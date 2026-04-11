@@ -1,7 +1,6 @@
 # Danbooru Insights
 
 ![license](https://img.shields.io/badge/license-MIT-green)
-![javascript](https://img.shields.io/badge/javascript-ESNext-yellow)
 ![typescript](https://img.shields.io/badge/typescript-✓-blue)
 ![platform](https://img.shields.io/badge/platform-Userscript-orange)
 ![build](https://img.shields.io/badge/build-Vite-646CFF)
