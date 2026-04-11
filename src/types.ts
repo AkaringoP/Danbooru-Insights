@@ -20,6 +20,19 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type D3Any = any;
 
+/**
+ * Escape hatch for CalHeatmap (https://cal-heatmap.com/) instances and
+ * options. Mirrors the `D3Any` pattern: there is no `@types/cal-heatmap`
+ * package, and CalHeatmap is loaded as an external global at runtime via
+ * `@require` / `externalGlobals` (see CLAUDE.md "External Dependencies").
+ *
+ * Use this alias **only at CalHeatmap call sites** (e.g. `new CalHeatmap()`,
+ * `cal.paint(...)`, `cal.on(...)`). Do not use it for non-CalHeatmap reasons.
+ * Grep for `CalHeatmapAny` to audit every usage.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type CalHeatmapAny = any;
+
 /** A named grass (heatmap level) color palette. */
 export interface GrassOption {
   name: string;
@@ -292,6 +305,182 @@ export interface CreatedTagItem {
   /** Date when the tag first appeared in the NNTBot report (YYYY-MM-DD). */
   reportDate: string;
 }
+
+// =========================================================================
+// Danbooru API Response Types
+//
+// Minimal-but-sufficient interfaces for the Danbooru REST API responses
+// consumed by this project. See `.claude/rules/api-endpoints.md` for the
+// endpoint catalog. Field optionality reflects two realities:
+//   1. Most fetches use `only=...` to request a subset of fields, so even
+//      "obvious" fields are absent from the response object.
+//   2. Some fields (e.g. `uploader_name`, `up_score`) are introduced by
+//      newer Danbooru schema versions or backfilled by this project's own
+//      code after the initial fetch.
+// Use `unknown` for genuinely opaque blobs; do not speculate fields.
+// =========================================================================
+
+/**
+ * Post object from `/posts.json`, `/posts/{id}.json`, `/posts/random.json`.
+ *
+ * Only `id`, `created_at`, `uploader_id`, and `rating` are universally
+ * present — every other field depends on the request's `only=` parameter or
+ * the post's age (e.g. `up_score`/`down_score` were added later).
+ *
+ * The trailing `uploader_name` / `uploader_level` / `approver_name` /
+ * `approver_level` fields are NOT from the Danbooru API. They are filled
+ * in-place by `TagAnalyticsDataService.backfillUploaderNames()` after a
+ * separate `/users.json` fetch — they live here so the same response
+ * objects can be passed around without re-typing.
+ */
+export interface DanbooruPost {
+  id: number;
+  created_at: string;
+  uploader_id: number;
+  rating: string;
+
+  // Score & engagement
+  score?: number;
+  up_score?: number;
+  down_score?: number;
+  fav_count?: number;
+  tag_count_general?: number;
+
+  // Status flags (modern post schema)
+  is_deleted?: boolean;
+  is_banned?: boolean;
+
+  // Approval
+  approver_id?: number;
+
+  // Tag strings (only included when requested via `only=`)
+  tag_string_artist?: string;
+  tag_string_copyright?: string;
+  tag_string_character?: string;
+
+  // Media (variants is the modern field; *_file_url are legacy fallbacks)
+  variants?: PostVariant[];
+  preview_file_url?: string;
+  file_url?: string;
+  large_file_url?: string;
+
+  // Backfilled by this project AFTER fetching (not from the API)
+  uploader_name?: string;
+  uploader_level?: string;
+  approver_name?: string;
+  approver_level?: string;
+}
+
+/**
+ * User object from `/users.json`.
+ * The project always requests `only=id,name,level_string` so other fields
+ * are normally absent. `created_at` is included only on a few endpoints
+ * that fetch the full user record.
+ */
+export interface DanbooruUser {
+  id: number;
+  name: string;
+  level_string: string;
+  created_at?: string;
+}
+
+/**
+ * Tag object from `/tags.json`.
+ * Category codes: 0=General, 1=Artist, 3=Copyright, 4=Character, 5=Meta.
+ */
+export interface DanbooruTag {
+  id?: number;
+  name: string;
+  post_count: number;
+  created_at: string;
+  category: number;
+}
+
+/**
+ * One entry from `/related_tag.json`'s `related_tags` array.
+ *
+ * Two response shapes coexist in the wild: some entries put `frequency`
+ * directly on the item, others nest it inside a sub-object also called
+ * `related_tag` (yes, the naming is confusing). Consumer code handles both
+ * via `item.related_tag?.frequency ?? item.frequency`.
+ */
+export interface DanbooruRelatedTag {
+  tag: {
+    name: string;
+    post_count?: number;
+    category?: number;
+  };
+  frequency: number;
+  related_tag?: {
+    frequency: number;
+  };
+}
+
+/** Top-level response from `/related_tag.json`. */
+export interface DanbooruRelatedTagResponse {
+  query?: string;
+  /** Total post count for the query (e.g. `user:foo`); used to scale frequency → count. */
+  post_count?: number;
+  related_tags: DanbooruRelatedTag[];
+}
+
+/**
+ * Response from `/counts/posts.json`.
+ *
+ * Two shapes coexist: modern responses wrap counts in a `counts` object,
+ * legacy responses use a flat `posts` field. Consumers always use the
+ * `data.counts?.posts ?? data.posts ?? 0` fallback chain.
+ */
+export interface DanbooruCountResponse {
+  counts?: {
+    posts: number;
+  };
+  posts?: number;
+}
+
+/**
+ * Tag implication entry from `/tag_implications.json`.
+ * Used by `isTopLevelTag()` — if any implication exists for a tag, it is
+ * NOT considered top-level.
+ */
+export interface DanbooruTagImplication {
+  id: number;
+  antecedent_name: string;
+  consequent_name: string;
+  status?: string;
+}
+
+/**
+ * User feedback entry from `/user_feedbacks.json`.
+ * Body text is parsed for promotion/demotion history (see
+ * `getPromotionHistory` / `getLevelChangeHistory`).
+ */
+export interface DanbooruUserFeedback {
+  id?: number;
+  user_id?: number;
+  created_at: string;
+  body: string;
+  category?: string;
+}
+
+/** Approval entry from `/post_approvals.json`. */
+export interface DanbooruApproval {
+  id: number;
+  post_id: number;
+  user_id: number;
+  created_at: string;
+}
+
+/** Note version entry from `/note_versions.json`. */
+export interface DanbooruNoteVersion {
+  id?: number;
+  updater_id: number;
+  created_at: string;
+}
+
+// =========================================================================
+// End of Danbooru API Response Types
+// =========================================================================
 
 /** Cached tag analytics report stored in the `tag_analytics` table. */
 export interface TagAnalyticsReport {

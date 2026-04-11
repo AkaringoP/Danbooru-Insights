@@ -1,5 +1,6 @@
 import {DataManager} from './data-manager';
 import type {ApiItem} from './data-manager';
+import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
 import {CONFIG} from '../config';
 import {isTopLevelTag, getBestThumbnailUrl} from '../utils';
@@ -11,6 +12,11 @@ import type {
   TagCloudItem,
   CreatedTagItem,
   UserStatsRecord,
+  PostRecord,
+  DanbooruPost,
+  DanbooruRelatedTag,
+  DanbooruCountResponse,
+  DanbooruUserFeedback,
 } from '../types';
 
 /** Summary statistics for a user's upload history. */
@@ -31,7 +37,7 @@ export interface SummaryStats {
 /** A milestone post entry. */
 export interface MilestoneEntry {
   type: string;
-  post: any;
+  post: PostRecord;
   index: number;
 }
 
@@ -129,6 +135,14 @@ export function buildUntaggedTranslationQueries(normalizedName: string): {
  * AnalyticsDataManager: Handles heavy data fetching for full history.
  */
 export class AnalyticsDataManager extends DataManager {
+  /**
+   * Narrows the inherited `db: any` field on DataManager. The base class
+   * declares `db: any` (will be tightened in sub-task 7.6); this declare
+   * statement gives AnalyticsDataManager methods proper Dexie types
+   * without changing runtime behavior.
+   */
+  declare db: Database;
+
   static isGlobalSyncing: boolean = false;
   static syncProgress: SyncProgress = {current: 0, total: 0, message: ''};
   static onProgressCallback:
@@ -139,7 +153,7 @@ export class AnalyticsDataManager extends DataManager {
    * @param {Database} db The Dexie database instance.
    * @param {RateLimitedFetch=} rateLimiter Optional shared rate limiter.
    */
-  constructor(db: any, rateLimiter?: RateLimitedFetch | null) {
+  constructor(db: Database, rateLimiter?: RateLimitedFetch | null) {
     super(db, rateLimiter ?? null);
   }
 
@@ -301,7 +315,7 @@ export class AnalyticsDataManager extends DataManager {
         currentStreak = 1;
         currentStreakStart = dateStr;
       } else {
-        const diffTime = (d as any) - (lastDateObj as any);
+        const diffTime = d.getTime() - lastDateObj.getTime();
         const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
         if (diffDays === 1) {
           currentStreak++;
@@ -484,7 +498,7 @@ export class AnalyticsDataManager extends DataManager {
     const targets = this.buildMilestoneTargets(total, customStep);
 
     // Use compound index [uploader_id+no] to fetch only this user's posts at the target positions
-    const matches: ApiItem[] = await this.db.posts
+    const matches: PostRecord[] = await this.db.posts
       .where('[uploader_id+no]')
       .anyOf(targets.map((no: number) => [uploaderId, no]))
       .toArray();
@@ -515,10 +529,8 @@ export class AnalyticsDataManager extends DataManager {
           if (res.ok) {
             const fetchedItems = await res.json();
             // Update local matches objects
-            fetchedItems.forEach((item: ApiItem) => {
-              const local = matches.find(
-                (m: ApiItem) => m['id'] === item['id'],
-              );
+            fetchedItems.forEach((item: DanbooruPost) => {
+              const local = matches.find((m: PostRecord) => m.id === item.id);
               if (local) {
                 local.variants = item.variants;
                 local.preview_file_url = item.preview_file_url;
@@ -833,7 +845,7 @@ export class AnalyticsDataManager extends DataManager {
       // Select top 30, then sort by frequency for font size mapping
       const items: TagCloudItem[] = resp.related_tags
         .slice(0, 30)
-        .map((item: any) => ({
+        .map((item: DanbooruRelatedTag) => ({
           name: item.tag.name.replace(/_/g, ' '),
           tagName: item.tag.name,
           frequency: item.frequency,
@@ -1129,20 +1141,23 @@ export class AnalyticsDataManager extends DataManager {
       if (!resp || !resp.related_tags || !Array.isArray(resp.related_tags))
         return [];
 
-      const tags = resp.related_tags;
+      const tags: DanbooruRelatedTag[] = resp.related_tags;
 
       // Limit to Top 10
       const itemsToProcess = tags.slice(0, 10);
 
-      const top10 = itemsToProcess.map((item: ApiItem) => ({
-        name: item.tag.name.replace(/_/g, ' '),
-        tagName: item.tag.name,
-        count: 0,
-        frequency: item.frequency,
-        thumb: null,
-        isOther: false,
-        _item: item,
-      }));
+      // _item is a transient prop holding the source DanbooruRelatedTag for
+      // post_count fallback; deleted before the array is returned.
+      const top10: Array<DistributionItem & {_item?: DanbooruRelatedTag}> =
+        itemsToProcess.map(item => ({
+          name: item.tag.name.replace(/_/g, ' '),
+          tagName: item.tag.name,
+          count: 0,
+          frequency: item.frequency,
+          thumb: null,
+          isOther: false,
+          _item: item,
+        }));
 
       // Fetch Counts Concurrent
       await this.mapConcurrent(top10, 3, async obj => {
@@ -1150,14 +1165,14 @@ export class AnalyticsDataManager extends DataManager {
         if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
         try {
           const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
-          const countResp = await this.rateLimiter
+          const countResp: DanbooruCountResponse = await this.rateLimiter
             .fetch(countUrl)
             .then(r => r.json());
           const c =
             countResp.counts && countResp.counts.posts
               ? countResp.counts.posts
               : 0;
-          obj.count = c || obj._item.tag.post_count;
+          obj.count = c || obj._item?.tag.post_count || 0;
         } catch (_e: unknown) {
           console.debug('[DI] Failed to fetch user tag count', _e);
         }
@@ -1232,44 +1247,50 @@ export class AnalyticsDataManager extends DataManager {
       if (!resp || !resp.related_tags || !Array.isArray(resp.related_tags))
         return [];
 
-      const tags = resp.related_tags;
+      const tags: DanbooruRelatedTag[] = resp.related_tags;
 
       // Limit to Top 20 Candidates for filtering performance
-      const candidates = tags.slice(0, 20);
+      const candidates: DanbooruRelatedTag[] = tags.slice(0, 20);
 
       // Concurrent Filter checks - Limit 2
       const filteredResults = await this.mapConcurrent(
         candidates,
         2,
-        async item =>
+        async (item): Promise<DanbooruRelatedTag | null> =>
           (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
       );
-      const filtered = filteredResults.filter(item => item !== null);
+      const filtered = filteredResults.filter(
+        (item): item is DanbooruRelatedTag => item !== null,
+      );
 
       // Concurrent Fetch Data for Top 10 - Limit 5
-      const top10: any[] = filtered.slice(0, 10).map(item => ({
-        name: item.tag.name.replace(/_/g, ' '),
-        tagName: item.tag.name,
-        count: 0,
-        frequency: item.frequency,
-        thumb: null,
-        isOther: false,
-        _item: item,
-      }));
+      // _item is a transient prop holding the source DanbooruRelatedTag so
+      // we can fall back to its global post_count if the user-scoped count
+      // query fails. It is `delete`d before the array is returned.
+      const top10: Array<DistributionItem & {_item?: DanbooruRelatedTag}> =
+        filtered.slice(0, 10).map(item => ({
+          name: item.tag.name.replace(/_/g, ' '),
+          tagName: item.tag.name,
+          count: 0,
+          frequency: item.frequency,
+          thumb: null,
+          isOther: false,
+          _item: item,
+        }));
 
       await this.mapConcurrent(top10, 3, async obj => {
         const tagName = obj.tagName;
         if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
         try {
           const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
-          const countResp = await this.rateLimiter
+          const countResp: DanbooruCountResponse = await this.rateLimiter
             .fetch(countUrl)
             .then(r => r.json());
           const c =
             countResp.counts && countResp.counts.posts
               ? countResp.counts.posts
               : 0;
-          obj.count = c || obj._item.tag.post_count;
+          obj.count = c || obj._item?.tag.post_count || 0;
         } catch (_e: unknown) {
           console.debug('[DI] Failed to fetch user tag count', _e);
         }
@@ -1322,13 +1343,13 @@ export class AnalyticsDataManager extends DataManager {
    * @param {number} [delayMs=250] Delay between iterations per worker.
    * @return {Promise<Array>} Results array.
    */
-  async mapConcurrent(
-    items: any[],
+  async mapConcurrent<T, R>(
+    items: T[],
     concurrency: number,
-    fn: (item: any) => Promise<any>,
+    fn: (item: T) => Promise<R>,
     delayMs: number = 50,
-  ): Promise<any[]> {
-    const results = new Array(items.length);
+  ): Promise<R[]> {
+    const results: R[] = new Array(items.length);
     let index = 0;
     const next = async () => {
       while (index < items.length) {
@@ -1371,14 +1392,14 @@ export class AnalyticsDataManager extends DataManager {
       if (!resp || !resp.related_tags || !Array.isArray(resp.related_tags))
         return [];
 
-      const tags = resp.related_tags;
-      const candidates = tags.slice(0, 20);
+      const tags: DanbooruRelatedTag[] = resp.related_tags;
+      const candidates: DanbooruRelatedTag[] = tags.slice(0, 20);
 
       // Concurrent Filter checks (Sub-copyright) - Limit 5
       const filteredResults = await this.mapConcurrent(
         candidates,
         2,
-        async item => {
+        async (item): Promise<DanbooruRelatedTag | null> => {
           const tagName = item.tag.name;
           const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}`;
           try {
@@ -1393,7 +1414,9 @@ export class AnalyticsDataManager extends DataManager {
         },
       );
 
-      const filtered = filteredResults.filter(item => item !== null);
+      const filtered = filteredResults.filter(
+        (item): item is DanbooruRelatedTag => item !== null,
+      );
 
       // 1. Return basic stats immediately (with null thumbs)
       // We still need to calculate frequencies and filter "Others"
@@ -1401,32 +1424,34 @@ export class AnalyticsDataManager extends DataManager {
 
       // Concurrent Fetch Data for Top 10 - Limit 5
       // Modification: Do NOT await valid thumbs. Just structural data.
-      const top10: any[] = filtered.slice(0, 10).map(item => {
-        const tagName = item.tag.name;
-        const displayName = tagName.replace(/_/g, ' ');
+      // _item is a transient prop, deleted before the array is returned.
+      const top10: Array<DistributionItem & {_item?: DanbooruRelatedTag}> =
+        filtered.slice(0, 10).map(item => {
+          const tagName = item.tag.name;
+          const displayName = tagName.replace(/_/g, ' ');
 
-        // We still probably want the "User Count" if possible, but that requires a fetch too?
-        // The original code did `fetch countUrl`. That is also a bottleneck?
-        // Providing "approximate" counts (global post_count) might be misleading.
-        // BUT replacing 10 sequential/parallel fetches is good.
-        // Let's Keep the count fetching if it's fast enough or necessary?
-        // User's plan said: "Load Chart (Shapes) first".
-        // Pie chart NEEDS counts/frequencies for shapes.
-        // User Count is needed for "Frequency" (User Count / Total User Posts).
-        // So we MUST wait for counts.
-        // But THUMBNAILS are only for tooltips/visuals. We can skip those.
+          // We still probably want the "User Count" if possible, but that requires a fetch too?
+          // The original code did `fetch countUrl`. That is also a bottleneck?
+          // Providing "approximate" counts (global post_count) might be misleading.
+          // BUT replacing 10 sequential/parallel fetches is good.
+          // Let's Keep the count fetching if it's fast enough or necessary?
+          // User's plan said: "Load Chart (Shapes) first".
+          // Pie chart NEEDS counts/frequencies for shapes.
+          // User Count is needed for "Frequency" (User Count / Total User Posts).
+          // So we MUST wait for counts.
+          // But THUMBNAILS are only for tooltips/visuals. We can skip those.
 
-        // So we will keep the 'mapConcurrent' for Counts, but remove Thumb fetch.
-        return {
-          name: displayName,
-          tagName: tagName,
-          count: 0, // Placeholder, will fill in mapConcurrent
-          frequency: item.frequency,
-          thumb: null, // Lazy Load
-          isOther: false,
-          _item: item, // Temp storage
-        };
-      });
+          // So we will keep the 'mapConcurrent' for Counts, but remove Thumb fetch.
+          return {
+            name: displayName,
+            tagName: tagName,
+            count: 0, // Placeholder, will fill in mapConcurrent
+            frequency: item.frequency,
+            thumb: null, // Lazy Load
+            isOther: false,
+            _item: item, // Temp storage
+          };
+        });
 
       // Fill Counts Concurrently
       // We can re-use mapConcurrent to fill counts.
@@ -1436,7 +1461,7 @@ export class AnalyticsDataManager extends DataManager {
         try {
           // Use fav: for counting (more standard), ordfav: for sorting/linking
           const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`fav:${normalizedName} ${tagName}`)}`;
-          const countResp = await this.rateLimiter
+          const countResp: DanbooruCountResponse = await this.rateLimiter
             .fetch(countUrl)
             .then(r => r.json());
           const c =
@@ -1516,16 +1541,19 @@ export class AnalyticsDataManager extends DataManager {
    * @param {!Object} userInfo The user's info object.
    * @return {!Promise<{g: ?Object, s: ?Object, q: ?Object, e: ?Object}>} Top post per rating.
    */
-  async getTopPostsByType(
-    userInfo: TargetUser,
-  ): Promise<{g: any | null; s: any | null; q: any | null; e: any | null}> {
+  async getTopPostsByType(userInfo: TargetUser): Promise<{
+    g: DanbooruPost | null;
+    s: DanbooruPost | null;
+    q: DanbooruPost | null;
+    e: DanbooruPost | null;
+  }> {
     if (!userInfo.name) return {g: null, s: null, q: null, e: null};
 
     // Helper for fetching 1 top post
     const fetchTop = async (
       ratingTag: string,
       extraQuery: string = '',
-    ): Promise<any | null> => {
+    ): Promise<DanbooruPost | null> => {
       try {
         // Use tags=... order:score rating:x limit=1
         const normalizedName = userInfo.name.replace(/ /g, '_');
@@ -1561,10 +1589,12 @@ export class AnalyticsDataManager extends DataManager {
    */
   async getRecentPopularPosts(
     userInfo: TargetUser,
-  ): Promise<{sfw: any | null; nsfw: any | null}> {
+  ): Promise<{sfw: DanbooruPost | null; nsfw: DanbooruPost | null}> {
     if (!userInfo.name) return {sfw: null, nsfw: null};
 
-    const fetchTop = async (ratingTag: string): Promise<any | null> => {
+    const fetchTop = async (
+      ratingTag: string,
+    ): Promise<DanbooruPost | null> => {
       try {
         const normalizedName = userInfo.name.replace(/ /g, '_');
         const query = `user:${normalizedName} order:score ${ratingTag} age:<1w`;
@@ -1597,10 +1627,12 @@ export class AnalyticsDataManager extends DataManager {
    */
   async getRandomPosts(
     userInfo: TargetUser,
-  ): Promise<{sfw: any | null; nsfw: any | null}> {
+  ): Promise<{sfw: DanbooruPost | null; nsfw: DanbooruPost | null}> {
     if (!userInfo.name) return {sfw: null, nsfw: null};
 
-    const fetchRandom = async (ratingTag: string): Promise<any | null> => {
+    const fetchRandom = async (
+      ratingTag: string,
+    ): Promise<DanbooruPost | null> => {
       try {
         const normalizedName = userInfo.name.replace(/ /g, '_');
         const query = `user:${normalizedName} ${ratingTag}`;
@@ -1635,7 +1667,7 @@ export class AnalyticsDataManager extends DataManager {
   async getTopScorePost(
     userInfo: TargetUser,
     filterMode: string = 'sfw',
-  ): Promise<any | null> {
+  ): Promise<DanbooruPost | PostRecord | null> {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return null;
 
@@ -1643,12 +1675,12 @@ export class AnalyticsDataManager extends DataManager {
     // .reverse() on a between() range walks from the upper bound down, stopping at the first filter match.
     const ratingFilter =
       filterMode === 'sfw'
-        ? (p: ApiItem) => p['rating'] === 'g' || p['rating'] === 's'
+        ? (p: PostRecord) => p.rating === 'g' || p.rating === 's'
         : filterMode === 'nsfw'
-          ? (p: ApiItem) => p['rating'] === 'q' || p['rating'] === 'e'
+          ? (p: PostRecord) => p.rating === 'q' || p.rating === 'e'
           : () => true;
 
-    const topLocal = await (this.db.posts as any)
+    const topLocal = await this.db.posts
       .where('[uploader_id+score]')
       .between([uploaderId, -Infinity], [uploaderId, Infinity])
       .reverse()
@@ -1725,7 +1757,7 @@ export class AnalyticsDataManager extends DataManager {
       .where('uploader_id')
       .equals(uploaderId)
       .filter(
-        (p: any) =>
+        (p: PostRecord) =>
           p.up_score === undefined ||
           p.down_score === undefined ||
           p.is_deleted === undefined ||
@@ -1761,7 +1793,7 @@ export class AnalyticsDataManager extends DataManager {
     const flagKey = `di_post_metadata_v2_${uploaderId}`;
 
     // Pull all of this user's posts and find ones lacking any required field
-    const allPosts: any[] = await this.db.posts
+    const allPosts: PostRecord[] = await this.db.posts
       .where('uploader_id')
       .equals(uploaderId)
       .toArray();
@@ -1783,7 +1815,7 @@ export class AnalyticsDataManager extends DataManager {
 
     // Index by id for O(1) lookup during merge. Use a loop for minId to
     // avoid call-stack overflow on very large arrays (spread operator limit).
-    const byId = new Map<number, any>();
+    const byId = new Map<number, PostRecord>();
     let minId = Infinity;
     for (const p of needsUpdate) {
       byId.set(p.id, p);
@@ -1800,10 +1832,10 @@ export class AnalyticsDataManager extends DataManager {
         tags: `user:${normalizedName} status:any id:>${lastId} order:id`,
         limit: String(limit),
         only: 'id,up_score,down_score,is_deleted,is_banned',
-      } as any);
+      });
       const url = `/posts.json?${params.toString()}`;
 
-      let batch: any[];
+      let batch: DanbooruPost[];
       try {
         const resp = await this.rateLimiter.fetch(url);
         if (!resp.ok) {
@@ -1821,7 +1853,7 @@ export class AnalyticsDataManager extends DataManager {
         break;
       }
 
-      const updates: any[] = [];
+      const updates: PostRecord[] = [];
       for (const p of batch) {
         const existing = byId.get(p.id);
         if (!existing) continue;
@@ -1959,7 +1991,7 @@ export class AnalyticsDataManager extends DataManager {
       if (!Array.isArray(feedbacks)) return [];
 
       return feedbacks
-        .map(f => {
+        .map((f: DanbooruUserFeedback) => {
           // Parse Body: "promoted to a Builder level account"
           const match = f.body.match(/promoted to a (.+?) level/i);
           const role = match ? match[1] : 'Unknown';
@@ -1969,8 +2001,11 @@ export class AnalyticsDataManager extends DataManager {
             rawBody: f.body,
           };
         })
-        .filter(item => item.role !== 'Unknown')
-        .sort((a, b) => (a.date as any) - (b.date as any));
+        .filter((item: PromotionEvent) => item.role !== 'Unknown')
+        .sort(
+          (a: PromotionEvent, b: PromotionEvent) =>
+            a.date.getTime() - b.date.getTime(),
+        );
     } catch (e: unknown) {
       console.error('[Danbooru Grass] Failed to fetch promotions', e);
       return [];
@@ -2945,7 +2980,7 @@ export class AnalyticsDataManager extends DataManager {
       let hasMore = true;
 
       // Ordered Commit State
-      const buffer = new Map<number, ApiItem[]>(); // page -> items
+      const buffer = new Map<number, DanbooruPost[]>(); // page -> items
       let nextExpectedPage = 1;
 
       const worker = async (workerId: number) => {
@@ -2957,13 +2992,13 @@ export class AnalyticsDataManager extends DataManager {
           const currentPage = pageOffset++;
 
           try {
-            const params = {
-              limit,
-              page: currentPage,
+            const params: Record<string, string> = {
+              limit: String(limit),
+              page: String(currentPage),
               tags: `user:${userInfo.name.replace(/ /g, '_')} order:id id:>${startId}`,
               only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
             };
-            const q = new URLSearchParams(params as any);
+            const q = new URLSearchParams(params);
             const url = `/posts.json?${q.toString()}`;
 
             const pending = buffer.size;
@@ -2974,7 +3009,7 @@ export class AnalyticsDataManager extends DataManager {
             );
 
             // Retry Logic
-            let items: ApiItem[] | null = null;
+            let items: DanbooruPost[] | null = null;
             let attempts = 0;
             while (attempts < 3) {
               try {
@@ -3024,9 +3059,9 @@ export class AnalyticsDataManager extends DataManager {
 
               if (batchItems && batchItems.length > 0) {
                 // Assign Sequential Numbers
-                const bulkData = batchItems.map(p => {
-                  const ds = (p as any).down_score ?? 0;
-                  const us = (p as any).up_score ?? 0;
+                const bulkData = batchItems.map((p: DanbooruPost) => {
+                  const ds = p.down_score ?? 0;
+                  const us = p.up_score ?? 0;
                   return {
                     id: p.id,
                     uploader_id: p.uploader_id,
@@ -3034,10 +3069,10 @@ export class AnalyticsDataManager extends DataManager {
                     score: us + ds,
                     up_score: us,
                     down_score: ds,
-                    is_deleted: (p as any).is_deleted ?? false,
-                    is_banned: (p as any).is_banned ?? false,
+                    is_deleted: p.is_deleted ?? false,
+                    is_banned: p.is_banned ?? false,
                     rating: p.rating,
-                    tag_count_general: p.tag_count_general,
+                    tag_count_general: p.tag_count_general ?? 0,
                     variants: p.variants,
                     preview_file_url: p.preview_file_url,
                     no: ++currentNo,
@@ -3154,12 +3189,12 @@ export class AnalyticsDataManager extends DataManager {
           limit: String(limit),
           page,
           only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
-        } as any);
+        });
         const url = `/posts.json?${params.toString()}`;
 
         reportProgress(no, total, `Fetching posts (${no}/${total})...`);
 
-        const batch: ApiItem[] = await this.rateLimiter
+        const batch: DanbooruPost[] = await this.rateLimiter
           .fetch(url)
           .then((r: Response) => r.json());
 
@@ -3174,9 +3209,9 @@ export class AnalyticsDataManager extends DataManager {
         }
 
         // Store batch with sequential no values
-        const bulkData = batch.map((p: ApiItem) => {
-          const ds = (p as any).down_score ?? 0;
-          const us = (p as any).up_score ?? 0;
+        const bulkData = batch.map((p: DanbooruPost) => {
+          const ds = p.down_score ?? 0;
+          const us = p.up_score ?? 0;
           return {
             id: p.id,
             uploader_id: p.uploader_id,
@@ -3184,10 +3219,10 @@ export class AnalyticsDataManager extends DataManager {
             score: us + ds,
             up_score: us,
             down_score: ds,
-            is_deleted: (p as any).is_deleted ?? false,
-            is_banned: (p as any).is_banned ?? false,
+            is_deleted: p.is_deleted ?? false,
+            is_banned: p.is_banned ?? false,
             rating: p.rating,
-            tag_count_general: p.tag_count_general,
+            tag_count_general: p.tag_count_general ?? 0,
             variants: p.variants,
             preview_file_url: p.preview_file_url,
             no: ++no,
