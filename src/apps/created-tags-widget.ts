@@ -4,8 +4,22 @@ import type {TargetUser} from '../types';
 
 /** Sort mode for the created tags table. */
 type SortMode = 'posts' | 'name' | 'date';
+type SortDirection = 'asc' | 'desc';
 
 const PAGE_SIZE = 20;
+
+const SORT_LABELS: Record<SortMode, string> = {
+  posts: 'Posts',
+  name: 'Name',
+  date: 'Date',
+};
+
+/** Default sort direction when switching into a mode. */
+const SORT_DEFAULT_DIR: Record<SortMode, SortDirection> = {
+  posts: 'desc',
+  name: 'asc',
+  date: 'desc',
+};
 
 /**
  * Renders the Created Tags widget with lazy loading.
@@ -19,6 +33,7 @@ export function renderCreatedTagsWidget(
   // Closure state
   let items: CreatedTagItem[] = [];
   let sortMode: SortMode = 'posts';
+  let sortDir: SortDirection = SORT_DEFAULT_DIR.posts;
   let currentPage = 0;
 
   // Build DOM
@@ -38,15 +53,45 @@ export function renderCreatedTagsWidget(
   controlsDiv.style.cssText = 'display:flex;align-items:center;gap:8px;';
   controlsDiv.style.display = 'none'; // Hidden until loaded
 
-  const sortSelect = document.createElement('select');
-  sortSelect.style.cssText = 'font-size:11px;padding:2px 6px;border:1px solid #ddd;border-radius:4px;background:#fff;color:#555;';
-  sortSelect.innerHTML = `
-    <option value="posts">Posts ▼</option>
-    <option value="name">Name</option>
-    <option value="date">Date ▼</option>
-  `;
+  // Segmented sort control: 3 buttons (Posts / Name / Date).
+  // Clicking the active button toggles direction; clicking another resets
+  // to that mode's default direction.
+  const sortButtons: Record<SortMode, HTMLButtonElement> = {} as Record<SortMode, HTMLButtonElement>;
 
-  controlsDiv.appendChild(sortSelect);
+  const updateSortButtons = () => {
+    (Object.keys(sortButtons) as SortMode[]).forEach(mode => {
+      const btn = sortButtons[mode];
+      const isActive = mode === sortMode;
+      const arrow = isActive ? (sortDir === 'desc' ? ' ▼' : ' ▲') : '';
+      btn.textContent = SORT_LABELS[mode] + arrow;
+      btn.style.background = isActive ? '#0969da' : '#fff';
+      btn.style.color = isActive ? '#fff' : '#555';
+      btn.style.borderColor = isActive ? '#0969da' : '#ddd';
+      btn.title = isActive
+        ? `Sorted by ${SORT_LABELS[mode]} (${sortDir === 'desc' ? 'descending' : 'ascending'}). Click to toggle direction.`
+        : `Sort by ${SORT_LABELS[mode]}`;
+    });
+  };
+
+  (['posts', 'name', 'date'] as SortMode[]).forEach(mode => {
+    const btn = document.createElement('button');
+    btn.style.cssText = 'font-size:11px;padding:2px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;color:#555;cursor:pointer;transition:all 0.15s;';
+    btn.onclick = () => {
+      if (sortMode === mode) {
+        sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        sortMode = mode;
+        sortDir = SORT_DEFAULT_DIR[mode];
+      }
+      currentPage = 0;
+      updateSortButtons();
+      sortItems();
+      renderTable();
+    };
+    sortButtons[mode] = btn;
+    controlsDiv.appendChild(btn);
+  });
+
   header.appendChild(titleDiv);
   header.appendChild(controlsDiv);
   container.appendChild(header);
@@ -70,12 +115,13 @@ export function renderCreatedTagsWidget(
   };
 
   const sortItems = () => {
+    const dir = sortDir === 'desc' ? -1 : 1;
     if (sortMode === 'posts') {
-      items.sort((a, b) => b.postCount - a.postCount);
+      items.sort((a, b) => dir * (a.postCount - b.postCount));
     } else if (sortMode === 'name') {
-      items.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      items.sort((a, b) => dir * a.displayName.localeCompare(b.displayName));
     } else if (sortMode === 'date') {
-      items.sort((a, b) => b.reportDate.localeCompare(a.reportDate));
+      items.sort((a, b) => dir * a.reportDate.localeCompare(b.reportDate));
     }
   };
 
@@ -94,8 +140,11 @@ export function renderCreatedTagsWidget(
       <tbody>`;
 
     for (const item of pageItems) {
+      // For aliased tags, link to the alias target wiki page (the original
+      // tag's wiki is empty); otherwise link to the tag's own wiki page.
+      const wikiTarget = item.aliasedTo ?? item.tagName;
       html += `<tr class="di-created-tags-row">
-        <td><a href="/wiki_pages/${item.tagName}" target="_blank" style="color:#0075f8;">${item.displayName}</a></td>
+        <td><a href="/wiki_pages/${wikiTarget}" target="_blank" style="color:#0075f8;">${item.displayName}</a></td>
         <td style="text-align:right;font-variant-numeric:tabular-nums;">${item.postCount.toLocaleString()}</td>
         <td>${getStatusHtml(item)}</td>
         <td style="color:#888;font-size:0.85em;">${item.reportDate}</td>
@@ -147,20 +196,13 @@ export function renderCreatedTagsWidget(
 
       titleDiv.textContent = `🏷️ Tags created by ${targetUser.name} (${items.length})`;
       controlsDiv.style.display = 'flex';
+      updateSortButtons();
       sortItems();
       renderTable();
     } catch (e) {
       console.debug('[DI] Created tags load failed', e);
       contentDiv.innerHTML = '<div style="color:#c00;text-align:center;padding:20px;font-size:0.9em;">Failed to load created tags.</div>';
     }
-  };
-
-  // Sort change handler
-  sortSelect.onchange = () => {
-    sortMode = sortSelect.value as SortMode;
-    currentPage = 0;
-    sortItems();
-    renderTable();
   };
 
   // Initial state: load button
