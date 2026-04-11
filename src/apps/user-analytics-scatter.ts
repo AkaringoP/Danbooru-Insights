@@ -149,9 +149,8 @@ export function renderScatterPlot(
   const downvoteContainer = document.createElement('div');
   downvoteContainer.className = 'di-scatter-downvote';
   downvoteContainer.style.position = 'absolute';
-  downvoteContainer.style.top = '15px';
-  downvoteContainer.style.left = '50%';
-  downvoteContainer.style.transform = 'translateX(-50%)';
+  downvoteContainer.style.top = '45px';
+  downvoteContainer.style.right = '15px';
   downvoteContainer.style.zIndex = '5';
   downvoteContainer.style.display = 'flex';
   downvoteContainer.style.alignItems = 'center';
