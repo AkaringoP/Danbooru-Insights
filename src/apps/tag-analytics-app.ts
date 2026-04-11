@@ -7,6 +7,16 @@ import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
+import type {
+  TagAnalyticsMeta,
+  PostRecord,
+  UserRanking,
+  HistoryEntry,
+  MilestoneEntry,
+} from '../types';
+
+/** fetchMonthlyCounts attaches historyCutoff to the returned array object. */
+type MonthlyHistoryData = HistoryEntry[] & {historyCutoff?: string};
 
 export class TagAnalyticsApp {
   db: Database;
@@ -74,7 +84,7 @@ export class TagAnalyticsApp {
       if (!tagData || !validCategories.includes(tagData.category)) {
         return;
       }
-    } catch (e) {
+    } catch {
       return; // On network error, silently skip
     }
 
@@ -109,7 +119,7 @@ export class TagAnalyticsApp {
         statusLabel.style.color = '#d73a49';
       }
       statusLabel.style.display = 'inline';
-    } catch (e) {
+    } catch {
       // Status display is non-critical, ignore errors
     }
   }
@@ -242,15 +252,8 @@ export class TagAnalyticsApp {
         return;
       }
 
-      let {
-        firstPost,
-        hundredthPost,
-        totalCount,
-        startDate,
-        timeToHundred,
-        meta,
-        initialPosts,
-      } = initialStats;
+      let {firstPost, hundredthPost, timeToHundred} = initialStats;
+      const {totalCount, startDate, meta, initialPosts} = initialStats;
 
       // Variable to hold updated First 100 Stats if backward scan happens
       let realFirst100Stats = null;
@@ -286,7 +289,7 @@ export class TagAnalyticsApp {
 
         // 3. Extract Milestones Locally
         const targets = this.dataService.getMilestoneTargets(totalCount);
-        const milestones: {milestone: number; post: any}[] = [];
+        const milestones: {milestone: number; post: PostRecord}[] = [];
         targets.forEach(target => {
           const index = target - 1;
           if (initialPosts[index]) {
@@ -302,7 +305,8 @@ export class TagAnalyticsApp {
         const oneYearAgo = new Date();
         oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
         const yearPosts = initialPosts.filter(
-          (p: any) => p.created_at && new Date(p.created_at) >= oneYearAgo,
+          (p: PostRecord) =>
+            p.created_at && new Date(p.created_at) >= oneYearAgo,
         );
         const localStatsYear = this.dataService.calculateLocalStats(yearPosts);
 
@@ -315,8 +319,11 @@ export class TagAnalyticsApp {
         this.injectAnalyticsButton(null, 25, 'Fetching stats... (25%)');
         let smallTagFetched = 0;
         const smallTagTotalFetches = 6;
-        const trackSmall = (label: string, promise: Promise<any>) =>
-          promise.then((res: any) => {
+        const trackSmall = <T>(
+          label: string,
+          promise: Promise<T>,
+        ): Promise<T> =>
+          promise.then((res: T) => {
             smallTagFetched++;
             const pct =
               25 + Math.round((smallTagFetched / smallTagTotalFetches) * 55);
@@ -376,8 +383,8 @@ export class TagAnalyticsApp {
         meta.trendingPostNSFW = trendingPostNSFW;
 
         // 6. Map User IDs to Names in Local Rankings
-        const mapNames = (ranking: any[]) =>
-          ranking.map((r: any) => {
+        const mapNames = (ranking: UserRanking[]) =>
+          ranking.map((r: UserRanking) => {
             const u = this.dataService.userNames[r.id];
             return {
               ...r,
@@ -410,7 +417,7 @@ export class TagAnalyticsApp {
           const copyrightMap: Record<string, number> = {};
           const characterMap: Record<string, number> = {};
 
-          initialPosts.forEach((p: any) => {
+          initialPosts.forEach((p: PostRecord) => {
             if (p.tag_string_copyright) {
               p.tag_string_copyright.split(' ').forEach((tag: string) => {
                 if (tag) copyrightMap[tag] = (copyrightMap[tag] || 0) + 1;
@@ -440,7 +447,7 @@ export class TagAnalyticsApp {
             ).filter(e => e !== null);
 
             meta.copyrightCounts = {};
-            (filteredCopyright as any[])
+            (filteredCopyright as [string, number][])
               .slice(0, 10)
               .forEach(([name, count]) => {
                 meta.copyrightCounts[name] = count;
@@ -486,9 +493,9 @@ export class TagAnalyticsApp {
       const dateStrTomorrow = tomorrow.toISOString().split('T')[0];
 
       // Helper for granular logging
-      const measure = (label: string, promise: Promise<any>) => {
+      const measure = <T>(label: string, promise: Promise<T>): Promise<T> => {
         const start = performance.now();
-        return promise.then((res: any) => {
+        return promise.then((res: T) => {
           console.log(
             `[TagAnalytics] [Task] Finished: ${label} (${(performance.now() - start).toFixed(2)}ms)`,
           );
@@ -633,12 +640,12 @@ export class TagAnalyticsApp {
       this.injectAnalyticsButton(null, 0, 'Initializing...');
 
       // Helper to wrap promise with progress update
-      const trackProgress = (task: {
+      const trackProgress = <T>(task: {
         id: string;
         label: string;
-        promise: Promise<any>;
-      }) => {
-        return task.promise.then((res: any) => {
+        promise: Promise<T>;
+      }): Promise<T> => {
+        return task.promise.then((res: T) => {
           completedCount++;
           const pct = Math.round((completedCount / totalEstimatedTasks) * 100);
           this.injectAnalyticsButton(null, pct, `${task.label} ${pct}%`);
@@ -715,13 +722,11 @@ export class TagAnalyticsApp {
           baseData.rankings.uploader &&
           baseData.rankings.uploader.first100
         ) {
-          (initialStats as any).first100Stats = {
+          initialStats.first100Stats = {
             uploaderRanking: baseData.rankings.uploader.first100,
             approverRanking: baseData.rankings.approver.first100,
           };
-          first100StatsPromise = Promise.resolve(
-            (initialStats as any).first100Stats,
-          );
+          first100StatsPromise = Promise.resolve(initialStats.first100Stats);
         } else {
           first100StatsPromise = Promise.resolve(
             this.dataService.calculateLocalStats(initialPosts || []),
@@ -736,101 +741,103 @@ export class TagAnalyticsApp {
       }
 
       // Chain Backward Scan
-      historyPromise = historyPromise.then(async (monthlyData: any) => {
-        const forwardTotal =
-          monthlyData && monthlyData.length > 0
-            ? monthlyData[monthlyData.length - 1].cumulative
-            : 0;
-        let referenceTotal = meta.post_count;
+      historyPromise = historyPromise.then(
+        async (monthlyData: MonthlyHistoryData) => {
+          const forwardTotal =
+            monthlyData && monthlyData.length > 0
+              ? monthlyData[monthlyData.length - 1].cumulative
+              : 0;
+          let referenceTotal = meta.post_count;
 
-        if (monthlyData.historyCutoff) {
-          try {
-            const cutoffUrl = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:any+date:<${encodeURIComponent(monthlyData.historyCutoff)}`;
-            const r = await this.rateLimiter
-              .fetch(cutoffUrl)
-              .then((res: Response) => res.json());
-            referenceTotal =
-              (r && r.counts ? r.counts.posts : r ? r.posts : 0) || 0;
-          } catch (e) {
-            console.warn(
-              'Failed to fetch cutoff total, falling back to meta.post_count',
-              e,
-            );
-          }
-        }
-
-        console.log(
-          `[TagAnalyticsApp] Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
-        );
-
-        if (forwardTotal < referenceTotal && !runDelta) {
-          // Disable Reverse Scan on Partial Sync
-          this.injectAnalyticsButton(
-            null,
-            undefined,
-            'Scanning history backwards...',
-          );
-          const backwardResult = await this.dataService.fetchHistoryBackwards(
-            tagName,
-            startDate,
-            referenceTotal,
-            forwardTotal,
-          );
-
-          if (backwardResult.length > 0) {
-            const backwardShift =
-              backwardResult[backwardResult.length - 1].cumulative;
-            const adjustedForward = monthlyData.map((h: any) => ({
-              ...h,
-              cumulative: h.cumulative + backwardShift,
-            }));
-            const fullHistory = [...backwardResult, ...adjustedForward];
-
-            // If reverse scan happened, we likely found an earlier start date than metadata suggested.
-            // We should use that to find the TRUE first post efficiently without scanning from 2005.
-            const earliestDateFound = backwardResult[0].date;
-
-            const realInitialStats = await this.dataService.fetchInitialStats(
-              tagName,
-              null,
-              true,
-              earliestDateFound,
-            );
-            if (realInitialStats) {
-              firstPost = realInitialStats.firstPost;
-              hundredthPost = realInitialStats.hundredthPost;
-              timeToHundred = realInitialStats.timeToHundred;
-
-              if (
-                realInitialStats.initialPosts &&
-                realInitialStats.initialPosts.length > 0
-              ) {
-                console.log(
-                  '[TagAnalytics] Recalculating First 100 Rankings for older posts...',
-                );
-                const newStats = this.dataService.calculateLocalStats(
-                  realInitialStats.initialPosts,
-                );
-                realFirst100Stats = await this.dataService
-                  .resolveFirst100Names(newStats)
-                  .catch(e => {
-                    console.warn(
-                      '[TagAnalytics] Failed to resolve names for older posts',
-                      e,
-                    );
-                    return newStats;
-                  });
-              }
+          if (monthlyData.historyCutoff) {
+            try {
+              const cutoffUrl = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:any+date:<${encodeURIComponent(monthlyData.historyCutoff)}`;
+              const r = await this.rateLimiter
+                .fetch(cutoffUrl)
+                .then((res: Response) => res.json());
+              referenceTotal =
+                (r && r.counts ? r.counts.posts : r ? r.posts : 0) || 0;
+            } catch (e) {
+              console.warn(
+                'Failed to fetch cutoff total, falling back to meta.post_count',
+                e,
+              );
             }
-            return fullHistory;
           }
-        }
-        return monthlyData;
-      });
+
+          console.log(
+            `[TagAnalyticsApp] Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
+          );
+
+          if (forwardTotal < referenceTotal && !runDelta) {
+            // Disable Reverse Scan on Partial Sync
+            this.injectAnalyticsButton(
+              null,
+              undefined,
+              'Scanning history backwards...',
+            );
+            const backwardResult = await this.dataService.fetchHistoryBackwards(
+              tagName,
+              startDate,
+              referenceTotal,
+              forwardTotal,
+            );
+
+            if (backwardResult.length > 0) {
+              const backwardShift =
+                backwardResult[backwardResult.length - 1].cumulative;
+              const adjustedForward = monthlyData.map((h: HistoryEntry) => ({
+                ...h,
+                cumulative: h.cumulative + backwardShift,
+              }));
+              const fullHistory = [...backwardResult, ...adjustedForward];
+
+              // If reverse scan happened, we likely found an earlier start date than metadata suggested.
+              // We should use that to find the TRUE first post efficiently without scanning from 2005.
+              const earliestDateFound = backwardResult[0].date;
+
+              const realInitialStats = await this.dataService.fetchInitialStats(
+                tagName,
+                null,
+                true,
+                earliestDateFound,
+              );
+              if (realInitialStats) {
+                firstPost = realInitialStats.firstPost;
+                hundredthPost = realInitialStats.hundredthPost;
+                timeToHundred = realInitialStats.timeToHundred;
+
+                if (
+                  realInitialStats.initialPosts &&
+                  realInitialStats.initialPosts.length > 0
+                ) {
+                  console.log(
+                    '[TagAnalytics] Recalculating First 100 Rankings for older posts...',
+                  );
+                  const newStats = this.dataService.calculateLocalStats(
+                    realInitialStats.initialPosts,
+                  );
+                  realFirst100Stats = await this.dataService
+                    .resolveFirst100Names(newStats)
+                    .catch(e => {
+                      console.warn(
+                        '[TagAnalytics] Failed to resolve names for older posts',
+                        e,
+                      );
+                      return newStats;
+                    });
+                }
+              }
+              return fullHistory;
+            }
+          }
+          return monthlyData;
+        },
+      );
 
       // Milestones Chain
       if (!milestonesPromise) {
-        milestonesPromise = historyPromise.then((monthlyData: any) => {
+        milestonesPromise = historyPromise.then(monthlyData => {
           return this.dataService.fetchMilestones(
             tagName,
             monthlyData || [],
@@ -882,8 +889,8 @@ export class TagAnalyticsApp {
       const heavyResults = await Promise.all(heavyTasks.map(trackProgress));
 
       // Extract results
-      let [resolvedRankings, historyData, milestones, first100Stats] =
-        heavyResults;
+      const [resolvedRankings, historyData, milestones] = heavyResults;
+      let first100Stats = heavyResults[3];
 
       // [FIX] Override First 100 Stats if backward scan updated them
       if (realFirst100Stats) {
@@ -1134,7 +1141,7 @@ export class TagAnalyticsApp {
    * @param {string=} statusText Optional text to display next to the button.
    */
   injectAnalyticsButton(
-    tagData: any,
+    tagData: TagAnalyticsMeta | null,
     progress?: number,
     statusText?: string,
   ): void {
@@ -1427,7 +1434,7 @@ export class TagAnalyticsApp {
    * Builds the dashboard header HTML: tag name, category badge, dates, NSFW toggle.
    */
   private buildDashboardHeader(
-    tagData: any,
+    tagData: TagAnalyticsMeta,
     titleColor: string,
     categoryLabel: string,
   ): string {
@@ -1458,11 +1465,11 @@ export class TagAnalyticsApp {
    * Builds the main grid HTML: Summary card (totals, trending thumbnails) +
    * Distribution card (pie chart tabs).
    */
-  private buildMainGrid(tagData: any): string {
+  private buildMainGrid(tagData: TagAnalyticsMeta): string {
     const totalUploads =
       tagData.historyData && tagData.historyData.length > 0
         ? tagData.historyData
-            .reduce((a: number, b: any) => a + b.count, 0)
+            .reduce((a: number, b: HistoryEntry) => a + b.count, 0)
             .toLocaleString()
         : '0';
 
@@ -1559,7 +1566,7 @@ export class TagAnalyticsApp {
   /**
    * Builds the user rankings section HTML: uploader/approver tab bar + ranking columns.
    */
-  private buildRankingsSection(tagData: any): string {
+  private buildRankingsSection(tagData: TagAnalyticsMeta): string {
     if (!tagData.rankings) return '';
     console.log(
       '[TagAnalytics] renderDashboard - Initial Render - hundredthPost:',
@@ -1625,7 +1632,7 @@ export class TagAnalyticsApp {
    *
    * @param {!Object} tagData The complete analytics data to render.
    */
-  renderDashboard(tagData: any): void {
+  renderDashboard(tagData: TagAnalyticsMeta): void {
     if (!document.getElementById('tag-analytics-modal')) {
       this.createModal();
     }
@@ -1712,7 +1719,7 @@ export class TagAnalyticsApp {
           // Pass tagName, totalCount, targets
           this.dataService
             .fetchMilestones(tagData.name, [], targets)
-            .then((milestonePosts: any) => {
+            .then((milestonePosts: MilestoneEntry[]) => {
               this.chartRenderer.renderMilestones(
                 milestonePosts,
                 () => this.updateNsfwVisibility(),
