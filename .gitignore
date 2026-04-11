@@ -1,0 +1,31 @@
+# OS junk files
+*.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE config
+.vscode/
+.idea/
+
+# Node/Build output
+node_modules/
+dist/
+build/
+npm-debug.log
+yarn-error.log
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Claude (tool config, not source code)
+CLAUDE.md
+CLAUDE.ko.md
+.claude/
+
+# Claude session files (generated during AI-assisted work sessions)
+PLAN.md
+TASK.md
+context.md
+checklist.md

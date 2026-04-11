@@ -23,11 +23,11 @@ export default defineConfig({
         grant: 'none',
         icon: 'https://danbooru.donmai.us/favicon.ico',
         homepageURL:
-          'https://github.com/AkaringoP/JavaScripts/tree/main/DanbooruInsights',
+          'https://github.com/AkaringoP/Danbooru-Insights',
         updateURL:
-          'https://github.com/AkaringoP/JavaScripts/raw/build/danbooruinsights.user.js',
+          'https://github.com/AkaringoP/Danbooru-Insights/raw/build/danbooruinsights.user.js',
         downloadURL:
-          'https://github.com/AkaringoP/JavaScripts/raw/build/danbooruinsights.user.js',
+          'https://github.com/AkaringoP/Danbooru-Insights/raw/build/danbooruinsights.user.js',
         require: [
           'https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js',
           'https://cdn.jsdelivr.net/npm/d3-cloud@1.2.7/build/d3.layout.cloud.min.js',

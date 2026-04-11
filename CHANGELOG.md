@@ -4,6 +4,23 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.0.1 — Repository Migration
+
+No functional changes. The project now lives in its own repository at
+[AkaringoP/Danbooru-Insights](https://github.com/AkaringoP/Danbooru-Insights),
+split out of the original [AkaringoP/JavaScripts](https://github.com/AkaringoP/JavaScripts)
+monorepo with its full git history preserved via `git subtree split`.
+
+- `@updateURL` / `@downloadURL` point at the new repository's `build`
+  branch. Existing installations will receive this patch once through
+  the old URL and then self-migrate to the new update endpoint on the
+  next check.
+- `homepageURL` and the dashboard footer link now point at the new
+  repository.
+- README install link updated.
+
+---
+
 ## v9.0.0 — Mobile Support, Scatter Plot Overhaul & Schema Migration
 
 ### Mobile Compatibility

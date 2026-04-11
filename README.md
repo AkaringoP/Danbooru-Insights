@@ -19,7 +19,12 @@ The script consists of three main components:
 <img width="608" height="685" alt="TagAnalyticsApp 1" src="https://github.com/user-attachments/assets/981b57c3-bb01-423b-927c-8a5f5a17d55b" />
 <img width="564" height="551" alt="TagAnalyticsApp 2" src="https://github.com/user-attachments/assets/a66065f8-87cc-4d3e-9772-953ee037871e" />
 
-## Features (v8.0)
+## Features (v9.0)
+
+### Mobile Support
+* **Responsive Layout**: Both dashboards fill the viewport on mobile (`100dvh`), widgets reflow under 768 px.
+* **Touch Interactions**: 2-step tap → tooltip → action pattern for CalHeatmap cells, pie chart slices, and tag cloud words. Scatter plot drag selection disabled on touch; year tap zoom retained.
+* **Browser Back Button** closes modals via `history.pushState`.
 
 ### New Widgets
 * **Tag Cloud**: d3-cloud word cloud showing user's most characteristic tags. 4 category tabs (General/Artist/Copyright/Character), log-scale font sizing, crossfade transitions.
@@ -31,17 +36,21 @@ The script consists of three main components:
 ### Theme System (12 Themes)
 * **Light**: Light, Solarized Light, Sakura, Lavender, Ice, Aurora
 * **Dark**: Midnight, Solarized Dark, Newspaper, Ocean, Monokai, Ember
-* **Grass Color Picker**: 4 selectable grass palettes per theme (48 total), inspired by d3-scale-chromatic.
+* **Grass Color Picker**: 4 selectable grass palettes per theme (48 total), inspired by d3-scale-chromatic. Per-theme palette memory — each theme remembers its own grass color.
 
 ### Scatter Plot
-* Drag range display with date, score/tag count, and post count.
-* Crosshair cursor for drag indication.
+* **Tag Count mode Y=10 click**: Jump to posts with fewer than 10 tags (general or total), with in-chart hover highlight.
+* **Score mode downvote filter**: Toggle between `>0`, `>2`, `>5`, `>10` downvotes.
+* **Post hover preview card**: Thumbnail + score + favs + artist/copy/char, with 100 ms debounce and in-memory cache. Reused by GrassApp approval popover.
+* Drag range display with date, score/tag count, and post count; selection box persists while popover is open.
+* Deleted/banned posts shown as gray dots in popover lists.
 
 ### Milestones
 * Auto, Every 1k/2.5k/5k/10k, and Repdigit (111, 222, ..., 11111) options.
+* **Next Milestone Card**: Placeholder at the end of the grid shows the upcoming milestone, remaining count, and a progress bar.
 
 ### Architecture
-* 112 automated tests (Vitest)
+* 136 automated tests (Vitest)
 * Architecture fitness tests (dependency direction, type safety, rate limit enforcement)
 * Git pre-commit hook for build verification
 
@@ -83,7 +92,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 ## Installation
 
 1. Install a UserScript manager like **[Tampermonkey](https://www.tampermonkey.net/)**.
-2. **[Click Here to Install](https://github.com/AkaringoP/JavaScripts/raw/build/danbooruinsights.user.js)**
+2. **[Click Here to Install](https://github.com/AkaringoP/Danbooru-Insights/raw/build/danbooruinsights.user.js)**
 3. Confirm the installation in Tampermonkey.
 
 ## Usage

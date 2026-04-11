@@ -5,10 +5,10 @@
  *
  * Bump this when releasing a new version — nothing else needs to change.
  */
-export const APP_VERSION = '9.0.0';
+export const APP_VERSION = '9.0.1';
 
 /** GitHub repository URL shown next to the version in the dashboard footer. */
-export const APP_REPO_URL = 'https://github.com/AkaringoP/JavaScripts';
+export const APP_REPO_URL = 'https://github.com/AkaringoP/Danbooru-Insights';
 
 /** Author credit shown in the dashboard footer. */
 export const APP_AUTHOR = 'AkaringoP';
