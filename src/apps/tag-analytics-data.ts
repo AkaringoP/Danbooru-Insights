@@ -11,7 +11,10 @@ export class TagAnalyticsDataService {
   db: Database;
   rateLimiter: RateLimitedFetch;
   tagName: string;
-  userNames: Record<string, {name: string; level: string; id?: number | string}>;
+  userNames: Record<
+    string,
+    {name: string; level: string; id?: number | string}
+  >;
 
   constructor(db: Database, rateLimiter: RateLimitedFetch, tagName: string) {
     this.db = db;
@@ -96,7 +99,10 @@ export class TagAnalyticsDataService {
    * @param {number} count The threshold.
    */
   setSyncThreshold(count: number): void {
-    localStorage.setItem('danbooru_tag_analytics_sync_threshold', count.toString());
+    localStorage.setItem(
+      'danbooru_tag_analytics_sync_threshold',
+      count.toString(),
+    );
   }
   /**
    * Sets the retention period for tag analytics caches in localStorage.
@@ -116,7 +122,7 @@ export class TagAnalyticsDataService {
     if (!this.db || !this.db.tag_analytics) return;
 
     const retentionDays = this.getRetentionDays();
-    const cutoff = Date.now() - (retentionDays * DAY_MS);
+    const cutoff = Date.now() - retentionDays * DAY_MS;
 
     try {
       await this.db.tag_analytics.where('updatedAt').below(cutoff).delete();
@@ -136,15 +142,18 @@ export class TagAnalyticsDataService {
    *                                      Used to narrow the search range for recent tags.
    * @return {Promise<Object|null>} - Initial stats object or null on failure.
    */
-  async fetchInitialStats(tagName: string, cachedData?: any, absoluteOldest?: boolean, foundEarliestDate?: string | null): Promise<any> {
-
+  async fetchInitialStats(
+    tagName: string,
+    cachedData?: any,
+    absoluteOldest?: boolean,
+    foundEarliestDate?: string | null,
+  ): Promise<any> {
     // Get Tag Metadata first to know count and category
     const tagData = await this.fetchTagData(tagName); // Existing helper
     if (!tagData) return null;
 
     // [DELTA] Use Cached First 100 Data if available
     if (cachedData && cachedData.firstPost) {
-
       return {
         firstPost: cachedData.firstPost,
         hundredthPost: cachedData.hundredthPost,
@@ -152,7 +161,7 @@ export class TagAnalyticsDataService {
         startDate: new Date(cachedData.firstPost.created_at),
         timeToHundred: cachedData.timeToHundred,
         meta: tagData,
-        initialPosts: null // We don't have them in full if cached, but we don't need them for delta
+        initialPosts: null, // We don't have them in full if cached, but we don't need them for delta
       };
     }
 
@@ -164,7 +173,7 @@ export class TagAnalyticsDataService {
     if (foundEarliestDate) {
       tagCreatedAt = foundEarliestDate;
     } else if (absoluteOldest) {
-      tagCreatedAt = "2005-01-01";
+      tagCreatedAt = '2005-01-01';
     }
 
     let posts: any[] = [];
@@ -179,15 +188,17 @@ export class TagAnalyticsDataService {
       // Fetch up to targetCount (max 1200) posts sequentially.
       while (hasMore && posts.length < targetFetchCount) {
         const fetchLimit = Math.min(limit, targetFetchCount - posts.length);
-        let params = new URLSearchParams({
+        const params = new URLSearchParams({
           tags: `${tagName} date:>=${tagCreatedAt}`,
           limit: fetchLimit,
           page: currentPage,
-          only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character'
+          only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
         } as any);
-        let url = `/posts.json?${params.toString()}`;
+        const url = `/posts.json?${params.toString()}`;
 
-        let batch = await this.rateLimiter.fetch(url).then((r: Response) => r.json());
+        const batch = await this.rateLimiter
+          .fetch(url)
+          .then((r: Response) => r.json());
 
         if (!Array.isArray(batch) || batch.length === 0) {
           break;
@@ -202,7 +213,11 @@ export class TagAnalyticsDataService {
 
         posts = posts.concat(batch);
 
-        if (batch.length < fetchLimit || posts.length >= targetFetchCount || !isSmallTag) {
+        if (
+          batch.length < fetchLimit ||
+          posts.length >= targetFetchCount ||
+          !isSmallTag
+        ) {
           hasMore = false; // Stop fetching
         } else {
           // Setup for next page
@@ -223,15 +238,20 @@ export class TagAnalyticsDataService {
             tags: `${tagName}`,
             limit: fetchLimit,
             page: currentPage,
-            only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character'
+            only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
           } as any);
-          let fbBatch = await this.rateLimiter.fetch(`/posts.json?${fbParams.toString()}`).then((r: Response) => r.json());
+          const fbBatch = await this.rateLimiter
+            .fetch(`/posts.json?${fbParams.toString()}`)
+            .then((r: Response) => r.json());
 
           if (!Array.isArray(fbBatch) || fbBatch.length === 0) {
             break;
           }
 
-          if (fbBatch.length > 1 && fbBatch[0].id > fbBatch[fbBatch.length - 1].id) {
+          if (
+            fbBatch.length > 1 &&
+            fbBatch[0].id > fbBatch[fbBatch.length - 1].id
+          ) {
             fbBatch.reverse();
           }
 
@@ -245,11 +265,18 @@ export class TagAnalyticsDataService {
         }
       }
     } catch (e) {
-      console.warn(`[TagAnalyticsApp] Fetch failed for initial stats gather`, e);
+      console.warn(
+        '[TagAnalyticsApp] Fetch failed for initial stats gather',
+        e,
+      );
     }
 
     if (!posts || posts.length === 0) {
-      return { totalCount: tagData.post_count, meta: tagData, updatedAt: Date.now() };
+      return {
+        totalCount: tagData.post_count,
+        meta: tagData,
+        updatedAt: Date.now(),
+      };
     }
 
     const firstPost = posts[0];
@@ -270,9 +297,8 @@ export class TagAnalyticsDataService {
       startDate,
       timeToHundred,
       meta: tagData,
-      initialPosts: posts // Can be used for ranking if needed
+      initialPosts: posts, // Can be used for ranking if needed
     };
-
   }
 
   /**
@@ -293,7 +319,12 @@ export class TagAnalyticsDataService {
         // Log raw data for debugging
         // console.log(`[TagAnalyticsApp] Raw data for ${url}:`, data);
 
-        const count = (data && data.counts && typeof data.counts === 'object') ? data.counts.posts : (data ? data.posts : undefined);
+        const count =
+          data && data.counts && typeof data.counts === 'object'
+            ? data.counts.posts
+            : data
+              ? data.posts
+              : undefined;
 
         if (count !== undefined && count !== null) {
           return count;
@@ -303,7 +334,10 @@ export class TagAnalyticsDataService {
         throw new Error('Invalid count data');
       } catch (e) {
         if (i === retries) {
-          console.warn(`[TagAnalyticsApp] Failed to fetch count after ${retries + 1} attempts: ${url}`, e);
+          console.warn(
+            `[TagAnalyticsApp] Failed to fetch count after ${retries + 1} attempts: ${url}`,
+            e,
+          );
           return 0; // Default to 0 after all retries
         }
         // Wait a bit before retry (e.g., 500ms)
@@ -322,22 +356,26 @@ export class TagAnalyticsDataService {
     const queries: Record<string, string> = {
       total: `tags=${encodeURIComponent(tagName)}+has:commentary`,
       translated: `tags=${encodeURIComponent(tagName)}+has:commentary+commentary`,
-      requested: `tags=${encodeURIComponent(tagName)}+has:commentary+commentary_request`
+      requested: `tags=${encodeURIComponent(tagName)}+has:commentary+commentary_request`,
     };
 
     const results: Record<string, number> = {};
 
     const keys = Object.keys(queries);
-    await Promise.all(keys.map(async (key) => {
-      const query = queries[key];
-      const url = `/counts/posts.json?${query}`;
-      results[key] = await this.fetchCountWithRetry(url);
-    }));
+    await Promise.all(
+      keys.map(async key => {
+        const query = queries[key];
+        const url = `/counts/posts.json?${query}`;
+        results[key] = await this.fetchCountWithRetry(url);
+      }),
+    );
 
     // [Integrity Check] Ensure all keys exist and are valid numbers
     keys.forEach(key => {
       if (results[key] == null) {
-        console.warn(`[TagAnalyticsApp] Missing commentary key: ${key}. Defaulting to 0.`);
+        console.warn(
+          `[TagAnalyticsApp] Missing commentary key: ${key}. Defaulting to 0.`,
+        );
         results[key] = 0;
       }
     });
@@ -350,11 +388,17 @@ export class TagAnalyticsDataService {
    * @return {Promise<Object>} - Map of status strings to counts.
    */
   async fetchStatusCounts(tagName: string): Promise<any> {
-
-    const statuses = ['active', 'appealed', 'banned', 'deleted', 'flagged', 'pending'];
+    const statuses = [
+      'active',
+      'appealed',
+      'banned',
+      'deleted',
+      'flagged',
+      'pending',
+    ];
     const results: Record<string, number> = {};
 
-    const tasks = statuses.map(async (status) => {
+    const tasks = statuses.map(async status => {
       const url = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:${status}`;
       results[status] = await this.fetchCountWithRetry(url);
     });
@@ -364,7 +408,9 @@ export class TagAnalyticsDataService {
     // [Integrity Check] Ensure all keys exist and are valid numbers
     statuses.forEach(status => {
       if (results[status] == null) {
-        console.warn(`[TagAnalyticsApp] Missing status key: ${status}. Defaulting to 0.`);
+        console.warn(
+          `[TagAnalyticsApp] Missing status key: ${status}. Defaulting to 0.`,
+        );
         results[status] = 0;
       }
     });
@@ -378,11 +424,14 @@ export class TagAnalyticsDataService {
    * @param {?string} startDate Optional start date (YYYY-MM-DD) to optimize query.
    * @return {Promise<!Object<string, number>>} Map of rating characters to counts.
    */
-  async fetchRatingCounts(tagName: string, startDate: string | null = null): Promise<any> {
+  async fetchRatingCounts(
+    tagName: string,
+    startDate: string | null = null,
+  ): Promise<any> {
     const ratings = ['g', 's', 'q', 'e'];
     const results: Record<string, number> = {};
 
-    const tasks = ratings.map(async (rating) => {
+    const tasks = ratings.map(async rating => {
       let qs = `tags=${encodeURIComponent(tagName)}+rating:${rating}`;
       if (startDate) {
         qs += `+date:>=${startDate}`;
@@ -396,7 +445,9 @@ export class TagAnalyticsDataService {
     // [Integrity Check] Ensure all keys exist and are valid numbers
     ratings.forEach(rating => {
       if (results[rating] == null) {
-        console.warn(`[TagAnalyticsApp] Missing rating key: ${rating}. Defaulting to 0.`);
+        console.warn(
+          `[TagAnalyticsApp] Missing rating key: ${rating}. Defaulting to 0.`,
+        );
         results[rating] = 0;
       }
     });
@@ -404,16 +455,22 @@ export class TagAnalyticsDataService {
     return results;
   }
 
-  async fetchRelatedTagDistribution(tagName: string, categoryId: number, totalTagCount: number): Promise<any> {
+  async fetchRelatedTagDistribution(
+    tagName: string,
+    categoryId: number,
+    totalTagCount: number,
+  ): Promise<any> {
     const catName = categoryId === 3 ? 'Copyright' : 'Character';
-
 
     // 1. Fetch Related Tags
     const relatedUrl = `/related_tag.json?commit=Search&search[category]=${categoryId}&search[order]=Frequency&search[query]=${encodeURIComponent(tagName)}`;
 
     try {
-      const resp = await this.rateLimiter.fetch(relatedUrl).then((r: Response) => r.json());
-      if (!resp || !resp.related_tags || !Array.isArray(resp.related_tags)) return null;
+      const resp = await this.rateLimiter
+        .fetch(relatedUrl)
+        .then((r: Response) => r.json());
+      if (!resp || !resp.related_tags || !Array.isArray(resp.related_tags))
+        return null;
 
       const tags = resp.related_tags; // [{ "tag": {...}, "frequency": 0.5, "related_tag": {...} }]
 
@@ -421,9 +478,11 @@ export class TagAnalyticsDataService {
       const candidates = tags.slice(0, 20);
 
       // 2. Filter Top-Level (Check Implications)
-      const checks = await Promise.all(candidates.map(async (item: any) =>
-        await isTopLevelTag(this.rateLimiter, item.tag.name) ? item : null
-      ));
+      const checks = await Promise.all(
+        candidates.map(async (item: any) =>
+          (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
+        ),
+      );
 
       const filtered = checks.filter(item => item !== null);
 
@@ -435,23 +494,36 @@ export class TagAnalyticsDataService {
       const topTags = filtered.slice(0, 10).map(item => ({
         name: item.tag.name.replace(/_/g, ' '),
         key: item.tag.name,
-        frequency: item.related_tag ? item.related_tag.frequency : (item.frequency || 0),
-        count: 0
+        frequency: item.related_tag
+          ? item.related_tag.frequency
+          : item.frequency || 0,
+        count: 0,
       }));
 
       // 4. Fetch Counts
-      await Promise.all(topTags.map(async (obj) => {
-        try {
-          const query = `${tagName} ${obj.key}`;
-          const cUrl = `/counts/posts.json?tags=${encodeURIComponent(query)}`;
-          const cResp = await this.rateLimiter.fetch(cUrl).then((r: Response) => r.json());
-          const c = (cResp && cResp.counts ? cResp.counts.posts : (cResp ? cResp.posts : 0)) || 0;
-          obj.count = c;
-        } catch (e) { console.debug('[DI] Failed to fetch combined tag count', e); }
-      }));
+      await Promise.all(
+        topTags.map(async obj => {
+          try {
+            const query = `${tagName} ${obj.key}`;
+            const cUrl = `/counts/posts.json?tags=${encodeURIComponent(query)}`;
+            const cResp = await this.rateLimiter
+              .fetch(cUrl)
+              .then((r: Response) => r.json());
+            const c =
+              (cResp && cResp.counts
+                ? cResp.counts.posts
+                : cResp
+                  ? cResp.posts
+                  : 0) || 0;
+            obj.count = c;
+          } catch (e) {
+            console.debug('[DI] Failed to fetch combined tag count', e);
+          }
+        }),
+      );
 
       // 5. Accumulate Frequency for Cutoff
-      let finalTags = [];
+      const finalTags = [];
       let currentSumFreq = 0.0;
       const threshold = 0.95;
 
@@ -466,14 +538,15 @@ export class TagAnalyticsDataService {
 
       // Calculate Others
       const remainFreq = Math.max(0, 1.0 - currentSumFreq);
-      if (remainFreq > 0.005) { // Show if > 0.5%
+      if (remainFreq > 0.005) {
+        // Show if > 0.5%
         const othersCount = Math.floor(totalTagCount * remainFreq);
         if (othersCount > 0) {
           finalTags.push({
             name: 'Others',
             key: 'others',
             count: othersCount,
-            isOther: true
+            isOther: true,
           });
         }
       }
@@ -485,27 +558,34 @@ export class TagAnalyticsDataService {
       });
 
       return result;
-
     } catch (e) {
-      console.warn(`[TagAnalyticsApp] Failed to fetch ${catName} distribution`, e);
+      console.warn(
+        `[TagAnalyticsApp] Failed to fetch ${catName} distribution`,
+        e,
+      );
       return null;
     }
   }
 
-  async fetchHistoryBackwards(tagName: string, forwardStartDate: string, targetTotal: number, currentForwardTotal: number): Promise<any[]> {
-    console.log(`[TagAnalyticsApp] Starting Reverse Scan. Tag: ${tagName}, Start: ${forwardStartDate}, Target: ${targetTotal}, Current: ${currentForwardTotal}`);
+  async fetchHistoryBackwards(
+    tagName: string,
+    forwardStartDate: string,
+    targetTotal: number,
+    currentForwardTotal: number,
+  ): Promise<any[]> {
+    console.log(
+      `[TagAnalyticsApp] Starting Reverse Scan. Tag: ${tagName}, Start: ${forwardStartDate}, Target: ${targetTotal}, Current: ${currentForwardTotal}`,
+    );
     const history = [];
     let totalSum = currentForwardTotal;
-    let currentMonth = new Date(forwardStartDate);
+    const currentMonth = new Date(forwardStartDate);
 
     // We strictly start scanning from 1 month before the forward start date
     // to avoid overlapping with fetchMonthlyCounts which already covers the starting month.
     currentMonth.setMonth(currentMonth.getMonth() - 1); // Start from month BEFORE forward scan
 
-
-
     // Danbooru founded in late 2005. Don't go past that.
-    const hardLimit = new Date("2005-01-01");
+    const hardLimit = new Date('2005-01-01');
 
     while (totalSum < targetTotal && currentMonth > hardLimit) {
       const year = currentMonth.getFullYear();
@@ -521,26 +601,37 @@ export class TagAnalyticsDataService {
       const url = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+date:${dateRange}`;
 
       try {
-        const data = await this.rateLimiter.fetch(url).then((r: Response) => r.json());
-        const count = (data.counts && typeof data.counts === 'object') ? (data.counts.posts || 0) : (data.counts || 0);
+        const data = await this.rateLimiter
+          .fetch(url)
+          .then((r: Response) => r.json());
+        const count =
+          data.counts && typeof data.counts === 'object'
+            ? data.counts.posts || 0
+            : data.counts || 0;
 
         if (count > 0) {
           history.unshift({
             date: `${year}-${String(month).padStart(2, '0')}-01`,
             count: count,
-            cumulative: 0 // Will fix in post-process
+            cumulative: 0, // Will fix in post-process
           });
           totalSum += count;
-          console.log(`[TagAnalyticsApp] Reverse Scan Hit: ${year}-${month} => ${count} posts. Total: ${totalSum}/${targetTotal}`);
-
+          console.log(
+            `[TagAnalyticsApp] Reverse Scan Hit: ${year}-${month} => ${count} posts. Total: ${totalSum}/${targetTotal}`,
+          );
         }
       } catch (e) {
-        console.warn(`[TagAnalyticsApp] Backward fetch failed for ${year}-${month}`, e);
+        console.warn(
+          `[TagAnalyticsApp] Backward fetch failed for ${year}-${month}`,
+          e,
+        );
       }
 
       currentMonth.setMonth(currentMonth.getMonth() - 1);
     }
-    console.log(`[TagAnalyticsApp] Reverse Scan Completed. Total: ${totalSum}/${targetTotal}, Months Checked: ${history.length} (hits)`);
+    console.log(
+      `[TagAnalyticsApp] Reverse Scan Completed. Total: ${totalSum}/${targetTotal}, Months Checked: ${history.length} (hits)`,
+    );
 
     // Calculate cumulative counts for backward data
     let runningSum = 0;
@@ -552,10 +643,12 @@ export class TagAnalyticsDataService {
     return history;
   }
 
-  async fetchHistoryDelta(tagName: string, lastDate: Date | string, startDate: Date | string): Promise<any[]> {
+  async fetchHistoryDelta(
+    tagName: string,
+    lastDate: Date | string,
+    startDate: Date | string,
+  ): Promise<any[]> {
     if (!lastDate) return this.fetchMonthlyCounts(tagName, startDate);
-
-
 
     // Delta Sync: Check last 2 months only
     const now = new Date();
@@ -563,7 +656,10 @@ export class TagAnalyticsDataService {
     twoMonthsAgo.setMonth(now.getMonth() - 2);
     twoMonthsAgo.setDate(1); // Start from 1st of month
 
-    const effectiveStart = (lastDate && lastDate > twoMonthsAgo) ? twoMonthsAgo : (lastDate || startDate);
+    const effectiveStart =
+      lastDate && lastDate > twoMonthsAgo
+        ? twoMonthsAgo
+        : lastDate || startDate;
 
     return this.fetchMonthlyCounts(tagName, effectiveStart);
   }
@@ -595,24 +691,28 @@ export class TagAnalyticsDataService {
     // We can just iterate and update.
 
     let runningSum = 0;
-    merged = merged.map((h) => {
+    merged = merged.map(h => {
       // We can't just sum 'count' unless we are sure we have the WHOLE history from 2005.
       // partial sync means we have (Old - Tail) + New.
       // So valid history.
       runningSum += h.count;
-      return { ...h, cumulative: runningSum };
+      return {...h, cumulative: runningSum};
     });
 
     return merged;
   }
 
-  async fetchMilestonesDelta(tagName: string, currentTotal: number, cachedMilestones: any[], fullHistory: any[]): Promise<any[]> {
+  async fetchMilestonesDelta(
+    tagName: string,
+    currentTotal: number,
+    cachedMilestones: any[],
+    fullHistory: any[],
+  ): Promise<any[]> {
     const allTargets = this.getMilestoneTargets(currentTotal);
     const existingTargets = new Set(cachedMilestones.map(m => m.milestone));
     const missingTargets = allTargets.filter(t => !existingTargets.has(t));
 
     if (missingTargets.length === 0) return [];
-
 
     return this.fetchMilestones(tagName, fullHistory, missingTargets);
   }
@@ -620,17 +720,21 @@ export class TagAnalyticsDataService {
   mergeMilestones(oldMilestones: any[], newMilestones: any[]): any[] {
     if (!newMilestones || newMilestones.length === 0) return oldMilestones;
     // Sort by milestone number
-    return [...oldMilestones, ...newMilestones].sort((a, b) => a.milestone - b.milestone);
+    return [...oldMilestones, ...newMilestones].sort(
+      (a, b) => a.milestone - b.milestone,
+    );
   }
 
   async fetchLatestPost(tagName: string): Promise<any> {
     // Query for the single latest post
     const url = `/posts.json?tags=${encodeURIComponent(tagName)}&limit=1&only=id,created_at,variants,uploader_id,rating,preview_file_url`;
     try {
-      const posts = await this.rateLimiter.fetch(url).then((r: Response) => r.json());
-      return (posts && posts.length > 0) ? posts[0] : null;
+      const posts = await this.rateLimiter
+        .fetch(url)
+        .then((r: Response) => r.json());
+      return posts && posts.length > 0 ? posts[0] : null;
     } catch (e) {
-      console.warn("[TagAnalyticsApp] Failed to fetch latest post:", e);
+      console.warn('[TagAnalyticsApp] Failed to fetch latest post:', e);
       return null;
     }
   }
@@ -639,33 +743,41 @@ export class TagAnalyticsDataService {
     // Query for posts created in the last 24 hours (age:..1d)
     const url = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+age:..1d`;
     try {
-      const resp = await this.rateLimiter.fetch(url).then((r: Response) => r.json());
-      return (resp && resp.counts ? resp.counts.posts : (resp ? resp.posts : 0)) || 0;
+      const resp = await this.rateLimiter
+        .fetch(url)
+        .then((r: Response) => r.json());
+      return (
+        (resp && resp.counts ? resp.counts.posts : resp ? resp.posts : 0) || 0
+      );
     } catch (e) {
-      console.warn("[TagAnalyticsApp] Failed to fetch new post count:", e);
+      console.warn('[TagAnalyticsApp] Failed to fetch new post count:', e);
       return 0;
     }
   }
 
-  async fetchTrendingPost(tagName: string, isNSFW: boolean = false): Promise<any> {
+  async fetchTrendingPost(
+    tagName: string,
+    isNSFW: boolean = false,
+  ): Promise<any> {
     // Query for the most popular SFW (or NSFW) post in the last 3 days
     // age:..3d, order:score, rating:g (or is:nsfw)
     const ratingQuery = isNSFW ? 'is:nsfw' : 'is:sfw';
     const url = `/posts.json?tags=${encodeURIComponent(tagName)}+age:..3d+order:score+${ratingQuery}&limit=1&only=id,created_at,variants,uploader_id,rating,score,preview_file_url`;
     try {
-      const posts = await this.rateLimiter.fetch(url).then((r: Response) => r.json());
-      return (posts && posts.length > 0) ? posts[0] : null;
+      const posts = await this.rateLimiter
+        .fetch(url)
+        .then((r: Response) => r.json());
+      return posts && posts.length > 0 ? posts[0] : null;
     } catch (e) {
-      console.warn("[TagAnalyticsApp] Failed to fetch trending post:", e);
+      console.warn('[TagAnalyticsApp] Failed to fetch trending post:', e);
       return null;
     }
   }
 
-
   // --- Helper Methods for Rankings ---
 
   calculateLocalStats(posts: any[]): any {
-    const ratingCounts: Record<string, number> = { g: 0, s: 0, q: 0, e: 0 };
+    const ratingCounts: Record<string, number> = {g: 0, s: 0, q: 0, e: 0};
     const uploaders: Record<string, number> = {};
     const approvers: Record<string, number> = {};
 
@@ -685,19 +797,25 @@ export class TagAnalyticsDataService {
     });
 
     // Sort Rankings
-    const sortMap = (map: Record<string, number>) => Object.entries(map)
-      .sort((a, b) => (b[1] as number) - (a[1] as number)) // Descending count
-      .slice(0, 100) // Top 100
-      .map(([id, count], index) => ({ id, count, rank: index + 1 }));
+    const sortMap = (map: Record<string, number>) =>
+      Object.entries(map)
+        .sort((a, b) => (b[1] as number) - (a[1] as number)) // Descending count
+        .slice(0, 100) // Top 100
+        .map(([id, count], index) => ({id, count, rank: index + 1}));
 
     return {
       ratingCounts,
       uploaderRanking: sortMap(uploaders),
-      approverRanking: sortMap(approvers)
+      approverRanking: sortMap(approvers),
     };
   }
 
-  async fetchReportRanking(tagName: string, group: string, from: string, to: string): Promise<any> {
+  async fetchReportRanking(
+    tagName: string,
+    group: string,
+    from: string,
+    to: string,
+  ): Promise<any> {
     // group: 'uploader' or 'approver'
     // from/to: YYYY-MM-DD
     const params = new URLSearchParams({
@@ -705,7 +823,7 @@ export class TagAnalyticsDataService {
       'search[group]': group,
       'search[mode]': 'table',
       'search[group_limit]': 10, // Top 100
-      'commit': 'Search'
+      commit: 'Search',
     } as any);
 
     if (from) params.append('search[from]', from);
@@ -713,13 +831,14 @@ export class TagAnalyticsDataService {
 
     const url = `/reports/posts.json?${params.toString()}`;
     try {
-      const resp = await this.rateLimiter.fetch(url, { headers: { 'Accept': 'application/json' } });
+      const resp = await this.rateLimiter.fetch(url, {
+        headers: {Accept: 'application/json'},
+      });
       const data = await resp.json();
 
       // Debug Log
 
       if (Array.isArray(data) && data.length > 0) {
-
       }
 
       return data;
@@ -745,8 +864,12 @@ export class TagAnalyticsDataService {
    * @param {!Date} startDate The date to start fetching from.
    * @return {Promise<!Array<{date: !Date, count: number, cumulative: number}>>} Array of monthly data.
    */
-  async fetchMonthlyCounts(tagName: string, startDate: Date | string): Promise<any[]> {
-    const startDateObj = startDate instanceof Date ? startDate : new Date(startDate);
+  async fetchMonthlyCounts(
+    tagName: string,
+    startDate: Date | string,
+  ): Promise<any[]> {
+    const startDateObj =
+      startDate instanceof Date ? startDate : new Date(startDate);
 
     const startYear = startDateObj.getFullYear();
     const startMonth = startDateObj.getMonth(); // 0-based
@@ -765,7 +888,7 @@ export class TagAnalyticsDataService {
 
     const tasks = [];
     // Use UTC to avoid timezone shifts in labels (April appearing as March)
-    let current = new Date(Date.UTC(startYear, startMonth, 1));
+    const current = new Date(Date.UTC(startYear, startMonth, 1));
 
     while (current <= now) {
       const y = current.getUTCFullYear();
@@ -792,7 +915,7 @@ export class TagAnalyticsDataService {
       tasks.push({
         dateObj: new Date(current), // Clone
         dateStr,
-        queryDate
+        queryDate,
       });
 
       current.setUTCMonth(current.getUTCMonth() + 1);
@@ -801,15 +924,18 @@ export class TagAnalyticsDataService {
     // Create Promises
     const promises = tasks.map(task => {
       const params = new URLSearchParams({
-        tags: `${tagName} status:any date:${task.queryDate}` // Correct: date must be in tags
+        tags: `${tagName} status:any date:${task.queryDate}`, // Correct: date must be in tags
       });
       const url = `/counts/posts.json?${params.toString()}`;
 
-      return this.rateLimiter.fetch(url)
+      return this.rateLimiter
+        .fetch(url)
         .then((r: Response) => r.json())
         .then((data: any) => {
           // Handle different response formats: { "counts": { "posts": N } } or { "posts": N }
-          const count = (data && data.counts ? data.counts.posts : (data ? data.posts : 0)) || 0;
+          const count =
+            (data && data.counts ? data.counts.posts : data ? data.posts : 0) ||
+            0;
           return {
             date: task.dateStr,
             count: count,
@@ -818,7 +944,7 @@ export class TagAnalyticsDataService {
         })
         .catch((e: unknown) => {
           console.warn(`[TagAnalyticsApp] Failed month ${task.dateStr}`, e);
-          return { date: task.dateStr, count: 0, cumulative: 0 };
+          return {date: task.dateStr, count: 0, cumulative: 0};
         });
     });
 
@@ -848,8 +974,11 @@ export class TagAnalyticsDataService {
    * @param {!Array<number>} targets The milestone targets (e.g., [1, 100, 1000]).
    * @return {Promise<!Array<{milestone: number, post: ?Object}>>} Array of milestones.
    */
-  async fetchMilestones(tagName: string, monthlyData: any[], targets: number[]): Promise<any[]> {
-
+  async fetchMilestones(
+    tagName: string,
+    monthlyData: any[],
+    targets: number[],
+  ): Promise<any[]> {
     const milestones = [];
 
     // Sort targets
@@ -873,7 +1002,6 @@ export class TagAnalyticsDataService {
 
       if (targetData) {
         const offset = target - prevCumulative;
-
 
         // targetData.date can be a "YYYY-MM-01" string (from fetchMonthlyCounts)
         // OR a Date object (from calculateHistoryFromPosts or old cache).
@@ -915,18 +1043,21 @@ export class TagAnalyticsDataService {
           tags: `${tagName} status:any date:>${prevDateStr} order:id`,
           limit: limit,
           page: page,
-          only: 'id,created_at,uploader_id,uploader_name,variants,rating,preview_file_url'
+          only: 'id,created_at,uploader_id,uploader_name,variants,rating,preview_file_url',
         } as any);
 
         const url = `/posts.json?${params.toString()}`;
 
         try {
-
-          const posts = await this.rateLimiter.fetch(url).then((r: Response) => r.json());
+          const posts = await this.rateLimiter
+            .fetch(url)
+            .then((r: Response) => r.json());
           if (posts && posts[indexInPage]) {
-            milestones.push({ milestone: target, post: posts[indexInPage] });
+            milestones.push({milestone: target, post: posts[indexInPage]});
           } else {
-            console.warn(`[TagAnalyticsApp] Milestone ${target} post not found at index ${indexInPage} (Page ${page}). Posts len: ${posts ? posts.length : 0}`);
+            console.warn(
+              `[TagAnalyticsApp] Milestone ${target} post not found at index ${indexInPage} (Page ${page}). Posts len: ${posts ? posts.length : 0}`,
+            );
           }
         } catch (e) {
           console.warn(`[TagAnalyticsApp] Failed milestone ${target}`, e);
@@ -1002,17 +1133,22 @@ export class TagAnalyticsDataService {
     const userPromises = userBatches.map(batch => {
       const params = new URLSearchParams({
         'search[id]': batch.join(','),
-        'only': 'id,name,level_string'
+        only: 'id,name,level_string',
       });
       const url = `/users.json?${params.toString()}`;
-      return this.rateLimiter.fetch(url)
+      return this.rateLimiter
+        .fetch(url)
         .then((r: Response) => r.json())
         .then((users: any) => {
           if (Array.isArray(users)) {
-            users.forEach((u: any) => userMap.set(String(u.id), { name: u.name, level: u.level_string }));
+            users.forEach((u: any) =>
+              userMap.set(String(u.id), {name: u.name, level: u.level_string}),
+            );
           }
         })
-        .catch((e: unknown) => console.warn("[TagAnalyticsApp] Failed to fetch user batch", e));
+        .catch((e: unknown) =>
+          console.warn('[TagAnalyticsApp] Failed to fetch user batch', e),
+        );
     });
 
     await Promise.all(userPromises);
@@ -1037,26 +1173,37 @@ export class TagAnalyticsDataService {
     const userPromises = uniqueNames.map(name => {
       const params = new URLSearchParams({
         'search[name]': name, // Exact match usually
-        'only': 'id,name,level_string'
+        only: 'id,name,level_string',
       } as any);
       const url = `/users.json?${params.toString()}`;
 
-      return this.rateLimiter.fetch(url)
+      return this.rateLimiter
+        .fetch(url)
         .then((r: Response) => r.json())
         .then((users: any) => {
           if (Array.isArray(users) && users.length > 0) {
             // Should return 1 user if exact match
             const u = users[0];
             if (u) {
-              userMap.set(name, { id: u.id, name: u.name, level: u.level_string });
+              userMap.set(name, {
+                id: u.id,
+                name: u.name,
+                level: u.level_string,
+              });
               // Also map by returned name just in case case sensitivity differs
-              userMap.set(u.name, { id: u.id, name: u.name, level: u.level_string });
+              userMap.set(u.name, {
+                id: u.id,
+                name: u.name,
+                level: u.level_string,
+              });
             }
           } else {
             console.warn(`[TagAnalyticsApp] User not found by name: "${name}"`);
           }
         })
-        .catch((e: unknown) => console.warn(`[TagAnalyticsApp] Failed to fetch user: "${name}"`, e));
+        .catch((e: unknown) =>
+          console.warn(`[TagAnalyticsApp] Failed to fetch user: "${name}"`, e),
+        );
     });
 
     await Promise.all(userPromises);
@@ -1070,8 +1217,10 @@ export class TagAnalyticsDataService {
    */
   async resolveFirst100Names(stats: any): Promise<any> {
     const ids = new Set();
-    if (stats.uploaderRanking) stats.uploaderRanking.forEach((u: any) => ids.add(String(u.id)));
-    if (stats.approverRanking) stats.approverRanking.forEach((u: any) => ids.add(String(u.id)));
+    if (stats.uploaderRanking)
+      stats.uploaderRanking.forEach((u: any) => ids.add(String(u.id)));
+    if (stats.approverRanking)
+      stats.approverRanking.forEach((u: any) => ids.add(String(u.id)));
 
     const userMap = await this.fetchUserMap(Array.from(ids) as any[]);
 
@@ -1108,7 +1257,10 @@ export class TagAnalyticsDataService {
     if (!posts || posts.length === 0) return [];
 
     // Sort by date asc
-    const sorted = [...posts].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    const sorted = [...posts].sort(
+      (a, b) =>
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+    );
 
     const counts: Record<string, number> = {}; // "YYYY-MM" -> count
 
@@ -1126,7 +1278,9 @@ export class TagAnalyticsDataService {
     let cumulative = 0;
 
     // Start from the month of the first post (using UTC to prevent timezone shifts)
-    let current = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1));
+    const current = new Date(
+      Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1),
+    );
 
     while (current <= now) {
       const key = `${current.getUTCFullYear()}-${String(current.getUTCMonth() + 1).padStart(2, '0')}`;
@@ -1138,7 +1292,7 @@ export class TagAnalyticsDataService {
       history.push({
         date: dateStr, // Store as string for consistency with fetchMonthlyCounts
         count: count,
-        cumulative: cumulative
+        cumulative: cumulative,
       });
 
       current.setUTCMonth(current.getUTCMonth() + 1);
@@ -1152,7 +1306,6 @@ export class TagAnalyticsDataService {
    * @return {!Array<number>} Sorted list of milestone targets.
    */
   getMilestoneTargets(total: number): number[] {
-
     const milestones = new Set([1]);
     if (total >= 100) milestones.add(100);
     if (total >= 1000) milestones.add(1000);
@@ -1217,13 +1370,50 @@ export class TagAnalyticsDataService {
     return next;
   }
 
-  async fetchRankingsAndResolve(tagName: string, dateStr1Y: string, dateStrTomorrow: string, measure: (label: string, promise: Promise<any>) => Promise<any>): Promise<any> {
+  async fetchRankingsAndResolve(
+    tagName: string,
+    dateStr1Y: string,
+    dateStrTomorrow: string,
+    measure: (label: string, promise: Promise<any>) => Promise<any>,
+  ): Promise<any> {
     // 1. Fetch all rankings in parallel (RateLimiter queues them)
     const [uAll, aAll, uYear, aYear] = await Promise.all([
-      measure('Ranking (Uploader All)', this.fetchReportRanking(tagName, 'uploader', '2005-01-01', dateStrTomorrow)),
-      measure('Ranking (Approver All)', this.fetchReportRanking(tagName, 'approver', '2005-01-01', dateStrTomorrow)),
-      measure('Ranking (Uploader Year)', this.fetchReportRanking(tagName, 'uploader', dateStr1Y, dateStrTomorrow)),
-      measure('Ranking (Approver Year)', this.fetchReportRanking(tagName, 'approver', dateStr1Y, dateStrTomorrow))
+      measure(
+        'Ranking (Uploader All)',
+        this.fetchReportRanking(
+          tagName,
+          'uploader',
+          '2005-01-01',
+          dateStrTomorrow,
+        ),
+      ),
+      measure(
+        'Ranking (Approver All)',
+        this.fetchReportRanking(
+          tagName,
+          'approver',
+          '2005-01-01',
+          dateStrTomorrow,
+        ),
+      ),
+      measure(
+        'Ranking (Uploader Year)',
+        this.fetchReportRanking(
+          tagName,
+          'uploader',
+          dateStr1Y,
+          dateStrTomorrow,
+        ),
+      ),
+      measure(
+        'Ranking (Approver Year)',
+        this.fetchReportRanking(
+          tagName,
+          'approver',
+          dateStr1Y,
+          dateStrTomorrow,
+        ),
+      ),
     ]);
 
     // 2. Resolve Users Immediately
@@ -1231,16 +1421,17 @@ export class TagAnalyticsDataService {
     const uRankingIds = new Set();
     const uRankingNames = new Set();
     const getKey = (r: any) => r.name || r.uploader || r.approver || r.user;
-    const normalize = (n: string) => n ? n.replace(/ /g, '_') : '';
+    const normalize = (n: string) => (n ? n.replace(/ /g, '_') : '');
 
     [uAll, uYear, aAll, aYear].forEach(report => {
-      if (Array.isArray(report)) report.forEach(r => {
-        if (r.id) uRankingIds.add(String(r.id));
-        else {
-          const n = normalize(getKey(r));
-          if (n && n !== 'Unknown') uRankingNames.add(n);
-        }
-      });
+      if (Array.isArray(report))
+        report.forEach(r => {
+          if (r.id) uRankingIds.add(String(r.id));
+          else {
+            const n = normalize(getKey(r));
+            if (n && n !== 'Unknown') uRankingNames.add(n);
+          }
+        });
     });
 
     // Fetch User Metadata (ID)
@@ -1253,7 +1444,9 @@ export class TagAnalyticsDataService {
 
     // Fetch User Metadata (Name)
     if (uRankingNames.size > 0) {
-      const nameMap = await this.fetchUserMapByNames(Array.from(uRankingNames) as any[]);
+      const nameMap = await this.fetchUserMapByNames(
+        Array.from(uRankingNames) as any[],
+      );
       nameMap.forEach((uObj, name) => {
         this.userNames[name] = uObj; // Map Name -> Object
         if (uObj.id) this.userNames[String(uObj.id)] = uObj; // Map ID -> Object
@@ -1264,15 +1457,17 @@ export class TagAnalyticsDataService {
     const processReport = (report: any) => {
       if (Array.isArray(report)) {
         return report.map(r => {
-          const rawKey = getKey(r) || "Unknown";
+          const rawKey = getKey(r) || 'Unknown';
           const nName = normalize(rawKey);
           // Lookup by ID first, then by Name
-          const u = (r.id ? this.userNames[String(r.id)] : null) || this.userNames[nName];
+          const u =
+            (r.id ? this.userNames[String(r.id)] : null) ||
+            this.userNames[nName];
 
           const level = u ? u.level : null;
           const finalName = u ? u.name : rawKey;
           const count = r.posts || r.count || r.post_count || 0;
-          return { id: r.id || (u ? u.id : null), name: finalName, level, count };
+          return {id: r.id || (u ? u.id : null), name: finalName, level, count};
         });
       }
       return [];
@@ -1282,7 +1477,7 @@ export class TagAnalyticsDataService {
       uploaderAll: processReport(uAll),
       approverAll: processReport(aAll),
       uploaderYear: processReport(uYear),
-      approverYear: processReport(aYear)
+      approverYear: processReport(aYear),
     };
     return result;
   }
@@ -1291,7 +1486,9 @@ export class TagAnalyticsDataService {
     try {
       // use name_matches to find the exact tag
       const url = `/tags.json?search[name_matches]=${encodeURIComponent(tagName)}`;
-      const resp = await this.rateLimiter.fetch(url).then((r: Response) => r.json());
+      const resp = await this.rateLimiter
+        .fetch(url)
+        .then((r: Response) => r.json());
 
       if (Array.isArray(resp) && resp.length > 0) {
         // Find exact match to be safe

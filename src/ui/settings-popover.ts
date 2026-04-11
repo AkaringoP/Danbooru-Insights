@@ -27,8 +27,11 @@ export interface SettingsPopoverResult {
  * @param {SettingsPopoverOptions} options Construction options.
  * @return {SettingsPopoverResult} The popover element and its close function.
  */
-export function createSettingsPopover(options: SettingsPopoverOptions): SettingsPopoverResult {
-  const {settingsManager, db, metric, settingsBtn, closeSettings, onRefresh} = options;
+export function createSettingsPopover(
+  options: SettingsPopoverOptions,
+): SettingsPopoverResult {
+  const {settingsManager, db, metric, settingsBtn, closeSettings, onRefresh} =
+    options;
 
   let settingsChanged = false;
 
@@ -68,7 +71,7 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
   popover.id = 'danbooru-grass-settings-popover';
 
   // Close on click outside
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', e => {
     if (popover && popover.style.display === 'block') {
       if (
         !popover.contains(e.target as Node) &&
@@ -85,13 +88,20 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
     if (popover.style.display !== 'block') return;
     const btnRect = settingsBtn.getBoundingClientRect();
     popover.style.left = btnRect.left + 'px';
-    popover.style.top = (btnRect.bottom + 4) + 'px';
+    popover.style.top = btnRect.bottom + 4 + 'px';
   };
-  window.addEventListener('scroll', (e) => {
-    if (popover.style.display === 'block' && !popover.contains(e.target as Node)) {
-      repositionPopover();
-    }
-  }, true);
+  window.addEventListener(
+    'scroll',
+    e => {
+      if (
+        popover.style.display === 'block' &&
+        !popover.contains(e.target as Node)
+      ) {
+        repositionPopover();
+      }
+    },
+    true,
+  );
 
   // --- 1. Color Themes Section ---
   const themeHeader = document.createElement('div');
@@ -121,7 +131,9 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
       const wasActive = icon.classList.contains('active');
       if (!wasActive) {
         settingsManager.applyTheme(key);
-        document.querySelectorAll('.theme-icon').forEach((el) => el.classList.remove('active'));
+        document
+          .querySelectorAll('.theme-icon')
+          .forEach(el => el.classList.remove('active'));
         icon.classList.add('active');
       }
       // Toggle grass flyout (show on click of active theme, or on first apply)
@@ -134,7 +146,8 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
   // --- 1b. Grass Color Flyout ---
   const grassFlyout = document.createElement('div');
   grassFlyout.id = 'danbooru-grass-flyout';
-  grassFlyout.style.cssText = 'position:fixed;display:none;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);padding:8px;z-index:10001;flex-direction:column;gap:6px;';
+  grassFlyout.style.cssText =
+    'position:fixed;display:none;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);padding:8px;z-index:10001;flex-direction:column;gap:6px;';
   document.body.appendChild(grassFlyout);
 
   let currentFlyoutKey = '';
@@ -152,10 +165,10 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
     if (isMobile) {
       grassFlyout.style.left = '10px';
       grassFlyout.style.right = '10px';
-      grassFlyout.style.top = (popoverRect.bottom + 8) + 'px';
+      grassFlyout.style.top = popoverRect.bottom + 8 + 'px';
       grassFlyout.style.maxWidth = 'calc(100vw - 20px)';
     } else {
-      grassFlyout.style.left = (popoverRect.right + 8) + 'px';
+      grassFlyout.style.left = popoverRect.right + 8 + 'px';
       grassFlyout.style.top = popoverRect.top + 'px';
       grassFlyout.style.right = '';
       grassFlyout.style.maxWidth = '';
@@ -177,13 +190,15 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
     const currentIdx = settingsManager.getGrassIndex(themeKey);
 
     const title = document.createElement('div');
-    title.style.cssText = 'font-size:10px;color:#888;font-weight:600;margin-bottom:2px;';
+    title.style.cssText =
+      'font-size:10px;color:#888;font-weight:600;margin-bottom:2px;';
     title.textContent = 'Grass Color';
     grassFlyout.appendChild(title);
 
     options.forEach((opt: any, idx: number) => {
       const row = document.createElement('div');
-      row.style.cssText = 'cursor:pointer;display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:4px;border:2px solid transparent;transition:all 0.15s;';
+      row.style.cssText =
+        'cursor:pointer;display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:4px;border:2px solid transparent;transition:all 0.15s;';
       if (idx === currentIdx) row.style.borderColor = '#007bff';
 
       // Mini heatmap (4 cells)
@@ -201,10 +216,14 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
       label.textContent = idx === 0 ? `★ ${opt.name}` : opt.name;
       row.appendChild(label);
 
-      row.onmouseover = () => { if (idx !== currentIdx) row.style.background = '#f6f8fa'; };
-      row.onmouseout = () => { row.style.background = ''; };
+      row.onmouseover = () => {
+        if (idx !== currentIdx) row.style.background = '#f6f8fa';
+      };
+      row.onmouseout = () => {
+        row.style.background = '';
+      };
 
-      row.onclick = (e) => {
+      row.onclick = e => {
         e.stopPropagation();
         settingsManager.setGrassIndex(themeKey, idx);
         settingsManager.applyTheme(themeKey);
@@ -216,7 +235,7 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
   };
 
   // Close flyout when clicking outside
-  popover.addEventListener('click', (e) => {
+  popover.addEventListener('click', e => {
     const target = e.target as HTMLElement;
     if (!grassFlyout.contains(target) && !target.closest('.theme-icon')) {
       grassFlyout.style.display = 'none';
@@ -233,11 +252,12 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
   // Mode Selector
   const modeSelect = document.createElement('select');
   modeSelect.className = 'popover-select';
-  ['uploads', 'approvals', 'notes'].forEach((m) => {
+  ['uploads', 'approvals', 'notes'].forEach(m => {
     const opt = document.createElement('option');
     opt.value = m;
     opt.textContent = m.charAt(0).toUpperCase() + m.slice(1);
-    if (m === metric.toLowerCase() || (m === 'uploads' && !metric)) opt.selected = true;
+    if (m === metric.toLowerCase() || (m === 'uploads' && !metric))
+      opt.selected = true;
     modeSelect.appendChild(opt);
   });
   popover.appendChild(modeSelect);
@@ -370,7 +390,7 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
           `;
   };
 
-  (trigger as HTMLElement).onclick = async (e) => {
+  (trigger as HTMLElement).onclick = async e => {
     e.preventDefault();
 
     if (isStatsVisible) {
@@ -404,9 +424,11 @@ export function createSettingsPopover(options: SettingsPopoverOptions): Settings
   };
 
   (purgeBtn as HTMLElement).onclick = () => {
-    if (confirm(
-      'Are you sure you want to clear all cached data? This will trigger a full re-fetch.'
-    )) {
+    if (
+      confirm(
+        'Are you sure you want to clear all cached data? This will trigger a full re-fetch.',
+      )
+    ) {
       onRefresh();
     }
   };

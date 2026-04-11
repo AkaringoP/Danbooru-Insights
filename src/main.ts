@@ -46,7 +46,9 @@ export function detectCurrentTag(): string | null {
     // 2b. "View posts" Link (Fallback)
     const postLink = document.querySelector('a[href^="/posts?tags="]');
     if (postLink) {
-      const urlParams = new URLSearchParams((postLink as HTMLAnchorElement).search);
+      const urlParams = new URLSearchParams(
+        (postLink as HTMLAnchorElement).search,
+      );
       return urlParams.get('tags');
     }
   }
@@ -77,15 +79,15 @@ async function main(): Promise<void> {
 
   // Cross-tab coordination
   const coordinator = new TabCoordinator();
-  coordinator.onTabCountChange = (count) => {
+  coordinator.onTabCountChange = count => {
     const rps = Math.max(1, Math.floor(rl.rps / count));
     const conc = Math.max(1, Math.floor(rl.concurrency / count));
     rateLimiter.updateLimits(rps, conc);
   };
-  coordinator.onBackoffReceived = (until) => {
+  coordinator.onBackoffReceived = until => {
     rateLimiter.setBackoff(until);
   };
-  rateLimiter.onBackoff = (until) => {
+  rateLimiter.onBackoff = until => {
     coordinator.broadcastBackoff(until);
   };
   coordinator.start();
@@ -95,7 +97,12 @@ async function main(): Promise<void> {
 
   if (targetTagName) {
     // Tag Analytics Mode (Wiki or Artist)
-    const tagAnalytics = new TagAnalyticsApp(db, settings, targetTagName, rateLimiter);
+    const tagAnalytics = new TagAnalyticsApp(
+      db,
+      settings,
+      targetTagName,
+      rateLimiter,
+    );
     tagAnalytics.run();
   } else {
     // Profile Mode
@@ -105,7 +112,12 @@ async function main(): Promise<void> {
     }
 
     const grass = new GrassApp(db, settings, context, rateLimiter);
-    const userAnalytics = new UserAnalyticsApp(db, settings, context, rateLimiter);
+    const userAnalytics = new UserAnalyticsApp(
+      db,
+      settings,
+      context,
+      rateLimiter,
+    );
 
     // Execution
     grass.run();

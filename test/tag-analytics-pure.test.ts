@@ -2,7 +2,13 @@ import {describe, it, expect, vi, beforeAll} from 'vitest';
 
 // Mock all heavy dependencies so we can instantiate TagAnalyticsDataService cheaply
 vi.mock('d3', () => ({}));
-vi.mock('../src/config', () => ({CONFIG: {RATE_LIMITER: {}, MAX_OPTIMIZED_POSTS: 1200, CACHE_EXPIRY_MS: 86400000}}));
+vi.mock('../src/config', () => ({
+  CONFIG: {
+    RATE_LIMITER: {},
+    MAX_OPTIMIZED_POSTS: 1200,
+    CACHE_EXPIRY_MS: 86400000,
+  },
+}));
 vi.mock('../src/core/analytics-data-manager', () => ({
   AnalyticsDataManager: vi.fn(),
 }));
@@ -14,14 +20,17 @@ vi.mock('../src/utils', () => ({
   escapeHtml: vi.fn((s: string) => s),
 }));
 
-let dataService: InstanceType<typeof import('../src/apps/tag-analytics-data').TagAnalyticsDataService>;
+let dataService: InstanceType<
+  typeof import('../src/apps/tag-analytics-data').TagAnalyticsDataService
+>;
 
 beforeAll(async () => {
-  const {TagAnalyticsDataService} = await import('../src/apps/tag-analytics-data');
+  const {TagAnalyticsDataService} =
+    await import('../src/apps/tag-analytics-data');
   dataService = new TagAnalyticsDataService(
     {} as any, // db
     {} as any, // rateLimiter
-    'test_tag'
+    'test_tag',
   );
 });
 

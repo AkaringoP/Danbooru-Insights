@@ -72,18 +72,21 @@ export function renderPieWidget(
   // Listen for lazy-loaded thumbnail updates
   const onPieDataUpdate = (e: Event) => {
     if (!document.body.contains(container)) {
-      window.removeEventListener('DanbooruInsights:DataUpdated', onPieDataUpdate);
+      window.removeEventListener(
+        'DanbooruInsights:DataUpdated',
+        onPieDataUpdate,
+      );
       return;
     }
     const {contentType, data} = (e as CustomEvent).detail;
     const keyMap: Record<string, string> = {
-      'character_dist': 'character',
-      'copyright_dist': 'copyright',
-      'fav_copyright_dist': 'fav_copyright',
-      'breasts_dist': 'breasts',
-      'hair_length_dist': 'hair_length',
-      'hair_color_dist': 'hair_color',
-      'rating_dist': 'rating',
+      character_dist: 'character',
+      copyright_dist: 'copyright',
+      fav_copyright_dist: 'fav_copyright',
+      breasts_dist: 'breasts',
+      hair_length_dist: 'hair_length',
+      hair_color_dist: 'hair_color',
+      rating_dist: 'rating',
     };
     const key = keyMap[contentType as string];
 
@@ -111,7 +114,10 @@ export function renderPieWidget(
    * Handles click events on pie chart slices.
    */
   const handlePieClick = (d: d3.PieArcDatum<PieSlice>) => {
-    const targetName = context.targetUser.normalizedName || context.targetUser.name.replace(/ /g, '_') || '';
+    const targetName =
+      context.targetUser.normalizedName ||
+      context.targetUser.name.replace(/ /g, '_') ||
+      '';
     if (!targetName) return;
     let query = '';
     const details = d.data.details;
@@ -124,10 +130,21 @@ export function renderPieWidget(
       return;
     } else if (currentPieTab === 'status') {
       query = `status:${details.name}`;
-    } else if (['breasts', 'hair_length', 'hair_color', 'gender', 'commentary', 'translation'].includes(currentPieTab)) {
+    } else if (
+      [
+        'breasts',
+        'hair_length',
+        'hair_color',
+        'gender',
+        'commentary',
+        'translation',
+      ].includes(currentPieTab)
+    ) {
       if (details.originalTag) query = details.originalTag;
-      else if (details.tagName === 'untagged_commentary') query = 'has:commentary -commentary -commentary_request';
-      else if (details.tagName === 'untagged_translation') query = '*_text -english_text -translation_request -translated';
+      else if (details.tagName === 'untagged_commentary')
+        query = 'has:commentary -commentary -commentary_request';
+      else if (details.tagName === 'untagged_translation')
+        query = '*_text -english_text -translation_request -translated';
       else if (details.tagName) query = details.tagName;
       else query = d.data.label.toLowerCase().replace(/ /g, '_');
     } else {
@@ -136,7 +153,10 @@ export function renderPieWidget(
 
     if (query) {
       const urlPrefix = `user:${targetName}`;
-      window.open(`/posts?tags=${encodeURIComponent(`${urlPrefix} ${query}`)}`, '_blank');
+      window.open(
+        `/posts?tags=${encodeURIComponent(`${urlPrefix} ${query}`)}`,
+        '_blank',
+      );
     }
   };
 
@@ -144,19 +164,22 @@ export function renderPieWidget(
    * Renders the Pie Chart content based on the current tab.
    */
   const renderPieContent = () => {
-    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    const isTouchDevice =
+      'ontouchstart' in window || navigator.maxTouchPoints > 0;
     let lastTouchedPieDatum: d3.PieArcDatum<PieSlice> | null = null;
     const contextUser = context.targetUser;
     const data = pieData[currentPieTab];
     const pieContent = container.querySelector('.pie-content') as HTMLElement;
 
     if (!data) {
-      pieContent.innerHTML = '<div style="color:#888; padding:30px; text-align:center;">Loading...</div>';
+      pieContent.innerHTML =
+        '<div style="color:#888; padding:30px; text-align:center;">Loading...</div>';
       return;
     }
 
     if (data.length === 0) {
-      pieContent.innerHTML = '<div style="color:#888; padding:30px; text-align:center;">No data available</div>';
+      pieContent.innerHTML =
+        '<div style="color:#888; padding:30px; text-align:center;">No data available</div>';
       return;
     }
 
@@ -166,8 +189,19 @@ export function renderPieWidget(
 
     // Sort: Hair Length has a specific order (custom sort)
     if (currentPieTab === 'hair_length') {
-      const order = ['Bald', 'Very Short Hair', 'Short Hair', 'Medium Hair', 'Long Hair', 'Very Long Hair', 'Absurdly Long Hair'];
-      data.sort((a: {name: string}, b: {name: string}) => order.indexOf(a.name) - order.indexOf(b.name));
+      const order = [
+        'Bald',
+        'Very Short Hair',
+        'Short Hair',
+        'Medium Hair',
+        'Long Hair',
+        'Very Long Hair',
+        'Absurdly Long Hair',
+      ];
+      data.sort(
+        (a: {name: string}, b: {name: string}) =>
+          order.indexOf(a.name) - order.indexOf(b.name),
+      );
     }
 
     pieContent.style.display = 'flex';
@@ -181,25 +215,65 @@ export function renderPieWidget(
       pieContent.style.perspective = '1000px';
     }
 
-    const ratingColors: Record<string, string> = {'g': '#28a745', 's': '#fd7e14', 'q': '#6f42c1', 'e': '#dc3545'};
-    const ratingLabels: Record<string, string> = {'g': 'General', 's': 'Sensitive', 'q': 'Questionable', 'e': 'Explicit'};
+    const ratingColors: Record<string, string> = {
+      g: '#28a745',
+      s: '#fd7e14',
+      q: '#6f42c1',
+      e: '#dc3545',
+    };
+    const ratingLabels: Record<string, string> = {
+      g: 'General',
+      s: 'Sensitive',
+      q: 'Questionable',
+      e: 'Explicit',
+    };
 
     const palette = [
-      '#e91e63', '#9c27b0', '#673ab7', '#3f51b5',
-      '#2196f3', '#03a9f4', '#00bcd4', '#009688',
-      '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b',
-      '#ffc107', '#ff9800', '#ff5722', '#795548',
+      '#e91e63',
+      '#9c27b0',
+      '#673ab7',
+      '#3f51b5',
+      '#2196f3',
+      '#03a9f4',
+      '#00bcd4',
+      '#009688',
+      '#4caf50',
+      '#8bc34a',
+      '#cddc39',
+      '#ffeb3b',
+      '#ffc107',
+      '#ff9800',
+      '#ff5722',
+      '#795548',
     ];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const processedData: PieSlice[] = data.map((d: any, i: number) => {
-      if (['rating', 'status', 'breasts', 'hair_length', 'hair_color', 'gender', 'commentary', 'translation'].includes(currentPieTab)) {
+      if (
+        [
+          'rating',
+          'status',
+          'breasts',
+          'hair_length',
+          'hair_color',
+          'gender',
+          'commentary',
+          'translation',
+        ].includes(currentPieTab)
+      ) {
         return {
           value: d.count,
-          label: (currentPieTab === 'rating') ? (ratingLabels[d.rating as keyof typeof ratingLabels] || d.rating) : d.label || d.name,
-          color: (currentPieTab === 'rating') ? (ratingColors[d.rating as keyof typeof ratingColors] || '#999') : (
-            (currentPieTab === 'hair_color' && d.color) ? d.color : (d.color || (d.isOther ? '#bdbdbd' : palette[i % palette.length]))
-          ),
+          label:
+            currentPieTab === 'rating'
+              ? ratingLabels[d.rating as keyof typeof ratingLabels] || d.rating
+              : d.label || d.name,
+          color:
+            currentPieTab === 'rating'
+              ? ratingColors[d.rating as keyof typeof ratingColors] || '#999'
+              : currentPieTab === 'hair_color' && d.color
+                ? d.color
+                : d.color ||
+                  (d.isOther ? '#bdbdbd' : palette[i % palette.length]),
           details: d,
         };
       } else {
@@ -216,16 +290,24 @@ export function renderPieWidget(
       }
     });
 
-    const validData = processedData.filter((d: PieSlice) => Number.isFinite(d.value) && d.value > 0);
-    const totalValue = validData.reduce((acc: number, curr: PieSlice) => acc + curr.value, 0);
+    const validData = processedData.filter(
+      (d: PieSlice) => Number.isFinite(d.value) && d.value > 0,
+    );
+    const totalValue = validData.reduce(
+      (acc: number, curr: PieSlice) => acc + curr.value,
+      0,
+    );
 
     if (validData.length === 0 || totalValue === 0) {
-      pieContent.innerHTML = '<div style="color:#888; padding:30px; text-align:center;">No data available (Total count is 0)</div>';
+      pieContent.innerHTML =
+        '<div style="color:#888; padding:30px; text-align:center;">No data available (Total count is 0)</div>';
       return;
     }
 
     // D3 Chart (Join Pattern)
-    let chartWrapper = pieContent.querySelector('.pie-chart-wrapper') as HTMLElement;
+    let chartWrapper = pieContent.querySelector(
+      '.pie-chart-wrapper',
+    ) as HTMLElement;
 
     if (!chartWrapper) {
       pieContent.innerHTML = '';
@@ -240,7 +322,8 @@ export function renderPieWidget(
         // 3D tilt effect (Chrome/Safari/Edge only — Firefox breaks SVG pointer events)
         chartWrapper.style.transformStyle = 'preserve-3d';
         chartWrapper.style.transform = 'rotateX(40deg) rotateY(0deg)';
-        chartWrapper.style.transition = 'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+        chartWrapper.style.transition =
+          'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
 
         const shadow = document.createElement('div');
         shadow.style.position = 'absolute';
@@ -256,7 +339,8 @@ export function renderPieWidget(
 
         chartWrapper.addEventListener('mouseenter', () => {
           chartWrapper.style.transform = 'rotateX(0deg) scale(1.1)';
-          shadow.style.transform = 'translate(-50%, -50%) translateZ(-30px) scale(0.9)';
+          shadow.style.transform =
+            'translate(-50%, -50%) translateZ(-30px) scale(0.9)';
           shadow.style.opacity = '0.5';
         });
         chartWrapper.addEventListener('mouseleave', () => {
@@ -310,11 +394,24 @@ export function renderPieWidget(
     const radius = Math.min(width, height) / 2 - 20;
 
     const svg = d3.select(chartWrapper).select('svg g');
-    const pie = d3.pie<PieSlice>().value(d => d.value).sort(null);
-    const arc = d3.arc<d3.PieArcDatum<PieSlice>>().innerRadius(0).outerRadius(radius);
-    const arcHover = d3.arc<d3.PieArcDatum<PieSlice>>().innerRadius(0).outerRadius(radius * 1.2);
+    const pie = d3
+      .pie<PieSlice>()
+      .value(d => d.value)
+      .sort(null);
+    const arc = d3
+      .arc<d3.PieArcDatum<PieSlice>>()
+      .innerRadius(0)
+      .outerRadius(radius);
+    const arcHover = d3
+      .arc<d3.PieArcDatum<PieSlice>>()
+      .innerRadius(0)
+      .outerRadius(radius * 1.2);
 
-    const tooltip = d3.select('body').selectAll('.danbooru-grass-pie-tooltip').data([0]).join('div')
+    const tooltip = d3
+      .select('body')
+      .selectAll('.danbooru-grass-pie-tooltip')
+      .data([0])
+      .join('div')
       .attr('class', 'danbooru-grass-pie-tooltip')
       .style('position', 'absolute')
       .style('background', 'rgba(30, 30, 30, 0.95)')
@@ -327,36 +424,52 @@ export function renderPieWidget(
       .style('z-index', '2147483647')
       .style('opacity', '0');
 
-    svg.selectAll('path')
+    svg
+      .selectAll('path')
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .data(pie(validData), (d: any) => d.data.label)
       .join(
-        enter => enter.append('path')
-          .attr('class', 'danbooru-grass-pie-path')
-          .attr('d', arc)
-          .attr('fill', d => d.data.color)
-          .style('opacity', '0.9')
-          .style('cursor', 'pointer'),
-        update => update
-          .attr('class', 'danbooru-grass-pie-path')
-          .attr('d', arc)
-          .call(update => update.transition().duration(500)
-            .attr('fill', d => d.data.color)),
+        enter =>
+          enter
+            .append('path')
+            .attr('class', 'danbooru-grass-pie-path')
+            .attr('d', arc)
+            .attr('fill', d => d.data.color)
+            .style('opacity', '0.9')
+            .style('cursor', 'pointer'),
+        update =>
+          update
+            .attr('class', 'danbooru-grass-pie-path')
+            .attr('d', arc)
+            .call(update =>
+              update
+                .transition()
+                .duration(500)
+                .attr('fill', d => d.data.color),
+            ),
       )
       .attr('stroke', '#fff')
       .style('stroke-width', '1px')
-      .on('mouseover', function(_event, d) {
-        d3.select(this).transition().duration(200).attr('d', (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '')
+      .on('mouseover', function (_event, d) {
+        d3.select(this)
+          .transition()
+          .duration(200)
+          .attr(
+            'd',
+            (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
+          )
           .style('opacity', '1')
           .style('filter', 'drop-shadow(0px 0px 8px rgba(255,255,255,0.4))');
 
         let html = '';
         const details = d.data.details;
         const thumbUrl = details.thumb;
-        const thumbHtml = thumbUrl ? `
+        const thumbHtml = thumbUrl
+          ? `
         <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
           <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;">
-        </div>` : '';
+        </div>`
+          : '';
 
         if (currentPieTab === 'rating') {
           html = `
@@ -370,7 +483,8 @@ export function renderPieWidget(
           </div>
         `;
         } else {
-          const percentage = ((d.data.value / totalValue) * 100).toFixed(1) + '%';
+          const percentage =
+            ((d.data.value / totalValue) * 100).toFixed(1) + '%';
           html = `
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
@@ -385,11 +499,18 @@ export function renderPieWidget(
 
         tooltip.html(html).style('opacity', 1);
       })
-      .on('mousemove', function(event) {
-        tooltip.style('left', (event.pageX + 15) + 'px').style('top', (event.pageY + 15) + 'px');
+      .on('mousemove', event => {
+        tooltip
+          .style('left', event.pageX + 15 + 'px')
+          .style('top', event.pageY + 15 + 'px');
       })
-      .on('mouseout', function() {
-        d3.select(this).transition().duration(200).attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '').style('opacity', '0.9').style('filter', 'none');
+      .on('mouseout', function () {
+        d3.select(this)
+          .transition()
+          .duration(200)
+          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
+          .style('opacity', '0.9')
+          .style('filter', 'none');
         tooltip.style('opacity', 0);
       })
       .on('click', (_event, d) => {
@@ -401,14 +522,19 @@ export function renderPieWidget(
       // Helper to handle touch on a slice
       const handleSliceTouch = (event: TouchEvent) => {
         const touch = event.touches[0];
-        const target = document.elementFromPoint(touch.clientX, touch.clientY) as Element;
+        const target = document.elementFromPoint(
+          touch.clientX,
+          touch.clientY,
+        ) as Element;
         if (!target) return;
         const datum = d3.select(target).datum() as d3.PieArcDatum<PieSlice>;
         if (!datum || !datum.data) return;
 
         // Reset all slices to normal size first
-        svg.selectAll('path.danbooru-grass-pie-path')
-          .transition().duration(200)
+        svg
+          .selectAll('path.danbooru-grass-pie-path')
+          .transition()
+          .duration(200)
           .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
           .style('opacity', '0.9')
           .style('filter', 'none');
@@ -416,8 +542,13 @@ export function renderPieWidget(
         lastTouchedPieDatum = datum;
 
         // Enlarge slice (same as mouseover)
-        d3.select(target).transition().duration(200)
-          .attr('d', (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '')
+        d3.select(target)
+          .transition()
+          .duration(200)
+          .attr(
+            'd',
+            (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
+          )
           .style('opacity', '1')
           .style('filter', 'drop-shadow(0px 0px 8px rgba(255,255,255,0.4))');
 
@@ -425,10 +556,12 @@ export function renderPieWidget(
         let html = '';
         const details = datum.data.details;
         const thumbUrl = details.thumb;
-        const thumbHtml = thumbUrl ? `
+        const thumbHtml = thumbUrl
+          ? `
         <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
           <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;">
-        </div>` : '';
+        </div>`
+          : '';
 
         if (currentPieTab === 'rating') {
           html = `
@@ -441,7 +574,8 @@ export function renderPieWidget(
             </div>
           </div>`;
         } else {
-          const percentage = ((datum.data.value / totalValue) * 100).toFixed(1) + '%';
+          const percentage =
+            ((datum.data.value / totalValue) * 100).toFixed(1) + '%';
           html = `
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
@@ -479,9 +613,14 @@ export function renderPieWidget(
         tooltip.style('left', left + 'px').style('top', top + 'px');
       };
 
-      svg.selectAll('path.danbooru-grass-pie-path')
-        .on('touchstart', function(event) { handleSliceTouch(event as TouchEvent); })
-        .on('touchmove', function(event) { handleSliceTouch(event as TouchEvent); });
+      svg
+        .selectAll('path.danbooru-grass-pie-path')
+        .on('touchstart', event => {
+          handleSliceTouch(event as TouchEvent);
+        })
+        .on('touchmove', event => {
+          handleSliceTouch(event as TouchEvent);
+        });
 
       // Tooltip tap → navigate
       tooltip.on('click', () => {
@@ -493,19 +632,32 @@ export function renderPieWidget(
       });
 
       // Outside tap → close tooltip + reset slices
-      document.addEventListener('touchstart', (e) => {
-        const tooltipEl = tooltip.node() as HTMLElement;
-        const svgEl = svg.node() as Element;
-        if (tooltipEl && !tooltipEl.contains(e.target as Node) && !svgEl?.contains(e.target as Node)) {
-          tooltip.style('opacity', 0);
-          svg.selectAll('path.danbooru-grass-pie-path')
-            .transition().duration(200)
-            .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
-            .style('opacity', '0.9')
-            .style('filter', 'none');
-          lastTouchedPieDatum = null;
-        }
-      }, {passive: true});
+      document.addEventListener(
+        'touchstart',
+        e => {
+          const tooltipEl = tooltip.node() as HTMLElement;
+          const svgEl = svg.node() as Element;
+          if (
+            tooltipEl &&
+            !tooltipEl.contains(e.target as Node) &&
+            !svgEl?.contains(e.target as Node)
+          ) {
+            tooltip.style('opacity', 0);
+            svg
+              .selectAll('path.danbooru-grass-pie-path')
+              .transition()
+              .duration(200)
+              .attr(
+                'd',
+                (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '',
+              )
+              .style('opacity', '0.9')
+              .style('filter', 'none');
+            lastTouchedPieDatum = null;
+          }
+        },
+        {passive: true},
+      );
     }
 
     const legendDiv = pieContent.querySelector('.danbooru-grass-legend-scroll');
@@ -513,7 +665,8 @@ export function renderPieWidget(
       let legendTitle = 'DIST.';
       if (currentPieTab === 'copyright') legendTitle = 'COPYRIGHTS';
       else if (currentPieTab === 'character') legendTitle = 'CHARACTERS';
-      else if (currentPieTab === 'fav_copyright') legendTitle = 'FAVORITE COPYRIGHTS';
+      else if (currentPieTab === 'fav_copyright')
+        legendTitle = 'FAVORITE COPYRIGHTS';
       else if (currentPieTab === 'status') legendTitle = 'STATUS';
       else if (currentPieTab === 'rating') legendTitle = 'RATINGS';
       else if (currentPieTab === 'hair_length') legendTitle = 'HAIR LENGTH';
@@ -525,55 +678,60 @@ export function renderPieWidget(
 
       const styleTag = legendDiv.querySelector('style')?.outerHTML ?? '';
 
-      const listHtml = processedData.map(d => {
-        const val = (d.value / totalValue) * 100;
-        const pct = val.toFixed(1) + '%';
-        let targetUrl = '#';
-        let query = '';
+      const listHtml = processedData
+        .map(d => {
+          const val = (d.value / totalValue) * 100;
+          const pct = val.toFixed(1) + '%';
+          let targetUrl = '#';
+          let query = '';
 
-        if (!d.details.isOther) {
-          if (currentPieTab === 'rating') {
-            query = `rating:${d.details.rating}`;
-            targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
-          } else if (currentPieTab === 'breasts') {
-            const tag = d.label.toLowerCase().replace(/ /g, '_');
-            targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${tag}`)}`;
-          } else if (currentPieTab === 'fav_copyright') {
-            query = `ordfav:${contextUser.normalizedName} ${d.details.tagName || d.label}`;
-            targetUrl = `/posts?tags=${encodeURIComponent(query)}`;
-          } else if (currentPieTab === 'status') {
-            query = `status:${d.details.name}`;
-            targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
-          } else {
-            // Mirror handlePieClick's logic so the legend link matches the pie-slice click target.
-            // Critical for categories where the count query is multi-tag (gender, untagged_commentary,
-            // untagged_translation): originalTag preserves the OR/exclusion query so navigation
-            // points to the same post set the count represents.
-            if (d.details.originalTag) {
-              query = d.details.originalTag;
-            } else if (d.details.tagName === 'untagged_commentary') {
-              query = 'has:commentary -commentary -commentary_request';
-            } else if (d.details.tagName === 'untagged_translation') {
-              query = '*_text -english_text -translation_request -translated';
+          if (!d.details.isOther) {
+            if (currentPieTab === 'rating') {
+              query = `rating:${d.details.rating}`;
+              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
+            } else if (currentPieTab === 'breasts') {
+              const tag = d.label.toLowerCase().replace(/ /g, '_');
+              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${tag}`)}`;
+            } else if (currentPieTab === 'fav_copyright') {
+              query = `ordfav:${contextUser.normalizedName} ${d.details.tagName || d.label}`;
+              targetUrl = `/posts?tags=${encodeURIComponent(query)}`;
+            } else if (currentPieTab === 'status') {
+              query = `status:${d.details.name}`;
+              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
             } else {
-              query = d.details.tagName || d.label;
+              // Mirror handlePieClick's logic so the legend link matches the pie-slice click target.
+              // Critical for categories where the count query is multi-tag (gender, untagged_commentary,
+              // untagged_translation): originalTag preserves the OR/exclusion query so navigation
+              // points to the same post set the count represents.
+              if (d.details.originalTag) {
+                query = d.details.originalTag;
+              } else if (d.details.tagName === 'untagged_commentary') {
+                query = 'has:commentary -commentary -commentary_request';
+              } else if (d.details.tagName === 'untagged_translation') {
+                query = '*_text -english_text -translation_request -translated';
+              } else {
+                query = d.details.tagName || d.label;
+              }
+              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
             }
-            targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
           }
-        }
 
-        return `
+          return `
                <div style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
                   <div style="width:12px; height:12px; background:${d.color}; border-radius:2px; margin-right:8px; border:1px solid rgba(0,0,0,0.1); flex-shrink:0;"></div>
-                  ${d.details.isOther
-          ? `<div style="color:#555; width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${d.label}">${d.label}</div>`
-          : `<a href="${targetUrl}" target="_blank" class="di-hover-underline" style="color:#555; width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${d.label}">${d.label}</a>`
-        }
+                  ${
+                    d.details.isOther
+                      ? `<div style="color:#555; width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${d.label}">${d.label}</div>`
+                      : `<a href="${targetUrl}" target="_blank" class="di-hover-underline" style="color:#555; width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${d.label}">${d.label}</a>`
+                  }
                   <div style="font-weight:bold; color:#333; margin-left:auto;" title="${d.details.count ? d.details.count.toLocaleString() : ''}">${pct}</div>
                </div>`;
-      }).join('');
+        })
+        .join('');
 
-      legendDiv.innerHTML = styleTag + `
+      legendDiv.innerHTML =
+        styleTag +
+        `
            <div style="font-size:0.8em; color:#888; margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:#fff; padding-bottom:4px; border-bottom:1px solid #eee;">${legendTitle}</div>
            ${listHtml}
       `;
@@ -632,22 +790,29 @@ export function renderPieWidget(
     }
 
     const pieContent = container.querySelector('.pie-content');
-    if (pieContent) pieContent.innerHTML = '<div style="color:#666;">Loading...</div>';
+    if (pieContent)
+      pieContent.innerHTML = '<div style="color:#666;">Loading...</div>';
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let data: any[] = [];
       if (tabName === 'rating') {
-        data = await dataManager.getRatingDistribution(context.targetUser as any, firstUploadDate);
+        data = await dataManager.getRatingDistribution(
+          context.targetUser as any,
+          firstUploadDate,
+        );
       } else if (tabName === 'status') {
-        data = await dataManager.getStatusDistribution(context.targetUser as any, firstUploadDate);
+        data = await dataManager.getStatusDistribution(
+          context.targetUser as any,
+          firstUploadDate,
+        );
         const statusColors: Record<string, string> = {
-          'active': '#2da44e',
-          'deleted': '#d73a49',
-          'pending': '#0969da',
-          'flagged': '#cf222e',
-          'banned': '#6e7781',
-          'appealed': '#bf3989',
+          active: '#2da44e',
+          deleted: '#d73a49',
+          pending: '#0969da',
+          flagged: '#cf222e',
+          banned: '#6e7781',
+          appealed: '#bf3989',
         };
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         data = data.map((d: any) => ({
@@ -655,13 +820,21 @@ export function renderPieWidget(
           color: statusColors[d.name as keyof typeof statusColors] || '#888',
         }));
       } else if (tabName === 'character') {
-        data = await dataManager.getCharacterDistribution(context.targetUser as any);
+        data = await dataManager.getCharacterDistribution(
+          context.targetUser as any,
+        );
       } else if (tabName === 'copyright') {
-        data = await dataManager.getCopyrightDistribution(context.targetUser as any);
+        data = await dataManager.getCopyrightDistribution(
+          context.targetUser as any,
+        );
       } else if (tabName === 'fav_copyright') {
-        data = await dataManager.getFavCopyrightDistribution(context.targetUser as any);
+        data = await dataManager.getFavCopyrightDistribution(
+          context.targetUser as any,
+        );
       } else if (tabName === 'breasts') {
-        data = await dataManager.getBreastsDistribution(context.targetUser as any);
+        data = await dataManager.getBreastsDistribution(
+          context.targetUser as any,
+        );
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -673,7 +846,9 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'gender') {
-        data = await dataManager.getGenderDistribution(context.targetUser as any);
+        data = await dataManager.getGenderDistribution(
+          context.targetUser as any,
+        );
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -685,7 +860,9 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'commentary') {
-        data = await dataManager.getCommentaryDistribution(context.targetUser as any);
+        data = await dataManager.getCommentaryDistribution(
+          context.targetUser as any,
+        );
         const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
         data = data.map((d: any) => ({
           ...d,
@@ -695,7 +872,9 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'translation') {
-        data = await dataManager.getTranslationDistribution(context.targetUser as any);
+        data = await dataManager.getTranslationDistribution(
+          context.targetUser as any,
+        );
         const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
         data = data.map((d: any) => ({
           ...d,
@@ -719,7 +898,7 @@ export function renderPieWidget(
     }
   };
 
-  container.addEventListener('click', (e) => {
+  container.addEventListener('click', e => {
     if ((e.target as HTMLElement).classList.contains('di-pie-tab')) {
       const mode = (e.target as HTMLElement).getAttribute('data-mode') ?? '';
       if (mode && currentPieTab !== mode) {
@@ -736,7 +915,9 @@ export function renderPieWidget(
   return {
     onNsfwChange: (enabled: boolean) => {
       isNsfwEnabled = enabled;
-      const boobsBtn = container.querySelector('.di-pie-tab[data-mode="breasts"]') as HTMLElement;
+      const boobsBtn = container.querySelector(
+        '.di-pie-tab[data-mode="breasts"]',
+      ) as HTMLElement;
       if (boobsBtn) {
         boobsBtn.style.display = isNsfwEnabled ? 'block' : 'none';
       }
@@ -788,30 +969,47 @@ export function renderTopPostsWidget(
 
   const renderTopPostContent = () => {
     const group = topPostGroups[currentWidgetMode];
-    const tabKey = currentWidgetMode === 'most' ? currentMostTab : currentSfwTab;
+    const tabKey =
+      currentWidgetMode === 'most' ? currentMostTab : currentSfwTab;
     const data = group ? group[tabKey] : null;
-    const contentDiv = container.querySelector('.top-post-content') as HTMLElement | null;
+    const contentDiv = container.querySelector(
+      '.top-post-content',
+    ) as HTMLElement | null;
     if (!contentDiv) return;
 
     if (!data) {
-      contentDiv.innerHTML = '<div style="color:#888; padding:20px 0;">No posts found or loading...</div>';
+      contentDiv.innerHTML =
+        '<div style="color:#888; padding:20px 0;">No posts found or loading...</div>';
       return;
     }
 
     const thumbUrl = getBestThumbnailUrl(data);
-    const dateStr = data.created_at ? new Date(data.created_at).toISOString().split('T')[0] : 'N/A';
+    const dateStr = data.created_at
+      ? new Date(data.created_at).toISOString().split('T')[0]
+      : 'N/A';
     const link = `/posts/${data.id}`;
-    const ratingMap: Record<string, string> = {'g': 'General', 's': 'Sensitive', 'q': 'Questionable', 'e': 'Explicit'};
+    const ratingMap: Record<string, string> = {
+      g: 'General',
+      s: 'Sensitive',
+      q: 'Questionable',
+      e: 'Explicit',
+    };
     const ratingLabel = ratingMap[data.rating] || data.rating;
 
-    const refreshBtn = container.querySelector('#analytics-random-refresh') as HTMLElement;
+    const refreshBtn = container.querySelector(
+      '#analytics-random-refresh',
+    ) as HTMLElement;
     if (refreshBtn) {
-      refreshBtn.style.display = (currentWidgetMode === 'random') ? 'inline-block' : 'none';
+      refreshBtn.style.display =
+        currentWidgetMode === 'random' ? 'inline-block' : 'none';
     }
 
-    const searchLinkBtn = container.querySelector('#analytics-more-post-link') as HTMLElement;
+    const searchLinkBtn = container.querySelector(
+      '#analytics-more-post-link',
+    ) as HTMLElement;
     if (searchLinkBtn) {
-      searchLinkBtn.style.display = (currentWidgetMode === 'recent') ? 'inline-block' : 'none';
+      searchLinkBtn.style.display =
+        currentWidgetMode === 'recent' ? 'inline-block' : 'none';
 
       const normalizedName = context.targetUser.normalizedName;
       const ratingTag = currentSfwTab === 'sfw' ? 'is:sfw' : 'is:nsfw';
@@ -825,14 +1023,19 @@ export function renderTopPostsWidget(
     const createTagLine = (label: string, icon: string, tags: string) => {
       if (!tags) return '';
       const tagList = tags.replace(/_/g, ' ');
-      const displayTags = (label === 'Char' && tags.split(' ').length > 5)
-        ? tagList.split(' ').slice(0, 5).join(', ') + '...'
-        : tagList;
+      const displayTags =
+        label === 'Char' && tags.split(' ').length > 5
+          ? tagList.split(' ').slice(0, 5).join(', ') + '...'
+          : tagList;
       return `<div>${icon} <strong>${label}:</strong> ${displayTags}</div>`;
     };
 
     const artistLine = createTagLine('Artist', '🎨', data.tag_string_artist);
-    const copyrightLine = createTagLine('Copy', '©️', data.tag_string_copyright);
+    const copyrightLine = createTagLine(
+      'Copy',
+      '©️',
+      data.tag_string_copyright,
+    );
     const charLine = createTagLine('Char', '👤', data.tag_string_character);
 
     contentDiv.innerHTML = `
@@ -868,21 +1071,29 @@ export function renderTopPostsWidget(
       btn.style.color = isActive ? '#fff' : '#24292f';
     };
 
-    const gsqeGroup = container.querySelector('#top-post-tabs-gsqe') as HTMLElement | null;
-    const sfwnsfwGroup = container.querySelector('#top-post-tabs-sfwnsfw') as HTMLElement | null;
+    const gsqeGroup = container.querySelector(
+      '#top-post-tabs-gsqe',
+    ) as HTMLElement | null;
+    const sfwnsfwGroup = container.querySelector(
+      '#top-post-tabs-sfwnsfw',
+    ) as HTMLElement | null;
 
     if (currentWidgetMode === 'most') {
       if (gsqeGroup) gsqeGroup.style.display = 'flex';
       if (sfwnsfwGroup) sfwnsfwGroup.style.display = 'none';
       for (const mode of ['g', 's', 'q', 'e']) {
-        const btn = container.querySelector(`button[data-mode="${mode}"]`) as HTMLElement | null;
+        const btn = container.querySelector(
+          `button[data-mode="${mode}"]`,
+        ) as HTMLElement | null;
         setStyle(btn, currentMostTab === mode);
       }
     } else {
       if (gsqeGroup) gsqeGroup.style.display = 'none';
       if (sfwnsfwGroup) sfwnsfwGroup.style.display = 'flex';
       for (const mode of ['sfw', 'nsfw']) {
-        const btn = container.querySelector(`button[data-mode="${mode}"]`) as HTMLElement | null;
+        const btn = container.querySelector(
+          `button[data-mode="${mode}"]`,
+        ) as HTMLElement | null;
         setStyle(btn, currentSfwTab === mode);
       }
     }
@@ -920,27 +1131,35 @@ export function renderTopPostsWidget(
      </div>
   `;
 
-  const modeSelect = container.querySelector('#analytics-top-post-select') as HTMLSelectElement;
+  const modeSelect = container.querySelector(
+    '#analytics-top-post-select',
+  ) as HTMLSelectElement;
   if (modeSelect) {
-    modeSelect.addEventListener('change', (e) => {
+    modeSelect.addEventListener('change', e => {
       currentWidgetMode = (e.target as HTMLSelectElement).value;
       updateTabs();
       renderTopPostContent();
     });
   }
 
-  const refreshBtn = container.querySelector('#analytics-random-refresh') as HTMLElement;
+  const refreshBtn = container.querySelector(
+    '#analytics-random-refresh',
+  ) as HTMLElement;
   if (refreshBtn) {
-    refreshBtn.onclick = async (e) => {
+    refreshBtn.onclick = async e => {
       e.stopPropagation();
       refreshBtn.style.transform = 'rotate(360deg)';
-      setTimeout(() => refreshBtn.style.transform = 'rotate(0deg)', 400);
+      setTimeout(() => (refreshBtn.style.transform = 'rotate(0deg)'), 400);
 
-      const contentDiv = container.querySelector('.top-post-content') as HTMLElement;
+      const contentDiv = container.querySelector(
+        '.top-post-content',
+      ) as HTMLElement;
       contentDiv.style.opacity = '0.5';
 
       try {
-        const newRandoms = await (new AnalyticsDataManager(db)).getRandomPosts(context.targetUser as any);
+        const newRandoms = await new AnalyticsDataManager(db).getRandomPosts(
+          context.targetUser as any,
+        );
         topPostGroups.random = newRandoms;
         renderTopPostContent();
       } catch (err) {
@@ -951,7 +1170,7 @@ export function renderTopPostsWidget(
     };
   }
 
-  container.addEventListener('click', (e) => {
+  container.addEventListener('click', e => {
     if ((e.target as HTMLElement).classList.contains('top-post-tab')) {
       const mode = (e.target as HTMLElement).getAttribute('data-mode') ?? '';
       if (currentWidgetMode === 'most') {
@@ -971,12 +1190,19 @@ export function renderTopPostsWidget(
     onNsfwChange: (enabled: boolean) => {
       isNsfwEnabled = enabled;
 
-      for (const id of ['analytics-top-q-btn', 'analytics-top-e-btn', 'analytics-top-nsfw-btn']) {
+      for (const id of [
+        'analytics-top-q-btn',
+        'analytics-top-e-btn',
+        'analytics-top-nsfw-btn',
+      ]) {
         const btn = document.getElementById(id);
         if (btn) btn.style.display = isNsfwEnabled ? 'inline-block' : 'none';
       }
 
-      if (!isNsfwEnabled && (currentMostTab === 'q' || currentMostTab === 'e')) {
+      if (
+        !isNsfwEnabled &&
+        (currentMostTab === 'q' || currentMostTab === 'e')
+      ) {
         currentMostTab = 'g';
         updateTabs();
         if (currentWidgetMode === 'most') renderTopPostContent();
@@ -1015,7 +1241,11 @@ export async function renderMilestonesWidget(
 
   const renderMilestones = async () => {
     const dm = new AnalyticsDataManager(db);
-    const milestones = await dm.getMilestones(context.targetUser as any, isNsfwEnabled, currentMilestoneStep);
+    const milestones = await dm.getMilestones(
+      context.targetUser as any,
+      isNsfwEnabled,
+      currentMilestoneStep,
+    );
     // Local DB count — same source `getMilestones` uses internally to build
     // its target sequence. Avoids an extra API call.
     const uploaderId = parseInt(context.targetUser?.id ?? '0');
@@ -1024,7 +1254,8 @@ export async function renderMilestonesWidget(
       : 0;
     const nextTarget = dm.getNextMilestone(totalPosts, currentMilestoneStep);
 
-    let msHtml = '<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding-bottom:8px; margin-bottom:10px;">';
+    let msHtml =
+      '<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding-bottom:8px; margin-bottom:10px;">';
     msHtml += '<h3 style="color:#333; margin:0;">🏆 Milestones</h3>';
     msHtml += '<div style="display:flex; align-items:center; gap:10px;">';
 
@@ -1037,17 +1268,23 @@ export async function renderMilestonesWidget(
       <option value="repdigit" ${currentMilestoneStep === 'repdigit' ? 'selected' : ''}>Repdigit</option>
     </select>`;
 
-    msHtml += '<button id="analytics-milestone-toggle" style="background:none; border:none; color:#0969da; cursor:pointer; font-size:0.9em; display:none;">Show More</button>';
+    msHtml +=
+      '<button id="analytics-milestone-toggle" style="background:none; border:none; color:#0969da; cursor:pointer; font-size:0.9em; display:none;">Show More</button>';
     msHtml += '</div>';
     msHtml += '</div>';
 
     if (milestones.length === 0) {
-      container.innerHTML = msHtml + '<div style="color:#888; font-size:0.9em;">No milestones found.</div>';
-      const sel = container.querySelector('#analytics-milestone-step') as HTMLSelectElement;
+      container.innerHTML =
+        msHtml +
+        '<div style="color:#888; font-size:0.9em;">No milestones found.</div>';
+      const sel = container.querySelector(
+        '#analytics-milestone-step',
+      ) as HTMLSelectElement;
       if (sel) {
-        sel.onchange = (e) => {
+        sel.onchange = e => {
           const v = (e.target as HTMLSelectElement).value;
-          currentMilestoneStep = v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
+          currentMilestoneStep =
+            v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
           renderMilestones();
         };
       }
@@ -1059,7 +1296,7 @@ export async function renderMilestonesWidget(
 
     milestones.forEach((m: any) => {
       const p = m.post;
-      const isSafe = (p.rating === 's' || p.rating === 'g');
+      const isSafe = p.rating === 's' || p.rating === 'g';
       const thumbUrl = getBestThumbnailUrl(p);
       const showThumb = isNsfwEnabled || isSafe;
 
@@ -1074,7 +1311,7 @@ export async function renderMilestonesWidget(
              <div style="font-size:0.8em; color:#555; margin-top:2px;">${new Date(p.created_at).toLocaleDateString()}</div>
              <div style="font-size:0.75em; color:#aaa; margin-top:4px;">Score: ${p.score}</div>
          </div>
-         ${(showThumb && thumbUrl) ? `<div style="width:60px; height:60px; margin-left:10px; flex-shrink:0; background:#f0f0f0; border-radius:4px; overflow:hidden; display:flex; align-items:center; justify-content:center;"><img src="${thumbUrl}" style="width:100%; height:100%; object-fit:cover;"></div>` : ''}
+         ${showThumb && thumbUrl ? `<div style="width:60px; height:60px; margin-left:10px; flex-shrink:0; background:#f0f0f0; border-radius:4px; overflow:hidden; display:flex; align-items:center; justify-content:center;"><img src="${thumbUrl}" style="width:100%; height:100%; object-fit:cover;"></div>` : ''}
       </a>
     `;
     });
@@ -1095,16 +1332,19 @@ export async function renderMilestonesWidget(
     // post list (e.g. show the placeholder before milestones load).
     if (nextTarget !== null && nextTarget > totalPosts) {
       const remaining = nextTarget - totalPosts;
-      const prevTarget = milestones.length > 0 ? milestones[milestones.length - 1].index : 0;
+      const prevTarget =
+        milestones.length > 0 ? milestones[milestones.length - 1].index : 0;
       const span = nextTarget - prevTarget;
-      const progressPct = span > 0
-        ? Math.max(0, Math.min(100, ((totalPosts - prevTarget) / span) * 100))
-        : 0;
-      const nextLabel = nextTarget === 1
-        ? 'First'
-        : nextTarget >= 1000 && nextTarget % 1000 === 0
-          ? `${nextTarget / 1000} k`
-          : nextTarget.toLocaleString();
+      const progressPct =
+        span > 0
+          ? Math.max(0, Math.min(100, ((totalPosts - prevTarget) / span) * 100))
+          : 0;
+      const nextLabel =
+        nextTarget === 1
+          ? 'First'
+          : nextTarget >= 1000 && nextTarget % 1000 === 0
+            ? `${nextTarget / 1000} k`
+            : nextTarget.toLocaleString();
 
       msHtml += `
       <div class="di-next-milestone-card" style="
@@ -1129,18 +1369,25 @@ export async function renderMilestonesWidget(
     msHtml += '</div>';
     container.innerHTML = msHtml;
 
-    const stepSelect = container.querySelector('#analytics-milestone-step') as HTMLSelectElement;
+    const stepSelect = container.querySelector(
+      '#analytics-milestone-step',
+    ) as HTMLSelectElement;
     if (stepSelect) {
-      stepSelect.onchange = (e) => {
+      stepSelect.onchange = e => {
         const v = (e.target as HTMLSelectElement).value;
-        currentMilestoneStep = v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
+        currentMilestoneStep =
+          v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
         renderMilestones();
       };
     }
 
     if (milestones.length > 6) {
-      const btn = container.querySelector('#analytics-milestone-toggle') as HTMLElement;
-      const milestoneContainer = container.querySelector(`#${containerId}`) as HTMLElement;
+      const btn = container.querySelector(
+        '#analytics-milestone-toggle',
+      ) as HTMLElement;
+      const milestoneContainer = container.querySelector(
+        `#${containerId}`,
+      ) as HTMLElement;
       btn.style.display = 'block';
 
       if (isMilestoneExpanded) {
@@ -1195,14 +1442,19 @@ export async function renderHistoryChart(
     minDate = levelChanges[0].date;
   }
 
-  const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isTouchDevice =
+    'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
-  const monthly = await (new AnalyticsDataManager(db)).getMonthlyStats(context.targetUser as any, minDate);
+  const monthly = await new AnalyticsDataManager(db).getMonthlyStats(
+    context.targetUser as any,
+    minDate,
+  );
   if (monthly.length === 0) return;
 
   const chartDiv = document.createElement('div');
   chartDiv.style.marginTop = '24px';
-  let chartHtml = '<h3 style="color:#333; border-bottom:1px solid #eee; padding-bottom:10px; margin-bottom:15px;">📅 Monthly Activity</h3>';
+  const chartHtml =
+    '<h3 style="color:#333; border-bottom:1px solid #eee; padding-bottom:10px; margin-bottom:15px;">📅 Monthly Activity</h3>';
 
   const minBarWidth = 25;
   const padLeftScroll = 10;
@@ -1212,7 +1464,7 @@ export async function renderHistoryChart(
   const yAxisWidth = 45;
 
   const maxCount = Math.max(...monthly.map((m: any) => m.count));
-  const requiredWidth = padLeftScroll + padRight + (monthly.length * minBarWidth);
+  const requiredWidth = padLeftScroll + padRight + monthly.length * minBarWidth;
   const vWidth = Math.max(800, requiredWidth);
   const vHeight = 200;
 
@@ -1254,7 +1506,8 @@ export async function renderHistoryChart(
   let ySvg = `<svg width="${yAxisWidth}" height="${vHeight}">`;
   for (let i = 0; i <= numTicks; i++) {
     const val = i * tickStep;
-    const y = (vHeight - padBottom) - ((val / tickMax) * (vHeight - padBottom - padTop));
+    const y =
+      vHeight - padBottom - (val / tickMax) * (vHeight - padBottom - padTop);
     ySvg += `<text x="${yAxisWidth - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="#888">${val}</text>`;
   }
   ySvg += '</svg>';
@@ -1264,7 +1517,8 @@ export async function renderHistoryChart(
 
   for (let i = 1; i <= numTicks; i++) {
     const val = i * tickStep;
-    const y = (vHeight - padBottom) - ((val / tickMax) * (vHeight - padBottom - padTop));
+    const y =
+      vHeight - padBottom - (val / tickMax) * (vHeight - padBottom - padTop);
     svg += `<line x1="0" y1="${y}" x2="${vWidth}" y2="${y}" stroke="#eee" stroke-width="1" />`;
   }
   svg += `<line x1="0" y1="${vHeight - padBottom}" x2="${vWidth}" y2="${vHeight - padBottom}" stroke="#ccc" />`;
@@ -1274,11 +1528,11 @@ export async function renderHistoryChart(
   const barWidth = step * 0.75;
 
   monthly.forEach((m: any, idx: number) => {
-    const x = padLeftScroll + (step * idx) + (step - barWidth) / 2;
+    const x = padLeftScroll + step * idx + (step - barWidth) / 2;
     const barH = (m.count / tickMax) * (vHeight - padBottom - padTop);
-    const y = (vHeight - padBottom) - barH;
+    const y = vHeight - padBottom - barH;
 
-    const colX = padLeftScroll + (step * idx);
+    const colX = padLeftScroll + step * idx;
     const colWidth = step;
 
     const nextDate = idx < monthly.length - 1 ? monthly[idx + 1].date : null;
@@ -1327,7 +1581,7 @@ export async function renderHistoryChart(
       const idx = monthDiff + frac;
 
       if (idx < 0 || idx > monthly.length) return;
-      const x = padLeftScroll + (step * idx);
+      const x = padLeftScroll + step * idx;
 
       svg += `
         <g class="promotion-marker">
@@ -1349,14 +1603,14 @@ export async function renderHistoryChart(
     });
 
     if (stars.length > 0) {
-      const x = padLeftScroll + (step * idx) + (step / 2);
+      const x = padLeftScroll + step * idx + step / 2;
 
       stars.forEach((m: any, si: number) => {
-        const y = 14 + (si * 18);
+        const y = 14 + si * 18;
 
         let fill = '#ffd700';
         let stroke = '#b8860b';
-        let style = 'filter: drop-shadow(0px 1px 1px rgba(0,0,0,0.3));';
+        const style = 'filter: drop-shadow(0px 1px 1px rgba(0,0,0,0.3));';
         let animClass = '';
 
         if (m.index === 1) {

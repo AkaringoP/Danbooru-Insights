@@ -13,7 +13,9 @@ export interface ScatterPlotOptions {
   /** True if some posts are missing the down_score field. */
   needsBackfill?: boolean;
   /** Async backfill runner; called once if needsBackfill is true. */
-  runBackfill?: (onProgress: (current: number, total: number) => void) => Promise<void>;
+  runBackfill?: (
+    onProgress: (current: number, total: number) => void,
+  ) => Promise<void>;
   /** Refresh callback to re-fetch scatter data (called after backfill completes). */
   refreshScatterData?: () => Promise<ScatterDataPoint[]>;
   /** Fetcher used by the hover preview card on popover list items. */
@@ -67,7 +69,8 @@ export function renderScatterPlot(
 
   scatterWrapper.appendChild(scatterDiv);
 
-  const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isTouchDevice =
+    'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
   // Metric Toggle (Top Left inside Widget)
   const toggleContainer = document.createElement('div');
@@ -83,7 +86,12 @@ export function renderScatterPlot(
   let currentScatterMode = 'score';
   let selectedYear: number | null = null;
 
-  const makeToggleBtn = (id: string, label: string, active: boolean, tooltip: string | null = null) => {
+  const makeToggleBtn = (
+    id: string,
+    label: string,
+    active: boolean,
+    tooltip: string | null = null,
+  ) => {
     const btn = document.createElement('button');
     btn.style.border = '1px solid #d0d7de';
     btn.style.borderRadius = '20px';
@@ -132,7 +140,9 @@ export function renderScatterPlot(
   };
 
   toggleContainer.appendChild(makeToggleBtn('score', 'Score', true));
-  toggleContainer.appendChild(makeToggleBtn('tags', 'Tag Count', false, 'General Tags Only'));
+  toggleContainer.appendChild(
+    makeToggleBtn('tags', 'Tag Count', false, 'General Tags Only'),
+  );
 
   scatterDiv.appendChild(toggleContainer);
 
@@ -209,13 +219,16 @@ export function renderScatterPlot(
       btn.style.color = isActive ? '#fff' : '#333';
       btn.style.borderColor = isActive ? '#d73a49' : '#d0d7de';
       btn.title = isDisabled
-        ? (backfillFailed ? 'Downvote data unavailable (fetch failed)' : 'Backfilling downvote data...')
+        ? backfillFailed
+          ? 'Downvote data unavailable (fetch failed)'
+          : 'Backfilling downvote data...'
         : `Show only posts with more than ${t} downvotes`;
     });
   };
 
   const updateDownvoteVisibility = () => {
-    downvoteContainer.style.display = currentScatterMode === 'score' ? 'flex' : 'none';
+    downvoteContainer.style.display =
+      currentScatterMode === 'score' ? 'flex' : 'none';
   };
 
   scatterDiv.appendChild(downvoteContainer);
@@ -286,7 +299,12 @@ export function renderScatterPlot(
     q: {label: 'Q', color: '#ab47bc'},
     e: {label: 'E', color: '#f44336'},
   };
-  const activeFilters: Record<string, boolean> = {g: true, s: true, q: true, e: true};
+  const activeFilters: Record<string, boolean> = {
+    g: true,
+    s: true,
+    q: true,
+    e: true,
+  };
 
   Object.keys(ratings).forEach(key => {
     const btn = document.createElement('div');
@@ -357,7 +375,8 @@ export function renderScatterPlot(
 
   // Y=10 click hit-area (Tag Count mode only)
   const y10Hit = document.createElement('div');
-  y10Hit.style.cssText = 'position:absolute;left:0;width:36px;height:18px;cursor:pointer;display:none;z-index:6;';
+  y10Hit.style.cssText =
+    'position:absolute;left:0;width:36px;height:18px;cursor:pointer;display:none;z-index:6;';
   y10Hit.setAttribute('aria-label', 'Show posts with less than 10 tags');
   canvasContainer.appendChild(y10Hit);
 
@@ -372,7 +391,8 @@ export function renderScatterPlot(
 
   // Y=10 tooltip
   const y10Tooltip = document.createElement('div');
-  y10Tooltip.style.cssText = 'position:absolute;background:rgba(30,30,30,0.95);color:#fff;padding:10px 14px;border-radius:6px;font-size:12px;z-index:10001;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.2);min-width:200px;';
+  y10Tooltip.style.cssText =
+    'position:absolute;background:rgba(30,30,30,0.95);color:#fff;padding:10px 14px;border-radius:6px;font-size:12px;z-index:10001;display:none;box-shadow:0 4px 12px rgba(0,0,0,0.2);min-width:200px;';
   document.body.appendChild(y10Tooltip);
 
   const closeY10Tooltip = () => {
@@ -380,7 +400,7 @@ export function renderScatterPlot(
     y10Highlight = false;
     renderScatter();
   };
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', e => {
     if (y10Tooltip.style.display === 'none') return;
     if (e.target === y10Hit || y10Tooltip.contains(e.target as Node)) return;
     closeY10Tooltip();
@@ -398,7 +418,7 @@ export function renderScatterPlot(
     renderScatter();
   });
 
-  y10Hit.onclick = (e) => {
+  y10Hit.onclick = e => {
     e.stopPropagation();
     if (!options.userStats) return;
     // Activate highlight mode while tooltip is visible
@@ -443,7 +463,8 @@ export function renderScatterPlot(
 
   // Range label shown during drag
   const rangeLabel = document.createElement('div');
-  rangeLabel.style.cssText = 'position:absolute;top:-38px;left:0;right:0;text-align:center;font-size:11px;color:#fff;background:rgba(0,0,0,0.75);padding:3px 10px;border-radius:4px;pointer-events:none;white-space:nowrap;display:none;width:fit-content;margin:0 auto;line-height:1.5;';
+  rangeLabel.style.cssText =
+    'position:absolute;top:-38px;left:0;right:0;text-align:center;font-size:11px;color:#fff;background:rgba(0,0,0,0.75);padding:3px 10px;border-radius:4px;pointer-events:none;white-space:nowrap;display:none;width:fit-content;margin:0 auto;line-height:1.5;';
   selectionDiv.appendChild(rangeLabel);
 
   // Crosshair cursor for canvas
@@ -452,11 +473,15 @@ export function renderScatterPlot(
   // Popover UI
   const popover = document.createElement('div');
   popover.id = 'scatter-popover-ui';
-  popover.style.cssText = 'position: fixed; z-index: 10000; background: #fff; border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: none; max-height: 300px; width: 320px; flex-direction: column; font-family: sans-serif;';
+  popover.style.cssText =
+    'position: fixed; z-index: 10000; background: #fff; border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: none; max-height: 300px; width: 320px; flex-direction: column; font-family: sans-serif;';
   document.body.appendChild(popover);
 
-  document.addEventListener('mousedown', (e) => {
-    if (popover.style.display !== 'none' && !popover.contains(e.target as Node)) {
+  document.addEventListener('mousedown', e => {
+    if (
+      popover.style.display !== 'none' &&
+      !popover.contains(e.target as Node)
+    ) {
       popover.style.display = 'none';
       selectionDiv.style.display = 'none';
       hidePostHoverCard();
@@ -480,7 +505,10 @@ export function renderScatterPlot(
     const rect = canvasContainer.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
 
-    if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+    if (
+      canvas.width !== rect.width * dpr ||
+      canvas.height !== rect.height * dpr
+    ) {
       canvas.width = rect.width * dpr;
       canvas.height = rect.height * dpr;
       ctx.scale(dpr, dpr);
@@ -493,7 +521,10 @@ export function renderScatterPlot(
 
     overlayDiv.innerHTML = '';
 
-    const padL = 40, padR = 20, padT = 60, padB = 50;
+    const padL = 40,
+      padR = 20,
+      padT = 60,
+      padB = 50;
     const drawW = w - padL - padR;
     const drawH = h - padT - padB;
 
@@ -529,7 +560,7 @@ export function renderScatterPlot(
 
     for (const d of scatterData) {
       if (d.d >= minX && d.d <= maxX) {
-        const val = currentScatterMode === 'tags' ? (d.t || 0) : d.s;
+        const val = currentScatterMode === 'tags' ? d.t || 0 : d.s;
         if (val > maxVal) maxVal = val;
       }
     }
@@ -550,9 +581,20 @@ export function renderScatterPlot(
     maxVal = Math.ceil(maxVal / stepY) * stepY;
     if (maxVal < stepY) maxVal = stepY;
 
-    Object.assign(currentScale, {minDate: minX, maxDate: maxX, maxVal, timeRange: xRange, padL, padT, drawW, drawH, mode: currentScatterMode});
+    Object.assign(currentScale, {
+      minDate: minX,
+      maxDate: maxX,
+      maxVal,
+      timeRange: xRange,
+      padL,
+      padT,
+      drawW,
+      drawH,
+      mode: currentScatterMode,
+    });
 
-    const dvFilter = currentScatterMode === 'score' ? activeDownvoteFilter : null;
+    const dvFilter =
+      currentScatterMode === 'score' ? activeDownvoteFilter : null;
     const visiblePoints = scatterData.filter(d => {
       if (!activeFilters[d.r]) return false;
       if (d.d < minX || d.d > maxX) return false;
@@ -573,7 +615,8 @@ export function renderScatterPlot(
     ctx.lineWidth = 1;
 
     let y10Pos: number | null = null;
-    const y10Overlaps = currentScatterMode === 'tags' && maxVal >= 10 && (10 % stepY === 0);
+    const y10Overlaps =
+      currentScatterMode === 'tags' && maxVal >= 10 && 10 % stepY === 0;
     for (let val = 0; val <= maxVal; val += stepY) {
       const y = padT + drawH - (val / maxVal) * drawH;
       ctx.moveTo(padL, y);
@@ -624,14 +667,27 @@ export function renderScatterPlot(
     ctx.textAlign = 'center';
 
     if (selectedYear) {
-      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const months = [
+        'Jan',
+        'Feb',
+        'Mar',
+        'Apr',
+        'May',
+        'Jun',
+        'Jul',
+        'Aug',
+        'Sep',
+        'Oct',
+        'Nov',
+        'Dec',
+      ];
       months.forEach((m, i) => {
         const stepW = drawW / 12;
-        const x = padL + (stepW * i) + (stepW / 2);
+        const x = padL + stepW * i + stepW / 2;
         ctx.fillText(m, x, padT + drawH + 15);
 
         if (i > 0) {
-          const tickX = padL + (stepW * i);
+          const tickX = padL + stepW * i;
           ctx.beginPath();
           ctx.moveTo(tickX, padT + drawH);
           ctx.lineTo(tickX, padT + drawH + 5);
@@ -669,7 +725,7 @@ export function renderScatterPlot(
     const highlightedPoints: Array<[number, number]> = [];
     visiblePoints.forEach(pt => {
       const xVal = pt.d;
-      const yVal = currentScatterMode === 'tags' ? (pt.t || 0) : pt.s;
+      const yVal = currentScatterMode === 'tags' ? pt.t || 0 : pt.s;
 
       if (xVal < minX || xVal > maxX) return;
 
@@ -703,7 +759,13 @@ export function renderScatterPlot(
     }
 
     // Render Overlays
-    const addOverlayLine = (dateObjOrStr: Date | string, color: string, title: string, isDashed: boolean, thickness: string = '2px') => {
+    const addOverlayLine = (
+      dateObjOrStr: Date | string,
+      color: string,
+      title: string,
+      isDashed: boolean,
+      thickness: string = '2px',
+    ) => {
       const d = new Date(dateObjOrStr).getTime();
       if (d < minX || d > maxX) return;
 
@@ -725,17 +787,34 @@ export function renderScatterPlot(
 
     if (context.targetUser && context.targetUser.joinDate) {
       const jd = new Date(context.targetUser.joinDate);
-      addOverlayLine(jd, '#00E676', `${jd.toLocaleDateString()}: Joined Danbooru`, true, '2px');
+      addOverlayLine(
+        jd,
+        '#00E676',
+        `${jd.toLocaleDateString()}: Joined Danbooru`,
+        true,
+        '2px',
+      );
     }
 
     if (levelChanges) {
       levelChanges.forEach((lc: any) => {
-        addOverlayLine(lc.date, '#ff5722', `${lc.date.toLocaleDateString()}: ${lc.fromLevel} → ${lc.toLevel}`, true);
+        addOverlayLine(
+          lc.date,
+          '#ff5722',
+          `${lc.date.toLocaleDateString()}: ${lc.fromLevel} → ${lc.toLevel}`,
+          true,
+        );
       });
     }
 
     if (currentScatterMode === 'score') {
-      addOverlayLine('2021-11-24', '#bbb', 'All users could vote since this day.', true, '1px');
+      addOverlayLine(
+        '2021-11-24',
+        '#bbb',
+        'All users could vote since this day.',
+        true,
+        '1px',
+      );
     }
   };
 
@@ -751,33 +830,36 @@ export function renderScatterPlot(
     progressLabel.textContent = 'updating…';
     downvoteContainer.appendChild(progressLabel);
 
-    options.runBackfill((cur, total) => {
-      if (total > 0) {
-        const pct = Math.round((cur / total) * 100);
-        progressLabel.textContent = `${pct}%`;
-      }
-    }).then(async () => {
-      backfillInProgress = false;
-      progressLabel.remove();
-      updateDownvoteButtonStyles();
-      // Refresh scatter data so the new dn fields are visible
-      if (options.refreshScatterData) {
-        try {
-          const fresh = await options.refreshScatterData();
-          scatterData.length = 0;
-          scatterData.push(...fresh);
-          renderScatter();
-        } catch (e) {
-          console.warn('[Scatter] refresh after backfill failed:', e);
+    options
+      .runBackfill((cur, total) => {
+        if (total > 0) {
+          const pct = Math.round((cur / total) * 100);
+          progressLabel.textContent = `${pct}%`;
         }
-      }
-    }).catch((e) => {
-      console.warn('[Scatter] backfill failed:', e);
-      backfillInProgress = false;
-      backfillFailed = true;
-      progressLabel.textContent = 'failed';
-      updateDownvoteButtonStyles();
-    });
+      })
+      .then(async () => {
+        backfillInProgress = false;
+        progressLabel.remove();
+        updateDownvoteButtonStyles();
+        // Refresh scatter data so the new dn fields are visible
+        if (options.refreshScatterData) {
+          try {
+            const fresh = await options.refreshScatterData();
+            scatterData.length = 0;
+            scatterData.push(...fresh);
+            renderScatter();
+          } catch (e) {
+            console.warn('[Scatter] refresh after backfill failed:', e);
+          }
+        }
+      })
+      .catch(e => {
+        console.warn('[Scatter] backfill failed:', e);
+        backfillInProgress = false;
+        backfillFailed = true;
+        progressLabel.textContent = 'failed';
+        updateDownvoteButtonStyles();
+      });
   }
 
   requestAnimationFrame(renderScatter);
@@ -786,7 +868,7 @@ export function renderScatterPlot(
   let lastDragEndTime = 0;
 
   // Click Listener for Year Zoom
-  canvas.addEventListener('click', (e) => {
+  canvas.addEventListener('click', e => {
     if (Date.now() - lastDragEndTime < 100) return;
 
     const rect = canvasContainer.getBoundingClientRect();
@@ -795,11 +877,17 @@ export function renderScatterPlot(
 
     const axisY = currentScale.padT + currentScale.drawH;
     if (y > axisY && y < axisY + 40 && !selectedYear) {
-      const t = ((x - currentScale.padL) / currentScale.drawW) * currentScale.timeRange + currentScale.minDate;
+      const t =
+        ((x - currentScale.padL) / currentScale.drawW) *
+          currentScale.timeRange +
+        currentScale.minDate;
       const clickedDate = new Date(t);
       const clickedYear = clickedDate.getFullYear();
 
-      if (clickedYear >= new Date(currentScale.minDate).getFullYear() && clickedYear <= new Date(currentScale.maxDate).getFullYear()) {
+      if (
+        clickedYear >= new Date(currentScale.minDate).getFullYear() &&
+        clickedYear <= new Date(currentScale.maxDate).getFullYear()
+      ) {
         selectedYear = clickedYear;
         renderScatter();
       }
@@ -807,7 +895,7 @@ export function renderScatterPlot(
   });
 
   // Hover Effect for Year Labels
-  canvas.addEventListener('mousemove', (e) => {
+  canvas.addEventListener('mousemove', e => {
     if (dragStart) return;
 
     const rect = canvasContainer.getBoundingClientRect();
@@ -817,9 +905,15 @@ export function renderScatterPlot(
     let isHand = false;
     const axisY = currentScale.padT + currentScale.drawH;
     if (y > axisY && y < axisY + 40 && !selectedYear) {
-      const t = ((x - currentScale.padL) / currentScale.drawW) * currentScale.timeRange + currentScale.minDate;
+      const t =
+        ((x - currentScale.padL) / currentScale.drawW) *
+          currentScale.timeRange +
+        currentScale.minDate;
       const hoveredYear = new Date(t).getFullYear();
-      if (hoveredYear >= new Date(currentScale.minDate).getFullYear() && hoveredYear <= new Date(currentScale.maxDate).getFullYear()) {
+      if (
+        hoveredYear >= new Date(currentScale.minDate).getFullYear() &&
+        hoveredYear <= new Date(currentScale.maxDate).getFullYear()
+      ) {
         isHand = true;
       }
     }
@@ -833,153 +927,199 @@ export function renderScatterPlot(
   void ignoreNextClick;
 
   if (!isTouchDevice) {
-  canvas.addEventListener('mousedown', (e) => {
-    if (e.button !== 0) return;
-    ignoreNextClick = false;
+    canvas.addEventListener('mousedown', e => {
+      if (e.button !== 0) return;
+      ignoreNextClick = false;
 
-    const rect = canvasContainer.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+      const rect = canvasContainer.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
 
-    if (x < currentScale.padL || x > currentScale.padL + currentScale.drawW ||
-      y < currentScale.padT || y > currentScale.padT + currentScale.drawH) return;
+      if (
+        x < currentScale.padL ||
+        x > currentScale.padL + currentScale.drawW ||
+        y < currentScale.padT ||
+        y > currentScale.padT + currentScale.drawH
+      )
+        return;
 
-    dragStart = {x, y};
-    selectionDiv.style.left = x + 'px';
-    selectionDiv.style.top = y + 'px';
-    selectionDiv.style.width = '0px';
-    selectionDiv.style.height = '0px';
-    selectionDiv.style.display = 'block';
-  });
+      dragStart = {x, y};
+      selectionDiv.style.left = x + 'px';
+      selectionDiv.style.top = y + 'px';
+      selectionDiv.style.width = '0px';
+      selectionDiv.style.height = '0px';
+      selectionDiv.style.display = 'block';
+    });
 
-  // Debounced range label updater
-  let rangeLabelTimer: ReturnType<typeof setTimeout> | null = null;
-  const updateRangeLabel = (x1: number, x2: number, y1: number, y2: number) => {
-    if (rangeLabelTimer) clearTimeout(rangeLabelTimer);
-    rangeLabelTimer = setTimeout(() => {
-      const xMin = ((Math.min(x1, x2) - currentScale.padL) / currentScale.drawW) * currentScale.timeRange + currentScale.minDate;
-      const xMax = ((Math.max(x1, x2) - currentScale.padL) / currentScale.drawW) * currentScale.timeRange + currentScale.minDate;
-      const valMin = ((currentScale.padT + currentScale.drawH - Math.max(y1, y2)) / currentScale.drawH) * currentScale.maxVal;
-      const valMax = ((currentScale.padT + currentScale.drawH - Math.min(y1, y2)) / currentScale.drawH) * currentScale.maxVal;
+    // Debounced range label updater
+    let rangeLabelTimer: ReturnType<typeof setTimeout> | null = null;
+    const updateRangeLabel = (
+      x1: number,
+      x2: number,
+      y1: number,
+      y2: number,
+    ) => {
+      if (rangeLabelTimer) clearTimeout(rangeLabelTimer);
+      rangeLabelTimer = setTimeout(() => {
+        const xMin =
+          ((Math.min(x1, x2) - currentScale.padL) / currentScale.drawW) *
+            currentScale.timeRange +
+          currentScale.minDate;
+        const xMax =
+          ((Math.max(x1, x2) - currentScale.padL) / currentScale.drawW) *
+            currentScale.timeRange +
+          currentScale.minDate;
+        const valMin =
+          ((currentScale.padT + currentScale.drawH - Math.max(y1, y2)) /
+            currentScale.drawH) *
+          currentScale.maxVal;
+        const valMax =
+          ((currentScale.padT + currentScale.drawH - Math.min(y1, y2)) /
+            currentScale.drawH) *
+          currentScale.maxVal;
 
-      // Count posts in selection (must respect the same filters as the rendered view)
-      const dvSel = currentScale.mode === 'score' ? activeDownvoteFilter : null;
-      const count = scatterData.filter(d => {
-        if (!activeFilters[d.r]) return false;
-        if (dvSel !== null) {
-          if (d.dn === undefined) return false;
-          if (-d.dn <= dvSel) return false;
-        }
-        const yVal = currentScale.mode === 'tags' ? (d.t || 0) : d.s;
-        return d.d >= xMin && d.d <= xMax && yVal >= valMin && yVal <= valMax;
-      }).length;
+        // Count posts in selection (must respect the same filters as the rendered view)
+        const dvSel =
+          currentScale.mode === 'score' ? activeDownvoteFilter : null;
+        const count = scatterData.filter(d => {
+          if (!activeFilters[d.r]) return false;
+          if (dvSel !== null) {
+            if (d.dn === undefined) return false;
+            if (-d.dn <= dvSel) return false;
+          }
+          const yVal = currentScale.mode === 'tags' ? d.t || 0 : d.s;
+          return d.d >= xMin && d.d <= xMax && yVal >= valMin && yVal <= valMax;
+        }).length;
 
-      const d1 = new Date(xMin).toISOString().slice(0, 10);
-      const d2 = new Date(xMax).toISOString().slice(0, 10);
-      const valLabel = currentScale.mode === 'tags' ? 'Tags' : 'Score';
-      rangeLabel.innerHTML = `${d1} ~ ${d2}<br>${valLabel}: ${Math.round(valMin)} ~ ${Math.round(valMax)} · ${count.toLocaleString()} posts`;
-      rangeLabel.style.display = 'block';
-    }, 50);
-  };
+        const d1 = new Date(xMin).toISOString().slice(0, 10);
+        const d2 = new Date(xMax).toISOString().slice(0, 10);
+        const valLabel = currentScale.mode === 'tags' ? 'Tags' : 'Score';
+        rangeLabel.innerHTML = `${d1} ~ ${d2}<br>${valLabel}: ${Math.round(valMin)} ~ ${Math.round(valMax)} · ${count.toLocaleString()} posts`;
+        rangeLabel.style.display = 'block';
+      }, 50);
+    };
 
-  window.addEventListener('mousemove', (e) => {
-    if (!dragStart) return;
-    const rect = canvasContainer.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
+    window.addEventListener('mousemove', e => {
+      if (!dragStart) return;
+      const rect = canvasContainer.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
 
-    const rL = currentScale.padL;
-    const rT = currentScale.padT;
-    const rW = currentScale.drawW;
+      const rL = currentScale.padL;
+      const rT = currentScale.padT;
+      const rW = currentScale.drawW;
 
-    const currentX = Math.max(rL, Math.min(rL + rW, mx));
-    const currentY = Math.max(rT, Math.min(rect.height, my));
+      const currentX = Math.max(rL, Math.min(rL + rW, mx));
+      const currentY = Math.max(rT, Math.min(rect.height, my));
 
-    const x = Math.min(dragStart.x, currentX);
-    const y = Math.min(dragStart.y, currentY);
-    const w = Math.abs(currentX - dragStart.x);
-    const h = Math.abs(currentY - dragStart.y);
+      const x = Math.min(dragStart.x, currentX);
+      const y = Math.min(dragStart.y, currentY);
+      const w = Math.abs(currentX - dragStart.x);
+      const h = Math.abs(currentY - dragStart.y);
 
-    selectionDiv.style.left = x + 'px';
-    selectionDiv.style.top = y + 'px';
-    selectionDiv.style.width = w + 'px';
-    selectionDiv.style.height = h + 'px';
+      selectionDiv.style.left = x + 'px';
+      selectionDiv.style.top = y + 'px';
+      selectionDiv.style.width = w + 'px';
+      selectionDiv.style.height = h + 'px';
 
-    updateRangeLabel(dragStart.x, currentX, dragStart.y, currentY);
-  });
+      updateRangeLabel(dragStart.x, currentX, dragStart.y, currentY);
+    });
 
-  window.addEventListener('mouseup', (e) => {
-    if (!dragStart) return;
-    const ds = dragStart;
-    dragStart = null;
-    rangeLabel.style.display = 'none';
-    if (rangeLabelTimer) { clearTimeout(rangeLabelTimer); rangeLabelTimer = null; }
-
-    const rect = canvasContainer.getBoundingClientRect();
-    const endX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-    const endY = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
-
-    if (Math.abs(endX - ds.x) >= 5 || Math.abs(endY - ds.y) >= 5) {
-      ignoreNextClick = true;
-      lastDragEndTime = Date.now();
-    }
-
-    // A click (not a drag) → hide the selection box
-    if (Math.abs(endX - ds.x) < 5 && Math.abs(endY - ds.y) < 5) {
-      selectionDiv.style.display = 'none';
-      return;
-    }
-
-    const x1 = Math.min(ds.x, endX);
-    const x2 = Math.max(ds.x, endX);
-    const y1 = Math.min(ds.y, endY);
-    const y2 = Math.max(ds.y, endY);
-
-    const xMin = ((x1 - currentScale.padL) / currentScale.drawW) * currentScale.timeRange + currentScale.minDate;
-    const xMax = ((x2 - currentScale.padL) / currentScale.drawW) * currentScale.timeRange + currentScale.minDate;
-
-    const valMin = ((currentScale.padT + currentScale.drawH - y2) / currentScale.drawH) * currentScale.maxVal;
-    const valMax = ((currentScale.padT + currentScale.drawH - y1) / currentScale.drawH) * currentScale.maxVal;
-
-    const dvRes = currentScale.mode === 'score' ? activeDownvoteFilter : null;
-    const result = scatterData.filter(d => {
-      if (!activeFilters[d.r]) return false;
-      if (dvRes !== null) {
-        if (d.dn === undefined) return false;
-        if (-d.dn <= dvRes) return false;
+    window.addEventListener('mouseup', e => {
+      if (!dragStart) return;
+      const ds = dragStart;
+      dragStart = null;
+      rangeLabel.style.display = 'none';
+      if (rangeLabelTimer) {
+        clearTimeout(rangeLabelTimer);
+        rangeLabelTimer = null;
       }
-      const yVal = currentScale.mode === 'tags' ? (d.t || 0) : d.s;
-      return d.d >= xMin && d.d <= xMax && yVal >= valMin && yVal <= valMax;
+
+      const rect = canvasContainer.getBoundingClientRect();
+      const endX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+      const endY = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+
+      if (Math.abs(endX - ds.x) >= 5 || Math.abs(endY - ds.y) >= 5) {
+        ignoreNextClick = true;
+        lastDragEndTime = Date.now();
+      }
+
+      // A click (not a drag) → hide the selection box
+      if (Math.abs(endX - ds.x) < 5 && Math.abs(endY - ds.y) < 5) {
+        selectionDiv.style.display = 'none';
+        return;
+      }
+
+      const x1 = Math.min(ds.x, endX);
+      const x2 = Math.max(ds.x, endX);
+      const y1 = Math.min(ds.y, endY);
+      const y2 = Math.max(ds.y, endY);
+
+      const xMin =
+        ((x1 - currentScale.padL) / currentScale.drawW) *
+          currentScale.timeRange +
+        currentScale.minDate;
+      const xMax =
+        ((x2 - currentScale.padL) / currentScale.drawW) *
+          currentScale.timeRange +
+        currentScale.minDate;
+
+      const valMin =
+        ((currentScale.padT + currentScale.drawH - y2) / currentScale.drawH) *
+        currentScale.maxVal;
+      const valMax =
+        ((currentScale.padT + currentScale.drawH - y1) / currentScale.drawH) *
+        currentScale.maxVal;
+
+      const dvRes = currentScale.mode === 'score' ? activeDownvoteFilter : null;
+      const result = scatterData.filter(d => {
+        if (!activeFilters[d.r]) return false;
+        if (dvRes !== null) {
+          if (d.dn === undefined) return false;
+          if (-d.dn <= dvRes) return false;
+        }
+        const yVal = currentScale.mode === 'tags' ? d.t || 0 : d.s;
+        return d.d >= xMin && d.d <= xMax && yVal >= valMin && yVal <= valMax;
+      });
+
+      if (result.length === 0) {
+        selectionDiv.style.display = 'none';
+        return;
+      }
+
+      const sortedList = result.sort((a, b) => {
+        const vA = currentScale.mode === 'tags' ? a.t || 0 : a.s;
+        const vB = currentScale.mode === 'tags' ? b.t || 0 : b.s;
+        return vB - vA;
+      });
+
+      let aDMin = Infinity,
+        aDMax = -Infinity;
+      let aVMin = Infinity,
+        aVMax = -Infinity;
+
+      sortedList.forEach(d => {
+        if (d.d < aDMin) aDMin = d.d;
+        if (d.d > aDMax) aDMax = d.d;
+
+        const v = currentScale.mode === 'tags' ? d.t || 0 : d.s;
+        if (v < aVMin) aVMin = v;
+        if (v > aVMax) aVMax = v;
+      });
+
+      showPopover(e.clientX, e.clientY, sortedList, aDMin, aDMax, aVMin, aVMax);
     });
-
-    if (result.length === 0) {
-      selectionDiv.style.display = 'none';
-      return;
-    }
-
-    const sortedList = result.sort((a, b) => {
-      const vA = currentScale.mode === 'tags' ? (a.t || 0) : a.s;
-      const vB = currentScale.mode === 'tags' ? (b.t || 0) : b.s;
-      return vB - vA;
-    });
-
-    let aDMin = Infinity, aDMax = -Infinity;
-    let aVMin = Infinity, aVMax = -Infinity;
-
-    sortedList.forEach(d => {
-      if (d.d < aDMin) aDMin = d.d;
-      if (d.d > aDMax) aDMax = d.d;
-
-      const v = currentScale.mode === 'tags' ? (d.t || 0) : d.s;
-      if (v < aVMin) aVMin = v;
-      if (v > aVMax) aVMax = v;
-    });
-
-    showPopover(e.clientX, e.clientY, sortedList, aDMin, aDMax, aVMin, aVMax);
-  });
   } // if (!isTouchDevice)
 
-  const showPopover = (mx: number, my: number, items: ScatterDataPoint[], dMin: number, dMax: number, sMin: number, sMax: number) => {
+  const showPopover = (
+    mx: number,
+    my: number,
+    items: ScatterDataPoint[],
+    dMin: number,
+    dMax: number,
+    sMin: number,
+    sMax: number,
+  ) => {
     const xLabel = `${new Date(dMin).toLocaleDateString()} ~ ${new Date(dMax).toLocaleDateString()}`;
     const sm1 = Math.floor(sMin);
     const sm2 = Math.ceil(sMax);
@@ -993,7 +1133,7 @@ export function renderScatterPlot(
 
       slice.forEach((it: ScatterDataPoint) => {
         const itDate = new Date(it.d).toLocaleDateString();
-        const val = isTags ? (it.t || 0) : it.s;
+        const val = isTags ? it.t || 0 : it.s;
         // Deleted or banned posts show a gray dot regardless of rating
         const isRemoved = it.del === true || it.ban === true;
         let color = '#ccc';
@@ -1004,7 +1144,8 @@ export function renderScatterPlot(
         else if (it.r === 'q') color = '#ab47bc';
         else if (it.r === 'e') color = '#f44336';
 
-        const statusTitle = it.ban === true ? 'Banned' : (it.del === true ? 'Deleted' : '');
+        const statusTitle =
+          it.ban === true ? 'Banned' : it.del === true ? 'Deleted' : '';
         const titleAttr = statusTitle ? ` title="${statusTitle}"` : '';
 
         chunkHtml += `
@@ -1042,17 +1183,25 @@ export function renderScatterPlot(
 
     const attachEvents = (parent: Element | null) => {
       if (!parent) return;
-      parent.querySelectorAll('.pop-item').forEach((el) => {
+      parent.querySelectorAll('.pop-item').forEach(el => {
         const htmlEl = el as HTMLElement;
-        htmlEl.onmouseover = () => htmlEl.style.backgroundColor = '#f5f9ff';
-        htmlEl.onmouseout = () => htmlEl.style.backgroundColor = 'transparent';
-        htmlEl.onclick = () => window.open(`/posts/${htmlEl.dataset.id}`, '_blank');
+        htmlEl.onmouseover = () => (htmlEl.style.backgroundColor = '#f5f9ff');
+        htmlEl.onmouseout = () =>
+          (htmlEl.style.backgroundColor = 'transparent');
+        htmlEl.onclick = () =>
+          window.open(`/posts/${htmlEl.dataset.id}`, '_blank');
         // Hover preview card (debounced + cached, desktop only).
         // Position the card next to the popover, not the small list item,
         // so it doesn't overlap the list.
         if (options.fetchPostDetails) {
           const postId = parseInt(htmlEl.dataset.id ?? '0');
-          if (postId) attachPostHoverCard(htmlEl, postId, options.fetchPostDetails, popover);
+          if (postId)
+            attachPostHoverCard(
+              htmlEl,
+              postId,
+              options.fetchPostDetails,
+              popover,
+            );
         }
       });
     };
@@ -1061,7 +1210,7 @@ export function renderScatterPlot(
 
     const closeBtn = popover.querySelector('#scatter-pop-close') as HTMLElement;
     if (closeBtn) {
-      closeBtn.onclick = (e) => {
+      closeBtn.onclick = e => {
         e.stopPropagation();
         popover.style.display = 'none';
         selectionDiv.style.display = 'none';
@@ -1069,10 +1218,16 @@ export function renderScatterPlot(
       };
     }
 
-    const loadMoreContainer = popover.querySelector('#pop-load-more') as HTMLElement;
+    const loadMoreContainer = popover.querySelector(
+      '#pop-load-more',
+    ) as HTMLElement;
     const loadMoreBtn = popover.querySelector('#btn-load-more') as HTMLElement;
-    const listContainer = popover.querySelector('#pop-list-container') as HTMLElement;
-    const popCountLabel = popover.querySelector('#pop-count-label') as HTMLElement;
+    const listContainer = popover.querySelector(
+      '#pop-list-container',
+    ) as HTMLElement;
+    const popCountLabel = popover.querySelector(
+      '#pop-count-label',
+    ) as HTMLElement;
 
     if (loadMoreBtn) {
       loadMoreBtn.onclick = () => {

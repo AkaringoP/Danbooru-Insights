@@ -17,7 +17,12 @@ class MockBroadcastChannel {
     if (this.closed) throw new Error('Channel is closed');
     // Deliver to all OTHER instances with the same name
     for (const inst of MockBroadcastChannel.instances) {
-      if (inst !== this && inst.name === this.name && !inst.closed && inst.onmessage) {
+      if (
+        inst !== this &&
+        inst.name === this.name &&
+        !inst.closed &&
+        inst.onmessage
+      ) {
         inst.onmessage(new MessageEvent('message', {data}));
       }
     }
@@ -51,7 +56,9 @@ beforeEach(() => {
   (globalThis as any).BroadcastChannel = MockBroadcastChannel;
   (globalThis as any).window = mockWindow;
   // Mock crypto.randomUUID
-  vi.stubGlobal('crypto', {randomUUID: () => Math.random().toString(36).slice(2)});
+  vi.stubGlobal('crypto', {
+    randomUUID: () => Math.random().toString(36).slice(2),
+  });
   // Clear listeners
   for (const key of Object.keys(windowListeners)) {
     windowListeners[key] = [];
@@ -76,7 +83,7 @@ describe('TabCoordinator', () => {
   it('increments tabCount when another tab joins', () => {
     const tabCounts: number[] = [];
     const coord1 = new TabCoordinator();
-    coord1.onTabCountChange = (c) => tabCounts.push(c);
+    coord1.onTabCountChange = c => tabCounts.push(c);
     coord1.start();
 
     const coord2 = new TabCoordinator();
@@ -133,7 +140,7 @@ describe('TabCoordinator', () => {
     coord1.start();
 
     const coord2 = new TabCoordinator();
-    coord2.onBackoffReceived = (until) => backoffReceived.push(until);
+    coord2.onBackoffReceived = until => backoffReceived.push(until);
     coord2.start();
 
     const until = Date.now() + 5000;
@@ -149,7 +156,7 @@ describe('TabCoordinator', () => {
     const counts: number[] = [];
 
     const coord1 = new TabCoordinator();
-    coord1.onTabCountChange = (c) => counts.push(c);
+    coord1.onTabCountChange = c => counts.push(c);
     coord1.start();
 
     const coord2 = new TabCoordinator();

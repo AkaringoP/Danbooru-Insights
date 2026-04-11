@@ -23,13 +23,23 @@ export class TagAnalyticsApp {
    * @param {!SettingsManager} settings The settings manager instance.
    * @param {string} tagName The name of the tag to analyze.
    */
-  constructor(db: Database, settings: SettingsManager, tagName: string, rateLimiter?: RateLimitedFetch) {
+  constructor(
+    db: Database,
+    settings: SettingsManager,
+    tagName: string,
+    rateLimiter?: RateLimitedFetch,
+  ) {
     this.db = db;
     this.settings = settings;
     this.tagName = tagName;
     const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter = rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
-    this.dataService = new TagAnalyticsDataService(db, this.rateLimiter, tagName);
+    this.rateLimiter =
+      rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+    this.dataService = new TagAnalyticsDataService(
+      db,
+      this.rateLimiter,
+      tagName,
+    );
     this.chartRenderer = new TagAnalyticsChartRenderer();
     this.isFetching = false;
   }
@@ -75,10 +85,11 @@ export class TagAnalyticsApp {
     // Read raw DB entry directly to distinguish "no cache" vs "stale cache",
     // since loadFromCache() returns null for both cases when expired.
     try {
-      const rawCache = (this.db && this.db.tag_analytics)
-        ? await this.db.tag_analytics.get(this.tagName)
-        : null;
-      const statusLabel = document.getElementById("tag-analytics-status");
+      const rawCache =
+        this.db && this.db.tag_analytics
+          ? await this.db.tag_analytics.get(this.tagName)
+          : null;
+      const statusLabel = document.getElementById('tag-analytics-status');
       if (!statusLabel) return;
 
       if (rawCache) {
@@ -109,7 +120,7 @@ export class TagAnalyticsApp {
    * @param {number} updatedAt - Timestamp of the update.
    */
   _showUpdatedStatus(updatedAt: number): void {
-    const statusLabel = document.getElementById("tag-analytics-status");
+    const statusLabel = document.getElementById('tag-analytics-status');
     if (!statusLabel) return;
     const date = new Date(updatedAt).toLocaleDateString();
     statusLabel.textContent = `Updated: ${date}`;
@@ -131,7 +142,7 @@ export class TagAnalyticsApp {
 
     try {
       // [IMMEDIATE UI] Show button in loading state
-      this.injectAnalyticsButton(null, 0, "Waiting...");
+      this.injectAnalyticsButton(null, 0, 'Waiting...');
 
       // 0. Auto-Cleanup Old Records (>7 days)
       this.dataService.cleanupOldCache();
@@ -159,13 +170,17 @@ export class TagAnalyticsApp {
             const cachedTotal = cachedData.post_count || 0;
             postCountDiff = Math.max(0, currentTotal - cachedTotal);
           }
-        } catch (e) { console.warn("Failed to check post count diff", e); }
+        } catch (e) {
+          console.warn('Failed to check post count diff', e);
+        }
 
         const threshold = this.dataService.getSyncThreshold();
         const isCountThresholdMet = postCountDiff >= threshold;
 
         if (isTimeExpired || isCountThresholdMet) {
-          console.log(`[TagAnalyticsApp] Partial Sync Triggered. TimeExpired=${isTimeExpired} (${(age / 3600000).toFixed(1)}h), CountThreshold=${isCountThresholdMet} (${postCountDiff} >= ${threshold})`);
+          console.log(
+            `[TagAnalyticsApp] Partial Sync Triggered. TimeExpired=${isTimeExpired} (${(age / 3600000).toFixed(1)}h), CountThreshold=${isCountThresholdMet} (${postCountDiff} >= ${threshold})`,
+          );
           baseData = cachedData;
           runDelta = true;
         } else {
@@ -179,13 +194,15 @@ export class TagAnalyticsApp {
 
           try {
             // Fetch 24h count for UI
-            const newPostCount24h = await this.dataService.fetchNewPostCount(tagName);
+            const newPostCount24h =
+              await this.dataService.fetchNewPostCount(tagName);
 
-            const [latestPost, trendingPost, trendingPostNSFW] = await Promise.all([
-              this.dataService.fetchLatestPost(tagName),
-              this.dataService.fetchTrendingPost(tagName, false),
-              this.dataService.fetchTrendingPost(tagName, true)
-            ]);
+            const [latestPost, trendingPost, trendingPostNSFW] =
+              await Promise.all([
+                this.dataService.fetchLatestPost(tagName),
+                this.dataService.fetchTrendingPost(tagName, false),
+                this.dataService.fetchTrendingPost(tagName, true),
+              ]);
 
             cachedData.latestPost = latestPost;
             cachedData.trendingPost = trendingPost;
@@ -194,7 +211,10 @@ export class TagAnalyticsApp {
 
             this.dataService.saveToCache(cachedData);
           } catch (e) {
-            console.warn("[TagAnalyticsApp] Failed to update volatile data for cache:", e);
+            console.warn(
+              '[TagAnalyticsApp] Failed to update volatile data for cache:',
+              e,
+            );
           }
 
           this.injectAnalyticsButton(cachedData);
@@ -207,14 +227,18 @@ export class TagAnalyticsApp {
 
       // If we are here, either No Cache OR Partial Sync triggered.
 
-
       // 1. Fetch Initial Stats (Top 100, Metadata, First/Last Date)
       const t0 = performance.now();
       this.rateLimiter.requestCounter = 0; // Reset counter
-      const initialStats = await this.dataService.fetchInitialStats(tagName, baseData);
+      const initialStats = await this.dataService.fetchInitialStats(
+        tagName,
+        baseData,
+      );
 
       if (!initialStats || initialStats.totalCount === 0) {
-        console.warn(`[TagAnalyticsApp] Could not fetch initial stats for tag: "${tagName}"`);
+        console.warn(
+          `[TagAnalyticsApp] Could not fetch initial stats for tag: "${tagName}"`,
+        );
         return;
       }
 
@@ -225,7 +249,7 @@ export class TagAnalyticsApp {
         startDate,
         timeToHundred,
         meta,
-        initialPosts
+        initialPosts,
       } = initialStats;
 
       // Variable to hold updated First 100 Stats if backward scan happens
@@ -240,23 +264,25 @@ export class TagAnalyticsApp {
         this.injectAnalyticsButton(meta);
       } else {
         // Remove button if it was injected but category is invalid
-        const btn = document.getElementById("tag-analytics-btn");
+        const btn = document.getElementById('tag-analytics-btn');
         if (btn) btn.remove();
-        const status = document.getElementById("tag-analytics-status");
+        const status = document.getElementById('tag-analytics-status');
         if (status) status.remove();
         return; // Stop if not valid category
       }
 
-
-
       // OPTIMIZATION: Small Tag Handling (<= 1200 posts)
       const MAX_OPTIMIZED_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
-      if (initialPosts && totalCount <= MAX_OPTIMIZED_POSTS && initialPosts.length >= totalCount) {
-
-        this.injectAnalyticsButton(null, 0, "Calculating history... (0%)");
+      if (
+        initialPosts &&
+        totalCount <= MAX_OPTIMIZED_POSTS &&
+        initialPosts.length >= totalCount
+      ) {
+        this.injectAnalyticsButton(null, 0, 'Calculating history... (0%)');
 
         // 2. Calculate History Locally
-        const historyData = this.dataService.calculateHistoryFromPosts(initialPosts);
+        const historyData =
+          this.dataService.calculateHistoryFromPosts(initialPosts);
 
         // 3. Extract Milestones Locally
         const targets = this.dataService.getMilestoneTargets(totalCount);
@@ -264,41 +290,73 @@ export class TagAnalyticsApp {
         targets.forEach(target => {
           const index = target - 1;
           if (initialPosts[index]) {
-            milestones.push({ milestone: target, post: initialPosts[index] });
+            milestones.push({milestone: target, post: initialPosts[index]});
           }
         });
 
         // 4. Calculate Ratings & Rankings Locally
-        this.injectAnalyticsButton(null, 15, "Calculating rankings... (15%)");
-        const localStatsAllTime = this.dataService.calculateLocalStats(initialPosts);
+        this.injectAnalyticsButton(null, 15, 'Calculating rankings... (15%)');
+        const localStatsAllTime =
+          this.dataService.calculateLocalStats(initialPosts);
 
         const oneYearAgo = new Date();
         oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-        const yearPosts = initialPosts.filter((p: any) => p.created_at && new Date(p.created_at) >= oneYearAgo);
+        const yearPosts = initialPosts.filter(
+          (p: any) => p.created_at && new Date(p.created_at) >= oneYearAgo,
+        );
         const localStatsYear = this.dataService.calculateLocalStats(yearPosts);
 
-        const localStatsFirst100 = this.dataService.calculateLocalStats(initialPosts.slice(0, 100));
+        const localStatsFirst100 = this.dataService.calculateLocalStats(
+          initialPosts.slice(0, 100),
+        );
 
         // 5. Parallel Data Fetching (Volatile & Status)
         // Note: backfillUploaderNames is CRITICAL for showing names instead of IDs
-        this.injectAnalyticsButton(null, 25, "Fetching stats... (25%)");
+        this.injectAnalyticsButton(null, 25, 'Fetching stats... (25%)');
         let smallTagFetched = 0;
         const smallTagTotalFetches = 6;
-        const trackSmall = (label: string, promise: Promise<any>) => promise.then((res: any) => {
-          smallTagFetched++;
-          const pct = 25 + Math.round((smallTagFetched / smallTagTotalFetches) * 55);
-          this.injectAnalyticsButton(null, pct, `${label}... (${pct}%)`);
-          return res;
-        });
+        const trackSmall = (label: string, promise: Promise<any>) =>
+          promise.then((res: any) => {
+            smallTagFetched++;
+            const pct =
+              25 + Math.round((smallTagFetched / smallTagTotalFetches) * 55);
+            this.injectAnalyticsButton(null, pct, `${label}... (${pct}%)`);
+            return res;
+          });
 
-        const [statusCounts, latestPost, trendingPost, trendingPostNSFW, newPostCount, commentaryCounts] = await Promise.all([
-          trackSmall('Fetching status', this.dataService.fetchStatusCounts(tagName)),
-          trackSmall('Fetching latest post', this.dataService.fetchLatestPost(tagName)),
-          trackSmall('Finding trending post', this.dataService.fetchTrendingPost(tagName, false)),
-          trackSmall('Finding trending NSFW', this.dataService.fetchTrendingPost(tagName, true)),
-          trackSmall('Counting new posts', this.dataService.fetchNewPostCount(tagName)),
-          trackSmall('Analyzing commentary', this.dataService.fetchCommentaryCounts(tagName)),
-          this.dataService.backfillUploaderNames(initialPosts) // Ensure ALL posts have names backfilled
+        const [
+          statusCounts,
+          latestPost,
+          trendingPost,
+          trendingPostNSFW,
+          newPostCount,
+          commentaryCounts,
+        ] = await Promise.all([
+          trackSmall(
+            'Fetching status',
+            this.dataService.fetchStatusCounts(tagName),
+          ),
+          trackSmall(
+            'Fetching latest post',
+            this.dataService.fetchLatestPost(tagName),
+          ),
+          trackSmall(
+            'Finding trending post',
+            this.dataService.fetchTrendingPost(tagName, false),
+          ),
+          trackSmall(
+            'Finding trending NSFW',
+            this.dataService.fetchTrendingPost(tagName, true),
+          ),
+          trackSmall(
+            'Counting new posts',
+            this.dataService.fetchNewPostCount(tagName),
+          ),
+          trackSmall(
+            'Analyzing commentary',
+            this.dataService.fetchCommentaryCounts(tagName),
+          ),
+          this.dataService.backfillUploaderNames(initialPosts), // Ensure ALL posts have names backfilled
         ]);
 
         // Attach Data
@@ -318,31 +376,36 @@ export class TagAnalyticsApp {
         meta.trendingPostNSFW = trendingPostNSFW;
 
         // 6. Map User IDs to Names in Local Rankings
-        const mapNames = (ranking: any[]) => ranking.map((r: any) => {
-          const u = this.dataService.userNames[r.id];
-          return {
-            ...r,
-            name: (u ? u.name : null) || `user_${r.id}`,
-            level: u ? u.level : null
-          };
-        });
+        const mapNames = (ranking: any[]) =>
+          ranking.map((r: any) => {
+            const u = this.dataService.userNames[r.id];
+            return {
+              ...r,
+              name: (u ? u.name : null) || `user_${r.id}`,
+              level: u ? u.level : null,
+            };
+          });
 
         meta.rankings = {
           uploader: {
             allTime: mapNames(localStatsAllTime.uploaderRanking),
             year: mapNames(localStatsYear.uploaderRanking),
-            first100: mapNames(localStatsFirst100.uploaderRanking)
+            first100: mapNames(localStatsFirst100.uploaderRanking),
           },
           approver: {
             allTime: mapNames(localStatsAllTime.approverRanking),
             year: mapNames(localStatsYear.approverRanking),
-            first100: mapNames(localStatsFirst100.approverRanking)
-          }
+            first100: mapNames(localStatsFirst100.approverRanking),
+          },
         };
 
         // 7. Calculate Related Tag Distribution Locally
         // Artist (1) -> Copyright + Character, Copyright (3) -> Character only
-        this.injectAnalyticsButton(null, 85, "Analyzing tag distribution... (85%)");
+        this.injectAnalyticsButton(
+          null,
+          85,
+          'Analyzing tag distribution... (85%)',
+        );
         if (meta.category === 1 || meta.category === 3) {
           const copyrightMap: Record<string, number> = {};
           const characterMap: Record<string, number> = {};
@@ -366,16 +429,22 @@ export class TagAnalyticsApp {
               .sort((a, b) => (b[1] as number) - (a[1] as number))
               .slice(0, 20);
 
-            const filteredCopyright = (await Promise.all(
-              copyrightCandidates.map(async ([tag, count]) =>
-                await isTopLevelTag(this.dataService.rateLimiter, tag) ? [tag, count] : null
+            const filteredCopyright = (
+              await Promise.all(
+                copyrightCandidates.map(async ([tag, count]) =>
+                  (await isTopLevelTag(this.dataService.rateLimiter, tag))
+                    ? [tag, count]
+                    : null,
+                ),
               )
-            )).filter(e => e !== null);
+            ).filter(e => e !== null);
 
             meta.copyrightCounts = {};
-            (filteredCopyright as any[]).slice(0, 10).forEach(([name, count]) => {
-              meta.copyrightCounts[name] = count;
-            });
+            (filteredCopyright as any[])
+              .slice(0, 10)
+              .forEach(([name, count]) => {
+                meta.copyrightCounts[name] = count;
+              });
           }
 
           // Character: take top 10 directly (no implication filtering needed)
@@ -388,12 +457,14 @@ export class TagAnalyticsApp {
             });
         }
 
-        this.injectAnalyticsButton(meta, 100, ""); // Clear status
+        this.injectAnalyticsButton(meta, 100, ''); // Clear status
         this._showUpdatedStatus(meta.updatedAt);
         this.dataService.saveToCache(meta); // Save Small Tag Data
 
         const finalTime = performance.now();
-        console.log(`[TagAnalytics] [Small Tag Optimization] Finished analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount}) in ${(finalTime - t0).toFixed(2)}ms`);
+        console.log(
+          `[TagAnalytics] [Small Tag Optimization] Finished analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount}) in ${(finalTime - t0).toFixed(2)}ms`,
+        );
 
         this.toggleModal(true);
         this.renderDashboard(meta);
@@ -401,7 +472,6 @@ export class TagAnalyticsApp {
       }
 
       // 2. Fetch Monthly Counts (History) & Milestones & Status/Rating Counts in parallel
-
 
       const milestoneTargets = this.dataService.getMilestoneTargets(totalCount);
 
@@ -419,7 +489,9 @@ export class TagAnalyticsApp {
       const measure = (label: string, promise: Promise<any>) => {
         const start = performance.now();
         return promise.then((res: any) => {
-          console.log(`[TagAnalytics] [Task] Finished: ${label} (${(performance.now() - start).toFixed(2)}ms)`);
+          console.log(
+            `[TagAnalytics] [Task] Finished: ${label} (${(performance.now() - start).toFixed(2)}ms)`,
+          );
           return res;
         });
       };
@@ -428,47 +500,110 @@ export class TagAnalyticsApp {
 
       // [DEBUG] Start Total Timer
       console.time('TagAnalytics:Total');
-      console.log(`[TagAnalytics] Starting analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount})`);
+      console.log(
+        `[TagAnalytics] Starting analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount})`,
+      );
 
       // [OPTIMIZATION] Start Quick Stats FIRST (so they get queue priority over the heavy history fetch)
-      console.log('[TagAnalytics] [Group 1] Queueing Quick Stats (Status, Rating, Latest, Trending, Related)...');
+      console.log(
+        '[TagAnalytics] [Group 1] Queueing Quick Stats (Status, Rating, Latest, Trending, Related)...',
+      );
       const tGroup1Start = performance.now();
-      const statusPromise = measure('Status Counts', this.dataService.fetchStatusCounts(tagName));
+      const statusPromise = measure(
+        'Status Counts',
+        this.dataService.fetchStatusCounts(tagName),
+      );
       // const ratingPromise = measure('Rating Counts', this.dataService.fetchRatingCounts(tagName)); // Removed from Phase 1
-      const latestPromise = measure('Latest Post', this.dataService.fetchLatestPost(tagName));
-      const newPostPromise = measure('New Post Count', this.dataService.fetchNewPostCount(tagName));
-      const trendingPromise = measure('Trending Post (SFW)', this.dataService.fetchTrendingPost(tagName, false));
-      const trendingNsfwPromise = measure('Trending Post (NSFW)', this.dataService.fetchTrendingPost(tagName, true));
+      const latestPromise = measure(
+        'Latest Post',
+        this.dataService.fetchLatestPost(tagName),
+      );
+      const newPostPromise = measure(
+        'New Post Count',
+        this.dataService.fetchNewPostCount(tagName),
+      );
+      const trendingPromise = measure(
+        'Trending Post (SFW)',
+        this.dataService.fetchTrendingPost(tagName, false),
+      );
+      const trendingNsfwPromise = measure(
+        'Trending Post (NSFW)',
+        this.dataService.fetchTrendingPost(tagName, true),
+      );
 
       // [OPTIMIZATION] Related Tags (Copyright/Character) - Queue immediately
       // Category 1=Artist, 3=Copyright, 4=Character
       let copyrightPromise = Promise.resolve(null);
       let characterPromise = Promise.resolve(null);
 
-      if (meta.category === 1) { // Artist -> Fetch Copyright & Character
-        copyrightPromise = measure('Related Copyrights', this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount));
-        characterPromise = measure('Related Characters', this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount));
-      } else if (meta.category === 3) { // Copyright -> Fetch Character
-        characterPromise = measure('Related Characters', this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount));
+      if (meta.category === 1) {
+        // Artist -> Fetch Copyright & Character
+        copyrightPromise = measure(
+          'Related Copyrights',
+          this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount),
+        );
+        characterPromise = measure(
+          'Related Characters',
+          this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
+        );
+      } else if (meta.category === 3) {
+        // Copyright -> Fetch Character
+        characterPromise = measure(
+          'Related Characters',
+          this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
+        );
       }
 
       // [OPTIMIZATION] Rankings Moved to Phase 2
       // console.log('[TagAnalytics] [Group 2] Queueing Ranking & User Resolution...');
       // const rankingPromise = ... (Moved)
 
-
-
       // --- [PHASE 1] QUICK STATS EXECUTION ---
       const quickTasks = [
-        { id: 'status', label: 'Analyzing post status...', promise: statusPromise },
+        {
+          id: 'status',
+          label: 'Analyzing post status...',
+          promise: statusPromise,
+        },
         // { id: 'rating', label: 'Calculating rating distribution...', promise: ratingPromise }, // Removed
-        { id: 'latest', label: 'Fetching latest info...', promise: latestPromise },
-        { id: 'new_count', label: 'Counting new posts...', promise: newPostPromise },
-        { id: 'trending', label: 'Finding trending posts...', promise: trendingPromise },
-        { id: 'trending_nsfw', label: 'Finding trending NSFW...', promise: trendingNsfwPromise },
-        { id: 'related_copy', label: 'Analyzing related copyrights...', promise: copyrightPromise },
-        { id: 'related_char', label: 'Analyzing related characters...', promise: characterPromise },
-        { id: 'commentary', label: 'Analyzing commentary status...', promise: measure('Commentary Status', this.dataService.fetchCommentaryCounts(tagName)) }
+        {
+          id: 'latest',
+          label: 'Fetching latest info...',
+          promise: latestPromise,
+        },
+        {
+          id: 'new_count',
+          label: 'Counting new posts...',
+          promise: newPostPromise,
+        },
+        {
+          id: 'trending',
+          label: 'Finding trending posts...',
+          promise: trendingPromise,
+        },
+        {
+          id: 'trending_nsfw',
+          label: 'Finding trending NSFW...',
+          promise: trendingNsfwPromise,
+        },
+        {
+          id: 'related_copy',
+          label: 'Analyzing related copyrights...',
+          promise: copyrightPromise,
+        },
+        {
+          id: 'related_char',
+          label: 'Analyzing related characters...',
+          promise: characterPromise,
+        },
+        {
+          id: 'commentary',
+          label: 'Analyzing commentary status...',
+          promise: measure(
+            'Commentary Status',
+            this.dataService.fetchCommentaryCounts(tagName),
+          ),
+        },
       ];
 
       // --- [PHASE 2] HEAVY STATS DEFINITION (But delayed execution logic handled by promise creation timing) ---
@@ -495,10 +630,14 @@ export class TagAnalyticsApp {
       // Phase 1 has 8 tasks. Phase 2 has 4 tasks (Rank, History, Milestone, Resolve). Total 12.
       const totalEstimatedTasks = 12;
 
-      this.injectAnalyticsButton(null, 0, "Initializing...");
+      this.injectAnalyticsButton(null, 0, 'Initializing...');
 
       // Helper to wrap promise with progress update
-      const trackProgress = (task: {id: string; label: string; promise: Promise<any>}) => {
+      const trackProgress = (task: {
+        id: string;
+        label: string;
+        promise: Promise<any>;
+      }) => {
         return task.promise.then((res: any) => {
           completedCount++;
           const pct = Math.round((completedCount / totalEstimatedTasks) * 100);
@@ -520,77 +659,130 @@ export class TagAnalyticsApp {
         trendingPostNSFW,
         copyrightCounts,
         characterCounts,
-        commentaryCounts
+        commentaryCounts,
       ] = quickResults;
 
-      console.log(`[TagAnalytics] [Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`);
+      console.log(
+        `[TagAnalytics] [Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
+      );
 
       // --- [PHASE 2] HEAVY STATS EXECUTION ---
       console.log('[TagAnalytics] [Phase 2] Starting Rankings & History...');
 
-      const rankingPromise = this.dataService.fetchRankingsAndResolve(tagName, dateStr1Y, dateStrTomorrow, measure);
+      const rankingPromise = this.dataService.fetchRankingsAndResolve(
+        tagName,
+        dateStr1Y,
+        dateStrTomorrow,
+        measure,
+      );
 
       let historyPromise, milestonesPromise, first100StatsPromise;
 
       if (runDelta && baseData) {
         // [DELTA] History
-        const lastHistory = baseData.historyData[baseData.historyData.length - 1];
+        const lastHistory =
+          baseData.historyData[baseData.historyData.length - 1];
         const lastDate = lastHistory ? new Date(lastHistory.date) : startDate;
         const deltaStart = new Date(lastDate);
         deltaStart.setDate(deltaStart.getDate() - 7);
 
-        historyPromise = this.dataService.fetchHistoryDelta(tagName, deltaStart, startDate)
-          .then(delta => this.dataService.mergeHistory(baseData.historyData, delta));
+        historyPromise = this.dataService
+          .fetchHistoryDelta(tagName, deltaStart, startDate)
+          .then(delta =>
+            this.dataService.mergeHistory(baseData.historyData, delta),
+          );
 
         // [DELTA] Milestones
         milestonesPromise = historyPromise.then(fullHistory => {
-          return this.dataService.fetchMilestonesDelta(tagName, totalCount, baseData.precalculatedMilestones, fullHistory)
-            .then(delta => this.dataService.mergeMilestones(baseData.precalculatedMilestones, delta));
+          return this.dataService
+            .fetchMilestonesDelta(
+              tagName,
+              totalCount,
+              baseData.precalculatedMilestones,
+              fullHistory,
+            )
+            .then(delta =>
+              this.dataService.mergeMilestones(
+                baseData.precalculatedMilestones,
+                delta,
+              ),
+            );
         });
 
         // [DELTA] First 100 Ranking
-        if (baseData.rankings && baseData.rankings.uploader && baseData.rankings.uploader.first100) {
+        if (
+          baseData.rankings &&
+          baseData.rankings.uploader &&
+          baseData.rankings.uploader.first100
+        ) {
           (initialStats as any).first100Stats = {
             uploaderRanking: baseData.rankings.uploader.first100,
-            approverRanking: baseData.rankings.approver.first100
+            approverRanking: baseData.rankings.approver.first100,
           };
-          first100StatsPromise = Promise.resolve((initialStats as any).first100Stats);
+          first100StatsPromise = Promise.resolve(
+            (initialStats as any).first100Stats,
+          );
         } else {
-          first100StatsPromise = Promise.resolve(this.dataService.calculateLocalStats(initialPosts || []));
+          first100StatsPromise = Promise.resolve(
+            this.dataService.calculateLocalStats(initialPosts || []),
+          );
         }
-
       } else {
         // [FULL]
-        historyPromise = measure('Full History (Monthly)', this.dataService.fetchMonthlyCounts(tagName, startDate));
+        historyPromise = measure(
+          'Full History (Monthly)',
+          this.dataService.fetchMonthlyCounts(tagName, startDate),
+        );
       }
 
       // Chain Backward Scan
       historyPromise = historyPromise.then(async (monthlyData: any) => {
-        const forwardTotal = (monthlyData && monthlyData.length > 0) ? monthlyData[monthlyData.length - 1].cumulative : 0;
+        const forwardTotal =
+          monthlyData && monthlyData.length > 0
+            ? monthlyData[monthlyData.length - 1].cumulative
+            : 0;
         let referenceTotal = meta.post_count;
 
         if (monthlyData.historyCutoff) {
           try {
             const cutoffUrl = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:any+date:<${encodeURIComponent(monthlyData.historyCutoff)}`;
-            const r = await this.rateLimiter.fetch(cutoffUrl).then((res: Response) => res.json());
-            referenceTotal = (r && r.counts ? r.counts.posts : (r ? r.posts : 0)) || 0;
+            const r = await this.rateLimiter
+              .fetch(cutoffUrl)
+              .then((res: Response) => res.json());
+            referenceTotal =
+              (r && r.counts ? r.counts.posts : r ? r.posts : 0) || 0;
           } catch (e) {
-            console.warn("Failed to fetch cutoff total, falling back to meta.post_count", e);
+            console.warn(
+              'Failed to fetch cutoff total, falling back to meta.post_count',
+              e,
+            );
           }
         }
 
+        console.log(
+          `[TagAnalyticsApp] Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
+        );
 
-        console.log(`[TagAnalyticsApp] Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`);
-
-        if (forwardTotal < referenceTotal && !runDelta) { // Disable Reverse Scan on Partial Sync
-          this.injectAnalyticsButton(null, undefined, "Scanning history backwards...");
-          const backwardResult = await this.dataService.fetchHistoryBackwards(tagName, startDate, referenceTotal, forwardTotal);
+        if (forwardTotal < referenceTotal && !runDelta) {
+          // Disable Reverse Scan on Partial Sync
+          this.injectAnalyticsButton(
+            null,
+            undefined,
+            'Scanning history backwards...',
+          );
+          const backwardResult = await this.dataService.fetchHistoryBackwards(
+            tagName,
+            startDate,
+            referenceTotal,
+            forwardTotal,
+          );
 
           if (backwardResult.length > 0) {
-            const backwardShift = backwardResult[backwardResult.length - 1].cumulative;
+            const backwardShift =
+              backwardResult[backwardResult.length - 1].cumulative;
             const adjustedForward = monthlyData.map((h: any) => ({
               ...h,
-              cumulative: h.cumulative + backwardShift
+              cumulative: h.cumulative + backwardShift,
             }));
             const fullHistory = [...backwardResult, ...adjustedForward];
 
@@ -598,19 +790,36 @@ export class TagAnalyticsApp {
             // We should use that to find the TRUE first post efficiently without scanning from 2005.
             const earliestDateFound = backwardResult[0].date;
 
-            const realInitialStats = await this.dataService.fetchInitialStats(tagName, null, true, earliestDateFound);
+            const realInitialStats = await this.dataService.fetchInitialStats(
+              tagName,
+              null,
+              true,
+              earliestDateFound,
+            );
             if (realInitialStats) {
               firstPost = realInitialStats.firstPost;
               hundredthPost = realInitialStats.hundredthPost;
               timeToHundred = realInitialStats.timeToHundred;
 
-              if (realInitialStats.initialPosts && realInitialStats.initialPosts.length > 0) {
-                console.log('[TagAnalytics] Recalculating First 100 Rankings for older posts...');
-                const newStats = this.dataService.calculateLocalStats(realInitialStats.initialPosts);
-                realFirst100Stats = await this.dataService.resolveFirst100Names(newStats).catch(e => {
-                  console.warn('[TagAnalytics] Failed to resolve names for older posts', e);
-                  return newStats;
-                });
+              if (
+                realInitialStats.initialPosts &&
+                realInitialStats.initialPosts.length > 0
+              ) {
+                console.log(
+                  '[TagAnalytics] Recalculating First 100 Rankings for older posts...',
+                );
+                const newStats = this.dataService.calculateLocalStats(
+                  realInitialStats.initialPosts,
+                );
+                realFirst100Stats = await this.dataService
+                  .resolveFirst100Names(newStats)
+                  .catch(e => {
+                    console.warn(
+                      '[TagAnalytics] Failed to resolve names for older posts',
+                      e,
+                    );
+                    return newStats;
+                  });
               }
             }
             return fullHistory;
@@ -622,67 +831,99 @@ export class TagAnalyticsApp {
       // Milestones Chain
       if (!milestonesPromise) {
         milestonesPromise = historyPromise.then((monthlyData: any) => {
-          return this.dataService.fetchMilestones(tagName, monthlyData || [], milestoneTargets);
+          return this.dataService.fetchMilestones(
+            tagName,
+            monthlyData || [],
+            milestoneTargets,
+          );
         });
       }
 
       if (!first100StatsPromise) {
-        first100StatsPromise = Promise.resolve(this.dataService.calculateLocalStats(initialPosts || []));
+        first100StatsPromise = Promise.resolve(
+          this.dataService.calculateLocalStats(initialPosts || []),
+        );
       }
 
       // Phase 2 Task List
       const heavyTasks = [
-        { id: 'rankings_full', label: 'Fetching & resolving rankings...', promise: rankingPromise },
-        { id: 'history', label: 'Analyzing monthly trends...', promise: historyPromise },
-        { id: 'milestones', label: 'Checking milestones...', promise: milestonesPromise },
+        {
+          id: 'rankings_full',
+          label: 'Fetching & resolving rankings...',
+          promise: rankingPromise,
+        },
+        {
+          id: 'history',
+          label: 'Analyzing monthly trends...',
+          promise: historyPromise,
+        },
+        {
+          id: 'milestones',
+          label: 'Checking milestones...',
+          promise: milestonesPromise,
+        },
         {
           id: 'resolve_names',
           label: 'Resolving usernames...',
           promise: first100StatsPromise.then(stats => {
-            if (runDelta && baseData && baseData.rankings && baseData.rankings.uploader.first100) return stats;
+            if (
+              runDelta &&
+              baseData &&
+              baseData.rankings &&
+              baseData.rankings.uploader.first100
+            )
+              return stats;
             return this.dataService.resolveFirst100Names(stats);
-          })
-        }
+          }),
+        },
       ];
 
       console.log('[TagAnalytics] [Phase 2] Awaiting Heavy Stats...');
       const heavyResults = await Promise.all(heavyTasks.map(trackProgress));
 
       // Extract results
-      let [
-        resolvedRankings,
-        historyData,
-        milestones,
-        first100Stats
-      ] = heavyResults;
+      let [resolvedRankings, historyData, milestones, first100Stats] =
+        heavyResults;
 
       // [FIX] Override First 100 Stats if backward scan updated them
       if (realFirst100Stats) {
-        console.log('[TagAnalytics] Applying updated First 100 Rankings from backward scan.');
+        console.log(
+          '[TagAnalytics] Applying updated First 100 Rankings from backward scan.',
+        );
         first100Stats = realFirst100Stats;
       }
 
-      console.log(`[TagAnalytics] [Group 1] Finished Quick Stats (approx) in ${(performance.now() - tGroup1Start).toFixed(2)}ms (Note: includes wait for longest item)`);
+      console.log(
+        `[TagAnalytics] [Group 1] Finished Quick Stats (approx) in ${(performance.now() - tGroup1Start).toFixed(2)}ms (Note: includes wait for longest item)`,
+      );
       console.log('[TagAnalytics] All parallel tasks completed.');
 
       // Extract resolved rankings
-      const {
-        uploaderAll, approverAll, uploaderYear, approverYear
-      } = resolvedRankings;
+      const {uploaderAll, approverAll, uploaderYear, approverYear} =
+        resolvedRankings;
 
       // --- [PHASE 3] DEFERRED COUNTS (Optimized with Date Range) ---
       // Now we have `first100Stats.startDate` or derive from historyData
-      const minDate = (first100Stats && first100Stats.startDate) ? first100Stats.startDate : (historyData && historyData.length > 0 ? new Date(historyData[0].date) : new Date('2005-01-01'));
+      const minDate =
+        first100Stats && first100Stats.startDate
+          ? first100Stats.startDate
+          : historyData && historyData.length > 0
+            ? new Date(historyData[0].date)
+            : new Date('2005-01-01');
       const minDateStr = minDate.toISOString().split('T')[0];
 
-      console.log(`[TagAnalytics] [Phase 3] Starting Deferred Counts (Rating) with startDate: ${minDateStr}`);
-      const ratingCounts = await measure('Rating Counts', this.dataService.fetchRatingCounts(tagName, minDateStr));
+      console.log(
+        `[TagAnalytics] [Phase 3] Starting Deferred Counts (Rating) with startDate: ${minDateStr}`,
+      );
+      const ratingCounts = await measure(
+        'Rating Counts',
+        this.dataService.fetchRatingCounts(tagName, minDateStr),
+      );
 
       // --- 6. Backward History Scan --- (MOVED TO historyPromise CHAIN ABOVE)
       // The historyData and milestones returned from Promise.all are already fully corrected.
 
       console.timeEnd('TagAnalytics:Total');
-
 
       // Conditional Fetch for Copyright/Character - REMOVED (Moved to Start)
       // The variables 'copyrightCounts' and 'characterCounts' are already populated from Promise.all above.
@@ -706,17 +947,17 @@ export class TagAnalyticsApp {
         uploader: {
           allTime: uploaderAll,
           year: uploaderYear,
-          first100: first100Stats.uploaderRanking
+          first100: first100Stats.uploaderRanking,
         },
         approver: {
           allTime: approverAll,
           year: approverYear,
-          first100: first100Stats.approverRanking
-        }
+          first100: first100Stats.approverRanking,
+        },
       };
 
       // Update Button state (Activation) and open modal
-      this.injectAnalyticsButton(meta, 100, "");
+      this.injectAnalyticsButton(meta, 100, '');
       this._showUpdatedStatus(meta.updatedAt);
       this.dataService.saveToCache(meta); // Save Full Tag Data
       this.toggleModal(true);
@@ -726,21 +967,20 @@ export class TagAnalyticsApp {
     }
   }
 
-
   /**
    * Injects header controls (Settings, Reset) into the UI.
    * @param {!Element} container The container element.
    */
   injectHeaderControls(container: HTMLElement): void {
-    if (document.getElementById("tag-analytics-controls-container")) return;
+    if (document.getElementById('tag-analytics-controls-container')) return;
 
-    const wrapper = document.createElement("span");
-    wrapper.id = "tag-analytics-controls-container";
+    const wrapper = document.createElement('span');
+    wrapper.id = 'tag-analytics-controls-container';
     container.appendChild(wrapper);
 
     // 1. Settings Button (Gear)
-    const settingsBtn = document.createElement("span");
-    settingsBtn.id = "tag-analytics-settings-btn";
+    const settingsBtn = document.createElement('span');
+    settingsBtn.id = 'tag-analytics-settings-btn';
     settingsBtn.innerHTML = '⚙️';
     settingsBtn.style.cursor = 'pointer';
     settingsBtn.style.marginLeft = '6px';
@@ -748,7 +988,7 @@ export class TagAnalyticsApp {
     settingsBtn.style.verticalAlign = 'middle';
     settingsBtn.title = 'Configure Data Retention';
 
-    settingsBtn.onclick = (e) => {
+    settingsBtn.onclick = e => {
       e.stopPropagation();
       e.preventDefault();
       this.showSettingsPopover(settingsBtn);
@@ -757,8 +997,8 @@ export class TagAnalyticsApp {
     wrapper.appendChild(settingsBtn);
 
     // 2. Reset Button (Trash)
-    const resetBtn = document.createElement("span");
-    resetBtn.id = "tag-analytics-reset-btn";
+    const resetBtn = document.createElement('span');
+    resetBtn.id = 'tag-analytics-reset-btn';
     resetBtn.innerHTML = '🗑️';
     resetBtn.style.cursor = 'pointer';
     resetBtn.style.marginLeft = '8px';
@@ -766,10 +1006,14 @@ export class TagAnalyticsApp {
     resetBtn.style.verticalAlign = 'middle';
     resetBtn.title = 'Reset Data & Re-fetch';
 
-    resetBtn.onclick = async (e) => {
+    resetBtn.onclick = async e => {
       e.stopPropagation();
       e.preventDefault();
-      if (confirm(`Are you sure you want to reset the analytics data for "${this.tagName}"?\nThis will clear the local cache and fetch fresh data.`)) {
+      if (
+        confirm(
+          `Are you sure you want to reset the analytics data for "${this.tagName}"?\nThis will clear the local cache and fetch fresh data.`,
+        )
+      ) {
         if (this.db && this.db.tag_analytics) {
           try {
             await this.db.tag_analytics.delete(this.tagName);
@@ -817,7 +1061,8 @@ export class TagAnalyticsApp {
     // Position logic
     const rect = target.getBoundingClientRect();
     const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-    const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+    const scrollLeft =
+      window.pageXOffset || document.documentElement.scrollLeft;
 
     popover.style.top = `${rect.top + scrollTop}px`;
     popover.style.left = `${rect.right + scrollLeft + 10}px`;
@@ -860,7 +1105,10 @@ export class TagAnalyticsApp {
       const thresholdInput = popover.querySelector('#sync-threshold-input');
 
       const days = parseInt((daysInput as HTMLInputElement).value, 10);
-      const threshold = parseInt((thresholdInput as HTMLInputElement).value, 10);
+      const threshold = parseInt(
+        (thresholdInput as HTMLInputElement).value,
+        10,
+      );
 
       if (!isNaN(days) && days > 0 && !isNaN(threshold) && threshold > 0) {
         this.dataService.setRetentionDays(days);
@@ -868,7 +1116,9 @@ export class TagAnalyticsApp {
 
         popover.remove();
         document.removeEventListener('click', closeHandler);
-        alert(`Settings Saved:\n- Retention: ${days} days\n- Sync Threshold: ${threshold} posts\n\nCleaning up old data now...`);
+        alert(
+          `Settings Saved:\n- Retention: ${days} days\n- Sync Threshold: ${threshold} posts\n\nCleaning up old data now...`,
+        );
         this.dataService.cleanupOldCache(); // Run cleanup immediately
       } else {
         alert('Please enter valid positive numbers.');
@@ -883,35 +1133,45 @@ export class TagAnalyticsApp {
    * @param {number=} progress The loading progress percentage.
    * @param {string=} statusText Optional text to display next to the button.
    */
-  injectAnalyticsButton(tagData: any, progress?: number, statusText?: string): void {
-    let title = document.querySelector("#c-wiki-pages #a-show h1, #c-artists #a-show h1, #tag-show #posts h1, #tag-list h1");
+  injectAnalyticsButton(
+    tagData: any,
+    progress?: number,
+    statusText?: string,
+  ): void {
+    let title = document.querySelector(
+      '#c-wiki-pages #a-show h1, #c-artists #a-show h1, #tag-show #posts h1, #tag-list h1',
+    );
 
     // Fallback: Try finding container via post-count (common in modern Danbooru layouts)
     if (!title) {
-      const postCount = document.querySelector('.post-count, span[class*="post-count"]');
+      const postCount = document.querySelector(
+        '.post-count, span[class*="post-count"]',
+      );
       if (postCount && postCount.parentElement) {
         title = postCount.parentElement;
       }
     }
 
     if (!title) {
-      console.warn("[TagAnalyticsApp] Could not find a suitable title element for button injection.");
+      console.warn(
+        '[TagAnalyticsApp] Could not find a suitable title element for button injection.',
+      );
       return;
     }
 
     // Check if button already exists to avoid duplicates, but allow updating it
-    let btn = document.getElementById("tag-analytics-btn");
+    let btn = document.getElementById('tag-analytics-btn');
     const isNew = !btn;
 
     if (isNew) {
-      btn = document.createElement("button");
-      btn.id = "tag-analytics-btn";
+      btn = document.createElement('button');
+      btn.id = 'tag-analytics-btn';
       btn.setAttribute('aria-label', 'View tag analytics dashboard');
-      btn.style.marginLeft = "10px";
-      btn.style.border = "none";
-      btn.style.background = "transparent";
-      btn.style.fontSize = "1.5rem";
-      btn.style.verticalAlign = "middle";
+      btn.style.marginLeft = '10px';
+      btn.style.border = 'none';
+      btn.style.background = 'transparent';
+      btn.style.fontSize = '1.5rem';
+      btn.style.verticalAlign = 'middle';
 
       btn.innerHTML = `
         <div class="icon-container" style="
@@ -935,15 +1195,15 @@ export class TagAnalyticsApp {
     }
 
     // Status Label Logic
-    let statusLabel = document.getElementById("tag-analytics-status");
+    let statusLabel = document.getElementById('tag-analytics-status');
     if (!statusLabel) {
-      statusLabel = document.createElement("span");
-      statusLabel.id = "tag-analytics-status";
-      statusLabel.style.marginLeft = "10px";
-      statusLabel.style.fontSize = "14px";
-      statusLabel.style.color = "#888";
-      statusLabel.style.verticalAlign = "middle";
-      statusLabel.style.fontFamily = "sans-serif";
+      statusLabel = document.createElement('span');
+      statusLabel.id = 'tag-analytics-status';
+      statusLabel.style.marginLeft = '10px';
+      statusLabel.style.fontSize = '14px';
+      statusLabel.style.color = '#888';
+      statusLabel.style.verticalAlign = 'middle';
+      statusLabel.style.fontFamily = 'sans-serif';
 
       // Insert after button
       if (btn && btn.nextSibling) {
@@ -955,24 +1215,31 @@ export class TagAnalyticsApp {
 
     if (statusText) {
       statusLabel.textContent = statusText;
-      statusLabel.style.display = "inline";
+      statusLabel.style.display = 'inline';
     } else {
-      statusLabel.textContent = "";
-      statusLabel.style.display = "none";
+      statusLabel.textContent = '';
+      statusLabel.style.display = 'none';
     }
 
     if (!btn) return;
 
-    const isReady = tagData && !!(tagData.historyData && tagData.precalculatedMilestones && tagData.statusCounts && tagData.ratingCounts);
-    const iconContainer = btn.querySelector(".icon-container");
+    const isReady =
+      tagData &&
+      !!(
+        tagData.historyData &&
+        tagData.precalculatedMilestones &&
+        tagData.statusCounts &&
+        tagData.ratingCounts
+      );
+    const iconContainer = btn.querySelector('.icon-container');
 
     if (isReady) {
       // Ready: data is available, open modal on click
-      btn.style.cursor = "pointer";
-      btn.title = "View Tag Analytics";
+      btn.style.cursor = 'pointer';
+      btn.title = 'View Tag Analytics';
       if (iconContainer) {
-        (iconContainer as HTMLElement).style.opacity = "1";
-        (iconContainer as HTMLElement).style.filter = "none";
+        (iconContainer as HTMLElement).style.opacity = '1';
+        (iconContainer as HTMLElement).style.filter = 'none';
       }
       btn.onclick = () => {
         this.toggleModal(true);
@@ -980,22 +1247,24 @@ export class TagAnalyticsApp {
       };
     } else if (this.isFetching) {
       // Loading: fetch in progress, block interaction
-      btn.style.cursor = "wait";
+      btn.style.cursor = 'wait';
       btn.title = `Analytics Data is loading... ${(progress ?? 0) > 0 ? progress + '%' : 'Please wait.'}`;
       if (iconContainer) {
-        (iconContainer as HTMLElement).style.opacity = "0.5";
-        (iconContainer as HTMLElement).style.filter = "grayscale(1)";
+        (iconContainer as HTMLElement).style.opacity = '0.5';
+        (iconContainer as HTMLElement).style.filter = 'grayscale(1)';
       }
       btn.onclick = () => {
-        alert(`Report data is still being calculated (${progress ?? 0}%). It will be ready in a few seconds.`);
+        alert(
+          `Report data is still being calculated (${progress ?? 0}%). It will be ready in a few seconds.`,
+        );
       };
     } else {
       // Idle: not yet fetched, click to start
-      btn.style.cursor = "pointer";
-      btn.title = "Load Tag Analytics (Click to start)";
+      btn.style.cursor = 'pointer';
+      btn.title = 'Load Tag Analytics (Click to start)';
       if (iconContainer) {
-        (iconContainer as HTMLElement).style.opacity = "1";
-        (iconContainer as HTMLElement).style.filter = "none";
+        (iconContainer as HTMLElement).style.opacity = '1';
+        (iconContainer as HTMLElement).style.filter = 'none';
       }
       btn.onclick = async () => {
         await this._fetchAndRender();
@@ -1007,20 +1276,20 @@ export class TagAnalyticsApp {
    * Creates the modal overlay for the dashboard.
    */
   createModal(): void {
-    if (document.getElementById("tag-analytics-modal")) return;
+    if (document.getElementById('tag-analytics-modal')) return;
 
-    const modal = document.createElement("div");
-    modal.id = "tag-analytics-modal";
-    modal.style.display = "none";
-    modal.style.position = "fixed";
-    modal.style.top = "0";
-    modal.style.left = "0";
-    modal.style.width = "100%";
-    modal.style.height = "100%";
-    modal.style.backgroundColor = "rgba(0,0,0,0.5)";
-    modal.style.zIndex = "10000";
-    modal.style.justifyContent = "center";
-    modal.style.alignItems = "center";
+    const modal = document.createElement('div');
+    modal.id = 'tag-analytics-modal';
+    modal.style.display = 'none';
+    modal.style.position = 'fixed';
+    modal.style.top = '0';
+    modal.style.left = '0';
+    modal.style.width = '100%';
+    modal.style.height = '100%';
+    modal.style.backgroundColor = 'rgba(0,0,0,0.5)';
+    modal.style.zIndex = '10000';
+    modal.style.justifyContent = 'center';
+    modal.style.alignItems = 'center';
 
     modal.innerHTML = `
           <div style="background: white; border-radius: 8px; width: 80%; max-width: 800px; max-height: 90vh; position: relative; display: flex; flex-direction: column;">
@@ -1034,9 +1303,9 @@ export class TagAnalyticsApp {
     document.body.appendChild(modal);
 
     // Close handlers
-    const closeBtn = document.getElementById("tag-analytics-close");
+    const closeBtn = document.getElementById('tag-analytics-close');
     if (closeBtn) closeBtn.onclick = () => this.toggleModal(false);
-    modal.onclick = (e) => {
+    modal.onclick = e => {
       if (e.target === modal) this.toggleModal(false);
     };
 
@@ -1049,7 +1318,10 @@ export class TagAnalyticsApp {
 
     // Close on browser back button (mobile-friendly)
     window.addEventListener('popstate', () => {
-      if (modal.style.display !== 'none' && history.state?.diModalOpen !== 'tag-analytics-modal') {
+      if (
+        modal.style.display !== 'none' &&
+        history.state?.diModalOpen !== 'tag-analytics-modal'
+      ) {
         this.toggleModal(false);
       }
     });
@@ -1060,20 +1332,24 @@ export class TagAnalyticsApp {
    * @param {boolean} show Whether to show or hide the modal.
    */
   toggleModal(show: boolean): void {
-    if (!document.getElementById("tag-analytics-modal")) {
+    if (!document.getElementById('tag-analytics-modal')) {
       this.createModal();
     }
-    const modal = document.getElementById("tag-analytics-modal");
+    const modal = document.getElementById('tag-analytics-modal');
     if (!modal) return;
 
     if (show) {
       // Push history state for back button support
       if (history.state?.diModalOpen !== 'tag-analytics-modal') {
-        history.pushState({diModalOpen: 'tag-analytics-modal'}, '', location.href);
+        history.pushState(
+          {diModalOpen: 'tag-analytics-modal'},
+          '',
+          location.href,
+        );
       }
-      modal.style.display = "flex";
-      document.body.style.overflow = "hidden";
-      const closeBtn = document.getElementById("tag-analytics-close");
+      modal.style.display = 'flex';
+      document.body.style.overflow = 'hidden';
+      const closeBtn = document.getElementById('tag-analytics-close');
       if (closeBtn) closeBtn.focus();
     } else {
       // If history state still belongs to us, route through history.back().
@@ -1082,8 +1358,8 @@ export class TagAnalyticsApp {
         history.back();
         return;
       }
-      modal.style.display = "none";
-      document.body.style.overflow = "";
+      modal.style.display = 'none';
+      document.body.style.overflow = '';
       this.chartRenderer.cleanup();
       // Remove any lingering area chart tooltips appended to body
       d3.select('body').selectAll('.tag-analytics-tooltip').remove();
@@ -1095,7 +1371,8 @@ export class TagAnalyticsApp {
    * Toggles blur/opacity on marked elements.
    */
   updateNsfwVisibility(): void {
-    const isNsfwEnabled = localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
+    const isNsfwEnabled =
+      localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
     const items = document.querySelectorAll('.di-nsfw-monitor');
 
     items.forEach(item => {
@@ -1149,7 +1426,11 @@ export class TagAnalyticsApp {
   /**
    * Builds the dashboard header HTML: tag name, category badge, dates, NSFW toggle.
    */
-  private buildDashboardHeader(tagData: any, titleColor: string, categoryLabel: string): string {
+  private buildDashboardHeader(
+    tagData: any,
+    titleColor: string,
+    categoryLabel: string,
+  ): string {
     return `
       <div class="di-tag-header" style="border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-end;">
           <div>
@@ -1178,11 +1459,15 @@ export class TagAnalyticsApp {
    * Distribution card (pie chart tabs).
    */
   private buildMainGrid(tagData: any): string {
-    const totalUploads = tagData.historyData && tagData.historyData.length > 0
-      ? tagData.historyData.reduce((a: number, b: any) => a + b.count, 0).toLocaleString()
-      : '0';
+    const totalUploads =
+      tagData.historyData && tagData.historyData.length > 0
+        ? tagData.historyData
+            .reduce((a: number, b: any) => a + b.count, 0)
+            .toLocaleString()
+        : '0';
 
-    const latestPostHtml = tagData.latestPost ? `
+    const latestPostHtml = tagData.latestPost
+      ? `
       <div class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.latestPost.rating}" style="display: flex; flex-direction: column; align-items: center; width: 80px; flex-shrink: 0;">
          <div style="border: 1px solid #ddd; padding: 2px; border-radius: 4px; background: #fff; width: 100%; aspect-ratio: 1/1; display: flex; align-items: center; justify-content: center; overflow: hidden;">
             <a href="/posts/${tagData.latestPost.id}" target="_blank" style="display: block; width: 100%; height: 100%;">
@@ -1192,9 +1477,11 @@ export class TagAnalyticsApp {
          <div style="font-size: 0.8em; font-weight: bold; color: #555; margin-top: 5px;">Latest</div>
          <div style="font-size: 0.7em; color: #999;">${tagData.latestPost.created_at.split('T')[0]}</div>
       </div>
-    ` : '';
+    `
+      : '';
 
-    const trendingSfwHtml = tagData.trendingPost ? `
+    const trendingSfwHtml = tagData.trendingPost
+      ? `
       <div id="trending-post-sfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPost.rating}" style="display: flex; flex-direction: column; align-items: center; width: 80px; flex-shrink: 0;">
          <div style="border: 1px solid #ffd700; padding: 2px; border-radius: 4px; background: #fff; width: 100%; aspect-ratio: 1/1; display: flex; align-items: center; justify-content: center; overflow: hidden; box-shadow: 0 0 5px rgba(255, 215, 0, 0.3);">
             <a href="/posts/${tagData.trendingPost.id}" target="_blank" style="display: block; width: 100%; height: 100%;">
@@ -1204,9 +1491,11 @@ export class TagAnalyticsApp {
          <div style="font-size: 0.75em; font-weight: bold; color: #e0a800; margin-top: 5px;">Trending(3d)</div>
          <div style="font-size: 0.7em; color: #999;">Score: ${tagData.trendingPost.score}</div>
       </div>
-    ` : '';
+    `
+      : '';
 
-    const trendingNsfwHtml = tagData.trendingPostNSFW ? `
+    const trendingNsfwHtml = tagData.trendingPostNSFW
+      ? `
       <div id="trending-post-nsfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPostNSFW.rating}" style="display: none; flex-direction: column; align-items: center; width: 80px; flex-shrink: 0;">
          <div style="border: 1px solid #ff4444; padding: 2px; border-radius: 4px; background: #fff; width: 100%; aspect-ratio: 1/1; display: flex; align-items: center; justify-content: center; overflow: hidden; box-shadow: 0 0 5px rgba(255, 0, 0, 0.3);">
             <a href="/posts/${tagData.trendingPostNSFW.id}" target="_blank" style="display: block; width: 100%; height: 100%;">
@@ -1216,12 +1505,13 @@ export class TagAnalyticsApp {
          <div style="font-size: 0.75em; font-weight: bold; color: #cc0000; margin-top: 5px;">Trending(NSFW)</div>
          <div style="font-size: 0.7em; color: #999;">Score: ${tagData.trendingPostNSFW.score}</div>
       </div>
-    ` : '';
+    `
+      : '';
 
     const extraPieTabsHtml = `
-      ${tagData.copyrightCounts ? `<button class="di-pie-tab" data-type="copyright">Copyright</button>` : ''}
-      ${tagData.characterCounts ? `<button class="di-pie-tab" data-type="character">Character</button>` : ''}
-      ${tagData.commentaryCounts ? `<button class="di-pie-tab" data-type="commentary">Commentary</button>` : ''}
+      ${tagData.copyrightCounts ? '<button class="di-pie-tab" data-type="copyright">Copyright</button>' : ''}
+      ${tagData.characterCounts ? '<button class="di-pie-tab" data-type="character">Character</button>' : ''}
+      ${tagData.commentaryCounts ? '<button class="di-pie-tab" data-type="commentary">Commentary</button>' : ''}
     `;
 
     return `
@@ -1271,8 +1561,13 @@ export class TagAnalyticsApp {
    */
   private buildRankingsSection(tagData: any): string {
     if (!tagData.rankings) return '';
-    console.log('[TagAnalytics] renderDashboard - Initial Render - hundredthPost:', tagData.hundredthPost);
-    const hundredthPostId = tagData.hundredthPost ? tagData.hundredthPost.id : null;
+    console.log(
+      '[TagAnalytics] renderDashboard - Initial Render - hundredthPost:',
+      tagData.hundredthPost,
+    );
+    const hundredthPostId = tagData.hundredthPost
+      ? tagData.hundredthPost.id
+      : null;
     return `
       <div style="margin-bottom: 30px;">
            <div style="border-bottom: 2px solid #eee; margin-bottom: 15px; display: flex; gap: 20px; align-items: center;">
@@ -1331,24 +1626,23 @@ export class TagAnalyticsApp {
    * @param {!Object} tagData The complete analytics data to render.
    */
   renderDashboard(tagData: any): void {
-    if (!document.getElementById("tag-analytics-modal")) {
+    if (!document.getElementById('tag-analytics-modal')) {
       this.createModal();
     }
 
-
-    const content = document.getElementById("tag-analytics-content");
+    const content = document.getElementById('tag-analytics-content');
     if (!content) return;
     const categoryMap: Record<number, string> = {
       1: 'Artist',
       3: 'Copyright',
-      4: 'Character'
+      4: 'Character',
     };
     const categoryLabel = categoryMap[tagData.category] || 'Unknown';
 
     const colorMap: Record<number, string> = {
       1: '#c00004', // Artist - Red
-      3: '#a800aa',    // Copyright - Purple/Magenta
-      4: '#00ab2c'  // Character - Green
+      3: '#a800aa', // Copyright - Purple/Magenta
+      4: '#00ab2c', // Character - Green
     };
     const titleColor = colorMap[tagData.category] || '#333';
 
@@ -1367,9 +1661,13 @@ export class TagAnalyticsApp {
     // NSFW Logic
     const nsfwCheck = document.getElementById('tag-analytics-nsfw-toggle');
     if (nsfwCheck) {
-      (nsfwCheck as HTMLInputElement).checked = localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
-      nsfwCheck.onchange = (e) => {
-        localStorage.setItem('tag_analytics_nsfw_enabled', (e.target as HTMLInputElement).checked.toString());
+      (nsfwCheck as HTMLInputElement).checked =
+        localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
+      nsfwCheck.onchange = e => {
+        localStorage.setItem(
+          'tag_analytics_nsfw_enabled',
+          (e.target as HTMLInputElement).checked.toString(),
+        );
         this.updateNsfwVisibility();
       };
       // Apply initial state
@@ -1378,29 +1676,49 @@ export class TagAnalyticsApp {
 
     // Use Pre-fetched Data
     const data = tagData.historyData || [];
-    const loading = document.getElementById("chart-loading");
+    const loading = document.getElementById('chart-loading');
     if (loading) loading.style.display = 'none';
 
     if (data && data.length > 0) {
-      this.chartRenderer.renderHistoryCharts(data, this.tagName, tagData.precalculatedMilestones);
+      this.chartRenderer.renderHistoryCharts(
+        data,
+        this.tagName,
+        tagData.precalculatedMilestones,
+      );
 
       // Milestones Logic
-      const milestonesContainer = document.getElementById('tag-analytics-milestones');
+      const milestonesContainer = document.getElementById(
+        'tag-analytics-milestones',
+      );
       if (milestonesContainer) {
         milestonesContainer.style.display = 'block';
 
         // Use totalCount from meta (tagData)
-        const targets = this.dataService.getMilestoneTargets(tagData.post_count);
-        const nextTarget = this.dataService.getNextMilestoneTarget(tagData.post_count);
+        const targets = this.dataService.getMilestoneTargets(
+          tagData.post_count,
+        );
+        const nextTarget = this.dataService.getNextMilestoneTarget(
+          tagData.post_count,
+        );
         const nextInfo = {totalPosts: tagData.post_count, nextTarget};
 
         if (tagData.precalculatedMilestones) {
-          this.chartRenderer.renderMilestones(tagData.precalculatedMilestones, () => this.updateNsfwVisibility(), nextInfo);
+          this.chartRenderer.renderMilestones(
+            tagData.precalculatedMilestones,
+            () => this.updateNsfwVisibility(),
+            nextInfo,
+          );
         } else {
           // Pass tagName, totalCount, targets
-          this.dataService.fetchMilestones(tagData.name, [], targets).then((milestonePosts: any) => {
-            this.chartRenderer.renderMilestones(milestonePosts, () => this.updateNsfwVisibility(), nextInfo);
-          });
+          this.dataService
+            .fetchMilestones(tagData.name, [], targets)
+            .then((milestonePosts: any) => {
+              this.chartRenderer.renderMilestones(
+                milestonePosts,
+                () => this.updateNsfwVisibility(),
+                nextInfo,
+              );
+            });
         }
       }
       // Pie Chart Initial Render & Tab Switching
@@ -1437,17 +1755,19 @@ export class TagAnalyticsApp {
             (tab as HTMLElement).style.fontWeight = 'bold';
             (tab as HTMLElement).style.color = '#007bff';
 
-            this.chartRenderer.updateRankingTabs(role ?? 'uploader', tagData, this.dataService.userNames);
+            this.chartRenderer.updateRankingTabs(
+              role ?? 'uploader',
+              tagData,
+              this.dataService.userNames,
+            );
           };
         });
       }
-
     } else {
       if (loading) {
-        loading.textContent = "No history data available.";
+        loading.textContent = 'No history data available.';
         loading.style.display = 'block';
       }
     }
   }
-
 }

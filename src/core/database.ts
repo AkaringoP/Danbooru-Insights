@@ -41,7 +41,7 @@ export class Database extends Dexie {
     this.version(1).stores({
       uploads: 'id, userId, date, count', // id: [userId]_[date]
       approvals: 'id, userId, date, count',
-      notes: 'id, userId, date, count'
+      notes: 'id, userId, date, count',
     });
 
     // [v2] New schema (v4.0 update) - Analytics feature added
@@ -56,7 +56,8 @@ export class Database extends Dexie {
       // Index description:
       // PK: id (Post ID is unique global)
       // no: User-specific sequence (1-based index)
-      posts: 'id, uploader_id, no, created_at, score, rating, tag_count_general'
+      posts:
+        'id, uploader_id, no, created_at, score, rating, tag_count_general',
     });
 
     // [v3] Stats Cache
@@ -66,8 +67,9 @@ export class Database extends Dexie {
       uploads: 'id, userId, date, count',
       approvals: 'id, userId, date, count',
       notes: 'id, userId, date, count',
-      posts: 'id, uploader_id, no, created_at, score, rating, tag_count_general',
-      piestats: '[key+userId], userId, updated_at'
+      posts:
+        'id, uploader_id, no, created_at, score, rating, tag_count_general',
+      piestats: '[key+userId], userId, updated_at',
     });
 
     // [v4] Completed Years Cache
@@ -77,11 +79,12 @@ export class Database extends Dexie {
       uploads: 'id, userId, date, count',
       approvals: 'id, userId, date, count',
       notes: 'id, userId, date, count',
-      posts: 'id, uploader_id, no, created_at, score, rating, tag_count_general', // Analytics
+      posts:
+        'id, uploader_id, no, created_at, score, rating, tag_count_general', // Analytics
       piestats: '[key+userId], userId, updated_at', // Pie Stats
       completed_years: 'id, userId, metric, year', // Full Year Cache Status
       approvals_detail: 'id, userId', // Detailed Post IDs for Approvals
-      hourly_stats: 'id, userId, metric, year' // Hourly aggregation (24 rows/year)
+      hourly_stats: 'id, userId, metric, year', // Hourly aggregation (24 rows/year)
     });
 
     // [v5] Bubble Chart Data
@@ -90,12 +93,13 @@ export class Database extends Dexie {
       uploads: 'id, userId, date, count',
       approvals: 'id, userId, date, count',
       notes: 'id, userId, date, count',
-      posts: 'id, uploader_id, no, created_at, score, rating, tag_count_general',
+      posts:
+        'id, uploader_id, no, created_at, score, rating, tag_count_general',
       piestats: '[key+userId], userId, updated_at',
       completed_years: 'id, userId, metric, year',
       approvals_detail: 'id, userId',
       hourly_stats: 'id, userId, metric, year',
-      bubble_data: '[userId+copyright], userId, copyright, updated_at'
+      bubble_data: '[userId+copyright], userId, copyright, updated_at',
     });
 
     // [v6] Tag Analytics Cache
@@ -103,13 +107,14 @@ export class Database extends Dexie {
       uploads: 'id, userId, date, count',
       approvals: 'id, userId, date, count',
       notes: 'id, userId, date, count',
-      posts: 'id, uploader_id, no, created_at, score, rating, tag_count_general',
+      posts:
+        'id, uploader_id, no, created_at, score, rating, tag_count_general',
       piestats: '[key+userId], userId, updated_at',
       completed_years: 'id, userId, metric, year',
       approvals_detail: 'id, userId',
       hourly_stats: 'id, userId, metric, year',
       bubble_data: '[userId+copyright], userId, copyright, updated_at',
-      tag_analytics: 'tagName, updatedAt'
+      tag_analytics: 'tagName, updatedAt',
     });
 
     // [v7] Per-User GrassApp Layout Settings
@@ -117,26 +122,28 @@ export class Database extends Dexie {
       uploads: 'id, userId, date, count',
       approvals: 'id, userId, date, count',
       notes: 'id, userId, date, count',
-      posts: 'id, uploader_id, no, created_at, score, rating, tag_count_general',
+      posts:
+        'id, uploader_id, no, created_at, score, rating, tag_count_general',
       piestats: '[key+userId], userId, updated_at',
       completed_years: 'id, userId, metric, year',
       approvals_detail: 'id, userId',
       hourly_stats: 'id, userId, metric, year',
       bubble_data: '[userId+copyright], userId, copyright, updated_at',
       tag_analytics: 'tagName, updatedAt',
-      grass_settings: 'userId' // PK: userId
+      grass_settings: 'userId', // PK: userId
     });
 
     // [v8] Remove Bubble Chart Data
     this.version(8).stores({
-      bubble_data: null
+      bubble_data: null,
     });
 
     // [v9] Add compound indexes to posts table for efficient per-user queries
     // [uploader_id+no]    — getMilestones: look up milestone posts by user-scoped sequence number
     // [uploader_id+score] — getTopScorePost: index-based sort by score per user
     this.version(9).stores({
-      posts: 'id, uploader_id, no, created_at, score, rating, tag_count_general, [uploader_id+no], [uploader_id+score]'
+      posts:
+        'id, uploader_id, no, created_at, score, rating, tag_count_general, [uploader_id+no], [uploader_id+score]',
     });
 
     // [v10] Add user_stats table for user-level aggregate counts
@@ -145,7 +152,7 @@ export class Database extends Dexie {
     // posts records for the Score mode downvote filter, but it's stored
     // schemaless (no index needed) so the posts schema string is unchanged.
     this.version(10).stores({
-      user_stats: 'userId'
+      user_stats: 'userId',
     });
   }
 }

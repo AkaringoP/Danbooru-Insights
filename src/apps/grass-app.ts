@@ -23,7 +23,12 @@ export class GrassApp {
    * @param {ProfileContext} context - The current profile context containing target user info.
    * @param {RateLimitedFetch=} rateLimiter - Optional shared rate limiter instance.
    */
-  constructor(db: Database, settings: SettingsManager, context: ProfileContext, rateLimiter?: RateLimitedFetch) {
+  constructor(
+    db: Database,
+    settings: SettingsManager,
+    context: ProfileContext,
+    rateLimiter?: RateLimitedFetch,
+  ) {
     this.db = db;
     this.settings = settings;
     this.context = context;
@@ -36,7 +41,6 @@ export class GrassApp {
    * @return {Promise<void>} Resolves when the initial render is complete.
    */
   async run(): Promise<void> {
-
     const context = this.context;
     const targetUser = context.targetUser;
     if (!targetUser) return;
@@ -52,7 +56,8 @@ export class GrassApp {
     }
 
     let currentYear = new Date().getFullYear();
-    let currentMetric: Metric = (this.settings.getLastMode(userId) || 'uploads') as Metric;
+    let currentMetric: Metric = (this.settings.getLastMode(userId) ||
+      'uploads') as Metric;
 
     const joinYear = targetUser.joinDate.getFullYear();
     const years: number[] = [];
@@ -71,12 +76,9 @@ export class GrassApp {
           // Safety: If currentYear is older than promoYear, switch to promoYear
           if (currentYear < promoYear) {
             currentYear = promoYear;
-
           }
         }
       }
-
-
 
       const onYearChange = (y: number) => {
         currentYear = y;
@@ -98,7 +100,7 @@ export class GrassApp {
             await dataManager.clearCache(currentMetric, targetUser);
             updateView();
           },
-          /* skipScroll */ true
+          /* skipScroll */ true,
         );
 
         renderer.updateControls(
@@ -106,7 +108,7 @@ export class GrassApp {
           currentYear,
           currentMetric,
           onYearChange,
-          (newMetric) => {
+          newMetric => {
             currentMetric = newMetric as Metric;
             // Save the new mode preference
             this.settings.setLastMode(userId, currentMetric);
@@ -128,7 +130,7 @@ export class GrassApp {
           currentMetric,
           targetUser,
           currentYear,
-          onProgress
+          onProgress,
         );
 
         await renderer.renderGraph(
@@ -142,11 +144,12 @@ export class GrassApp {
             renderer.setLoading(true);
             await dataManager.clearCache(currentMetric, targetUser);
             updateView();
-          }
+          },
         );
       } catch (e: unknown) {
         console.error(e);
-        const message = e instanceof Error ? e.message : 'Unknown error occurred';
+        const message =
+          e instanceof Error ? e.message : 'Unknown error occurred';
         renderer.renderError(message, () => updateView());
       } finally {
         renderer.setLoading(false);

@@ -41,7 +41,7 @@ export class RateLimitedFetch {
   constructor(
     maxConcurrency: number = 6,
     startDelayRange: [number, number] = [50, 150],
-    requestsPerSecond: number = 6
+    requestsPerSecond: number = 6,
   ) {
     this.maxConcurrency = maxConcurrency;
     this.startDelayRange = startDelayRange;
@@ -63,7 +63,6 @@ export class RateLimitedFetch {
     // Global backoff
     this.backoffUntil = 0;
     this.onBackoff = null;
-
   }
 
   getRequestCount(): number {
@@ -94,14 +93,14 @@ export class RateLimitedFetch {
     // 1. Intercept /reports/ requests (Legacy custom report endpoints if any)
     if (url.includes('/reports/')) {
       return new Promise((resolve, reject) => {
-        this.reportQueue.push({ url, options, resolve, reject });
+        this.reportQueue.push({url, options, resolve, reject});
         this.processReportQueue();
       });
     }
 
     // 2. General Queue (Token Bucket)
     return new Promise((resolve, reject) => {
-      this.queue.push({ url, options, resolve, reject });
+      this.queue.push({url, options, resolve, reject});
       this.processQueue();
     });
   }
@@ -172,7 +171,10 @@ export class RateLimitedFetch {
     }
 
     // Staggered Start Delay (minimal now, rely on token bucket for rate)
-    const startDelay = Math.floor(Math.random() * (this.startDelayRange[1] - this.startDelayRange[0] + 1)) + this.startDelayRange[0];
+    const startDelay =
+      Math.floor(
+        Math.random() * (this.startDelayRange[1] - this.startDelayRange[0] + 1),
+      ) + this.startDelayRange[0];
     if (startDelay > 0) await new Promise(r => setTimeout(r, startDelay));
 
     try {

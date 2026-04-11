@@ -34,7 +34,10 @@ export class GraphRenderer {
    * @param {string|number} userId The user's ID for settings.
    * @return {Promise<boolean>} Resolves to true if injection was successful.
    */
-  async injectSkeleton(dataManager: DataManager, userId: string | number): Promise<boolean> {
+  async injectSkeleton(
+    dataManager: DataManager,
+    userId: string | number,
+  ): Promise<boolean> {
     // Save reference for later use (e.g. approval popover hover preview)
     this.dataManager = dataManager;
 
@@ -48,13 +51,13 @@ export class GraphRenderer {
     // Fallbacks...
     if (!stats) {
       const table = document.querySelector(
-        '#a-show > div:nth-child(1) > div:nth-child(2) > table'
+        '#a-show > div:nth-child(1) > div:nth-child(2) > table',
       );
       if (table) stats = table.parentElement;
     }
     if (!stats) {
       // Text Fallback (H1/H2)
-      document.querySelectorAll('h1, h2').forEach((el) => {
+      document.querySelectorAll('h1, h2').forEach(el => {
         if (el.textContent.trim() === 'Statistics') stats = el.parentElement;
       });
     }
@@ -88,8 +91,8 @@ export class GraphRenderer {
 
     // Fetch Per-User Settings from IndexedDB
     const grassSettings = await dataManager.getGrassSettings(userId);
-    let savedWidth = grassSettings ? grassSettings.width : null;
-    let savedX = grassSettings ? grassSettings.xOffset : 0;
+    const savedWidth = grassSettings ? grassSettings.width : null;
+    const savedX = grassSettings ? grassSettings.xOffset : 0;
 
     // Constraints logic
     const applyConstraints = () => {
@@ -98,7 +101,8 @@ export class GraphRenderer {
       const gap = 20;
 
       // Check if wrapped (Graph is below Stats)
-      const isWrapped = container.offsetTop > ((stats as HTMLElement).offsetTop + 10);
+      const isWrapped =
+        container.offsetTop > (stats as HTMLElement).offsetTop + 10;
 
       let maxAvailableWidth;
       if (isWrapped) {
@@ -109,16 +113,22 @@ export class GraphRenderer {
 
       if (savedWidth) {
         const numericWidth = parseFloat(String(savedWidth));
-        const clampedWidth = Math.max(300, Math.min(numericWidth, maxAvailableWidth));
+        const clampedWidth = Math.max(
+          300,
+          Math.min(numericWidth, maxAvailableWidth),
+        );
         container.style.flex = '0 0 auto';
         container.style.width = `${clampedWidth}px`;
 
         // Also clamp X to ensure it doesn't overflow right
-        const clampedX = Math.max(0, Math.min(savedX ?? 0, maxAvailableWidth - clampedWidth));
+        const clampedX = Math.max(
+          0,
+          Math.min(savedX ?? 0, maxAvailableWidth - clampedWidth),
+        );
         container.style.transform = `translateX(${clampedX}px)`;
       } else {
         container.style.flex = '1';
-        container.style.transform = `translateX(0px)`;
+        container.style.transform = 'translateX(0px)';
       }
     };
 
@@ -126,12 +136,18 @@ export class GraphRenderer {
     const syncPanelPosition = () => {
       const panel = document.getElementById('danbooru-grass-panel');
       if (!panel) return;
-      const xOffset = parseFloat(container.style.transform?.replace(/translateX\(|px\)/g, '') || '0') || 0;
+      const xOffset =
+        parseFloat(
+          container.style.transform?.replace(/translateX\(|px\)/g, '') || '0',
+        ) || 0;
       panel.style.marginLeft = xOffset > 0 ? `${xOffset}px` : '0';
     };
 
     // Initial apply (might be 0 if not 100% rendered, so we use a small delay or observer)
-    setTimeout(() => { applyConstraints(); syncPanelPosition(); }, 0);
+    setTimeout(() => {
+      applyConstraints();
+      syncPanelPosition();
+    }, 0);
 
     // Re-apply on layout stabilization. The wrapper's offsetWidth can be 0
     // (or smaller than its final value) on the very first frame, especially
@@ -165,7 +181,10 @@ export class GraphRenderer {
     container.style.minWidth = '300px';
 
     // Resize & Move Logic
-    const createHandle = (type: 'resize' | 'move', side?: 'left' | 'right'): HTMLDivElement => {
+    const createHandle = (
+      type: 'resize' | 'move',
+      side?: 'left' | 'right',
+    ): HTMLDivElement => {
       const handle = document.createElement('div');
       if (type === 'resize') {
         handle.style.cssText = `
@@ -192,11 +211,14 @@ export class GraphRenderer {
           `;
       }
 
-      handle.onmousedown = (e) => {
+      handle.onmousedown = e => {
         e.preventDefault();
         const startX = e.clientX;
         const startWidth = container.offsetWidth;
-        const startXOffset = parseFloat(container.style.transform.replace(/translateX\(|px\)/g, '')) || 0;
+        const startXOffset =
+          parseFloat(
+            container.style.transform.replace(/translateX\(|px\)/g, ''),
+          ) || 0;
 
         const onMouseMove = (mE: MouseEvent): void => {
           const delta = mE.clientX - startX;
@@ -208,7 +230,8 @@ export class GraphRenderer {
           const gap = 20;
 
           // Check if wrapped (Graph is below Stats)
-          const isWrapped = container.offsetTop > ((stats as HTMLElement).offsetTop + 10);
+          const isWrapped =
+            container.offsetTop > (stats as HTMLElement).offsetTop + 10;
 
           let maxAvailableWidth;
           if (isWrapped) {
@@ -225,14 +248,17 @@ export class GraphRenderer {
           } else if (type === 'resize') {
             if (side === 'right') {
               const maxWidth = maxAvailableWidth - startXOffset;
-              const newWidth = Math.max(300, Math.min(startWidth + delta, maxWidth));
+              const newWidth = Math.max(
+                300,
+                Math.min(startWidth + delta, maxWidth),
+              );
               container.style.flex = '0 0 auto';
               container.style.width = `${newWidth}px`;
             } else if (side === 'left') {
               // Expansion left is limited by XOffset reaching 0
               const minDelta = -startXOffset;
               const clampedDelta = Math.max(delta, minDelta);
-              let newWidth = Math.max(300, startWidth - clampedDelta);
+              const newWidth = Math.max(300, startWidth - clampedDelta);
 
               // If width hits 300, stop moving X
               const finalDelta = startWidth - newWidth;
@@ -249,10 +275,13 @@ export class GraphRenderer {
         const onMouseUp = () => {
           document.removeEventListener('mousemove', onMouseMove);
           document.removeEventListener('mouseup', onMouseUp);
-          const finalX = parseFloat(container.style.transform.replace(/translateX\(|px\)/g, '')) || 0;
+          const finalX =
+            parseFloat(
+              container.style.transform.replace(/translateX\(|px\)/g, ''),
+            ) || 0;
           dataManager.saveGrassSettings(userId, {
             width: container.style.width,
-            xOffset: finalX
+            xOffset: finalX,
           });
           syncPanelPosition();
         };
@@ -320,21 +349,29 @@ export class GraphRenderer {
    * @param {function(string)} onMetricChange Callback invoked when the metric changes.
    * @param {function()} onRefresh Callback invoked to refresh data.
    */
-  updateControls(_availableYears: number[], _currentYear: number, currentMetric: string, _onYearChange: (year: number) => void, onMetricChange: (metric: string) => void, _onRefresh: () => void): void {
+  updateControls(
+    _availableYears: number[],
+    _currentYear: number,
+    currentMetric: string,
+    _onYearChange: (year: number) => void,
+    onMetricChange: (metric: string) => void,
+    _onRefresh: () => void,
+  ): void {
     const controls = document.getElementById('grass-controls');
     if (!controls) return;
     controls.innerHTML = '';
 
     const metricSel = document.createElement('select');
     metricSel.className = 'ui-select';
-    ['uploads', 'approvals', 'notes'].forEach((m) => {
+    ['uploads', 'approvals', 'notes'].forEach(m => {
       const opt = document.createElement('option');
       opt.value = m;
       opt.text = m.charAt(0).toUpperCase() + m.slice(1);
       if (m === currentMetric) opt.selected = true;
       metricSel.appendChild(opt);
     });
-    metricSel.onchange = (e) => onMetricChange((e.target as HTMLSelectElement).value);
+    metricSel.onchange = e =>
+      onMetricChange((e.target as HTMLSelectElement).value);
     controls.appendChild(metricSel);
   }
 
@@ -424,8 +461,14 @@ export class GraphRenderer {
         color: var(--grass-text, #57606a);
       `;
     // Initial Placeholder
-    legendRow.innerHTML = '<span style="margin-right:2px">Less</span>' +
-      [0, 1, 2, 3, 4].map(l => `<div class="legend-rect" data-level="${l}" style="width:10px; height:10px; border-radius:2px; background:var(--grass-level-${l})"></div>`).join('') +
+    legendRow.innerHTML =
+      '<span style="margin-right:2px">Less</span>' +
+      [0, 1, 2, 3, 4]
+        .map(
+          l =>
+            `<div class="legend-rect" data-level="${l}" style="width:10px; height:10px; border-radius:2px; background:var(--grass-level-${l})"></div>`,
+        )
+        .join('') +
       '<span style="margin-left:2px">More</span>';
 
     wrapper.appendChild(legendRow);
@@ -448,7 +491,8 @@ export class GraphRenderer {
     // If no data, reset to empty
     if (!hourlyCounts) {
       cells.forEach(cell => {
-        (cell as HTMLElement).style.background = 'var(--grass-empty-cell, #ebedf0)';
+        (cell as HTMLElement).style.background =
+          'var(--grass-empty-cell, #ebedf0)';
         // Add empty state tooltip events? No, just clear
         (cell as HTMLElement).onmouseenter = null;
         (cell as HTMLElement).onmouseleave = null;
@@ -487,7 +531,7 @@ export class GraphRenderer {
       cell.removeAttribute('title');
 
       // Add custom tooltip events
-      (cell as HTMLElement).onmouseenter = (_e) => {
+      (cell as HTMLElement).onmouseenter = _e => {
         const tooltip = document.getElementById('danbooru-grass-tooltip');
         if (!tooltip) return;
 
@@ -498,8 +542,9 @@ export class GraphRenderer {
         const tooltipRect = tooltip.getBoundingClientRect();
 
         // Center above the cell (Add window.scrollX/Y for absolute position)
-        let left = rect.left + window.scrollX + (rect.width / 2) - (tooltipRect.width / 2);
-        let top = rect.top + window.scrollY - tooltipRect.height - 8;
+        const left =
+          rect.left + window.scrollX + rect.width / 2 - tooltipRect.width / 2;
+        const top = rect.top + window.scrollY - tooltipRect.height - 8;
 
         tooltip.style.left = `${left}px`;
         tooltip.style.top = `${top}px`;
@@ -534,7 +579,7 @@ export class GraphRenderer {
         r.removeAttribute('title');
 
         // Add custom dark tooltip
-        (r as HTMLElement).onmouseenter = (_e) => {
+        (r as HTMLElement).onmouseenter = _e => {
           const tooltip = document.getElementById('danbooru-grass-tooltip');
           if (!tooltip) return;
 
@@ -544,8 +589,9 @@ export class GraphRenderer {
           const rect = r.getBoundingClientRect();
           const tooltipRect = tooltip.getBoundingClientRect();
 
-          let left = rect.left + window.scrollX + (rect.width / 2) - (tooltipRect.width / 2);
-          let top = rect.top + window.scrollY - tooltipRect.height - 8;
+          const left =
+            rect.left + window.scrollX + rect.width / 2 - tooltipRect.width / 2;
+          const top = rect.top + window.scrollY - tooltipRect.height - 8;
 
           tooltip.style.left = `${left}px`;
           tooltip.style.top = `${top}px`;
@@ -592,7 +638,7 @@ export class GraphRenderer {
     availableYears: number[],
     onYearChange: (year: number) => void,
     onRefresh: () => void,
-    skipScroll = false
+    skipScroll = false,
   ): Promise<void> {
     // Handle new data format { daily, hourly } or legacy map
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -605,7 +651,10 @@ export class GraphRenderer {
     }
 
     // Update Header with Total Count and Embedded Year Selector
-    const total = Object.values(dailyData || {}).reduce((acc: number, v) => acc + (v as number), 0);
+    const total = Object.values(dailyData || {}).reduce(
+      (acc: number, v) => acc + (v as number),
+      0,
+    );
     const header = document.querySelector('#danbooru-grass-container h2');
 
     if (header) {
@@ -633,7 +682,7 @@ export class GraphRenderer {
             vertical-align: baseline;
           `;
 
-        availableYears.forEach((y) => {
+        availableYears.forEach(y => {
           const opt = document.createElement('option');
           opt.value = String(y);
           opt.textContent = String(y);
@@ -641,7 +690,8 @@ export class GraphRenderer {
           yearSelect.appendChild(opt);
         });
 
-        yearSelect.onchange = (e) => onYearChange(parseInt((e.target as HTMLSelectElement).value, 10));
+        yearSelect.onchange = e =>
+          onYearChange(parseInt((e.target as HTMLSelectElement).value, 10));
         header.appendChild(yearSelect);
       } else {
         // Fallback if no controls passed (e.g. init)
@@ -649,11 +699,17 @@ export class GraphRenderer {
       }
     }
 
-    if ((window as any).cal && typeof (window as any).cal.destroy === 'function') {
+    if (
+      (window as any).cal &&
+      typeof (window as any).cal.destroy === 'function'
+    ) {
       try {
         (window as any).cal.destroy();
       } catch (e) {
-        console.warn('[Danbooru Grass] Failed to destroy previous instance:', e);
+        console.warn(
+          '[Danbooru Grass] Failed to destroy previous instance:',
+          e,
+        );
       }
     }
     (window as any).cal = new (window as any).CalHeatmap();
@@ -666,10 +722,12 @@ export class GraphRenderer {
 
     const source = Object.entries(dailyData || {}).map(([k, v]) => ({
       date: k,
-      value: v
+      value: v,
     }));
 
-    const sanitizedName = (userInfo as any).normalizedName || (userName as string).replace(/ /g, '_');
+    const sanitizedName =
+      (userInfo as any).normalizedName ||
+      (userName as string).replace(/ /g, '_');
     const userIdVal = (userInfo as any).id || (userInfo as any).name;
 
     const getUrl = (date: string, _count: number): string | null => {
@@ -686,7 +744,6 @@ export class GraphRenderer {
           return null;
       }
     };
-
 
     // Inject Custom CSS
     const styleId = 'danbooru-grass-styles';
@@ -1071,13 +1128,19 @@ export class GraphRenderer {
           color: #57606a;
         `;
       // Chevron Down SVG
-      const chevronDown = `<svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;"><path d="M12.78 6.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L3.22 7.28a.75.75 0 0 1 1.06-1.06L8 9.94l3.72-3.72a.75.75 0 0 1 1.06 0Z"></path></svg>`;
-      const chevronUp = `<svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;"><path d="M3.22 9.78a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1-1.06 1.06L8 6.06 4.28 9.78a.75.75 0 0 1-1.06 0Z"></path></svg>`;
+      const chevronDown =
+        '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;"><path d="M12.78 6.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L3.22 7.28a.75.75 0 0 1 1.06-1.06L8 9.94l3.72-3.72a.75.75 0 0 1 1.06 0Z"></path></svg>';
+      const chevronUp =
+        '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;"><path d="M3.22 9.78a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1-1.06 1.06L8 6.06 4.28 9.78a.75.75 0 0 1-1.06 0Z"></path></svg>';
 
       toggleBtn.innerHTML = chevronDown;
 
-      toggleBtn.onmouseover = () => { toggleBtn.style.backgroundColor = '#eaeef2'; };
-      toggleBtn.onmouseout = () => { toggleBtn.style.backgroundColor = '#f6f8fa'; };
+      toggleBtn.onmouseover = () => {
+        toggleBtn.style.backgroundColor = '#eaeef2';
+      };
+      toggleBtn.onmouseout = () => {
+        toggleBtn.style.backgroundColor = '#f6f8fa';
+      };
 
       footerLeft.appendChild(toggleBtn);
 
@@ -1173,7 +1236,7 @@ export class GraphRenderer {
         onRefresh,
       });
 
-      settingsBtn.onclick = (e) => {
+      settingsBtn.onclick = e => {
         const current = popover.style.display;
         if (current === 'block') {
           closeSettings();
@@ -1181,7 +1244,7 @@ export class GraphRenderer {
           // Position popover near the settings button
           const btnRect = settingsBtn.getBoundingClientRect();
           popover.style.left = btnRect.left + 'px';
-          popover.style.top = (btnRect.bottom + 4) + 'px';
+          popover.style.top = btnRect.bottom + 4 + 'px';
           popover.style.display = 'block';
         }
         e.stopPropagation();
@@ -1201,7 +1264,11 @@ export class GraphRenderer {
 
       // Custom Thresholds Logic (Empty + 4 Levels)
       const colors = [
-        'var(--grass-level-0)', 'var(--grass-level-1)', 'var(--grass-level-2)', 'var(--grass-level-3)', 'var(--grass-level-4)'
+        'var(--grass-level-0)',
+        'var(--grass-level-1)',
+        'var(--grass-level-2)',
+        'var(--grass-level-3)',
+        'var(--grass-level-4)',
       ];
       // const thresholds = this.settingsManager.getThresholds(metric); // Unused local var
 
@@ -1210,9 +1277,12 @@ export class GraphRenderer {
       // Colors[1] is L1 (>= T1).
       // ...
       // Colors[4] is L4 (>= T4).
-      const rects = colors.map((c) =>
-        `<div style="width:10px; height:10px; background:${c}; border-radius:2px;"></div>`
-      ).join('');
+      const rects = colors
+        .map(
+          c =>
+            `<div style="width:10px; height:10px; background:${c}; border-radius:2px;"></div>`,
+        )
+        .join('');
 
       legend.innerHTML = `
           <span style="margin-right:4px;">Less</span>
@@ -1221,8 +1291,6 @@ export class GraphRenderer {
         `;
       footer.appendChild(legend);
     }
-
-
 
     // --- GUARD: Empty Data Guard ---
     // Removed to allow empty graph rendering
@@ -1233,7 +1301,9 @@ export class GraphRenderer {
     }
     */
 
-    const currentThresholds = this.settingsManager.getThresholds(metric as import('../types').Metric);
+    const currentThresholds = this.settingsManager.getThresholds(
+      metric as import('../types').Metric,
+    );
 
     // Reusable paint config (for theme-change re-paints)
     const buildPaintConfig = () => ({
@@ -1242,20 +1312,22 @@ export class GraphRenderer {
       domain: {
         type: 'month',
         gutter: 3,
-        label: { position: 'top', text: 'MMM', height: 20, textAlign: 'start' },
+        label: {position: 'top', text: 'MMM', height: 20, textAlign: 'start'},
       },
-      subDomain: { type: 'day', radius: 2, width: 11, height: 11, gutter: 2 },
+      subDomain: {type: 'day', radius: 2, width: 11, height: 11, gutter: 2},
       date: {
         start: new Date(
-          new Date(year, 0, 1).getTime() - (new Date().getTimezoneOffset() * 60000)
-        )
+          new Date(year, 0, 1).getTime() -
+            new Date().getTimezoneOffset() * 60000,
+        ),
       },
-      data: { source: source, x: 'date', y: 'value' },
+      data: {source: source, x: 'date', y: 'value'},
       scale: {
         color: {
           range: this.settingsManager.resolveLevels(
             this.settingsManager.getTheme(),
-            CONFIG.THEMES[this.settingsManager.getTheme()] || CONFIG.THEMES.light
+            CONFIG.THEMES[this.settingsManager.getTheme()] ||
+              CONFIG.THEMES.light,
           ),
           domain: currentThresholds,
           type: 'threshold',
@@ -1264,9 +1336,9 @@ export class GraphRenderer {
       theme: 'light',
     });
 
-    (window as any).cal.paint(buildPaintConfig())
+    (window as any).cal
+      .paint(buildPaintConfig())
       .then(() => {
-
         // Listen for theme/grass changes — destroy + re-paint CalHeatmap
         const onThemeChange = () => {
           try {
@@ -1279,7 +1351,9 @@ export class GraphRenderer {
               // Restore scroll position after paint
               if (sw) sw.scrollLeft = savedScroll;
             });
-          } catch (e) { console.debug('[DI] CalHeatmap re-paint failed', e); }
+          } catch (e) {
+            console.debug('[DI] CalHeatmap re-paint failed', e);
+          }
           this.updateSummaryGrid(hourlyData, metric);
         };
         window.addEventListener('DanbooruInsights:ThemeChanged', onThemeChange);
@@ -1309,16 +1383,14 @@ export class GraphRenderer {
             if (left + rect.width > viewportWidth - 20) {
               // Overflow detected: Switch to "Top-Centered"
               // Position above the cursor, centered horizontally
-              left = event.pageX - (rect.width / 2);
+              left = event.pageX - rect.width / 2;
               top = event.pageY - rect.height - 15; // Move appropriately above
 
               // Safety: Don't overflow left
               if (left < 5) left = 5;
             }
 
-            tooltip
-              .style('left', left + 'px')
-              .style('top', top + 'px');
+            tooltip.style('left', left + 'px').style('top', top + 'px');
           };
 
           // Helper: Touch-compatible tooltip positioning
@@ -1338,7 +1410,7 @@ export class GraphRenderer {
 
             // Check for Right Overflow
             if (left + rect.width > viewportWidth - 20) {
-              left = touch.pageX - (rect.width / 2);
+              left = touch.pageX - rect.width / 2;
               top = touch.pageY - rect.height - 15;
               if (left < 5) left = 5;
             }
@@ -1346,12 +1418,11 @@ export class GraphRenderer {
             // Keep tooltip above viewport top
             if (top < scrollY + 5) top = scrollY + 5;
 
-            tooltip
-              .style('left', left + 'px')
-              .style('top', top + 'px');
+            tooltip.style('left', left + 'px').style('top', top + 'px');
           };
 
-          const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+          const isTouchDevice =
+            'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
           // --- Auto-Scroll to Current Date (Refined) ---
           const scrollContainer = document.getElementById('cal-heatmap-scroll');
@@ -1361,13 +1432,16 @@ export class GraphRenderer {
               // Find the Nth .ch-domain (Month) element
               // We look for 'svg.ch-domain' or just '.ch-domain' that are direct children if possible
               // Based on user feedback, it seems to be 'svg.ch-domain'
-              const targetMonth = scrollContainer.querySelector(`.ch-domain:nth-of-type(${currentMonth})`);
+              const targetMonth = scrollContainer.querySelector(
+                `.ch-domain:nth-of-type(${currentMonth})`,
+              );
 
               if (targetMonth) {
                 const containerRect = scrollContainer.getBoundingClientRect();
                 const elementRect = targetMonth.getBoundingClientRect();
                 // Scroll to the element with a slight padding
-                scrollContainer.scrollLeft += (elementRect.left - containerRect.left - 10);
+                scrollContainer.scrollLeft +=
+                  elementRect.left - containerRect.left - 10;
               } else {
                 // Fallback: Scroll to end
                 scrollContainer.scrollLeft = scrollContainer.scrollWidth;
@@ -1385,16 +1459,22 @@ export class GraphRenderer {
           let lastTouchedDatum: CalHeatmapDatum | null = null;
 
           d3.selectAll('#cal-heatmap-scroll rect')
-            .attr('rx', 2).attr('ry', 2) // Apply border radius
+            .attr('rx', 2)
+            .attr('ry', 2) // Apply border radius
             .on('mouseover', function (event, d) {
               // Fallback for datum if D3 binding is tricky
               const datum = d || d3.select(this).datum();
               if (!datum || !(datum as CalHeatmapDatum).t) return;
 
-              const count = ((datum as CalHeatmapDatum).v ?? 0);
-              const dateStr = new Date((datum as CalHeatmapDatum).t).toISOString().split('T')[0];
+              const count = (datum as CalHeatmapDatum).v ?? 0;
+              const dateStr = new Date((datum as CalHeatmapDatum).t)
+                .toISOString()
+                .split('T')[0];
 
-              updateTooltip(event, `<strong>${dateStr}</strong>, ${count} ${metric}`);
+              updateTooltip(
+                event,
+                `<strong>${dateStr}</strong>, ${count} ${metric}`,
+              );
             })
             .on('mouseout', () => tooltip.style('opacity', 0))
             .on('click', (event, d) => {
@@ -1404,8 +1484,10 @@ export class GraphRenderer {
                 return;
               }
 
-              const count = ((datum as CalHeatmapDatum).v ?? 0);
-              const dateStr = new Date((datum as CalHeatmapDatum).t).toISOString().split('T')[0];
+              const count = (datum as CalHeatmapDatum).v ?? 0;
+              const dateStr = new Date((datum as CalHeatmapDatum).t)
+                .toISOString()
+                .split('T')[0];
 
               if (metric === 'approvals' && count > 0) {
                 this.showApprovalsDetail(dateStr, userIdVal, event);
@@ -1417,9 +1499,12 @@ export class GraphRenderer {
 
           if (isTouchDevice) {
             d3.selectAll('#cal-heatmap-scroll rect')
-              .on('touchstart', function(event: TouchEvent) {
+              .on('touchstart', (event: TouchEvent) => {
                 const touch = event.touches[0];
-                const target = document.elementFromPoint(touch.clientX, touch.clientY);
+                const target = document.elementFromPoint(
+                  touch.clientX,
+                  touch.clientY,
+                );
                 if (!target) return;
                 const datum = d3.select(target).datum() as CalHeatmapDatum;
                 if (!datum || !datum.t) return;
@@ -1427,11 +1512,17 @@ export class GraphRenderer {
                 lastTouchedDatum = datum;
                 const count = datum.v ?? 0;
                 const dateStr = new Date(datum.t).toISOString().split('T')[0];
-                updateTooltipTouch(touch, `<strong>${dateStr}</strong>, ${count} ${metric}`);
+                updateTooltipTouch(
+                  touch,
+                  `<strong>${dateStr}</strong>, ${count} ${metric}`,
+                );
               })
-              .on('touchmove', function(event: TouchEvent) {
+              .on('touchmove', (event: TouchEvent) => {
                 const touch = event.touches[0];
-                const target = document.elementFromPoint(touch.clientX, touch.clientY);
+                const target = document.elementFromPoint(
+                  touch.clientX,
+                  touch.clientY,
+                );
                 if (!target) return;
                 const datum = d3.select(target).datum() as CalHeatmapDatum;
                 if (!datum || !datum.t) return;
@@ -1439,14 +1530,19 @@ export class GraphRenderer {
                 lastTouchedDatum = datum;
                 const count = datum.v ?? 0;
                 const dateStr = new Date(datum.t).toISOString().split('T')[0];
-                updateTooltipTouch(touch, `<strong>${dateStr}</strong>, ${count} ${metric}`);
+                updateTooltipTouch(
+                  touch,
+                  `<strong>${dateStr}</strong>, ${count} ${metric}`,
+                );
               });
 
             // Tooltip tap → navigate
             tooltip.on('click', () => {
               if (!lastTouchedDatum) return;
               const count = lastTouchedDatum.v ?? 0;
-              const dateStr = new Date(lastTouchedDatum.t).toISOString().split('T')[0];
+              const dateStr = new Date(lastTouchedDatum.t)
+                .toISOString()
+                .split('T')[0];
               const link = getUrl(dateStr, count);
               if (link && link !== '#') window.open(link, '_blank');
               tooltip.style('opacity', 0);
@@ -1454,20 +1550,30 @@ export class GraphRenderer {
             });
 
             // Tap outside tooltip and cells → close it
-            document.addEventListener('touchstart', (e: TouchEvent) => {
-              const tooltipEl = tooltip.node() as HTMLElement | null;
-              const target = e.target as Node;
-              const heatmapEl = document.getElementById('cal-heatmap-scroll');
-              if (tooltipEl && !tooltipEl.contains(target) && !heatmapEl?.contains(target)) {
-                tooltip.style('opacity', 0);
-                lastTouchedDatum = null;
-              }
-            }, {passive: true});
+            document.addEventListener(
+              'touchstart',
+              (e: TouchEvent) => {
+                const tooltipEl = tooltip.node() as HTMLElement | null;
+                const target = e.target as Node;
+                const heatmapEl = document.getElementById('cal-heatmap-scroll');
+                if (
+                  tooltipEl &&
+                  !tooltipEl.contains(target) &&
+                  !heatmapEl?.contains(target)
+                ) {
+                  tooltip.style('opacity', 0);
+                  lastTouchedDatum = null;
+                }
+              },
+              {passive: true},
+            );
           }
 
           // 2. Tooltips for Legend Cells
           // Calculate ranges based on thresholds [t1, t2, t3, t4]
-          const t = this.settingsManager.getThresholds(metric as import('../types').Metric);
+          const t = this.settingsManager.getThresholds(
+            metric as import('../types').Metric,
+          );
           const legendThresholds = [
             `${t[0] > 1 ? `0-${t[0] - 1}` : '0'} (Less)`,
             `${t[0]}-${t[1] - 1}`,
@@ -1482,7 +1588,7 @@ export class GraphRenderer {
           legendDivs.each(function (_d, i) {
             if (i >= 0 && i < legendThresholds.length) {
               d3.select(this)
-                .on('mouseover', function (event) {
+                .on('mouseover', event => {
                   updateTooltip(event, legendThresholds[i]);
                 })
                 .on('mouseout', () => tooltip.style('opacity', 0));
@@ -1531,7 +1637,11 @@ export class GraphRenderer {
    * @param {string|number} userId The user's ID.
    * @param {MouseEvent} event The triggering mouse event.
    */
-  async showApprovalsDetail(dateStr: string, userId: string | number, event: MouseEvent): Promise<void> {
+  async showApprovalsDetail(
+    dateStr: string,
+    userId: string | number,
+    event: MouseEvent,
+  ): Promise<void> {
     const fetcher = this.dataManager
       ? (postId: number) => this.dataManager!.fetchPostDetails(postId)
       : undefined;

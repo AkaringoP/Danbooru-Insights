@@ -26,9 +26,10 @@ export class TabCoordinator {
   onBackoffReceived: ((until: number) => void) | null = null;
 
   constructor() {
-    this.tabId = typeof crypto !== 'undefined' && crypto.randomUUID
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
+    this.tabId =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2);
 
     this.boundBeforeUnload = () => this.destroy();
   }

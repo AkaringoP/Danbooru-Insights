@@ -27,11 +27,16 @@ export async function showApprovalsDetail(
   const detail = await db.approvals_detail.get(detailId);
 
   if (!detail) {
-    console.warn(`[Danbooru Grass] No entry found in approvals_detail for ID: ${detailId}. Did you clear cache?`);
+    console.warn(
+      `[Danbooru Grass] No entry found in approvals_detail for ID: ${detailId}. Did you clear cache?`,
+    );
     return;
   }
   if (!detail.post_list || detail.post_list.length === 0) {
-    console.warn(`[Danbooru Grass] Entry found but post_list is empty:`, detail);
+    console.warn(
+      '[Danbooru Grass] Entry found but post_list is empty:',
+      detail,
+    );
     return;
   }
 
@@ -73,11 +78,11 @@ export async function showApprovalsDetail(
       pop!.style.display = 'none';
       hidePostHoverCard();
     };
-    (pop!.querySelector('#popover-prev') as HTMLElement).onclick = (e) => {
+    (pop!.querySelector('#popover-prev') as HTMLElement).onclick = e => {
       e.stopPropagation();
       renderPage(currentPage - 1);
     };
-    (pop!.querySelector('#popover-next') as HTMLElement).onclick = (e) => {
+    (pop!.querySelector('#popover-next') as HTMLElement).onclick = e => {
       e.stopPropagation();
       renderPage(currentPage + 1);
     };
@@ -85,7 +90,7 @@ export async function showApprovalsDetail(
     // Attach hover preview cards (debounced + cached, desktop only).
     // Position next to the popover so the card doesn't overlap the list.
     if (fetchPostDetails) {
-      pop!.querySelectorAll('.post-link').forEach((linkEl) => {
+      pop!.querySelectorAll('.post-link').forEach(linkEl => {
         const a = linkEl as HTMLAnchorElement;
         const match = a.getAttribute('href')?.match(/\/posts\/(\d+)/);
         if (!match) return;

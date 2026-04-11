@@ -4,7 +4,12 @@ import {RateLimitedFetch} from '../core/rate-limiter';
 import {SettingsManager} from '../core/settings';
 import {UserAnalyticsDataService} from './user-analytics-data';
 import {getLevelClass} from '../utils';
-import {renderPieWidget, renderTopPostsWidget, renderMilestonesWidget, renderHistoryChart} from './user-analytics-charts';
+import {
+  renderPieWidget,
+  renderTopPostsWidget,
+  renderMilestonesWidget,
+  renderHistoryChart,
+} from './user-analytics-charts';
 import {renderScatterPlot} from './user-analytics-scatter';
 import {renderTagCloudWidget} from './tag-cloud-widget';
 import {renderCreatedTagsWidget} from './created-tags-widget';
@@ -35,12 +40,18 @@ export class UserAnalyticsApp {
    * @param {Object} settings The settings manager.
    * @param {ProfileContext} context The profile context.
    */
-  constructor(db: Database, settings: SettingsManager, context: ProfileContext, rateLimiter?: RateLimitedFetch) {
+  constructor(
+    db: Database,
+    settings: SettingsManager,
+    context: ProfileContext,
+    rateLimiter?: RateLimitedFetch,
+  ) {
     this.db = db;
     this.settings = settings;
     this.context = context as ValidatedProfileContext;
     const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter = rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+    this.rateLimiter =
+      rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
 
     this.dataManager = new AnalyticsDataManager(db, this.rateLimiter);
     this.dataService = new UserAnalyticsDataService(db);
@@ -56,7 +67,6 @@ export class UserAnalyticsApp {
    * Initializes and runs the Analytics application.
    */
   run(): void {
-
     this.createModal(); // Create hidden modal
     this.injectButton(); // Add entry button
   }
@@ -94,7 +104,7 @@ export class UserAnalyticsApp {
     overlay.appendChild(windowDiv);
 
     // Close on click outside
-    overlay.addEventListener('click', (e) => {
+    overlay.addEventListener('click', e => {
       if (e.target === overlay) {
         this.toggleModal(false);
       }
@@ -109,7 +119,10 @@ export class UserAnalyticsApp {
 
     // Close on browser back button (mobile-friendly)
     window.addEventListener('popstate', () => {
-      if (overlay.classList.contains('visible') && history.state?.diModalOpen !== this.modalId) {
+      if (
+        overlay.classList.contains('visible') &&
+        history.state?.diModalOpen !== this.modalId
+      ) {
         this.toggleModal(false);
       }
     });
@@ -155,13 +168,12 @@ export class UserAnalyticsApp {
       btn.setAttribute('aria-label', 'Open user analytics report');
       btn.innerHTML = '📊';
       btn.style.margin = '0'; // Reset margin since container has it
-      btn.onclick = async (e) => {
+      btn.onclick = async e => {
         e.preventDefault();
         e.stopPropagation();
 
         // Auto-Sync Check: If not synced, wait for sync THEN open
         if (this.isFullySynced === false) {
-
           try {
             await this.performPartialSync(btn, false);
           } catch (err) {
@@ -198,7 +210,10 @@ export class UserAnalyticsApp {
    * @param {HTMLElement} btn Optional button element to update UI.
    * @param {boolean} shouldRender Whether to re-render the dashboard after sync (default: true).
    */
-  async performPartialSync(btn: HTMLElement | null = null, shouldRender: boolean = true): Promise<void> {
+  async performPartialSync(
+    btn: HTMLElement | null = null,
+    shouldRender: boolean = true,
+  ): Promise<void> {
     if (AnalyticsDataManager.isGlobalSyncing) return;
 
     const originalText = btn ? btn.innerHTML : '';
@@ -210,7 +225,7 @@ export class UserAnalyticsApp {
       current: 0,
       total: 0,
       phase: 'FETCHING', // 'FETCHING' or 'PREPARING'
-      message: ''
+      message: '',
     };
 
     if (btn) {
@@ -222,7 +237,8 @@ export class UserAnalyticsApp {
     const render = () => {
       dotCount = (dotCount % 3) + 1;
       const dotStr = '.'.repeat(dotCount);
-      const percent = state.total > 0 ? Math.floor((state.current / state.total) * 100) : 0;
+      const percent =
+        state.total > 0 ? Math.floor((state.current / state.total) * 100) : 0;
 
       let headerHtml = '';
       let subHtml = '';
@@ -250,7 +266,7 @@ export class UserAnalyticsApp {
       state.total = total;
       if (msg) state.message = msg;
 
-      const isComplete = (total > 0 && current >= total);
+      const isComplete = total > 0 && current >= total;
       if (msg === 'PREPARING' || isComplete) {
         state.phase = 'PREPARING';
       } else {
@@ -260,11 +276,19 @@ export class UserAnalyticsApp {
 
     try {
       const MAX_QUICK_SYNC_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
-      const syncTotal = await this.dataManager.getTotalPostCount(this.context.targetUser);
+      const syncTotal = await this.dataManager.getTotalPostCount(
+        this.context.targetUser,
+      );
       if (syncTotal > 0 && syncTotal <= MAX_QUICK_SYNC_POSTS) {
-        await this.dataManager.quickSyncAllPosts(this.context.targetUser, onProgress);
+        await this.dataManager.quickSyncAllPosts(
+          this.context.targetUser,
+          onProgress,
+        );
       } else {
-        await this.dataManager.syncAllPosts(this.context.targetUser, onProgress);
+        await this.dataManager.syncAllPosts(
+          this.context.targetUser,
+          onProgress,
+        );
       }
 
       if (animInterval) clearInterval(animInterval);
@@ -273,8 +297,13 @@ export class UserAnalyticsApp {
 
       // Final Status (Green)
       if (shouldRender) {
-        const finalStats = await this.dataManager.getSyncStats(this.context.targetUser);
-        this.updateHeaderStatus(`Synced: ${finalStats.count.toLocaleString()} / ${finalStats.count.toLocaleString()}`, '#00ba7c');
+        const finalStats = await this.dataManager.getSyncStats(
+          this.context.targetUser,
+        );
+        this.updateHeaderStatus(
+          `Synced: ${finalStats.count.toLocaleString()} / ${finalStats.count.toLocaleString()}`,
+          '#00ba7c',
+        );
       }
 
       if (btn) {
@@ -303,7 +332,10 @@ export class UserAnalyticsApp {
    * @param {string|null} [customColor=null] CSS color for the text.
    * @return {Promise<void>}
    */
-  async updateHeaderStatus(progressText: string | null = null, customColor: string | null = null) {
+  async updateHeaderStatus(
+    progressText: string | null = null,
+    customColor: string | null = null,
+  ) {
     const el = document.getElementById(`${this.modalId}-header-status`);
     if (!el) return;
 
@@ -323,16 +355,18 @@ export class UserAnalyticsApp {
     const count = stats.count;
     const lastSyncKey = `danbooru_grass_last_sync_${this.context.targetUser.id}`;
     const lastSync = localStorage.getItem(lastSyncKey);
-    const lastSyncText = lastSync ? new Date(lastSync).toLocaleDateString() : 'Never';
+    const lastSyncText = lastSync
+      ? new Date(lastSync).toLocaleDateString()
+      : 'Never';
 
     // Dynamic Sync Threshold
     const settingsManager = new SettingsManager();
     const tolerance = settingsManager.getSyncThreshold();
-    const isSynced = (total > 0 && count >= total - tolerance);
+    const isSynced = total > 0 && count >= total - tolerance;
     this.isFullySynced = isSynced; // Store state for auto-sync check
 
     // Update UI
-    const statusColor = (stats.lastSync && isSynced) ? '#28a745' : '#d73a49';
+    const statusColor = stats.lastSync && isSynced ? '#28a745' : '#d73a49';
     el.innerHTML = '';
     el.style.color = statusColor;
     el.title = `Last synced: ${lastSyncText}`;
@@ -355,7 +389,7 @@ export class UserAnalyticsApp {
     settingBtn.style.marginLeft = '6px';
     settingBtn.style.fontSize = '12px';
     settingBtn.title = 'Configure Sync Threshold';
-    settingBtn.onclick = (e) => {
+    settingBtn.onclick = e => {
       e.stopPropagation();
       e.preventDefault();
       this.showSyncSettingsPopover(settingBtn);
@@ -401,7 +435,8 @@ export class UserAnalyticsApp {
     // Position logic
     const rect = target.getBoundingClientRect();
     const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-    const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+    const scrollLeft =
+      window.pageXOffset || document.documentElement.scrollLeft;
 
     popover.style.top = `${rect.top + scrollTop}px`;
     popover.style.left = `${rect.right + scrollLeft + 10}px`;
@@ -495,7 +530,11 @@ export class UserAnalyticsApp {
    * @param {string} contentHtml The HTML content to display.
    * @param {string|null} [helpHtml=null] Optional HTML content for the help tooltip.
    */
-  showSubModal(title: string, contentHtml: string, helpHtml: string | null = null) {
+  showSubModal(
+    title: string,
+    contentHtml: string,
+    helpHtml: string | null = null,
+  ) {
     let subOverlay = document.getElementById(`${this.modalId}-sub-overlay`);
 
     // Remove existing if any (simplifies logic)
@@ -522,7 +561,7 @@ export class UserAnalyticsApp {
       justifyContent: 'center',
       opacity: '0',
       transition: 'opacity 0.2s ease',
-      cursor: 'default' // reset cursor
+      cursor: 'default', // reset cursor
     });
 
     const subWindow = document.createElement('div');
@@ -537,7 +576,7 @@ export class UserAnalyticsApp {
       flexDirection: 'column',
       overflow: 'hidden',
       transform: 'scale(0.95)',
-      transition: 'transform 0.2s ease'
+      transition: 'transform 0.2s ease',
     });
 
     // Header
@@ -549,7 +588,7 @@ export class UserAnalyticsApp {
       justifyContent: 'space-between',
       alignItems: 'center',
       backgroundColor: '#f9f9f9',
-      position: 'relative'
+      position: 'relative',
     });
 
     // Simple Title Wrapper
@@ -567,7 +606,7 @@ export class UserAnalyticsApp {
         cursor: 'help',
         fontSize: '14px',
         color: '#888', // Replaces opacity to prevent child inheritance issues
-        position: 'relative'
+        position: 'relative',
       });
 
       // Hover Tooltip logic for Help
@@ -585,13 +624,13 @@ export class UserAnalyticsApp {
         zIndex: '11001',
         display: 'none',
         boxShadow: '0 4px 10px rgba(0,0,0,0.3)',
-        marginTop: '5px'
+        marginTop: '5px',
       });
       tooltip.innerHTML = helpHtml;
       helpBtn.appendChild(tooltip);
 
-      helpBtn.onmouseover = () => tooltip.style.display = 'block';
-      helpBtn.onmouseout = () => tooltip.style.display = 'none';
+      helpBtn.onmouseover = () => (tooltip.style.display = 'block');
+      helpBtn.onmouseout = () => (tooltip.style.display = 'none');
 
       titleWrapper.appendChild(helpBtn);
     }
@@ -606,7 +645,7 @@ export class UserAnalyticsApp {
       fontSize: '1.5em',
       lineHeight: '1',
       cursor: 'pointer',
-      color: '#666'
+      color: '#666',
     });
     closeBtn.onclick = () => closeSubModal();
     header.appendChild(closeBtn);
@@ -616,7 +655,7 @@ export class UserAnalyticsApp {
     const contentDiv = document.createElement('div');
     Object.assign(contentDiv.style, {
       padding: '20px',
-      overflowY: 'auto'
+      overflowY: 'auto',
     });
     contentDiv.innerHTML = contentHtml;
     subWindow.appendChild(contentDiv);
@@ -639,7 +678,7 @@ export class UserAnalyticsApp {
       }, 200);
     };
 
-    subOverlay.addEventListener('click', (e) => {
+    subOverlay.addEventListener('click', e => {
       if (e.target === subOverlay) closeSubModal();
     });
   }
@@ -672,10 +711,14 @@ export class UserAnalyticsApp {
       {
         const [preStats, preTotal] = await Promise.all([
           this.dataManager.getSyncStats(this.context.targetUser),
-          this.dataManager.getTotalPostCount(this.context.targetUser)
+          this.dataManager.getTotalPostCount(this.context.targetUser),
         ]);
 
-        if (preTotal > 0 && preTotal <= MAX_QUICK_SYNC_POSTS && preStats.count < preTotal) {
+        if (
+          preTotal > 0 &&
+          preTotal <= MAX_QUICK_SYNC_POSTS &&
+          preStats.count < preTotal
+        ) {
           content.innerHTML = `
             <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:#555;">
               <div class="di-spinner"></div>
@@ -687,13 +730,21 @@ export class UserAnalyticsApp {
             </div>
           `;
 
-          const qBar = content.querySelector('#analytics-quick-sync-bar') as HTMLElement;
-          const qMsg = content.querySelector('#analytics-quick-sync-msg') as HTMLElement;
+          const qBar = content.querySelector(
+            '#analytics-quick-sync-bar',
+          ) as HTMLElement;
+          const qMsg = content.querySelector(
+            '#analytics-quick-sync-msg',
+          ) as HTMLElement;
 
-          await this.dataManager.quickSyncAllPosts(this.context.targetUser, (c: number, t: number, msg?: string) => {
-            if (qBar && t > 0) qBar.style.width = `${Math.round((c / t) * 100)}%`;
-            if (qMsg && msg && msg !== 'PREPARING') qMsg.textContent = msg;
-          });
+          await this.dataManager.quickSyncAllPosts(
+            this.context.targetUser,
+            (c: number, t: number, msg?: string) => {
+              if (qBar && t > 0)
+                qBar.style.width = `${Math.round((c / t) * 100)}%`;
+              if (qMsg && msg && msg !== 'PREPARING') qMsg.textContent = msg;
+            },
+          );
 
           this.isFullySynced = true;
           this.updateHeaderStatus();
@@ -710,9 +761,28 @@ export class UserAnalyticsApp {
       }
 
       // Pre-fetch all data!
-      const dashboardData = await this.dataService.fetchDashboardData(this.context);
-      const { stats, total, summaryStats, distributions, topPosts, recentPopularPosts, randomPosts, milestones1k, scatterData, levelChanges, timelineMilestones, tagCloudGeneral, userStats, needsBackfill, dataManager } = dashboardData;
-      const { maxUploads, maxDate, firstUploadDate, lastUploadDate } = summaryStats;
+      const dashboardData = await this.dataService.fetchDashboardData(
+        this.context,
+      );
+      const {
+        stats,
+        total,
+        summaryStats,
+        distributions,
+        topPosts,
+        recentPopularPosts,
+        randomPosts,
+        milestones1k,
+        scatterData,
+        levelChanges,
+        timelineMilestones,
+        tagCloudGeneral,
+        userStats,
+        needsBackfill,
+        dataManager,
+      } = dashboardData;
+      const {maxUploads, maxDate, firstUploadDate, lastUploadDate} =
+        summaryStats;
       const today = new Date();
       const oneDay = 1000 * 60 * 60 * 24;
 
@@ -754,9 +824,11 @@ export class UserAnalyticsApp {
 
       // NSFW Logic
       setTimeout(() => {
-        const nsfwToggle = header.querySelector('#user-analytics-nsfw-toggle') as HTMLInputElement;
+        const nsfwToggle = header.querySelector(
+          '#user-analytics-nsfw-toggle',
+        ) as HTMLInputElement;
         if (nsfwToggle) {
-          nsfwToggle.onchange = (e) => {
+          nsfwToggle.onchange = e => {
             isNsfwEnabled = (e.target as HTMLInputElement).checked;
             localStorage.setItem(nsfwKey, String(isNsfwEnabled));
 
@@ -765,18 +837,27 @@ export class UserAnalyticsApp {
           };
         }
 
-
         if (dBtn) {
           dBtn.onclick = async () => {
-            if (confirm("⚠ FULL RESET WARNING ⚠\n\nThis will DELETE all local analytics data for this user and require a full re-sync.\n\nContinue?")) {
+            if (
+              confirm(
+                '⚠ FULL RESET WARNING ⚠\n\nThis will DELETE all local analytics data for this user and require a full re-sync.\n\nContinue?',
+              )
+            ) {
               dBtn.innerHTML = '⌛';
               await this.dataManager.clearUserData(this.context.targetUser);
-              alert("Data cleared.");
+              alert('Data cleared.');
               this.toggleModal(false);
             }
           };
-          dBtn.onmouseover = () => { dBtn.style.background = '#ffeef0'; dBtn.style.borderColor = '#d73a49'; };
-          dBtn.onmouseout = () => { dBtn.style.background = 'none'; dBtn.style.borderColor = '#e1e4e8'; };
+          dBtn.onmouseover = () => {
+            dBtn.style.background = '#ffeef0';
+            dBtn.style.borderColor = '#d73a49';
+          };
+          dBtn.onmouseout = () => {
+            dBtn.style.background = 'none';
+            dBtn.style.borderColor = '#e1e4e8';
+          };
         }
 
         // Stale Data Check (Last sync > 7 days)
@@ -838,7 +919,9 @@ export class UserAnalyticsApp {
 
       // Condition: Show Dashboard if Synced OR if we have data and total is unknown
       const tolerance = 10;
-      const needsSync = (total > 0 && stats.count < total - tolerance) || (total === 0 && stats.count === 0);
+      const needsSync =
+        (total > 0 && stats.count < total - tolerance) ||
+        (total === 0 && stats.count === 0);
 
       if (needsSync) {
         // Show Sync/Resume View
@@ -848,8 +931,10 @@ export class UserAnalyticsApp {
         syncDiv.style.color = '#555';
 
         let msg = `We have <strong>${stats.count}</strong> posts synced, but the user has <strong>${total || 'more'}</strong>.`;
-        if (total === 0 && stats.count > 0) msg = `We have <strong>${stats.count}</strong> posts synced. Total count unavailable.`;
-        if (stats.count === 0) msg = `To generate the report, we need to fetch all post metadata for <strong>${this.context.targetUser.name}</strong>.`;
+        if (total === 0 && stats.count > 0)
+          msg = `We have <strong>${stats.count}</strong> posts synced. Total count unavailable.`;
+        if (stats.count === 0)
+          msg = `To generate the report, we need to fetch all post metadata for <strong>${this.context.targetUser.name}</strong>.`;
 
         syncDiv.innerHTML = `
         <div style="font-size:48px; margin-bottom:20px;">💾</div>
@@ -880,7 +965,9 @@ export class UserAnalyticsApp {
         content.appendChild(syncDiv);
 
         // Setup Sync Button
-        const btn = syncDiv.querySelector('#analytics-start-sync') as HTMLButtonElement;
+        const btn = syncDiv.querySelector(
+          '#analytics-start-sync',
+        ) as HTMLButtonElement;
 
         // Check Global Sync State
         if (AnalyticsDataManager.isGlobalSyncing) {
@@ -890,15 +977,23 @@ export class UserAnalyticsApp {
           btn.style.cursor = 'not-allowed';
 
           // Restore Progress Bar
-          const progressDiv = syncDiv.querySelector('#analytics-main-progress') as HTMLElement;
-          const bar = syncDiv.querySelector('#analytics-main-bar') as HTMLElement;
-          const percent = syncDiv.querySelector('#analytics-main-percent') as HTMLElement;
-          const countText = syncDiv.querySelector('#analytics-main-count') as HTMLElement;
+          const progressDiv = syncDiv.querySelector(
+            '#analytics-main-progress',
+          ) as HTMLElement;
+          const bar = syncDiv.querySelector(
+            '#analytics-main-bar',
+          ) as HTMLElement;
+          const percent = syncDiv.querySelector(
+            '#analytics-main-percent',
+          ) as HTMLElement;
+          const countText = syncDiv.querySelector(
+            '#analytics-main-count',
+          ) as HTMLElement;
 
           progressDiv.style.display = 'block';
 
           // Initial State
-          const { current, total } = AnalyticsDataManager.syncProgress;
+          const {current, total} = AnalyticsDataManager.syncProgress;
           if (total > 0) {
             const p = Math.round((current / total) * 100);
             bar.style.width = `${p}%`;
@@ -919,10 +1014,18 @@ export class UserAnalyticsApp {
           btn.innerHTML = 'Fetching...';
           btn.disabled = true;
           btn.style.opacity = '0.7';
-          const progressDiv = syncDiv.querySelector('#analytics-main-progress') as HTMLElement;
-          const bar = syncDiv.querySelector('#analytics-main-bar') as HTMLElement;
-          const percent = syncDiv.querySelector('#analytics-main-percent') as HTMLElement;
-          const countText = syncDiv.querySelector('#analytics-main-count') as HTMLElement;
+          const progressDiv = syncDiv.querySelector(
+            '#analytics-main-progress',
+          ) as HTMLElement;
+          const bar = syncDiv.querySelector(
+            '#analytics-main-bar',
+          ) as HTMLElement;
+          const percent = syncDiv.querySelector(
+            '#analytics-main-percent',
+          ) as HTMLElement;
+          const countText = syncDiv.querySelector(
+            '#analytics-main-count',
+          ) as HTMLElement;
 
           progressDiv.style.display = 'block';
 
@@ -934,7 +1037,10 @@ export class UserAnalyticsApp {
             countText.textContent = `${c} / ${max > 0 ? max : '?'}`;
           };
 
-          await this.dataManager.syncAllPosts(this.context.targetUser, () => {}); // No-op: internal broadcast handles progress
+          await this.dataManager.syncAllPosts(
+            this.context.targetUser,
+            () => {},
+          ); // No-op: internal broadcast handles progress
 
           // Done
           this.updateHeaderStatus();
@@ -946,7 +1052,9 @@ export class UserAnalyticsApp {
 
       // --- VIEW 2: DASHBOARD (REPORT) ---
       // Show Header Controls
-      const headerControls = header.querySelector('#analytics-header-controls') as HTMLElement;
+      const headerControls = header.querySelector(
+        '#analytics-header-controls',
+      ) as HTMLElement;
       if (headerControls) headerControls.style.display = 'flex';
 
       // Show widgets
@@ -957,7 +1065,8 @@ export class UserAnalyticsApp {
       const summaryWrapper = document.createElement('div');
       summaryWrapper.className = 'di-summary-grid';
       summaryWrapper.style.display = 'grid';
-      summaryWrapper.style.gridTemplateColumns = 'repeat(auto-fit, minmax(300px, 1fr))';
+      summaryWrapper.style.gridTemplateColumns =
+        'repeat(auto-fit, minmax(300px, 1fr))';
       summaryWrapper.style.gap = '15px';
       summaryWrapper.style.marginBottom = '35px'; // Increased Spacing
 
@@ -969,7 +1078,12 @@ export class UserAnalyticsApp {
        * @param {string} [details=''] Additional HTML details.
        * @return {string} HTML string.
        */
-      const makeCard = (title: string, val: string | number, icon: string, details: string = '') => `
+      const makeCard = (
+        title: string,
+        val: string | number,
+        icon: string,
+        details: string = '',
+      ) => `
           <div style="background:#fff; border:1px solid #e1e4e8; border-radius:8px; padding:15px; display:flex; align-items:flex-start;">
              <div style="font-size:2em; margin-right:15px; margin-top:5px;">${icon}</div>
              <div style="flex:1; min-width:0;">
@@ -984,7 +1098,9 @@ export class UserAnalyticsApp {
       let avgUploads: number | string = 0;
       let daysSinceFirst = 0;
       if (firstUploadDate) {
-        daysSinceFirst = Math.floor((today.getTime() - firstUploadDate.getTime()) / oneDay);
+        daysSinceFirst = Math.floor(
+          (today.getTime() - firstUploadDate.getTime()) / oneDay,
+        );
         if (daysSinceFirst > 0) {
           avgUploads = (stats.count / daysSinceFirst).toFixed(2);
         }
@@ -998,7 +1114,7 @@ export class UserAnalyticsApp {
     `;
 
       // Calculations for Card 1 (Uploads) 1-Year
-      const { count1Year, maxUploads1Year, maxDate1Year } = summaryStats;
+      const {count1Year, maxUploads1Year, maxDate1Year} = summaryStats;
       let avgUploads1Year: number | string = 0;
       const daysSinceFirst1Year = Math.min(daysSinceFirst, 365);
       if (daysSinceFirst1Year > 0) {
@@ -1013,20 +1129,24 @@ export class UserAnalyticsApp {
     `;
 
       // Calculations for Card 1 (Uploads) 3rd Pane (Consistency)
-      const { maxStreak, maxStreakStart, maxStreakEnd, activeDays } = summaryStats;
-      let activeRatio = "0.0";
+      const {maxStreak, maxStreakStart, maxStreakEnd, activeDays} =
+        summaryStats;
+      let activeRatio = '0.0';
       if (daysSinceFirst > 0) {
         activeRatio = ((activeDays / daysSinceFirst) * 100).toFixed(1);
       } else if (activeDays > 0) {
-        activeRatio = "100.0";
+        activeRatio = '100.0';
       }
 
-      let activeAvg = "0.0";
+      let activeAvg = '0.0';
       if (activeDays > 0) {
         activeAvg = (stats.count / activeDays).toFixed(1);
       }
 
-      const streakPeriod = maxStreakStart && maxStreakEnd ? ` <span style="color:#888;">(${maxStreakStart} ~ ${maxStreakEnd})</span>` : '';
+      const streakPeriod =
+        maxStreakStart && maxStreakEnd
+          ? ` <span style="color:#888;">(${maxStreakStart} ~ ${maxStreakEnd})</span>`
+          : '';
 
       const consistencyDetails = `
        <div style="display:flex; flex-direction:column; gap:4px; border-left:2px solid #eee; padding-left:12px;">
@@ -1080,17 +1200,23 @@ export class UserAnalyticsApp {
       summaryWrapper.innerHTML += uploadCardHtml;
 
       // Calculations for Card 2 (Latest Post & Days)
-      const lastDate = lastUploadDate ? lastUploadDate.toISOString().split('T')[0] : 'N/A';
+      const lastDate = lastUploadDate
+        ? lastUploadDate.toISOString().split('T')[0]
+        : 'N/A';
 
       let daysSinceJoin = 0;
       let joinDateStr = '';
       if (this.context.targetUser.created_at) {
         const joinDate = new Date(this.context.targetUser.created_at);
-        daysSinceJoin = Math.floor((today.getTime() - joinDate.getTime()) / oneDay);
+        daysSinceJoin = Math.floor(
+          (today.getTime() - joinDate.getTime()) / oneDay,
+        );
         joinDateStr = joinDate.toISOString().split('T')[0];
       }
 
-      const firstUploadDateStr = firstUploadDate ? firstUploadDate.toISOString().split('T')[0] : '';
+      const firstUploadDateStr = firstUploadDate
+        ? firstUploadDate.toISOString().split('T')[0]
+        : '';
 
       // Build timeline events (all types merged, sorted by date ASC)
       interface TimelineEvent {
@@ -1106,7 +1232,7 @@ export class UserAnalyticsApp {
         tlEvents.push({
           date: joinDate,
           icon: '🎊',
-          html: `🎊 <strong>Join:</strong> ${daysSinceJoin.toLocaleString()} days ago <span style="color:#888;">(${joinDateStr})</span>`
+          html: `🎊 <strong>Join:</strong> ${daysSinceJoin.toLocaleString()} days ago <span style="color:#888;">(${joinDateStr})</span>`,
         });
       }
 
@@ -1115,7 +1241,7 @@ export class UserAnalyticsApp {
         tlEvents.push({
           date: firstUploadDate,
           icon: '🚀',
-          html: `🚀 <strong>1st Post:</strong> ${daysSinceFirst.toLocaleString()} days ago <span style="color:#888;">(${firstUploadDateStr})</span>`
+          html: `🚀 <strong>1st Post:</strong> ${daysSinceFirst.toLocaleString()} days ago <span style="color:#888;">(${firstUploadDateStr})</span>`,
         });
       }
 
@@ -1125,11 +1251,13 @@ export class UserAnalyticsApp {
         const icon = milestoneIcons[m.index] ?? '🏅';
         const label = `${m.index.toLocaleString()}th Post`;
         const dateStr = m.date.toISOString().split('T')[0];
-        const daysAgo = Math.floor((today.getTime() - m.date.getTime()) / oneDay);
+        const daysAgo = Math.floor(
+          (today.getTime() - m.date.getTime()) / oneDay,
+        );
         tlEvents.push({
           date: m.date,
           icon,
-          html: `${icon} <strong>${label}:</strong> ${daysAgo.toLocaleString()} days ago <span style="color:#888;">(${dateStr})</span>`
+          html: `${icon} <strong>${label}:</strong> ${daysAgo.toLocaleString()} days ago <span style="color:#888;">(${dateStr})</span>`,
         });
       });
 
@@ -1137,33 +1265,41 @@ export class UserAnalyticsApp {
       levelChanges.forEach(lc => {
         const icon = lc.isPromotion ? '⬆️' : '⬇️';
         const dateStr = lc.date.toISOString().split('T')[0];
-        const daysAgo = Math.floor((today.getTime() - lc.date.getTime()) / oneDay);
+        const daysAgo = Math.floor(
+          (today.getTime() - lc.date.getTime()) / oneDay,
+        );
         const fromLevelClass = getLevelClass(lc.fromLevel);
         const toLevelClass = getLevelClass(lc.toLevel);
         tlEvents.push({
           date: lc.date,
           icon,
-          html: `${icon} <strong class="${fromLevelClass}">${lc.fromLevel}</strong> → <strong class="${toLevelClass}">${lc.toLevel}</strong> ${daysAgo.toLocaleString()} days ago <span style="color:#888;">(${dateStr})</span>`
+          html: `${icon} <strong class="${fromLevelClass}">${lc.fromLevel}</strong> → <strong class="${toLevelClass}">${lc.toLevel}</strong> ${daysAgo.toLocaleString()} days ago <span style="color:#888;">(${dateStr})</span>`,
         });
       });
 
       // Latest Post (with total post count as Nth)
       if (lastUploadDate) {
-        const daysAgoLast = Math.floor((today.getTime() - lastUploadDate.getTime()) / oneDay);
-        const latestLabel = total > 0 ? `${total.toLocaleString()}th Post` : 'Latest Post';
+        const daysAgoLast = Math.floor(
+          (today.getTime() - lastUploadDate.getTime()) / oneDay,
+        );
+        const latestLabel =
+          total > 0 ? `${total.toLocaleString()}th Post` : 'Latest Post';
         tlEvents.push({
           date: lastUploadDate,
           icon: '📌',
-          html: `📌 <strong>${latestLabel}:</strong> ${daysAgoLast.toLocaleString()} days ago <span style="color:#888;">(${lastDate})</span>`
+          html: `📌 <strong>${latestLabel}:</strong> ${daysAgoLast.toLocaleString()} days ago <span style="color:#888;">(${lastDate})</span>`,
         });
       }
 
       // Sort by date ASC
       tlEvents.sort((a, b) => a.date.getTime() - b.date.getTime());
 
-      const timelineRows = tlEvents.map(ev =>
-        `<div class="di-timeline-row" style="white-space:nowrap;">${ev.html}</div>`
-      ).join('');
+      const timelineRows = tlEvents
+        .map(
+          ev =>
+            `<div class="di-timeline-row" style="white-space:nowrap;">${ev.html}</div>`,
+        )
+        .join('');
 
       // Details for Card 2 — scrollable timeline (3 rows visible by default).
       // Discoverability for overflowing rows uses two layers:
@@ -1181,28 +1317,41 @@ export class UserAnalyticsApp {
        </div>
     `;
 
-      summaryWrapper.innerHTML += makeCard('User History', '', '📅', dateDetails);
+      summaryWrapper.innerHTML += makeCard(
+        'User History',
+        '',
+        '📅',
+        dateDetails,
+      );
 
       dashboardDiv.appendChild(summaryWrapper);
 
       // Toggle `.has-overflow` on the wrap so the bottom fade gradient only
       // shows when there's actually more content below the fold. Also hide
       // the fade when the user has scrolled to the bottom.
-      const historyTimeline = dashboardDiv.querySelector('.di-user-history-timeline') as HTMLElement | null;
+      const historyTimeline = dashboardDiv.querySelector(
+        '.di-user-history-timeline',
+      ) as HTMLElement | null;
       const historyWrap = historyTimeline?.parentElement as HTMLElement | null;
       if (historyTimeline && historyWrap) {
         if (historyTimeline.scrollHeight > historyTimeline.clientHeight + 1) {
           historyWrap.classList.add('has-overflow');
           historyTimeline.addEventListener('scroll', () => {
-            const atBottom = historyTimeline.scrollTop + historyTimeline.clientHeight >= historyTimeline.scrollHeight - 1;
+            const atBottom =
+              historyTimeline.scrollTop + historyTimeline.clientHeight >=
+              historyTimeline.scrollHeight - 1;
             historyWrap.classList.toggle('scrolled-to-bottom', atBottom);
           });
         }
       }
 
       // Bind Play/Pause Button Logic
-      const btnPlayPause = dashboardDiv.querySelector('#analytics-upload-btn-play-pause') as HTMLElement;
-      const uploadCard = dashboardDiv.querySelector('#danbooru-insights-upload-card') as HTMLElement;
+      const btnPlayPause = dashboardDiv.querySelector(
+        '#analytics-upload-btn-play-pause',
+      ) as HTMLElement;
+      const uploadCard = dashboardDiv.querySelector(
+        '#danbooru-insights-upload-card',
+      ) as HTMLElement;
       if (btnPlayPause && uploadCard) {
         let isPaused = false;
         btnPlayPause.addEventListener('click', () => {
@@ -1231,7 +1380,8 @@ export class UserAnalyticsApp {
       // --- ROW 2: Top Stats (Pie + Top Post) ---
       const topStatsRow = document.createElement('div');
       topStatsRow.style.display = 'grid';
-      topStatsRow.style.gridTemplateColumns = 'repeat(auto-fit, minmax(300px, 1fr))'; // Responsive
+      topStatsRow.style.gridTemplateColumns =
+        'repeat(auto-fit, minmax(300px, 1fr))'; // Responsive
       topStatsRow.style.gap = '15px';
       topStatsRow.style.marginBottom = '35px'; // Increased Spacing
 
@@ -1253,10 +1403,25 @@ export class UserAnalyticsApp {
       topPostContainer.style.flexDirection = 'column';
 
       // --- PIE CHART WIDGET ---
-      const pieResult = renderPieWidget(pieContainer, distributions, isNsfwEnabled, this.dataManager, this.context, firstUploadDate);
+      const pieResult = renderPieWidget(
+        pieContainer,
+        distributions,
+        isNsfwEnabled,
+        this.dataManager,
+        this.context,
+        firstUploadDate,
+      );
 
       // --- TOP POSTS WIDGET ---
-      const topPostsResult = renderTopPostsWidget(topPostContainer, topPosts, recentPopularPosts, randomPosts, isNsfwEnabled, this.db, this.context);
+      const topPostsResult = renderTopPostsWidget(
+        topPostContainer,
+        topPosts,
+        recentPopularPosts,
+        randomPosts,
+        isNsfwEnabled,
+        this.db,
+        this.context,
+      );
 
       topStatsRow.appendChild(pieContainer);
       topStatsRow.appendChild(topPostContainer);
@@ -1268,7 +1433,12 @@ export class UserAnalyticsApp {
       milestonesDiv.style.marginTop = '20px';
       dashboardDiv.appendChild(milestonesDiv);
 
-      const milestonesResult = await renderMilestonesWidget(milestonesDiv, this.db, this.context, isNsfwEnabled);
+      const milestonesResult = await renderMilestonesWidget(
+        milestonesDiv,
+        this.db,
+        this.context,
+        isNsfwEnabled,
+      );
 
       // Wire up NSFW toggle to delegate to all widget callbacks
       applyNsfwUpdate = async () => {
@@ -1278,13 +1448,23 @@ export class UserAnalyticsApp {
       };
 
       // 4. Monthly Activity Chart
-      await renderHistoryChart(dashboardDiv, this.db, this.context, milestones1k, levelChanges);
+      await renderHistoryChart(
+        dashboardDiv,
+        this.db,
+        this.context,
+        milestones1k,
+        levelChanges,
+      );
 
       // 5. Created Tags Widget (lazy load) — after Monthly Activity
       const createdTagsContainer = document.createElement('div');
       createdTagsContainer.style.marginTop = '35px';
       dashboardDiv.appendChild(createdTagsContainer);
-      renderCreatedTagsWidget(createdTagsContainer, this.dataManager, this.context.targetUser);
+      renderCreatedTagsWidget(
+        createdTagsContainer,
+        this.dataManager,
+        this.context.targetUser,
+      );
 
       // 6. Tag Cloud Widget
       const tagCloudContainer = document.createElement('div');
@@ -1292,9 +1472,8 @@ export class UserAnalyticsApp {
       dashboardDiv.appendChild(tagCloudContainer);
       renderTagCloudWidget(tagCloudContainer, {
         initialData: tagCloudGeneral,
-        fetchData: (catId: number) => this.dataManager.getTagCloudData(
-          this.context.targetUser, catId
-        ),
+        fetchData: (catId: number) =>
+          this.dataManager.getTagCloudData(this.context.targetUser, catId),
         userName: this.context.targetUser.normalizedName,
         categories: [
           {id: 0, label: 'General', color: '#0075f8'},
@@ -1306,17 +1485,28 @@ export class UserAnalyticsApp {
 
       // 6. Scatter Plot Widget
       if (scatterData.length > 0) {
-        renderScatterPlot(dashboardDiv, scatterData, this.context, levelChanges, {
-          userStats,
-          needsBackfill,
-          runBackfill: needsBackfill
-            // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-            ? (onProgress) => dataManager.backfillPostMetadata(this.context.targetUser!, onProgress)
-            : undefined,
-          // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          refreshScatterData: () => dataManager.getScatterData(this.context.targetUser!),
-          fetchPostDetails: (postId: number) => dataManager.fetchPostDetails(postId),
-        });
+        renderScatterPlot(
+          dashboardDiv,
+          scatterData,
+          this.context,
+          levelChanges,
+          {
+            userStats,
+            needsBackfill,
+            runBackfill: needsBackfill
+              ? onProgress =>
+                  dataManager.backfillPostMetadata(
+                    this.context.targetUser!,
+                    onProgress,
+                  )
+              : undefined,
+
+            refreshScatterData: () =>
+              dataManager.getScatterData(this.context.targetUser!),
+            fetchPostDetails: (postId: number) =>
+              dataManager.fetchPostDetails(postId),
+          },
+        );
       }
 
       // 7. Footer credit (always last)

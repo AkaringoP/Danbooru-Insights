@@ -39,7 +39,11 @@ describe('getBestThumbnailUrl', () => {
   it('preferred type 없으면 첫 번째 variant URL 반환', () => {
     const post = {
       variants: [
-        {type: 'original', file_ext: 'png', url: 'http://example.com/original.png'},
+        {
+          type: 'original',
+          file_ext: 'png',
+          url: 'http://example.com/original.png',
+        },
       ],
     };
     expect(getBestThumbnailUrl(post)).toBe('http://example.com/original.png');

@@ -295,8 +295,16 @@ export interface TagAnalyticsMeta {
   historyData: HistoryEntry[];
   precalculatedMilestones: MilestoneEntry[];
   rankings: {
-    uploader: {allTime: UserRanking[]; year: UserRanking[]; first100: UserRanking[]};
-    approver: {allTime: UserRanking[]; year: UserRanking[]; first100: UserRanking[]};
+    uploader: {
+      allTime: UserRanking[];
+      year: UserRanking[];
+      first100: UserRanking[];
+    };
+    approver: {
+      allTime: UserRanking[];
+      year: UserRanking[];
+      first100: UserRanking[];
+    };
   };
   statusCounts: Record<string, number>;
   ratingCounts: Record<string, number>;
