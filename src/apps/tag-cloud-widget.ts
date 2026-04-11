@@ -1,5 +1,5 @@
 import * as d3 from 'd3';
-import type {TagCloudItem} from '../types';
+import type {D3Any, TagCloudItem} from '../types';
 
 /** Category configuration for a tag cloud tab. */
 export interface TagCloudCategory {
@@ -82,7 +82,7 @@ export function renderTagCloudWidget(
 
   // Closure state
   const cloudData: Record<number, TagCloudItem[]> = {};
-  const layoutCache: Record<number, any[]> = {};
+  const layoutCache: Record<number, D3Any[]> = {};
   let currentTab = categories[0]?.id ?? 0;
   let activeTag: string | null = null;
 
@@ -187,7 +187,7 @@ export function renderTagCloudWidget(
    * Creates an SVG with placed words and returns the wrapper div.
    */
   const createCloudSvg = (
-    placedWords: any[],
+    placedWords: D3Any[],
     width: number,
     color: string,
     startOpacity: string,
@@ -210,21 +210,21 @@ export function renderTagCloudWidget(
       .data(placedWords)
       .join('text')
       .attr('class', 'di-tag-cloud-word')
-      .style('font-size', (d: any) => `${d.size}px`)
-      .style('font-weight', (d: any) => (d.bold ? '700' : '500'))
+      .style('font-size', (d: D3Any) => `${d.size}px`)
+      .style('font-weight', (d: D3Any) => (d.bold ? '700' : '500'))
       .style('font-family', 'sans-serif')
       .style('fill', color)
       .attr('text-anchor', 'middle')
       .attr(
         'transform',
-        (d: any) => `translate(${d.x},${d.y})rotate(${d.rotate || 0})`,
+        (d: D3Any) => `translate(${d.x},${d.y})rotate(${d.rotate || 0})`,
       )
-      .text((d: any) => d.text)
+      .text((d: D3Any) => d.text)
       .style('pointer-events', 'all')
       .style('paint-order', 'stroke')
       .style('stroke', 'transparent')
       .style('stroke-width', isTouchDevice ? '8px' : '0px')
-      .on('mouseover', function (event: MouseEvent, d: any) {
+      .on('mouseover', function (event: MouseEvent, d: D3Any) {
         if (isTouchDevice) return;
         g.selectAll('text').style('opacity', 0.25);
         d3.select(this)
@@ -244,13 +244,13 @@ export function renderTagCloudWidget(
           .style('left', `${event.pageX + 15}px`)
           .style('top', `${event.pageY + 15}px`);
       })
-      .on('mouseout', function (_event: MouseEvent, d: any) {
+      .on('mouseout', function (_event: MouseEvent, d: D3Any) {
         if (isTouchDevice) return;
         g.selectAll('text').style('opacity', 1);
         d3.select(this).style('font-size', `${d.size}px`);
         tooltip.style('opacity', '0');
       })
-      .on('click', function (_event: MouseEvent, d: any) {
+      .on('click', function (_event: MouseEvent, d: D3Any) {
         if (isTouchDevice) {
           if (activeTag === d.tagName) {
             // 2nd tap on same tag → navigate
@@ -286,7 +286,7 @@ export function renderTagCloudWidget(
   /**
    * Crossfade transition: fade out old content, fade in new SVG simultaneously.
    */
-  const crossfadeTo = (placedWords: any[], width: number, color: string) => {
+  const crossfadeTo = (placedWords: D3Any[], width: number, color: string) => {
     const oldChildren = Array.from(cloudContainer.children) as HTMLElement[];
 
     const newWrapper = createCloudSvg(placedWords, width, color, '0');
@@ -333,7 +333,7 @@ export function renderTagCloudWidget(
 
     // Compute layout
     const words = computeFontSizes(data, MIN_FONT, MAX_FONT);
-    const cloud = (d3 as any).layout.cloud;
+    const cloud = (d3 as D3Any).layout.cloud;
     if (!cloud) {
       cloudContainer.innerHTML =
         '<div style="color:#c00;">d3-cloud library not loaded</div>';
@@ -346,8 +346,8 @@ export function renderTagCloudWidget(
       .padding(4)
       .rotate(() => 0)
       .font('sans-serif')
-      .fontSize((d: any) => d.size)
-      .on('end', (placedWords: any[]) => {
+      .fontSize((d: D3Any) => d.size)
+      .on('end', (placedWords: D3Any[]) => {
         layoutCache[currentTab] = placedWords;
         if (crossfade) {
           crossfadeTo(placedWords, width, color);

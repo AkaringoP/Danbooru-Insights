@@ -1,5 +1,25 @@
 // Shared interfaces and type aliases for DanbooruInsights.
 
+/**
+ * Escape hatch for d3 selections, scales, transitions, and datums.
+ *
+ * Per CLAUDE.md ("`d3` is typed as `any` — do not add `@types/d3` (breaks
+ * app file typing)"), d3 lacks first-class TypeScript types in this
+ * project. Use this alias **only at d3 call sites** instead of bare `any`
+ * so:
+ *   1. The intent is auditable in code review (you can grep `D3Any` to
+ *      find every d3 escape hatch).
+ *   2. The `@typescript-eslint/no-explicit-any` rule stays universally
+ *      enforced as `error` everywhere else — no file-level overrides.
+ *   3. If d3 typing improves later, removing the alias is a single
+ *      mechanical find-replace.
+ *
+ * Do **not** use `D3Any` for non-d3 reasons (API responses, JSON, lazy
+ * typing). Those must use real types and will be caught in review.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type D3Any = any;
+
 /** A named grass (heatmap level) color palette. */
 export interface GrassOption {
   name: string;

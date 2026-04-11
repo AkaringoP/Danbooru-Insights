@@ -2,6 +2,7 @@ import * as d3 from 'd3';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
+import type {D3Any} from '../types';
 import type {PieSlice} from './user-analytics-data';
 
 /** Context needed by chart widgets that access user data. */
@@ -426,8 +427,7 @@ export function renderPieWidget(
 
     svg
       .selectAll('path')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .data(pie(validData), (d: any) => d.data.label)
+      .data(pie(validData), (d: D3Any) => d.data.label)
       .join(
         enter =>
           enter

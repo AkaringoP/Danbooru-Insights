@@ -1,13 +1,14 @@
 import * as d3 from 'd3';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
+import type {D3Any} from '../types';
 
 /**
  * Chart renderer for TagAnalyticsApp.
  * Handles D3 chart rendering, milestone gallery, and ranking tables.
  */
 export class TagAnalyticsChartRenderer {
-  currentData: any;
-  currentMilestones: any;
+  currentData: D3Any;
+  currentMilestones: D3Any;
   resizeObserver: ResizeObserver | null;
   resizeTimeout: ReturnType<typeof setTimeout> | null;
   isMilestoneExpanded: boolean;
@@ -156,20 +157,17 @@ export class TagAnalyticsChartRenderer {
       return ordinalColor(key);
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const pie = (d3.pie() as any).value((d: any) => d.count).sort(null);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const arc = (d3.arc() as any).innerRadius(radius * 0.4).outerRadius(radius);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const arcHover = (d3.arc() as any)
+    const pie = (d3.pie() as D3Any).value((d: D3Any) => d.count).sort(null);
+    const arc = (d3.arc() as D3Any)
+      .innerRadius(radius * 0.4)
+      .outerRadius(radius);
+    const arcHover = (d3.arc() as D3Any)
       .innerRadius(radius * 0.4)
       .outerRadius(radius * 1.1);
 
     // Select existing SVG or create new one
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let svg: any = d3.select(container).select('svg');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let g: any;
+    let svg: D3Any = d3.select(container).select('svg');
+    let g: D3Any;
 
     if (svg.empty()) {
       svg = d3
@@ -202,19 +200,19 @@ export class TagAnalyticsChartRenderer {
       .style('opacity', '0')
       .style('box-shadow', '0 2px 5px rgba(0,0,0,0.2)');
 
-    const totalValue = d3.sum(data, (d: any) => d.count);
+    const totalValue = d3.sum(data, (d: D3Any) => d.count);
     const arcs = pie(data);
 
     // JOIN
 
-    const path = g.selectAll('path').data(arcs, (d: any) => d.data.key); // Use key for stable updates
+    const path = g.selectAll('path').data(arcs, (d: D3Any) => d.data.key); // Use key for stable updates
 
     // EXIT
     path
       .exit()
       .transition()
       .duration(500)
-      .attrTween('d', function (this: any, d: any) {
+      .attrTween('d', function (this: D3Any, d: D3Any) {
         const start = d.startAngle;
         const end = d.endAngle;
         const i = d3.interpolate(start, end);
@@ -229,7 +227,7 @@ export class TagAnalyticsChartRenderer {
     path
       .transition()
       .duration(500)
-      .attrTween('d', function (this: any, d: any) {
+      .attrTween('d', function (this: D3Any, d: D3Any) {
         const prev = this._current || {startAngle: 0, endAngle: 0, padAngle: 0};
         const i = d3.interpolate(prev, d);
         const self = this;
@@ -239,20 +237,20 @@ export class TagAnalyticsChartRenderer {
           return arc(val) || '';
         };
       })
-      .attr('fill', (d: any) => getColor(d.data.key));
+      .attr('fill', (d: D3Any) => getColor(d.data.key));
 
     // ENTER
     path
       .enter()
       .append('path')
-      .attr('fill', (d: any) => getColor(d.data.key))
+      .attr('fill', (d: D3Any) => getColor(d.data.key))
       .attr('stroke', '#fff')
       .style('stroke-width', '1px')
       .style('opacity', 0.8)
       .style('cursor', 'pointer')
       .transition()
       .duration(500)
-      .attrTween('d', function (this: any, d: any) {
+      .attrTween('d', function (this: D3Any, d: D3Any) {
         const i = d3.interpolate({startAngle: 0, endAngle: 0, padAngle: 0}, d);
         const self = this;
         return function (t: number) {
@@ -264,7 +262,7 @@ export class TagAnalyticsChartRenderer {
 
     // RE-ATTACH EVENTS (Merge Enter + Update)
     g.selectAll('path')
-      .on('mouseover', function (this: any, event: any, d: any) {
+      .on('mouseover', function (this: D3Any, event: D3Any, d: D3Any) {
         d3.select(this)
           .transition()
           .duration(200)
@@ -279,12 +277,12 @@ export class TagAnalyticsChartRenderer {
           .style('left', event.pageX + 10 + 'px')
           .style('top', event.pageY - 20 + 'px');
       })
-      .on('mousemove', function (this: any, event: any) {
+      .on('mousemove', function (this: D3Any, event: D3Any) {
         tooltip
           .style('left', event.pageX + 10 + 'px')
           .style('top', event.pageY - 20 + 'px');
       })
-      .on('mouseout', function (this: any) {
+      .on('mouseout', function (this: D3Any) {
         d3.select(this)
           .transition()
           .duration(200)
@@ -292,7 +290,7 @@ export class TagAnalyticsChartRenderer {
           .style('opacity', 0.8);
         tooltip.transition().duration(200).style('opacity', 0);
       })
-      .on('click', (_event: any, d: any) => {
+      .on('click', (_event: D3Any, d: D3Any) => {
         if (d.data.key === 'others') return;
 
         let query = '';
@@ -537,7 +535,7 @@ export class TagAnalyticsChartRenderer {
    * @param {!Array<Object>=} milestones Optional pre-calculated milestones for display.
    */
   renderHistoryCharts(data: any[], tagName: string, milestones?: any[]): void {
-    if (!(window as any).d3) {
+    if (!(window as D3Any).d3) {
       console.error('D3.js not loaded');
       return;
     }
@@ -800,29 +798,29 @@ export class TagAnalyticsChartRenderer {
       // d.date might be Date or String. Use safe conversion.
       .attr(
         'class',
-        (d: any) =>
+        (d: D3Any) =>
           `monthly-bar monthly-bar-${d.date instanceof Date ? d.date.toLocaleDateString('en-CA') : d.date}`,
       )
       .attr(
         'x',
-        (d: any) =>
+        (d: D3Any) =>
           x(
             d.date instanceof Date
               ? d.date.toLocaleDateString('en-CA')
               : d.date,
           ) ?? 0,
       )
-      .attr('y', (d: any) => y(d.count))
+      .attr('y', (d: D3Any) => y(d.count))
       .attr('width', x.bandwidth())
       .attr(
         'height',
-        (d: any) => height - margin.top - margin.bottom - y(d.count),
+        (d: D3Any) => height - margin.top - margin.bottom - y(d.count),
       )
       .attr('fill', '#69b3a2')
       .style('pointer-events', 'none') // Let clicks pass through to overlays
       .append('title')
       .text(
-        (d: any) =>
+        (d: D3Any) =>
           `${d.date instanceof Date ? d.date.toLocaleDateString('en-CA') : d.date}: ${d.count} posts`,
       );
 
@@ -968,12 +966,12 @@ export class TagAnalyticsChartRenderer {
 
     const x = d3
       .scaleTime()
-      .domain(d3.extent(data, (d: any) => new Date(d.date)) as [Date, Date])
+      .domain(d3.extent(data, (d: D3Any) => new Date(d.date)) as [Date, Date])
       .range([0, width - margin.left - margin.right]);
 
     const y = d3
       .scaleLinear()
-      .domain([0, d3.max(data, (d: any) => d.cumulative) ?? 0])
+      .domain([0, d3.max(data, (d: D3Any) => d.cumulative) ?? 0])
       .nice()
       .range([height - margin.top - margin.bottom, 0]);
 
@@ -986,10 +984,10 @@ export class TagAnalyticsChartRenderer {
       .attr('stroke-width', 1.5)
       .attr(
         'd',
-        (d3.area() as any)
-          .x((d: any) => x(new Date(d.date)))
+        (d3.area() as D3Any)
+          .x((d: D3Any) => x(new Date(d.date)))
           .y0(y(0))
-          .y1((d: any) => y(d.cumulative)),
+          .y1((d: D3Any) => y(d.cumulative)),
       );
 
     // X Axis
@@ -1068,7 +1066,7 @@ export class TagAnalyticsChartRenderer {
       })
       .on('mousemove', event => {
         try {
-          const bisectDate = d3.bisector((d: any) => new Date(d.date)).left;
+          const bisectDate = d3.bisector((d: D3Any) => new Date(d.date)).left;
           // Use pointer relative to SVG g element (which has margins)
           // But event is relative to page or viewport?
           // d3.pointer(event) returns [x, y] relative to current element
@@ -1084,7 +1082,7 @@ export class TagAnalyticsChartRenderer {
             const date0 = new Date(d0.date);
             const date1 = new Date(d1.date);
             d =
-              (x0 as any) - date0.getTime() > date1.getTime() - (x0 as any)
+              (x0 as D3Any) - date0.getTime() > date1.getTime() - (x0 as D3Any)
                 ? d1
                 : d0;
           } else if (d1) {
