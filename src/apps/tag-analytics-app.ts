@@ -9,7 +9,7 @@ import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import type {
   TagAnalyticsMeta,
-  PostRecord,
+  DanbooruPost,
   UserRanking,
   HistoryEntry,
   MilestoneEntry,
@@ -155,7 +155,8 @@ export class TagAnalyticsApp {
       this.injectAnalyticsButton(null, 0, 'Waiting...');
 
       // 0. Auto-Cleanup Old Records (>7 days)
-      this.dataService.cleanupOldCache();
+      // Fire-and-forget: background sweep, failure is non-fatal.
+      void this.dataService.cleanupOldCache();
 
       // [CACHE] Check Cache First
       const cachedData = await this.dataService.loadFromCache();
@@ -214,12 +215,12 @@ export class TagAnalyticsApp {
                 this.dataService.fetchTrendingPost(tagName, true),
               ]);
 
-            cachedData.latestPost = latestPost;
-            cachedData.trendingPost = trendingPost;
-            cachedData.trendingPostNSFW = trendingPostNSFW;
+            cachedData.latestPost = latestPost ?? undefined;
+            cachedData.trendingPost = trendingPost ?? undefined;
+            cachedData.trendingPostNSFW = trendingPostNSFW ?? undefined;
             cachedData.newPostCount = newPostCount24h;
 
-            this.dataService.saveToCache(cachedData);
+            await this.dataService.saveToCache(cachedData);
           } catch (e) {
             console.warn(
               '[TagAnalyticsApp] Failed to update volatile data for cache:',
@@ -253,7 +254,9 @@ export class TagAnalyticsApp {
       }
 
       let {firstPost, hundredthPost, timeToHundred} = initialStats;
-      const {totalCount, startDate, meta, initialPosts} = initialStats;
+      const {totalCount, startDate, initialPosts} = initialStats;
+      // meta starts as DanbooruTag but is mutated into TagAnalyticsMeta below
+      const meta = initialStats.meta as unknown as TagAnalyticsMeta;
 
       // Variable to hold updated First 100 Stats if backward scan happens
       let realFirst100Stats = null;
@@ -289,11 +292,14 @@ export class TagAnalyticsApp {
 
         // 3. Extract Milestones Locally
         const targets = this.dataService.getMilestoneTargets(totalCount);
-        const milestones: {milestone: number; post: PostRecord}[] = [];
+        const milestones: MilestoneEntry[] = [];
         targets.forEach(target => {
           const index = target - 1;
           if (initialPosts[index]) {
-            milestones.push({milestone: target, post: initialPosts[index]});
+            milestones.push({
+              milestone: target,
+              post: initialPosts[index],
+            } as MilestoneEntry);
           }
         });
 
@@ -305,7 +311,7 @@ export class TagAnalyticsApp {
         const oneYearAgo = new Date();
         oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
         const yearPosts = initialPosts.filter(
-          (p: PostRecord) =>
+          (p: DanbooruPost) =>
             p.created_at && new Date(p.created_at) >= oneYearAgo,
         );
         const localStatsYear = this.dataService.calculateLocalStats(yearPosts);
@@ -368,19 +374,19 @@ export class TagAnalyticsApp {
 
         // Attach Data
         meta.historyData = historyData;
-        meta.firstPost = firstPost;
-        meta.hundredthPost = hundredthPost;
-        meta.timeToHundred = timeToHundred;
+        meta.firstPost = firstPost ?? undefined;
+        meta.hundredthPost = hundredthPost ?? undefined;
+        meta.timeToHundred = timeToHundred ?? undefined;
         meta.statusCounts = statusCounts;
         meta.commentaryCounts = commentaryCounts;
         meta.ratingCounts = localStatsAllTime.ratingCounts;
         meta.precalculatedMilestones = milestones;
-        meta.latestPost = latestPost;
+        meta.latestPost = latestPost ?? undefined;
         meta.newPostCount = newPostCount;
 
         // Trending (Local Fallback if parallel fetch fails, though we use the API result here for consistency)
-        meta.trendingPost = trendingPost;
-        meta.trendingPostNSFW = trendingPostNSFW;
+        meta.trendingPost = trendingPost ?? undefined;
+        meta.trendingPostNSFW = trendingPostNSFW ?? undefined;
 
         // 6. Map User IDs to Names in Local Rankings
         const mapNames = (ranking: UserRanking[]) =>
@@ -417,7 +423,7 @@ export class TagAnalyticsApp {
           const copyrightMap: Record<string, number> = {};
           const characterMap: Record<string, number> = {};
 
-          initialPosts.forEach((p: PostRecord) => {
+          initialPosts.forEach((p: DanbooruPost) => {
             if (p.tag_string_copyright) {
               p.tag_string_copyright.split(' ').forEach((tag: string) => {
                 if (tag) copyrightMap[tag] = (copyrightMap[tag] || 0) + 1;
@@ -446,27 +452,29 @@ export class TagAnalyticsApp {
               )
             ).filter(e => e !== null);
 
-            meta.copyrightCounts = {};
+            const copyrightMap2: Record<string, number> = {};
             (filteredCopyright as [string, number][])
               .slice(0, 10)
               .forEach(([name, count]) => {
-                meta.copyrightCounts[name] = count;
+                copyrightMap2[name] = count;
               });
+            meta.copyrightCounts = copyrightMap2;
           }
 
           // Character: take top 10 directly (no implication filtering needed)
-          meta.characterCounts = {};
+          const characterMap2: Record<string, number> = {};
           Object.entries(characterMap)
             .sort((a, b) => (b[1] as number) - (a[1] as number))
             .slice(0, 10)
             .forEach(([name, count]) => {
-              meta.characterCounts[name] = count;
+              characterMap2[name] = count;
             });
+          meta.characterCounts = characterMap2;
         }
 
         this.injectAnalyticsButton(meta, 100, ''); // Clear status
         this._showUpdatedStatus(meta.updatedAt);
-        this.dataService.saveToCache(meta); // Save Small Tag Data
+        await this.dataService.saveToCache(meta); // Save Small Tag Data
 
         const finalTime = performance.now();
         console.log(
@@ -540,8 +548,10 @@ export class TagAnalyticsApp {
 
       // [OPTIMIZATION] Related Tags (Copyright/Character) - Queue immediately
       // Category 1=Artist, 3=Copyright, 4=Character
-      let copyrightPromise = Promise.resolve(null);
-      let characterPromise = Promise.resolve(null);
+      let copyrightPromise: Promise<Record<string, number> | null> =
+        Promise.resolve(null);
+      let characterPromise: Promise<Record<string, number> | null> =
+        Promise.resolve(null);
 
       if (meta.category === 1) {
         // Artist -> Fetch Copyright & Character
@@ -654,9 +664,17 @@ export class TagAnalyticsApp {
       };
 
       console.log('[TagAnalytics] [Phase 1] Executing Quick Stats...');
-      const quickResults = await Promise.all(quickTasks.map(trackProgress));
+      const quickResults = await Promise.all(
+        (
+          quickTasks as Array<{
+            id: string;
+            label: string;
+            promise: Promise<unknown>;
+          }>
+        ).map(trackProgress),
+      );
 
-      // Extract Phase 1 Results
+      // Extract Phase 1 Results — cast from unknown[] since quickTasks is heterogeneous
       const [
         statusCounts,
         // ratingCounts, // Removed
@@ -667,7 +685,16 @@ export class TagAnalyticsApp {
         copyrightCounts,
         characterCounts,
         commentaryCounts,
-      ] = quickResults;
+      ] = quickResults as [
+        Record<string, number>,
+        DanbooruPost | null,
+        number,
+        DanbooruPost | null,
+        DanbooruPost | null,
+        Record<string, number> | null,
+        Record<string, number> | null,
+        Record<string, number>,
+      ];
 
       console.log(
         `[TagAnalytics] [Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
@@ -689,12 +716,14 @@ export class TagAnalyticsApp {
         // [DELTA] History
         const lastHistory =
           baseData.historyData[baseData.historyData.length - 1];
-        const lastDate = lastHistory ? new Date(lastHistory.date) : startDate;
+        const lastDate = lastHistory
+          ? new Date(lastHistory.date)
+          : (startDate ?? new Date());
         const deltaStart = new Date(lastDate);
         deltaStart.setDate(deltaStart.getDate() - 7);
 
         historyPromise = this.dataService
-          .fetchHistoryDelta(tagName, deltaStart, startDate)
+          .fetchHistoryDelta(tagName, deltaStart, startDate ?? new Date())
           .then(delta =>
             this.dataService.mergeHistory(baseData.historyData, delta),
           );
@@ -725,6 +754,7 @@ export class TagAnalyticsApp {
           initialStats.first100Stats = {
             uploaderRanking: baseData.rankings.uploader.first100,
             approverRanking: baseData.rankings.approver.first100,
+            ratingCounts: {},
           };
           first100StatsPromise = Promise.resolve(initialStats.first100Stats);
         } else {
@@ -736,7 +766,7 @@ export class TagAnalyticsApp {
         // [FULL]
         historyPromise = measure(
           'Full History (Monthly)',
-          this.dataService.fetchMonthlyCounts(tagName, startDate),
+          this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date()),
         );
       }
 
@@ -778,7 +808,7 @@ export class TagAnalyticsApp {
             );
             const backwardResult = await this.dataService.fetchHistoryBackwards(
               tagName,
-              startDate,
+              (startDate ?? new Date()).toISOString().slice(0, 10),
               referenceTotal,
               forwardTotal,
             );
@@ -880,17 +910,40 @@ export class TagAnalyticsApp {
               baseData.rankings.uploader.first100
             )
               return stats;
+            if (!stats) return stats;
             return this.dataService.resolveFirst100Names(stats);
           }),
         },
       ];
 
       console.log('[TagAnalytics] [Phase 2] Awaiting Heavy Stats...');
-      const heavyResults = await Promise.all(heavyTasks.map(trackProgress));
+      const heavyResults = await Promise.all(
+        (
+          heavyTasks as Array<{
+            id: string;
+            label: string;
+            promise: Promise<unknown>;
+          }>
+        ).map(trackProgress),
+      );
 
-      // Extract results
-      const [resolvedRankings, historyData, milestones] = heavyResults;
-      let first100Stats = heavyResults[3];
+      // Extract results — cast from unknown[] since heavyTasks is heterogeneous
+      const [resolvedRankings, historyData, milestones, first100StatsRaw] =
+        heavyResults as [
+          {
+            uploaderAll: UserRanking[];
+            approverAll: UserRanking[];
+            uploaderYear: UserRanking[];
+            approverYear: UserRanking[];
+          },
+          HistoryEntry[],
+          MilestoneEntry[],
+          (
+            | {uploaderRanking: UserRanking[]; approverRanking: UserRanking[]}
+            | undefined
+          ),
+        ];
+      let first100Stats = first100StatsRaw;
 
       // [FIX] Override First 100 Stats if backward scan updated them
       if (realFirst100Stats) {
@@ -910,13 +963,10 @@ export class TagAnalyticsApp {
         resolvedRankings;
 
       // --- [PHASE 3] DEFERRED COUNTS (Optimized with Date Range) ---
-      // Now we have `first100Stats.startDate` or derive from historyData
       const minDate =
-        first100Stats && first100Stats.startDate
-          ? first100Stats.startDate
-          : historyData && historyData.length > 0
-            ? new Date(historyData[0].date)
-            : new Date('2005-01-01');
+        historyData && historyData.length > 0
+          ? new Date(historyData[0].date)
+          : new Date('2005-01-01');
       const minDateStr = minDate.toISOString().split('T')[0];
 
       console.log(
@@ -938,35 +988,35 @@ export class TagAnalyticsApp {
       // Attach fetched data to meta
       meta.statusCounts = statusCounts;
       meta.ratingCounts = ratingCounts;
-      meta.latestPost = latestPost;
+      meta.latestPost = latestPost ?? undefined;
       meta.newPostCount = newPostCount;
-      meta.trendingPost = trendingPost;
-      meta.trendingPostNSFW = trendingPostNSFW;
-      meta.copyrightCounts = copyrightCounts;
-      meta.characterCounts = characterCounts;
+      meta.trendingPost = trendingPost ?? undefined;
+      meta.trendingPostNSFW = trendingPostNSFW ?? undefined;
+      meta.copyrightCounts = copyrightCounts ?? undefined;
+      meta.characterCounts = characterCounts ?? undefined;
       meta.commentaryCounts = commentaryCounts;
       meta.historyData = historyData;
       meta.precalculatedMilestones = milestones;
-      meta.firstPost = firstPost; // Ensure this is passed
-      meta.hundredthPost = hundredthPost; // Ensure this is passed
+      meta.firstPost = firstPost ?? undefined; // Ensure this is passed
+      meta.hundredthPost = hundredthPost ?? undefined; // Ensure this is passed
 
       meta.rankings = {
         uploader: {
           allTime: uploaderAll,
           year: uploaderYear,
-          first100: first100Stats.uploaderRanking,
+          first100: first100Stats?.uploaderRanking ?? [],
         },
         approver: {
           allTime: approverAll,
           year: approverYear,
-          first100: first100Stats.approverRanking,
+          first100: first100Stats?.approverRanking ?? [],
         },
       };
 
       // Update Button state (Activation) and open modal
       this.injectAnalyticsButton(meta, 100, '');
       this._showUpdatedStatus(meta.updatedAt);
-      this.dataService.saveToCache(meta); // Save Full Tag Data
+      await this.dataService.saveToCache(meta); // Save Full Tag Data
       this.toggleModal(true);
       this.renderDashboard(meta);
     } finally {
@@ -1028,7 +1078,8 @@ export class TagAnalyticsApp {
             // Close existing modal to prevent conflicts or stale state
             this.toggleModal(false);
             // Re-fetch immediately since user explicitly requested reset
-            this._fetchAndRender();
+            // Fire-and-forget: triggered by reset button; errors surface in console.
+            void this._fetchAndRender();
           } catch (err) {
             console.error('[TagAnalyticsApp] Failed to delete cache:', err);
             alert('Failed to reset data. Check console for details.');
@@ -1075,22 +1126,22 @@ export class TagAnalyticsApp {
     popover.style.left = `${rect.right + scrollLeft + 10}px`;
 
     popover.innerHTML = `
-  <div style="margin-bottom:8px; line-height:1.4;">
+  <div class="di-section">
     <strong>Data Retention Period</strong><br>
     Records older than this (days) will be deleted.
   </div>
-  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
-     <input type="number" id="retention-days-input" value="${currentDays}" min="1" step="1" style="width:60px; padding:3px; border:1px solid #ddd; border-radius:3px; background:#fff; color:#333;">
+  <div class="di-row di-gapped">
+     <input type="number" id="retention-days-input" value="${currentDays}" min="1" step="1">
      <span>days</span>
   </div>
 
-  <div style="margin-bottom:8px; line-height:1.4; border-top:1px solid #eee; padding-top:8px;">
+  <div class="di-section di-divider">
     <strong>Sync Threshold</strong><br>
     Run partial sync if new posts exceed this count.
   </div>
-  <div style="display:flex; align-items:center; justify-content:space-between;">
-     <input type="number" id="sync-threshold-input" value="${currentThreshold}" min="1" step="1" style="width:60px; padding:3px; border:1px solid #ddd; border-radius:3px; background:#fff; color:#333;">
-     <button id="retention-save-btn" style="background:none; border:1px solid #28a745; color:#28a745; border-radius:4px; cursor:pointer; padding:2px 8px; font-size:11px;">✅ Save</button>
+  <div class="di-row">
+     <input type="number" id="sync-threshold-input" value="${currentThreshold}" min="1" step="1">
+     <button id="retention-save-btn" class="di-save-btn">✅ Save</button>
   </div>
 `;
 
@@ -1126,7 +1177,7 @@ export class TagAnalyticsApp {
         alert(
           `Settings Saved:\n- Retention: ${days} days\n- Sync Threshold: ${threshold} posts\n\nCleaning up old data now...`,
         );
-        this.dataService.cleanupOldCache(); // Run cleanup immediately
+        void this.dataService.cleanupOldCache(); // Run cleanup immediately (fire-and-forget)
       } else {
         alert('Please enter valid positive numbers.');
       }
@@ -1181,16 +1232,7 @@ export class TagAnalyticsApp {
       btn.style.verticalAlign = 'middle';
 
       btn.innerHTML = `
-        <div class="icon-container" style="
-            display: inline-flex; 
-            align-items: center; 
-            justify-content: center; 
-            width: 32px; 
-            height: 32px; 
-            background: #eef; 
-            border-radius: 6px; 
-            border: 1px solid #ccf;
-            transition: all 0.2s;">
+        <div class="di-tag-analytics-icon">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="18" y1="20" x2="18" y2="10"></line>
                 <line x1="12" y1="20" x2="12" y2="4"></line>
@@ -1299,9 +1341,9 @@ export class TagAnalyticsApp {
     modal.style.alignItems = 'center';
 
     modal.innerHTML = `
-          <div style="background: white; border-radius: 8px; width: 80%; max-width: 800px; max-height: 90vh; position: relative; display: flex; flex-direction: column;">
-              <button id="tag-analytics-close" style="position: absolute; top: 10px; right: 10px; background: none; border: none; font-size: 1.5rem; cursor: pointer; z-index: 10;">&times;</button>
-              <div id="tag-analytics-content" style="padding: 20px; overflow-y: auto; flex: 1; min-height: 0; -webkit-overflow-scrolling: touch;">
+          <div>
+              <button id="tag-analytics-close">&times;</button>
+              <div id="tag-analytics-content">
                   <h2>Loading...</h2>
               </div>
           </div>
@@ -1439,21 +1481,21 @@ export class TagAnalyticsApp {
     categoryLabel: string,
   ): string {
     return `
-      <div class="di-tag-header" style="border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: flex-end;">
+      <div class="di-tag-header">
           <div>
-              <h2 style="margin: 0 0 5px 0; color: ${titleColor};">${escapeHtml(tagData.name.replace(/_/g, ' '))}</h2>
-              <div style="display: flex; align-items: center; gap: 10px;">
-                  <span style="background: #eee; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; color: #555;">${categoryLabel}</span>
-                  <span style="font-size: 0.9em; color: #777;">Created: ${tagData.created_at ? new Date(tagData.created_at).toLocaleDateString('en-CA') : 'N/A'}</span>
-                  <span style="font-size: 0.9em; color: #777; border-left: 1px solid #ddd; padding-left: 10px; display: flex; align-items: center;" id="tag-updated-at">
+              <h2 style="color: ${titleColor};">${escapeHtml(tagData.name.replace(/_/g, ' '))}</h2>
+              <div class="di-tag-header-meta">
+                  <span class="di-category-badge">${categoryLabel}</span>
+                  <span class="di-tag-header-date">Created: ${tagData.created_at ? new Date(tagData.created_at).toLocaleDateString('en-CA') : 'N/A'}</span>
+                  <span class="di-tag-header-date di-tag-header-date-updated" id="tag-updated-at">
                       Updated: ${tagData.updatedAt ? new Date(tagData.updatedAt).toLocaleDateString('en-CA') : 'N/A'}
-                      <span id="tag-settings-anchor" style="display: inline-flex; align-items: center; margin-left: 5px;"></span>
+                      <span id="tag-settings-anchor"></span>
                   </span>
               </div>
           </div>
           <div>
-              <label style="display: flex; align-items: center; font-size: 0.9em; color: #555; cursor: pointer; user-select: none;">
-                  <input type="checkbox" id="tag-analytics-nsfw-toggle" style="margin-right: 6px;">
+              <label class="di-tag-header-nsfw">
+                  <input type="checkbox" id="tag-analytics-nsfw-toggle">
                   Enable NSFW
               </label>
           </div>
@@ -1475,42 +1517,42 @@ export class TagAnalyticsApp {
 
     const latestPostHtml = tagData.latestPost
       ? `
-      <div class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.latestPost.rating}" style="display: flex; flex-direction: column; align-items: center; width: 80px; flex-shrink: 0;">
-         <div style="border: 1px solid #ddd; padding: 2px; border-radius: 4px; background: #fff; width: 100%; aspect-ratio: 1/1; display: flex; align-items: center; justify-content: center; overflow: hidden;">
-            <a href="/posts/${tagData.latestPost.id}" target="_blank" style="display: block; width: 100%; height: 100%;">
-                <img src="${getBestThumbnailUrl(tagData.latestPost)}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+      <div class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.latestPost.rating}">
+         <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-latest">
+            <a href="/posts/${tagData.latestPost.id}" target="_blank">
+                <img src="${getBestThumbnailUrl(tagData.latestPost)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
             </a>
          </div>
-         <div style="font-size: 0.8em; font-weight: bold; color: #555; margin-top: 5px;">Latest</div>
-         <div style="font-size: 0.7em; color: #999;">${tagData.latestPost.created_at.split('T')[0]}</div>
+         <div class="di-nsfw-monitor-label">Latest</div>
+         <div class="di-nsfw-monitor-sublabel">${tagData.latestPost.created_at.split('T')[0]}</div>
       </div>
     `
       : '';
 
     const trendingSfwHtml = tagData.trendingPost
       ? `
-      <div id="trending-post-sfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPost.rating}" style="display: flex; flex-direction: column; align-items: center; width: 80px; flex-shrink: 0;">
-         <div style="border: 1px solid #ffd700; padding: 2px; border-radius: 4px; background: #fff; width: 100%; aspect-ratio: 1/1; display: flex; align-items: center; justify-content: center; overflow: hidden; box-shadow: 0 0 5px rgba(255, 215, 0, 0.3);">
-            <a href="/posts/${tagData.trendingPost.id}" target="_blank" style="display: block; width: 100%; height: 100%;">
-                  <img src="${getBestThumbnailUrl(tagData.trendingPost)}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+      <div id="trending-post-sfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPost.rating}">
+         <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-trending">
+            <a href="/posts/${tagData.trendingPost.id}" target="_blank">
+                  <img src="${getBestThumbnailUrl(tagData.trendingPost)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
             </a>
          </div>
-         <div style="font-size: 0.75em; font-weight: bold; color: #e0a800; margin-top: 5px;">Trending(3d)</div>
-         <div style="font-size: 0.7em; color: #999;">Score: ${tagData.trendingPost.score}</div>
+         <div class="di-nsfw-monitor-label-trending">Trending(3d)</div>
+         <div class="di-nsfw-monitor-sublabel">Score: ${tagData.trendingPost.score}</div>
       </div>
     `
       : '';
 
     const trendingNsfwHtml = tagData.trendingPostNSFW
       ? `
-      <div id="trending-post-nsfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPostNSFW.rating}" style="display: none; flex-direction: column; align-items: center; width: 80px; flex-shrink: 0;">
-         <div style="border: 1px solid #ff4444; padding: 2px; border-radius: 4px; background: #fff; width: 100%; aspect-ratio: 1/1; display: flex; align-items: center; justify-content: center; overflow: hidden; box-shadow: 0 0 5px rgba(255, 0, 0, 0.3);">
-            <a href="/posts/${tagData.trendingPostNSFW.id}" target="_blank" style="display: block; width: 100%; height: 100%;">
-                  <img src="${getBestThumbnailUrl(tagData.trendingPostNSFW)}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+      <div id="trending-post-nsfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPostNSFW.rating}">
+         <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-trending-nsfw">
+            <a href="/posts/${tagData.trendingPostNSFW.id}" target="_blank">
+                  <img src="${getBestThumbnailUrl(tagData.trendingPostNSFW)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
             </a>
          </div>
-         <div style="font-size: 0.75em; font-weight: bold; color: #cc0000; margin-top: 5px;">Trending(NSFW)</div>
-         <div style="font-size: 0.7em; color: #999;">Score: ${tagData.trendingPostNSFW.score}</div>
+         <div class="di-nsfw-monitor-label-trending-nsfw">Trending(NSFW)</div>
+         <div class="di-nsfw-monitor-sublabel">Score: ${tagData.trendingPostNSFW.score}</div>
       </div>
     `
       : '';
@@ -1523,19 +1565,19 @@ export class TagAnalyticsApp {
 
     return `
       <!-- Main Grid: Summary & Distribution -->
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 30px;">
+      <div class="di-summary-grid">
            <!-- Summary Card -->
-           <div class="di-card di-flex-col-between" style="min-height: 180px; position: relative;">
-              <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+           <div class="di-card di-flex-col-between di-summary-card">
+              <div class="di-summary-card-top">
                   <div>
-                      <div style="font-size: 0.9em; color: #666; font-weight: bold; margin-bottom: 5px;">Total Uploads</div>
-                      <div style="font-size: 2.2em; font-weight: bold; color: #007bff; line-height: 1.1;">${totalUploads}</div>
-                      <div style="font-size: 0.8em; color: #28a745; margin-top: 5px;">
-                          +${tagData.newPostCount || 0} <span style="color: #999; font-weight: normal;">(24h)</span>
+                      <div class="di-summary-stat-label">Total Uploads</div>
+                      <div class="di-summary-stat-value">${totalUploads}</div>
+                      <div class="di-summary-stat-trend">
+                          +${tagData.newPostCount || 0} <span class="di-summary-stat-trend-meta">(24h)</span>
                       </div>
                   </div>
                   <!-- Right Side: Latest & Trending -->
-                  <div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end;">
+                  <div class="di-summary-card-thumbs">
                       ${latestPostHtml}
                       ${trendingSfwHtml}
                       ${trendingNsfwHtml}
@@ -1544,20 +1586,20 @@ export class TagAnalyticsApp {
            </div>
 
            <!-- Distribution Card -->
-           <div style="background: #f9f9f9; padding: 15px; border-radius: 8px; min-height: 180px; position: relative; display: flex; flex-direction: column;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                 <div style="font-size: 0.9em; color: #666; font-weight: bold;">Distribution</div>
-                 <div class="pie-tabs" style="display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end;">
+           <div class="di-distribution-card">
+              <div class="di-distribution-header">
+                 <div class="di-distribution-title">Distribution</div>
+                 <div class="pie-tabs">
                     <button class="di-pie-tab active" data-type="status">Status</button>
                     <button class="di-pie-tab" data-type="rating">Rating</button>
                     ${extraPieTabsHtml}
                  </div>
               </div>
-              <div id="status-pie-chart-wrapper" style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; opacity: 0; transition: opacity 0.5s;">
-                 <div id="status-pie-chart" style="width: 120px; height: 120px; flex-shrink: 0;"></div>
-                 <div id="status-pie-legend" style="margin-left: 15px; font-size: 0.75em; flex: 1; min-width: 140px; max-height: 140px; overflow-y: auto; padding-right: 10px;"></div>
+              <div id="status-pie-chart-wrapper">
+                 <div id="status-pie-chart"></div>
+                 <div id="status-pie-legend"></div>
               </div>
-              <div id="status-pie-loading" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #888; font-size: 0.8em;">Loading data...</div>
+              <div id="status-pie-loading">Loading data...</div>
            </div>
       </div>
     `;
@@ -1576,15 +1618,15 @@ export class TagAnalyticsApp {
       ? tagData.hundredthPost.id
       : null;
     return `
-      <div style="margin-bottom: 30px;">
-           <div style="border-bottom: 2px solid #eee; margin-bottom: 15px; display: flex; gap: 20px; align-items: center;">
-              <h3 style="margin: 0; padding-bottom: 10px; font-size: 1.2em; color: #444; border-bottom: 3px solid #007bff; margin-bottom: -2px;">User Rankings</h3>
-              <div style="display: flex; gap: 10px; margin-bottom: 10px;">
-                  <button class="rank-tab active" data-role="uploader" style="border: none; background: none; font-weight: bold; color: #007bff; cursor: pointer; padding: 5px 10px;">Uploaders</button>
-                  <button class="rank-tab" data-role="approver" style="border: none; background: none; font-weight: normal; color: #888; cursor: pointer; padding: 5px 10px;">Approvers</button>
+      <div class="di-rankings-section">
+           <div class="di-rankings-header">
+              <h3 class="di-rankings-title">User Rankings</h3>
+              <div class="di-rank-tabs">
+                  <button class="rank-tab active" data-role="uploader">Uploaders</button>
+                  <button class="rank-tab" data-role="approver">Approvers</button>
               </div>
            </div>
-           <div id="ranking-container" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+           <div id="ranking-container">
               ${this.chartRenderer.renderRankingColumn('All-time', tagData.rankings.uploader.allTime, 'uploader', tagData.name, this.dataService.userNames)}
               ${this.chartRenderer.renderRankingColumn('Last 1 Year', tagData.rankings.uploader.year, 'uploader', tagData.name, this.dataService.userNames)}
               ${this.chartRenderer.renderRankingColumn('First 100 Post', tagData.rankings.uploader.first100, 'uploader', tagData.name, this.dataService.userNames, hundredthPostId)}
@@ -1599,21 +1641,21 @@ export class TagAnalyticsApp {
   private buildBottomSections(): string {
     return `
       <!-- Milestones Container -->
-      <div id="tag-analytics-milestones" style="margin-bottom: 30px; display:none;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 15px;">
-              <h2 style="color: #444; border-left: 4px solid #ffc107; padding-left: 10px; margin: 0;">Milestones</h2>
-              <button id="tag-milestones-toggle" style="background:none; border:none; color:#007bff; cursor:pointer; font-size:0.9em; display:none;">Show More</button>
+      <div id="tag-analytics-milestones">
+          <div class="di-milestones-header">
+              <h2>Milestones</h2>
+              <button id="tag-milestones-toggle">Show More</button>
           </div>
-          <div id="milestones-loading" style="color:#888; text-align:center; padding:20px;">Checking milestones...</div>
-          <div id="tag-milestones-grid-container" class="milestones-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 15px; max-height: 120px; overflow: hidden; transition: max-height 0.3s ease;"></div>
+          <div id="milestones-loading">Checking milestones...</div>
+          <div id="tag-milestones-grid-container" class="milestones-grid"></div>
       </div>
 
       <!-- Charts Container -->
-      <div id="tag-analytics-charts" style="margin-bottom: 30px;">
-          <h2 style="color: #444; border-left: 4px solid #007bff; padding-left: 10px; margin-bottom: 15px;">Post History</h2>
-          <div id="chart-loading" style="color: #888; text-align: center; padding: 20px;">Loading History Data...</div>
-          <div id="history-chart-monthly" style="width: 100%; height: 300px; margin-bottom: 20px;"></div>
-          <div id="history-chart-cumulative" style="width: 100%; height: 300px;"></div>
+      <div id="tag-analytics-charts">
+          <h2>Post History</h2>
+          <div id="chart-loading">Loading History Data...</div>
+          <div id="history-chart-monthly"></div>
+          <div id="history-chart-cumulative"></div>
       </div>
     `;
   }
@@ -1724,6 +1766,12 @@ export class TagAnalyticsApp {
                 milestonePosts,
                 () => this.updateNsfwVisibility(),
                 nextInfo,
+              );
+            })
+            .catch((err: unknown) => {
+              console.error(
+                '[TagAnalyticsApp] Failed to fetch milestones:',
+                err,
               );
             });
         }

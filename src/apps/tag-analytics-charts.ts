@@ -1,6 +1,12 @@
 import * as d3 from 'd3';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
-import type {D3Any} from '../types';
+import type {
+  D3Any,
+  TagAnalyticsMeta,
+  MilestoneEntry,
+  HistoryEntry,
+  UserRanking,
+} from '../types';
 
 /**
  * Chart renderer for TagAnalyticsApp.
@@ -43,7 +49,7 @@ export class TagAnalyticsChartRenderer {
    * @param {string} type - The type of data to render ('status', 'rating', 'copyright', 'character', 'commentary').
    * @param {Object} tagData - The full tag data object containing counts and other metadata.
    */
-  renderPieChart(type: string, tagData: any): void {
+  renderPieChart(type: string, tagData: TagAnalyticsMeta): void {
     const container = document.getElementById('status-pie-chart');
     const legendContainer = document.getElementById('status-pie-legend');
     const loading = document.getElementById('status-pie-loading');
@@ -59,9 +65,9 @@ export class TagAnalyticsChartRenderer {
     else if (type === 'commentary') {
       // Transform Commentary Counts
       const c = tagData.commentaryCounts;
-      const translated = c.translated || 0;
-      const requested = c.requested || 0;
-      const total = c.total || 0;
+      const translated = c?.translated || 0;
+      const requested = c?.requested || 0;
+      const total = c?.total || 0;
       const untagged = Math.max(0, total - (translated + requested)); // Avoid negative
 
       counts = {
@@ -212,11 +218,11 @@ export class TagAnalyticsChartRenderer {
       .exit()
       .transition()
       .duration(500)
-      .attrTween('d', function (this: D3Any, d: D3Any) {
+      .attrTween('d', (d: D3Any) => {
         const start = d.startAngle;
         const end = d.endAngle;
         const i = d3.interpolate(start, end);
-        return function (t: number) {
+        return (t: number) => {
           // Create a temp object for arc, do NOT modify d in place
           return arc({...d, startAngle: i(t)}) || '';
         };
@@ -230,10 +236,9 @@ export class TagAnalyticsChartRenderer {
       .attrTween('d', function (this: D3Any, d: D3Any) {
         const prev = this._current || {startAngle: 0, endAngle: 0, padAngle: 0};
         const i = d3.interpolate(prev, d);
-        const self = this;
-        return function (t: number) {
+        return (t: number) => {
           const val = i(t);
-          self._current = val;
+          this._current = val;
           return arc(val) || '';
         };
       })
@@ -252,10 +257,9 @@ export class TagAnalyticsChartRenderer {
       .duration(500)
       .attrTween('d', function (this: D3Any, d: D3Any) {
         const i = d3.interpolate({startAngle: 0, endAngle: 0, padAngle: 0}, d);
-        const self = this;
-        return function (t: number) {
+        return (t: number) => {
           const val = i(t);
-          self._current = val;
+          this._current = val;
           return arc(val) || '';
         };
       });
@@ -277,7 +281,7 @@ export class TagAnalyticsChartRenderer {
           .style('left', event.pageX + 10 + 'px')
           .style('top', event.pageY - 20 + 'px');
       })
-      .on('mousemove', function (this: D3Any, event: D3Any) {
+      .on('mousemove', (event: D3Any) => {
         tooltip
           .style('left', event.pageX + 10 + 'px')
           .style('top', event.pageY - 20 + 'px');
@@ -368,7 +372,7 @@ export class TagAnalyticsChartRenderer {
    * @param {function(): void} onNsfwUpdate Callback to apply NSFW visibility after rendering.
    */
   renderMilestones(
-    milestonePosts: any[],
+    milestonePosts: MilestoneEntry[],
     onNsfwUpdate: () => void,
     nextMilestone?: {totalPosts: number; nextTarget: number},
   ): void {
@@ -448,7 +452,7 @@ export class TagAnalyticsChartRenderer {
             <a href="/posts/${p.id}" target="_blank" class="di-milestone-link" style="font-weight: bold; font-size: 1.1em; color: #0969da; text-decoration: none; display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${label}</a>
             <div style="font-size: 0.8em; color: #555; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${dateStr}</div>
             <div style="font-size: 0.75em; color: #888; margin-top: 4px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                <a href="/users/${p.uploader_id}" target="_blank" class="${getLevelClass(p.uploader_level)}" style="text-decoration: none;">${escapeHtml(uploaderName)}</a>
+                <a href="/users/${p.uploader_id}" target="_blank" class="${getLevelClass(p.uploader_level ?? null)}" style="text-decoration: none;">${escapeHtml(uploaderName)}</a>
             </div>
             <a href="/posts/${p.id}" target="_blank" style="position: absolute; top: 10px; right: 10px; width: 60px; height: 60px; border-radius: 4px; overflow: hidden; background: #f0f0f0; display: block;">
                 <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
@@ -534,7 +538,11 @@ export class TagAnalyticsChartRenderer {
    * @param {string} tagName The tag name used for search URL construction.
    * @param {!Array<Object>=} milestones Optional pre-calculated milestones for display.
    */
-  renderHistoryCharts(data: any[], tagName: string, milestones?: any[]): void {
+  renderHistoryCharts(
+    data: HistoryEntry[],
+    tagName: string,
+    milestones?: MilestoneEntry[],
+  ): void {
     if (!(window as D3Any).d3) {
       console.error('D3.js not loaded');
       return;
@@ -543,16 +551,8 @@ export class TagAnalyticsChartRenderer {
     this.currentMilestones = milestones;
 
     // Sanitize Data: Ensure all dates are strings YYYY-MM-DD
-    const chartData = data.map(d => {
-      let dateStr = d.date;
-      if (d.date instanceof Date) {
-        dateStr = d.date.toISOString().slice(0, 10);
-      }
-      return {
-        ...d,
-        date: dateStr,
-      };
-    });
+    // (HistoryEntry.date is always a string; spread preserves all fields)
+    const chartData = data.map(d => ({...d}));
 
     this.currentData = chartData;
 
@@ -615,11 +615,11 @@ export class TagAnalyticsChartRenderer {
    * @param {!Array<Object>=} milestones Optional milestones to overlay.
    */
   renderBarChart(
-    data: any[],
+    data: HistoryEntry[],
     selector: string,
     title: string,
     tagName: string,
-    milestones?: any[],
+    milestones?: MilestoneEntry[],
   ): void {
     const container = document.querySelector(selector) as HTMLElement;
     if (!container) return;
@@ -709,19 +709,13 @@ export class TagAnalyticsChartRenderer {
 
     const x = d3
       .scaleBand()
-      // Handle both Date objects (old cache/calc) and strings (new fetch). Use Local Time YYYY-MM-DD
-      .domain(
-        data.map(d => {
-          if (d.date instanceof Date) return d.date.toLocaleDateString('en-CA');
-          return d.date; // already YYYY-MM-DD string
-        }),
-      )
+      .domain(data.map(d => d.date)) // HistoryEntry.date is always YYYY-MM-DD string
       .range([0, width - margin.left - margin.right])
       .padding(0.2);
 
     const y = d3
       .scaleLinear()
-      .domain([0, d3.max(data, d => d.count)])
+      .domain([0, d3.max(data, d => d.count) ?? 0])
       .nice()
       .range([height - margin.top - margin.bottom, 0]);
 
@@ -745,10 +739,9 @@ export class TagAnalyticsChartRenderer {
     // 4. Clickable Monthly Overlays (Full height clickable area)
     const overlayGroups = svg.append('g').attr('class', 'monthly-overlays');
     data.forEach(d => {
-      // d.date can be "YYYY-MM-DD" string or Date object
-      const dateStr =
-        d.date instanceof Date ? d.date.toLocaleDateString('en-CA') : d.date;
-      const dateObj = d.date instanceof Date ? d.date : new Date(dateStr);
+      // HistoryEntry.date is always a YYYY-MM-DD string
+      const dateStr = d.date;
+      const dateObj = new Date(dateStr);
 
       const nextDate = new Date(dateObj);
       nextDate.setMonth(nextDate.getMonth() + 1);
@@ -827,8 +820,8 @@ export class TagAnalyticsChartRenderer {
     // 5. Render Stars (Milestones) - Render AFTER bars and overlays
     if (milestones && milestones.length > 0) {
       // Group milestones by month for stacking
-      const milestonesByMonth: Record<string, any[]> = {};
-      milestones.forEach((m: any) => {
+      const milestonesByMonth: Record<string, MilestoneEntry[]> = {};
+      milestones.forEach((m: MilestoneEntry) => {
         // Filter milestones: show only #1 and multiples of 1000
         if (!m.post) return;
         if (m.milestone !== 1 && m.milestone % 1000 !== 0) return;
@@ -843,15 +836,14 @@ export class TagAnalyticsChartRenderer {
       const starGroups = svg.append('g').attr('class', 'di-milestone-stars');
 
       data.forEach(d => {
-        // Use local date methods for consistent matching
-        const mKey =
-          d.date instanceof Date ? d.date.toISOString().slice(0, 10) : d.date;
+        // HistoryEntry.date is always a YYYY-MM-DD string
+        const mKey = d.date;
         const monthMilestones = milestonesByMonth[mKey];
 
         if (monthMilestones) {
           const bx = (x(d.date) ?? 0) + x.bandwidth() / 2;
 
-          monthMilestones.forEach((m: any, si: number) => {
+          monthMilestones.forEach((m: MilestoneEntry, si: number) => {
             // Position stars inside the plot area, stacking downwards
             const starY = 12 + si * 14;
 
@@ -923,7 +915,7 @@ export class TagAnalyticsChartRenderer {
    * @param {string} selector The CSS selector for the container.
    * @param {string} title The title of the chart.
    */
-  renderAreaChart(data: any[], selector: string, title: string) {
+  renderAreaChart(data: HistoryEntry[], selector: string, title: string) {
     const container = document.querySelector(selector) as HTMLElement | null;
     if (!container) return;
     container.innerHTML = '';
@@ -1113,18 +1105,21 @@ export class TagAnalyticsChartRenderer {
             )
             .style('left', left + 'px')
             .style('top', top + 'px');
-        } catch (e) {
-          // console.warn(e);
+        } catch {
+          // Suppress tooltip positioning errors silently
         }
       });
   }
 
   renderRankingColumn(
     title: string,
-    data: any[],
+    data: UserRanking[],
     role: string,
     tagName: string,
-    userNames: Record<string, any>,
+    userNames: Record<
+      string,
+      {name: string; level: string; id?: number | string}
+    >,
     limitId: string | number | null = null,
   ): string {
     if (!data || data.length === 0) {
@@ -1135,13 +1130,11 @@ export class TagAnalyticsChartRenderer {
           </div>`;
     }
 
-    const maxCount = Math.max(
-      ...data.map((u: any) => u.count || u.post_count || 0),
-    );
+    const maxCount = Math.max(...data.map((u: UserRanking) => u.count || 0));
 
     const list = data
       .slice(0, 10)
-      .map((u: any, i: number) => {
+      .map((u: UserRanking, i: number) => {
         let nameHtml = 'Unknown';
         const name = u.name || `user_${u.id} `;
         // Normalize name: replace spaces with underscores for search query
@@ -1177,7 +1170,7 @@ export class TagAnalyticsChartRenderer {
           nameHtml = `<span class="di-ranking-username ${userClass}" style="cursor: default;">${safeName}</span>`;
         }
 
-        const count = u.count || u.post_count || 0;
+        const count = u.count || 0;
         const percentage = maxCount > 0 ? (count / maxCount) * 100 : 0;
 
         return `
@@ -1197,13 +1190,17 @@ export class TagAnalyticsChartRenderer {
 
   updateRankingTabs(
     role: string,
-    tagData: any,
-    userNames: Record<string, any>,
+    tagData: TagAnalyticsMeta,
+    userNames: Record<
+      string,
+      {name: string; level: string; id?: number | string}
+    >,
   ): void {
     const container = document.getElementById('ranking-container');
-    if (!container || !tagData.rankings || !tagData.rankings[role]) return;
+    const rankRole = role as 'uploader' | 'approver';
+    if (!container || !tagData.rankings || !tagData.rankings[rankRole]) return;
 
-    const rData = tagData.rankings[role];
+    const rData = tagData.rankings[rankRole];
     console.log(
       '[TagAnalytics] updateRankingTabs - hundredthPost:',
       tagData.hundredthPost,

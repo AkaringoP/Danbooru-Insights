@@ -1,21 +1,55 @@
 import * as d3 from 'd3';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
+import type {
+  LevelChangeEvent,
+  MonthlyStatEntry,
+} from '../core/analytics-data-manager';
 import {getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
-import type {D3Any} from '../types';
+import type {
+  D3Any,
+  TargetUser,
+  DistributionItem,
+  DanbooruPost,
+  MilestoneEntry,
+} from '../types';
 import type {PieSlice} from './user-analytics-data';
 
 /** Context needed by chart widgets that access user data. */
 export interface ChartContext {
-  targetUser: {
-    name: string;
-    normalizedName: string;
-    id: string | null;
-    created_at?: string;
-    joinDate: Date;
-    level_string: string | null;
-  };
+  targetUser: TargetUser;
 }
+
+/**
+ * Union type for pie chart tab data. The `status` and `rating` tabs return
+ * different shapes from getStatusDistribution/getRatingDistribution —
+ * those don't include `frequency`, `thumb`, or `isOther`. All other tabs
+ * return full `DistributionItem`s.
+ */
+type PieTabItem =
+  | DistributionItem
+  | {
+      name?: string;
+      rating?: string;
+      count: number;
+      label?: string;
+      isOther?: boolean;
+      color?: string;
+      frequency?: number;
+      thumb?: string | null;
+    };
+
+/**
+ * Real types returned by getTopPostsByType / getRecentPopularPosts / getRandomPosts.
+ * These are indexed by rating key or sfw/nsfw — NOT a single DanbooruPost.
+ */
+type TopPostsByRating = {
+  g: DanbooruPost | null;
+  s: DanbooruPost | null;
+  q: DanbooruPost | null;
+  e: DanbooruPost | null;
+};
+type TopPostsBySfw = {sfw: DanbooruPost | null; nsfw: DanbooruPost | null};
 
 // ============================================================
 // PIE CHART WIDGET
@@ -33,15 +67,14 @@ export interface ChartContext {
  */
 export function renderPieWidget(
   container: HTMLElement,
-  distributions: Record<string, any[]>,
+  distributions: Record<string, PieTabItem[]>,
   initialNsfwEnabled: boolean,
   dataManager: AnalyticsDataManager,
   context: ChartContext,
   firstUploadDate: Date | null,
 ): {onNsfwChange: (enabled: boolean) => void} {
   // Local state (closure variables)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pieData: Record<string, any[]> = {...distributions};
+  const pieData: Record<string, PieTabItem[]> = {...distributions};
   let currentPieTab = 'copyright';
   let renderPending = false;
   let isNsfwEnabled = initialNsfwEnabled;
@@ -50,8 +83,11 @@ export function renderPieWidget(
   for (const key of ['breasts', 'gender', 'commentary', 'translation']) {
     if (pieData[key]) {
       const data = pieData[key];
-      const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-      pieData[key] = data.map((d: any) => ({
+      const total = data.reduce(
+        (acc: number, c: PieTabItem) => acc + c.count,
+        0,
+      );
+      pieData[key] = data.map((d: PieTabItem) => ({
         ...d,
         frequency: total > 0 ? d.count / total : 0,
         value: total > 0 ? d.count / total : 0,
@@ -91,16 +127,20 @@ export function renderPieWidget(
     };
     const key = keyMap[contentType as string];
 
-    if (key && (pieData as Record<string, unknown[]>)[key]) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const incomingMap = new Map((data as any[]).map((d: any) => [d.name, d]));
-      const currentData = (pieData as Record<string, unknown[]>)[key];
+    if (key && pieData[key]) {
+      const incomingMap = new Map(
+        (data as PieTabItem[]).map((d: PieTabItem) => [d.name, d]),
+      );
+      const currentData = pieData[key];
 
-      currentData.forEach((item: any) => {
-        const update = incomingMap.get(item.name) as any;
+      currentData.forEach((item: PieTabItem) => {
+        const update = incomingMap.get(item.name);
         if (update && update.thumb && item.thumb !== update.thumb) {
           item.thumb = update.thumb;
-          if (item.details) item.details.thumb = update.thumb;
+          const withDetails = item as PieTabItem & {
+            details?: {thumb: string | null};
+          };
+          if (withDetails.details) withDetails.details.thumb = update.thumb;
         }
       });
 
@@ -200,8 +240,8 @@ export function renderPieWidget(
         'Absurdly Long Hair',
       ];
       data.sort(
-        (a: {name: string}, b: {name: string}) =>
-          order.indexOf(a.name) - order.indexOf(b.name),
+        (a: PieTabItem, b: PieTabItem) =>
+          order.indexOf(a.name ?? '') - order.indexOf(b.name ?? ''),
       );
     }
 
@@ -248,8 +288,7 @@ export function renderPieWidget(
       '#795548',
     ];
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const processedData: PieSlice[] = data.map((d: any, i: number) => {
+    const processedData: PieSlice[] = data.map((d: PieTabItem, i: number) => {
       if (
         [
           'rating',
@@ -262,29 +301,36 @@ export function renderPieWidget(
           'translation',
         ].includes(currentPieTab)
       ) {
-        return {
-          value: d.count,
-          label:
-            currentPieTab === 'rating'
-              ? ratingLabels[d.rating as keyof typeof ratingLabels] || d.rating
-              : d.label || d.name,
-          color:
-            currentPieTab === 'rating'
-              ? ratingColors[d.rating as keyof typeof ratingColors] || '#999'
-              : currentPieTab === 'hair_color' && d.color
-                ? d.color
-                : d.color ||
-                  (d.isOther ? '#bdbdbd' : palette[i % palette.length]),
-          details: d,
-        };
+        {
+          // d may be {rating, label} (status/rating tabs) or DistributionItem
+          const dFlexible = d as {rating?: string; label?: string};
+          return {
+            value: d.count,
+            label:
+              currentPieTab === 'rating'
+                ? ratingLabels[dFlexible.rating as keyof typeof ratingLabels] ||
+                  dFlexible.rating ||
+                  ''
+                : dFlexible.label || d.name || '',
+            color:
+              currentPieTab === 'rating'
+                ? ratingColors[dFlexible.rating as keyof typeof ratingColors] ||
+                  '#999'
+                : currentPieTab === 'hair_color' && d.color
+                  ? d.color
+                  : d.color ||
+                    (d.isOther ? '#bdbdbd' : palette[i % palette.length]),
+            details: d,
+          };
+        }
       } else {
         let sliceColor = d.isOther ? '#bdbdbd' : palette[i % palette.length];
         if (currentPieTab === 'hair_color' && d.color) {
           sliceColor = d.color;
         }
         return {
-          value: d.frequency,
-          label: d.name,
+          value: d.frequency ?? 0,
+          label: d.name ?? '',
           color: sliceColor,
           details: d,
         };
@@ -794,18 +840,12 @@ export function renderPieWidget(
       pieContent.innerHTML = '<div style="color:#666;">Loading...</div>';
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let data: any[] = [];
+      let data: PieTabItem[] = [];
+      const user = context.targetUser;
       if (tabName === 'rating') {
-        data = await dataManager.getRatingDistribution(
-          context.targetUser as any,
-          firstUploadDate,
-        );
+        data = await dataManager.getRatingDistribution(user, firstUploadDate);
       } else if (tabName === 'status') {
-        data = await dataManager.getStatusDistribution(
-          context.targetUser as any,
-          firstUploadDate,
-        );
+        data = await dataManager.getStatusDistribution(user, firstUploadDate);
         const statusColors: Record<string, string> = {
           active: '#2da44e',
           deleted: '#d73a49',
@@ -814,31 +854,23 @@ export function renderPieWidget(
           banned: '#6e7781',
           appealed: '#bf3989',
         };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data = data.map((d: any) => ({
+        data = data.map((d: PieTabItem) => ({
           ...d,
           color: statusColors[d.name as keyof typeof statusColors] || '#888',
         }));
       } else if (tabName === 'character') {
-        data = await dataManager.getCharacterDistribution(
-          context.targetUser as any,
-        );
+        data = await dataManager.getCharacterDistribution(user);
       } else if (tabName === 'copyright') {
-        data = await dataManager.getCopyrightDistribution(
-          context.targetUser as any,
-        );
+        data = await dataManager.getCopyrightDistribution(user);
       } else if (tabName === 'fav_copyright') {
-        data = await dataManager.getFavCopyrightDistribution(
-          context.targetUser as any,
-        );
+        data = await dataManager.getFavCopyrightDistribution(user);
       } else if (tabName === 'breasts') {
-        data = await dataManager.getBreastsDistribution(
-          context.targetUser as any,
+        data = await dataManager.getBreastsDistribution(user);
+        const total = data.reduce(
+          (acc: number, c: PieTabItem) => acc + c.count,
+          0,
         );
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data = data.map((d: any) => ({
+        data = data.map((d: PieTabItem) => ({
           ...d,
           frequency: total > 0 ? d.count / total : 0,
           value: total > 0 ? d.count / total : 0,
@@ -846,13 +878,12 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'gender') {
-        data = await dataManager.getGenderDistribution(
-          context.targetUser as any,
+        data = await dataManager.getGenderDistribution(user);
+        const total = data.reduce(
+          (acc: number, c: PieTabItem) => acc + c.count,
+          0,
         );
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data = data.map((d: any) => ({
+        data = data.map((d: PieTabItem) => ({
           ...d,
           frequency: total > 0 ? d.count / total : 0,
           value: total > 0 ? d.count / total : 0,
@@ -860,11 +891,12 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'commentary') {
-        data = await dataManager.getCommentaryDistribution(
-          context.targetUser as any,
+        data = await dataManager.getCommentaryDistribution(user);
+        const total = data.reduce(
+          (acc: number, c: PieTabItem) => acc + c.count,
+          0,
         );
-        const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-        data = data.map((d: any) => ({
+        data = data.map((d: PieTabItem) => ({
           ...d,
           frequency: total > 0 ? d.count / total : 0,
           value: total > 0 ? d.count / total : 0,
@@ -872,11 +904,12 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'translation') {
-        data = await dataManager.getTranslationDistribution(
-          context.targetUser as any,
+        data = await dataManager.getTranslationDistribution(user);
+        const total = data.reduce(
+          (acc: number, c: PieTabItem) => acc + c.count,
+          0,
         );
-        const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-        data = data.map((d: any) => ({
+        data = data.map((d: PieTabItem) => ({
           ...d,
           frequency: total > 0 ? d.count / total : 0,
           value: total > 0 ? d.count / total : 0,
@@ -904,13 +937,13 @@ export function renderPieWidget(
       if (mode && currentPieTab !== mode) {
         currentPieTab = mode;
         updatePieTabs();
-        loadTab(mode);
+        void loadTab(mode);
       }
     }
   });
 
   updatePieTabs();
-  loadTab(currentPieTab);
+  void loadTab(currentPieTab);
 
   return {
     onNsfwChange: (enabled: boolean) => {
@@ -924,7 +957,7 @@ export function renderPieWidget(
       if (!isNsfwEnabled && currentPieTab === 'breasts') {
         currentPieTab = 'copyright';
         updatePieTabs();
-        loadTab('copyright');
+        void loadTab('copyright');
       }
     },
   };
@@ -947,21 +980,21 @@ export function renderPieWidget(
  */
 export function renderTopPostsWidget(
   container: HTMLElement,
-  topPosts: any,
-  recentPopularPosts: any,
-  randomPosts: any,
+  topPosts: TopPostsByRating | null,
+  recentPopularPosts: TopPostsBySfw | null,
+  randomPosts: TopPostsBySfw | null,
   initialNsfwEnabled: boolean,
   db: Database,
   context: ChartContext,
 ): {onNsfwChange: (enabled: boolean) => void} {
   let isNsfwEnabled = initialNsfwEnabled;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const topPostGroups: Record<string, any> = {
-    most: topPosts,
-    recent: recentPopularPosts,
-    random: randomPosts,
-  };
+  const topPostGroups: Record<string, TopPostsByRating | TopPostsBySfw | null> =
+    {
+      most: topPosts,
+      recent: recentPopularPosts,
+      random: randomPosts,
+    };
 
   let currentWidgetMode = 'recent';
   let currentMostTab = 'g';
@@ -971,7 +1004,9 @@ export function renderTopPostsWidget(
     const group = topPostGroups[currentWidgetMode];
     const tabKey =
       currentWidgetMode === 'most' ? currentMostTab : currentSfwTab;
-    const data = group ? group[tabKey] : null;
+    const data = group
+      ? (group as Record<string, DanbooruPost | null>)[tabKey]
+      : null;
     const contentDiv = container.querySelector(
       '.top-post-content',
     ) as HTMLElement | null;
@@ -1030,13 +1065,21 @@ export function renderTopPostsWidget(
       return `<div>${icon} <strong>${label}:</strong> ${displayTags}</div>`;
     };
 
-    const artistLine = createTagLine('Artist', '🎨', data.tag_string_artist);
+    const artistLine = createTagLine(
+      'Artist',
+      '🎨',
+      data.tag_string_artist ?? '',
+    );
     const copyrightLine = createTagLine(
       'Copy',
       '©️',
-      data.tag_string_copyright,
+      data.tag_string_copyright ?? '',
     );
-    const charLine = createTagLine('Char', '👤', data.tag_string_character);
+    const charLine = createTagLine(
+      'Char',
+      '👤',
+      data.tag_string_character ?? '',
+    );
 
     contentDiv.innerHTML = `
       <div class="di-top-post-layout" style="display:flex; gap:15px; align-items:flex-start;">
@@ -1158,9 +1201,9 @@ export function renderTopPostsWidget(
 
       try {
         const newRandoms = await new AnalyticsDataManager(db).getRandomPosts(
-          context.targetUser as any,
+          context.targetUser,
         );
-        topPostGroups.random = newRandoms;
+        topPostGroups['random'] = newRandoms;
         renderTopPostContent();
       } catch (err) {
         console.error('Failed to refresh random post:', err);
@@ -1242,7 +1285,7 @@ export async function renderMilestonesWidget(
   const renderMilestones = async () => {
     const dm = new AnalyticsDataManager(db);
     const milestones = await dm.getMilestones(
-      context.targetUser as any,
+      context.targetUser,
       isNsfwEnabled,
       currentMilestoneStep,
     );
@@ -1285,16 +1328,16 @@ export async function renderMilestonesWidget(
           const v = (e.target as HTMLSelectElement).value;
           currentMilestoneStep =
             v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
-          renderMilestones();
+          void renderMilestones();
         };
       }
       return;
     }
 
     const containerId = 'analytics-milestone-container';
-    msHtml += `<div id="${containerId}" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap:10px; max-height:110px; overflow:hidden; transition: max-height 0.3s ease;">`;
+    msHtml += `<div id="${containerId}" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap:10px; max-height:110px; overflow:hidden; transition: max-height 0.3s ease;">`;
 
-    milestones.forEach((m: any) => {
+    milestones.forEach((m: MilestoneEntry) => {
       const p = m.post;
       const isSafe = p.rating === 's' || p.rating === 'g';
       const thumbUrl = getBestThumbnailUrl(p);
@@ -1333,7 +1376,7 @@ export async function renderMilestonesWidget(
     if (nextTarget !== null && nextTarget > totalPosts) {
       const remaining = nextTarget - totalPosts;
       const prevTarget =
-        milestones.length > 0 ? milestones[milestones.length - 1].index : 0;
+        milestones.length > 0 ? milestones[milestones.length - 1].milestone : 0;
       const span = nextTarget - prevTarget;
       const progressPct =
         span > 0
@@ -1377,7 +1420,7 @@ export async function renderMilestonesWidget(
         const v = (e.target as HTMLSelectElement).value;
         currentMilestoneStep =
           v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
-        renderMilestones();
+        void renderMilestones();
       };
     }
 
@@ -1434,8 +1477,8 @@ export async function renderHistoryChart(
   container: HTMLElement,
   db: Database,
   context: ChartContext,
-  milestones1k: any[],
-  levelChanges: any[],
+  milestones1k: MilestoneEntry[],
+  levelChanges: LevelChangeEvent[],
 ): Promise<void> {
   let minDate = null;
   if (levelChanges.length > 0) {
@@ -1446,7 +1489,7 @@ export async function renderHistoryChart(
     'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
   const monthly = await new AnalyticsDataManager(db).getMonthlyStats(
-    context.targetUser as any,
+    context.targetUser,
     minDate,
   );
   if (monthly.length === 0) return;
@@ -1463,7 +1506,7 @@ export async function renderHistoryChart(
   const padTop = 20;
   const yAxisWidth = 45;
 
-  const maxCount = Math.max(...monthly.map((m: any) => m.count));
+  const maxCount = Math.max(...monthly.map(m => m.count));
   const requiredWidth = padLeftScroll + padRight + monthly.length * minBarWidth;
   const vWidth = Math.max(800, requiredWidth);
   const vHeight = 200;
@@ -1527,7 +1570,7 @@ export async function renderHistoryChart(
   const step = barAreaWidth / monthly.length;
   const barWidth = step * 0.75;
 
-  monthly.forEach((m: any, idx: number) => {
+  monthly.forEach((m: MonthlyStatEntry, idx: number) => {
     const x = padLeftScroll + step * idx + (step - barWidth) / 2;
     const barH = (m.count / tickMax) * (vHeight - padBottom - padTop);
     const y = vHeight - padBottom - barH;
@@ -1571,7 +1614,7 @@ export async function renderHistoryChart(
 
   if (levelChanges && levelChanges.length > 0) {
     const [sY, sM] = monthly[0].date.split('-').map(Number);
-    levelChanges.forEach((lc: any) => {
+    levelChanges.forEach((lc: LevelChangeEvent) => {
       const pY = lc.date.getFullYear();
       const pM = lc.date.getMonth() + 1;
       const pD = lc.date.getDate();
@@ -1594,9 +1637,9 @@ export async function renderHistoryChart(
     });
   }
 
-  monthly.forEach((mo: any, idx: number) => {
+  monthly.forEach((mo: MonthlyStatEntry, idx: number) => {
     const mKey = mo.date;
-    const stars = milestones1k.filter((m: any) => {
+    const stars = milestones1k.filter((m: MilestoneEntry) => {
       const pDate = new Date(m.post.created_at);
       const k = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}`;
       return k === mKey;
@@ -1605,7 +1648,7 @@ export async function renderHistoryChart(
     if (stars.length > 0) {
       const x = padLeftScroll + step * idx + step / 2;
 
-      stars.forEach((m: any, si: number) => {
+      stars.forEach((m: MilestoneEntry, si: number) => {
         const y = 14 + si * 18;
 
         let fill = '#ffd700';
@@ -1613,10 +1656,10 @@ export async function renderHistoryChart(
         const style = 'filter: drop-shadow(0px 1px 1px rgba(0,0,0,0.3));';
         let animClass = '';
 
-        if (m.index === 1) {
+        if (m.milestone === 1) {
           fill = '#00e676';
           stroke = '#00a050';
-        } else if (m.index % 10000 === 0) {
+        } else if (m.milestone % 10000 === 0) {
           fill = '#ffb300';
           animClass = 'star-shiny';
         }
@@ -1625,7 +1668,7 @@ export async function renderHistoryChart(
           svg += `
                <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}; pointer-events: none;">
                    ★
-                   <title>Milestone #${m.index} (${new Date(m.post.created_at).toLocaleDateString()})</title>
+                   <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
                </text>
              `;
         } else {
@@ -1633,7 +1676,7 @@ export async function renderHistoryChart(
                <a href="/posts/${m.post.id}" target="_blank" style="cursor: pointer; pointer-events: all;" onclick="event.stopPropagation()">
                   <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}">
                      ★
-                     <title>Milestone #${m.index} (${new Date(m.post.created_at).toLocaleDateString()})</title>
+                     <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
                   </text>
                </a>
              `;
