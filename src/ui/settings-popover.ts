@@ -4,6 +4,59 @@ import type {SettingsManager} from '../core/settings';
 import type {Metric, GrassOption} from '../types';
 import type {Database} from '../core/database';
 
+/** Light palette for popover elements (when a light grass theme is selected). */
+const POPOVER_LIGHT: Record<string, string> = {
+  '--di-bg': '#ffffff',
+  '--di-text': '#333',
+  '--di-text-heading': '#444',
+  '--di-text-muted': '#888',
+  '--di-btn-text': '#555',
+  '--di-border-input': '#ddd',
+  '--di-border-light': '#eee',
+  '--di-shadow': 'rgba(0,0,0,0.2)',
+  '--di-shadow-light': 'rgba(0,0,0,0.1)',
+  '--di-link': '#007bff',
+  '--di-bg-tertiary': '#f0f0f0',
+};
+
+/** Dark palette for popover elements (when a dark grass theme is selected). */
+const POPOVER_DARK: Record<string, string> = {
+  '--di-bg': '#1a1a2e',
+  '--di-text': '#e0e0e0',
+  '--di-text-heading': '#d0d0d0',
+  '--di-text-muted': '#888',
+  '--di-btn-text': '#ccc',
+  '--di-border-input': '#444466',
+  '--di-border-light': '#2e2e48',
+  '--di-shadow': 'rgba(0,0,0,0.5)',
+  '--di-shadow-light': 'rgba(0,0,0,0.3)',
+  '--di-link': '#58a6ff',
+  '--di-bg-tertiary': '#2a2a44',
+};
+
+/** Dark grass theme keys (bottom row in the theme grid). */
+const DARK_THEMES = new Set([
+  'midnight',
+  'solarized_dark',
+  'newspaper',
+  'ocean',
+  'monokai',
+  'ember',
+]);
+
+/** Apply popover palette based on the selected grass theme. */
+export function applyPopoverPalette(
+  elements: HTMLElement[],
+  themeKey: string,
+): void {
+  const palette = DARK_THEMES.has(themeKey) ? POPOVER_DARK : POPOVER_LIGHT;
+  for (const el of elements) {
+    for (const [prop, val] of Object.entries(palette)) {
+      el.style.setProperty(prop, val);
+    }
+  }
+}
+
 /** Options for constructing the settings popover. */
 export interface SettingsPopoverOptions {
   settingsManager: SettingsManager;
@@ -136,6 +189,8 @@ export function createSettingsPopover(
           .querySelectorAll('.theme-icon')
           .forEach(el => el.classList.remove('active'));
         icon.classList.add('active');
+        // Update popover palette to match the selected grass theme
+        applyPopoverPalette([popover, grassFlyout], key);
       }
       // Toggle grass flyout (show on click of active theme, or on first apply)
       toggleGrassFlyout(icon, key);
@@ -148,7 +203,7 @@ export function createSettingsPopover(
   const grassFlyout = document.createElement('div');
   grassFlyout.id = 'danbooru-grass-flyout';
   grassFlyout.style.cssText =
-    'position:fixed;display:none;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);padding:8px;z-index:10001;flex-direction:column;gap:6px;';
+    'position:fixed;display:none;background:var(--di-bg, #fff);border:1px solid var(--di-border-input, #ddd);border-radius:8px;box-shadow:0 4px 12px var(--di-shadow, rgba(0,0,0,0.2));padding:8px;z-index:10001;flex-direction:column;gap:6px;';
   document.body.appendChild(grassFlyout);
 
   let currentFlyoutKey = '';
@@ -192,7 +247,7 @@ export function createSettingsPopover(
 
     const title = document.createElement('div');
     title.style.cssText =
-      'font-size:10px;color:#888;font-weight:600;margin-bottom:2px;';
+      'font-size:10px;color:var(--di-text-muted, #888);font-weight:600;margin-bottom:2px;';
     title.textContent = 'Grass Color';
     grassFlyout.appendChild(title);
 
@@ -200,7 +255,7 @@ export function createSettingsPopover(
       const row = document.createElement('div');
       row.style.cssText =
         'cursor:pointer;display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:4px;border:2px solid transparent;transition:all 0.15s;';
-      if (idx === currentIdx) row.style.borderColor = '#007bff';
+      if (idx === currentIdx) row.style.borderColor = 'var(--di-link, #007bff)';
 
       // Mini heatmap (4 cells)
       const preview = document.createElement('div');
@@ -213,12 +268,13 @@ export function createSettingsPopover(
       row.appendChild(preview);
 
       const label = document.createElement('div');
-      label.style.cssText = 'font-size:10px;color:#555;white-space:nowrap;';
+      label.style.cssText =
+        'font-size:10px;color:var(--di-btn-text, #555);white-space:nowrap;';
       label.textContent = idx === 0 ? `★ ${opt.name}` : opt.name;
       row.appendChild(label);
 
       row.onmouseover = () => {
-        if (idx !== currentIdx) row.style.background = '#f6f8fa';
+        if (idx !== currentIdx) row.style.background = 'var(--di-bg-tertiary, #f0f0f0)';
       };
       row.onmouseout = () => {
         row.style.background = '';
@@ -290,7 +346,7 @@ export function createSettingsPopover(
       input.style.color = '#ffffff';
       input.style.textShadow = '0px 1px 2px rgba(0,0,0,0.8)';
       input.style.fontWeight = 'bold';
-      input.style.border = '1px solid #d0d7de';
+      input.style.border = '1px solid var(--di-border-input, #ddd)';
       input.style.borderRadius = '4px';
 
       input.onchange = () => {
@@ -314,7 +370,7 @@ export function createSettingsPopover(
   // --- 3. Cache Info Section ---
   const cacheSection = document.createElement('div');
   cacheSection.style.marginTop = '15px';
-  cacheSection.style.borderTop = '1px solid #d0d7de';
+  cacheSection.style.borderTop = '1px solid var(--di-border-input, #ddd)';
   cacheSection.style.paddingTop = '10px';
 
   // Header with Purge Button
@@ -324,7 +380,7 @@ export function createSettingsPopover(
   cacheHeader.style.alignItems = 'center';
   cacheHeader.style.marginBottom = '5px';
   cacheHeader.innerHTML = `
-          <div style="font-weight:bold; color:#24292f;">Cache Info</div>
+          <div style="font-weight:bold; color:var(--di-text-heading, #444);">Cache Info</div>
           <button id="grass-purge-btn" title="Purge Cache" style="
             padding: 2px 6px;
             background-color: #ffebe9;
@@ -343,7 +399,7 @@ export function createSettingsPopover(
   cacheStatsContainer.id = 'grass-cache-container';
   cacheStatsContainer.innerHTML = `
           <div style="font-size:12px; margin-bottom:10px;">
-            <a href="#" id="grass-cache-trigger" style="color:#0969da; text-decoration:none;">[ Show Stats ]</a>
+            <a href="#" id="grass-cache-trigger" style="color:var(--di-link, #007bff); text-decoration:none;">[ Show Stats ]</a>
           </div>
           <div id="grass-cache-content" style="display:none;"></div>
         `;
@@ -372,7 +428,7 @@ export function createSettingsPopover(
     const stats = await dataManager.getCacheStats();
     (contentDiv as HTMLElement).innerHTML = `
             <table style="width:100%; border-collapse:collapse; font-size:11px;">
-              <tr style="border-bottom:1px solid #eee;">
+              <tr style="border-bottom:1px solid var(--di-border-light, #eee);">
                 <th style="text-align:left; padding:2px;">Source</th>
                 <th style="text-align:right; padding:2px;">Items</th>
                 <th style="text-align:right; padding:2px;">Size</th>
@@ -434,6 +490,9 @@ export function createSettingsPopover(
       onRefresh();
     }
   };
+
+  // Apply initial popover palette based on current grass theme
+  applyPopoverPalette([popover, grassFlyout], settingsManager.getTheme());
 
   return {popover, close: handleClose};
 }

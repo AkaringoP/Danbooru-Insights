@@ -9,7 +9,7 @@ import type {
 } from '../types';
 import type {Database} from '../core/database';
 import {SettingsManager} from '../core/settings';
-import {createSettingsPopover} from './settings-popover';
+import {createSettingsPopover, applyPopoverPalette} from './settings-popover';
 import {showApprovalsDetail} from './approval-detail-popover';
 import {isTouchDevice, createTwoStepTap} from './two-step-tap';
 
@@ -769,7 +769,7 @@ export class GraphRenderer {
             font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
             font-weight: normal !important;
           }
-          /* Controls */
+          /* Controls — always light (GrassApp chrome is theme-independent) */
           #grass-controls select {
             background-color: #f6f8fa !important;
             color: #24292f !important;
@@ -807,10 +807,10 @@ export class GraphRenderer {
             position: fixed;
             max-height: 70vh;
             overflow-y: auto;
-            background: #fff;
-            color: #24292f;
-            border: 1px solid #d0d7de;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            background: var(--di-bg, #fff);
+            color: var(--di-text, #333);
+            border: 1px solid var(--di-border-input, #ddd);
+            box-shadow: 0 4px 12px var(--di-shadow, rgba(0,0,0,0.2));
             border-radius: 8px;
             padding: 12px;
             z-index: 10000;
@@ -833,7 +833,7 @@ export class GraphRenderer {
             box-sizing: border-box;
           }
           .theme-icon:hover { transform: scale(1.1); }
-          .theme-icon.active { border-color: #0969da; }
+          .theme-icon.active { border-color: var(--di-link, #007bff); }
           .theme-icon-inner {
             position: absolute;
             top: 50%; left: 50%;
@@ -844,7 +844,7 @@ export class GraphRenderer {
           .popover-header {
             font-weight: 600;
             font-size: 12px;
-            color: #24292f;
+            color: var(--di-text, #333);
             margin-bottom: 8px;
           }
           .popover-select {
@@ -852,8 +852,8 @@ export class GraphRenderer {
             margin-bottom: 10px;
             padding: 4px;
             border-radius: 4px;
-            border: 1px solid #d0d7de;
-            background-color: #f6f8fa;
+            border: 1px solid var(--di-border-input, #ddd);
+            background-color: var(--di-bg-tertiary, #f0f0f0);
             font-size: 12px;
           }
           .threshold-row {
@@ -866,17 +866,17 @@ export class GraphRenderer {
             width: 60px;
             margin-left: auto;
             padding: 2px 4px;
-            border: 1px solid #d0d7de;
+            border: 1px solid var(--di-border-input, #ddd);
             border-radius: 4px;
           }
 
           /* Approvals Detail Popover */
           #danbooru-approvals-popover {
             position: absolute;
-            background: #fff;
-            color: #24292f;
-            border: 1px solid #d0d7de;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            background: var(--di-bg, #fff);
+            color: var(--di-text, #333);
+            border: 1px solid var(--di-border-input, #ddd);
+            box-shadow: 0 4px 20px var(--di-shadow, rgba(0,0,0,0.2));
             border-radius: 10px;
             padding: 16px;
             z-index: 100005;
@@ -890,7 +890,7 @@ export class GraphRenderer {
             align-items: center;
             margin-bottom: 12px;
             padding-bottom: 8px;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid var(--di-border-light, #eee);
           }
           #danbooru-approvals-popover .header-title {
             font-weight: 600;
@@ -898,7 +898,7 @@ export class GraphRenderer {
           }
           #danbooru-approvals-popover .close-btn {
             cursor: pointer;
-            color: #888;
+            color: var(--di-text-muted, #888);
             font-size: 18px;
             line-height: 1;
           }
@@ -964,7 +964,7 @@ export class GraphRenderer {
           }
           #danbooru-approvals-popover .gallery-btn {
             cursor: pointer;
-            color: #0969da;
+            color: var(--di-link, #007bff);
             display: flex;
             align-items: center;
             padding: 2px;
@@ -973,8 +973,8 @@ export class GraphRenderer {
             text-decoration: none;
           }
           #danbooru-approvals-popover .gallery-btn:hover {
-            background: #f0f7ff;
-            color: #054ada;
+            background: var(--di-bg-tertiary, #f0f0f0);
+            color: var(--di-link, #007bff);
           }
           #danbooru-approvals-popover .post-grid {
             display: grid;
@@ -988,15 +988,15 @@ export class GraphRenderer {
             display: block;
             text-align: center;
             padding: 4px;
-            background: #f6f8fa;
-            border: 1px solid #d0d7de;
+            background: var(--di-bg-tertiary, #f0f0f0);
+            border: 1px solid var(--di-border-input, #ddd);
             border-radius: 4px;
             font-size: 11px;
-            color: #0969da;
+            color: var(--di-link, #007bff);
             text-decoration: none;
           }
           #danbooru-approvals-popover .post-link:hover {
-            background: #0969da;
+            background: var(--di-link, #007bff);
             color: #fff;
           }
           #danbooru-approvals-popover .pagination {
@@ -1008,8 +1008,8 @@ export class GraphRenderer {
           }
           #danbooru-approvals-popover .page-btn {
             padding: 2px 8px;
-            border: 1px solid #d0d7de;
-            background: #fff;
+            border: 1px solid var(--di-border-input, #ddd);
+            background: var(--di-bg, #fff);
             border-radius: 4px;
             cursor: pointer;
           }
@@ -1113,10 +1113,12 @@ export class GraphRenderer {
       };
 
       settingsBtn.onmouseover = () => {
-        settingsBtn.style.backgroundColor = '#eaeef2';
+        settingsBtn.style.backgroundColor = '#f6f8fa';
+        settingsBtn.style.filter = 'brightness(0.95)';
       };
       settingsBtn.onmouseout = () => {
         settingsBtn.style.backgroundColor = '#f6f8fa';
+        settingsBtn.style.filter = '';
       };
       footerLeft.appendChild(settingsBtn);
 
@@ -1143,10 +1145,12 @@ export class GraphRenderer {
       toggleBtn.innerHTML = chevronDown;
 
       toggleBtn.onmouseover = () => {
-        toggleBtn.style.backgroundColor = '#eaeef2';
+        toggleBtn.style.backgroundColor = '#f6f8fa';
+        toggleBtn.style.filter = 'brightness(0.95)';
       };
       toggleBtn.onmouseout = () => {
         toggleBtn.style.backgroundColor = '#f6f8fa';
+        toggleBtn.style.filter = '';
       };
 
       footerLeft.appendChild(toggleBtn);
@@ -1628,6 +1632,12 @@ export class GraphRenderer {
     const fetcher = this.dataManager
       ? (postId: number) => this.dataManager!.fetchPostDetails(postId)
       : undefined;
-    return showApprovalsDetail(this.db, dateStr, userId, event, fetcher);
+    await showApprovalsDetail(this.db, dateStr, userId, event, fetcher);
+    // Apply GrassApp theme palette to the approvals popover
+    const pop = document.getElementById('danbooru-approvals-popover');
+    if (pop) {
+      const themeKey = this.settingsManager.getTheme();
+      applyPopoverPalette([pop], themeKey);
+    }
   }
 }

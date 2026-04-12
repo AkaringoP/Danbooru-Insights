@@ -3,6 +3,74 @@
  * and improve performance by utilizing CSS classes and pseudo-classes.
  */
 export const GLOBAL_CSS = `
+    /* -- Dark Mode: CSS Variables --
+       Light values are provided as var() fallbacks in each rule.
+       Dark overrides are scoped to OUR container elements only — NOT on
+       body or :root — to avoid triggering a full-page style recalculation
+       on Danbooru's large DOM (thousands of nodes). */
+    [data-di-theme="dark"] {
+      /* Surface */
+      --di-bg: #1a1a2e;
+      --di-bg-secondary: #22223a;
+      --di-bg-tertiary: #2a2a44;
+      --di-bg-glass: rgba(26, 26, 46, 0.95);
+
+      /* Text */
+      --di-text: #e0e0e0;
+      --di-text-secondary: #aaaaaa;
+      --di-text-muted: #888888;
+      --di-text-faint: #777777;
+      --di-text-heading: #d0d0d0;
+
+      /* Border */
+      --di-border: #3a3a55;
+      --di-border-light: #2e2e48;
+      --di-border-input: #444466;
+
+      /* Interactive */
+      --di-link: #58a6ff;
+      --di-btn-bg: #2a2a44;
+      --di-btn-text: #cccccc;
+      --di-btn-active-bg: #58a6ff;
+      --di-btn-active-text: #ffffff;
+      --di-btn-hover-bg: #3a3a55;
+
+      /* Card */
+      --di-card-bg: #22223a;
+      --di-card-border: #2e2e48;
+
+      /* Chart */
+      --di-chart-bg: #1a1a2e;
+      --di-chart-grid: #2e2e48;
+      --di-chart-axis: #cccccc;
+      --di-chart-axis-secondary: #999999;
+
+      /* Scrollbar */
+      --di-scrollbar-thumb: #444466;
+      --di-scrollbar-thumb-hover: #555588;
+
+      /* Shadow */
+      --di-shadow: rgba(0, 0, 0, 0.5);
+      --di-shadow-light: rgba(0, 0, 0, 0.3);
+
+      /* Overlay */
+      --di-overlay-bg: rgba(0, 0, 0, 0.6);
+
+      /* Spinner */
+      --di-spinner-track: #2a2a44;
+      --di-spinner-accent: #58a6ff;
+
+      /* Table */
+      --di-table-row-hover: #2a2a44;
+      --di-table-border: #2e2e48;
+
+      /* Hover (fade) */
+      --di-fade-end: rgba(26, 26, 46, 0.95);
+
+      /* Input */
+      --di-input-bg: #2a2a44;
+    }
+
     /* -- Animations & Base -- */
     @keyframes di-slide-in-out-a {
         0%, 28% { transform: translateX(0); opacity: 1; }
@@ -30,7 +98,7 @@ export const GLOBAL_CSS = `
       width: 100vw;
       height: 100vh;
       height: 100dvh;
-      background: rgba(0, 0, 0, 0.4);
+      background: var(--di-overlay-bg, rgba(0, 0, 0, 0.4));
       z-index: 10000;
       display: none;
       justify-content: center;
@@ -52,14 +120,14 @@ export const GLOBAL_CSS = `
       width: 80%;
       max-width: 1000px;
       height: 80%;
-      background: rgba(255, 255, 255, 0.9);
+      background: var(--di-bg-glass, rgba(255, 255, 255, 0.9));
       border-radius: 12px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+      box-shadow: 0 10px 30px var(--di-shadow, rgba(0, 0, 0, 0.2));
       backdrop-filter: blur(10px);
       display: flex;
       flex-direction: column;
       position: relative;
-      color: #333;
+      color: var(--di-text, #333333);
       font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
     }
     #danbooru-grass-modal-close {
@@ -68,12 +136,12 @@ export const GLOBAL_CSS = `
       right: 20px;
       font-size: 24px;
       cursor: pointer;
-      color: #666;
+      color: var(--di-text-secondary, #666666);
       z-index: 10;
       line-height: 1;
     }
     #danbooru-grass-modal-close:hover {
-      color: #000;
+      color: var(--di-text, #333333);
     }
     #danbooru-grass-modal-content {
       padding: 40px;
@@ -109,7 +177,7 @@ export const GLOBAL_CSS = `
        nothing to scroll. */
     .di-user-history-timeline {
       scrollbar-width: thin;
-      scrollbar-color: #bbb transparent;
+      scrollbar-color: var(--di-scrollbar-thumb, #cccccc) transparent;
     }
     .di-user-history-timeline::-webkit-scrollbar {
       width: 8px;
@@ -118,11 +186,11 @@ export const GLOBAL_CSS = `
       background: transparent;
     }
     .di-user-history-timeline::-webkit-scrollbar-thumb {
-      background: #ccc;
+      background: var(--di-scrollbar-thumb, #cccccc);
       border-radius: 4px;
     }
     .di-user-history-timeline:hover::-webkit-scrollbar-thumb {
-      background: #999;
+      background: var(--di-scrollbar-thumb-hover, #999999);
     }
     .di-user-history-wrap {
       position: relative;
@@ -134,7 +202,7 @@ export const GLOBAL_CSS = `
       right: 8px;
       bottom: 0;
       height: 14px;
-      background: linear-gradient(to bottom, rgba(255,255,255,0) 0%, rgba(255,255,255,0.95) 100%);
+      background: linear-gradient(to bottom, transparent 0%, var(--di-fade-end, rgba(255, 255, 255, 0.95)) 100%);
       pointer-events: none;
     }
     .di-user-history-wrap.has-overflow.scrolled-to-bottom::after {
@@ -146,8 +214,8 @@ export const GLOBAL_CSS = `
     .di-spinner {
         width: 50px;
         height: 50px;
-        border: 5px solid #f3f3f3;
-        border-top: 5px solid #0969da;
+        border: 5px solid var(--di-spinner-track, #f3f3f3);
+        border-top: 5px solid var(--di-spinner-accent, #0969da);
         border-radius: 50%;
         animation: di-spin 1s linear infinite;
     }
@@ -182,13 +250,13 @@ export const GLOBAL_CSS = `
     }
     .di-play-pause-btn:hover {
         opacity: 1;
-        background-color: #f0f0f0;
+        background-color: var(--di-bg-tertiary, #f0f0f0);
     }
 
     /* -- Pie Chart Tabs -- */
     .di-pie-tab {
-        background: #eee;
-        color: #555;
+        background: var(--di-btn-bg, #eeeeee);
+        color: var(--di-btn-text, #555555);
         border: none;
         padding: 2px 10px;
         border-radius: 12px;
@@ -196,9 +264,9 @@ export const GLOBAL_CSS = `
         cursor: pointer;
         transition: all 0.2s;
     }
-    .di-pie-tab:hover { background: #ddd; }
-    .di-pie-tab.active { background: #555; color: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
-    .di-pie-tab:not(.active):hover { background: #ddd; }
+    .di-pie-tab:hover { background: var(--di-btn-hover-bg, #dddddd); }
+    .di-pie-tab.active { background: var(--di-btn-active-bg, #555555); color: var(--di-btn-active-text, #ffffff); box-shadow: 0 1px 3px var(--di-shadow, rgba(0, 0, 0, 0.2)); }
+    .di-pie-tab:not(.active):hover { background: var(--di-btn-hover-bg, #dddddd); }
 
     /* -- User Rankings (Tag Analytics) -- */
     .di-ranking-username:hover { font-weight: bold; }
@@ -208,7 +276,7 @@ export const GLOBAL_CSS = `
     .user-platinum { color: #777892; } .user-platinum:hover { color: #9192a7; }
     .user-gold { color: #fd9200; } .user-gold:hover { color: #ffc5a5; }
     .user-member { color: #0075f8; } .user-member:hover { color: #5091fa; }
-    .user-janitor { color: #000; } .user-janitor:hover { color: #555; }
+    .user-janitor { color: var(--di-text, #333333); } .user-janitor:hover { color: var(--di-text-secondary, #666666); }
 
     /* -- Hover Utilities -- */
     .di-hover-translate-up { transition: transform 0.2s; }
@@ -220,8 +288,8 @@ export const GLOBAL_CSS = `
     .di-hover-text-primary { transition: color 0.2s; }
 
     /* -- Layout Utilities -- */
-    .di-card { background: #f9f9f9; padding: 15px; border-radius: 8px; }
-    .di-card-sm { background: #f9f9f9; padding: 10px; border-radius: 6px; border: 1px solid #eee; }
+    .di-card { background: var(--di-card-bg, #f9f9f9); padding: 15px; border-radius: 8px; }
+    .di-card-sm { background: var(--di-card-bg, #f9f9f9); padding: 10px; border-radius: 6px; border: 1px solid var(--di-card-border, #eeeeee); }
     .di-flex-col-between { display: flex; flex-direction: column; justify-content: space-between; }
     .di-flex-row-between { display: flex; justify-content: space-between; align-items: center; }
     .di-flex-center { display: flex; justify-content: center; align-items: center; }
@@ -242,9 +310,9 @@ export const GLOBAL_CSS = `
         justify-content: space-between;
         align-items: center;
         font-size: 0.75em;
-        color: #888;
+        color: var(--di-text-muted, #888888);
         padding-top: 8px;
-        border-top: 1px solid #eee;
+        border-top: 1px solid var(--di-border-light, #eeeeee);
     }
 
     /* -- Created Tags Widget -- */
@@ -255,20 +323,20 @@ export const GLOBAL_CSS = `
     }
     .di-created-tags-table th {
         text-align: left;
-        color: #666;
+        color: var(--di-text-secondary, #666666);
         font-weight: 600;
         padding: 6px 8px;
-        border-bottom: 2px solid #e1e4e8;
+        border-bottom: 2px solid var(--di-border, #e1e4e8);
         font-size: 0.85em;
         text-transform: uppercase;
         letter-spacing: 0.3px;
     }
     .di-created-tags-table td {
         padding: 5px 8px;
-        border-bottom: 1px solid #f0f0f0;
+        border-bottom: 1px solid var(--di-table-border, #f0f0f0);
     }
     .di-created-tags-row:hover {
-        background: #f6f8fa;
+        background: var(--di-table-row-hover, #f6f8fa);
     }
     .di-created-tags-row a {
         text-decoration: none;
@@ -305,7 +373,7 @@ export const GLOBAL_CSS = `
         line-height: 1.4;
     }
     #tag-analytics-settings-popover .di-section.di-divider {
-        border-top: 1px solid #eee;
+        border-top: 1px solid var(--di-border-light, #eeeeee);
         padding-top: 8px;
     }
     #tag-analytics-settings-popover .di-row {
@@ -319,10 +387,10 @@ export const GLOBAL_CSS = `
     #tag-analytics-settings-popover input[type="number"] {
         width: 60px;
         padding: 3px;
-        border: 1px solid #ddd;
+        border: 1px solid var(--di-border-input, #dddddd);
         border-radius: 3px;
-        background: #fff;
-        color: #333;
+        background: var(--di-input-bg, #ffffff);
+        color: var(--di-text, #333333);
     }
     #tag-analytics-settings-popover .di-save-btn {
         background: none;
@@ -341,15 +409,15 @@ export const GLOBAL_CSS = `
         justify-content: center;
         width: 32px;
         height: 32px;
-        background: #eef;
-        border: 1px solid #ccf;
+        background: var(--di-bg-secondary, #f9f9f9);
+        border: 1px solid var(--di-border, #e1e4e8);
         border-radius: 6px;
         transition: all 0.2s;
     }
 
     /* Modal scaffold (createModal) */
     #tag-analytics-modal > div {
-        background: white;
+        background: var(--di-bg, #ffffff);
         border-radius: 8px;
         width: 80%;
         max-width: 800px;
@@ -364,6 +432,7 @@ export const GLOBAL_CSS = `
         right: 10px;
         background: none;
         border: none;
+        color: var(--di-text, #333);
         font-size: 1.5rem;
         cursor: pointer;
         z-index: 10;
@@ -378,7 +447,7 @@ export const GLOBAL_CSS = `
 
     /* Dashboard header (buildDashboardHeader) */
     .di-tag-header {
-        border-bottom: 1px solid #eee;
+        border-bottom: 1px solid var(--di-border-light, #eeeeee);
         padding-bottom: 15px;
         margin-bottom: 20px;
         display: flex;
@@ -395,18 +464,18 @@ export const GLOBAL_CSS = `
         gap: 10px;
     }
     .di-category-badge {
-        background: #eee;
+        background: var(--di-btn-bg, #eeeeee);
         padding: 2px 8px;
         border-radius: 4px;
         font-size: 0.8em;
-        color: #555;
+        color: var(--di-btn-text, #555555);
     }
     .di-tag-header-date {
         font-size: 0.9em;
-        color: #777;
+        color: var(--di-text-faint, #999999);
     }
     .di-tag-header-date-updated {
-        border-left: 1px solid #ddd;
+        border-left: 1px solid var(--di-border-input, #dddddd);
         padding-left: 10px;
         display: flex;
         align-items: center;
@@ -420,7 +489,7 @@ export const GLOBAL_CSS = `
         display: flex;
         align-items: center;
         font-size: 0.9em;
-        color: #555;
+        color: var(--di-btn-text, #555555);
         cursor: pointer;
         user-select: none;
     }
@@ -447,7 +516,7 @@ export const GLOBAL_CSS = `
     .di-nsfw-monitor-thumb {
         padding: 2px;
         border-radius: 4px;
-        background: #fff;
+        background: var(--di-bg, #ffffff);
         width: 100%;
         aspect-ratio: 1/1;
         display: flex;
@@ -456,7 +525,7 @@ export const GLOBAL_CSS = `
         overflow: hidden;
     }
     .di-nsfw-monitor-thumb-latest {
-        border: 1px solid #ddd;
+        border: 1px solid var(--di-border-input, #dddddd);
     }
     .di-nsfw-monitor-thumb-trending {
         border: 1px solid #ffd700;
@@ -479,7 +548,7 @@ export const GLOBAL_CSS = `
     .di-nsfw-monitor-label {
         font-size: 0.8em;
         font-weight: bold;
-        color: #555;
+        color: var(--di-btn-text, #555555);
         margin-top: 5px;
     }
     .di-nsfw-monitor-label-trending {
@@ -496,7 +565,7 @@ export const GLOBAL_CSS = `
     }
     .di-nsfw-monitor-sublabel {
         font-size: 0.7em;
-        color: #999;
+        color: var(--di-text-faint, #999999);
     }
 
     /* Main grid: summary card + distribution card (buildMainGrid) */
@@ -517,14 +586,14 @@ export const GLOBAL_CSS = `
     }
     .di-summary-stat-label {
         font-size: 0.9em;
-        color: #666;
+        color: var(--di-text-secondary, #666666);
         font-weight: bold;
         margin-bottom: 5px;
     }
     .di-summary-stat-value {
         font-size: 2.2em;
         font-weight: bold;
-        color: #007bff;
+        color: var(--di-link, #007bff);
         line-height: 1.1;
     }
     .di-summary-stat-trend {
@@ -533,7 +602,7 @@ export const GLOBAL_CSS = `
         margin-top: 5px;
     }
     .di-summary-stat-trend-meta {
-        color: #999;
+        color: var(--di-text-faint, #999999);
         font-weight: normal;
     }
     .di-summary-card-thumbs {
@@ -543,7 +612,7 @@ export const GLOBAL_CSS = `
         justify-content: flex-end;
     }
     .di-distribution-card {
-        background: #f9f9f9;
+        background: var(--di-card-bg, #f9f9f9);
         padding: 15px;
         border-radius: 8px;
         min-height: 180px;
@@ -559,7 +628,7 @@ export const GLOBAL_CSS = `
     }
     .di-distribution-title {
         font-size: 0.9em;
-        color: #666;
+        color: var(--di-text-secondary, #666666);
         font-weight: bold;
     }
     .pie-tabs {
@@ -596,7 +665,7 @@ export const GLOBAL_CSS = `
         top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
-        color: #888;
+        color: var(--di-text-muted, #888888);
         font-size: 0.8em;
     }
 
@@ -605,7 +674,7 @@ export const GLOBAL_CSS = `
         margin-bottom: 30px;
     }
     .di-rankings-header {
-        border-bottom: 2px solid #eee;
+        border-bottom: 2px solid var(--di-border-light, #eeeeee);
         margin-bottom: 15px;
         display: flex;
         gap: 20px;
@@ -615,8 +684,8 @@ export const GLOBAL_CSS = `
         margin: 0;
         padding-bottom: 10px;
         font-size: 1.2em;
-        color: #444;
-        border-bottom: 3px solid #007bff;
+        color: var(--di-text-heading, #444444);
+        border-bottom: 3px solid var(--di-link, #007bff);
         margin-bottom: -2px;
     }
     .di-rank-tabs {
@@ -628,13 +697,13 @@ export const GLOBAL_CSS = `
         border: none;
         background: none;
         font-weight: normal;
-        color: #888;
+        color: var(--di-text-muted, #888888);
         cursor: pointer;
         padding: 5px 10px;
     }
     .rank-tab.active {
         font-weight: bold;
-        color: #007bff;
+        color: var(--di-link, #007bff);
     }
     #ranking-container {
         display: grid;
@@ -654,7 +723,7 @@ export const GLOBAL_CSS = `
         margin-bottom: 15px;
     }
     #tag-analytics-milestones h2 {
-        color: #444;
+        color: var(--di-text-heading, #444444);
         border-left: 4px solid #ffc107;
         padding-left: 10px;
         margin: 0;
@@ -662,13 +731,13 @@ export const GLOBAL_CSS = `
     #tag-milestones-toggle {
         background: none;
         border: none;
-        color: #007bff;
+        color: var(--di-link, #007bff);
         cursor: pointer;
         font-size: 0.9em;
         display: none;
     }
     #milestones-loading {
-        color: #888;
+        color: var(--di-text-muted, #888888);
         text-align: center;
         padding: 20px;
     }
@@ -684,13 +753,13 @@ export const GLOBAL_CSS = `
         margin-bottom: 30px;
     }
     #tag-analytics-charts h2 {
-        color: #444;
-        border-left: 4px solid #007bff;
+        color: var(--di-text-heading, #444444);
+        border-left: 4px solid var(--di-link, #007bff);
         padding-left: 10px;
         margin-bottom: 15px;
     }
     #chart-loading {
-        color: #888;
+        color: var(--di-text-muted, #888888);
         text-align: center;
         padding: 20px;
     }
@@ -868,7 +937,7 @@ export const GLOBAL_CSS = `
       .di-hover-translate-up:hover { transform: translateY(-3px) !important; }
       .di-hover-scale:hover { transform: scale(1.02) !important; }
       .di-hover-underline:hover { text-decoration: underline !important; }
-      .di-hover-text-primary:hover { color: #007bff !important; }
+      .di-hover-text-primary:hover { color: var(--di-link, #007bff) !important; }
       .month-column:hover .column-overlay { fill: rgba(0, 123, 255, 0.05); }
       .month-column:hover .monthly-bar { fill: #216e39; }
     }

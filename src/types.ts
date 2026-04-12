@@ -61,6 +61,9 @@ export interface ThresholdMap {
   notes: number[];
 }
 
+/** Dark mode preference: auto follows Danbooru, or forced light/dark. */
+export type DarkModePreference = 'auto' | 'light' | 'dark';
+
 /** Persisted user settings stored in localStorage. */
 export interface SettingsData {
   theme: string;
@@ -71,6 +74,8 @@ export interface SettingsData {
   syncThreshold?: number;
   /** Per-theme grass palette index (themeKey → 0-3). */
   grassIndexByTheme?: Record<string, number>;
+  /** Dark mode preference (default: 'auto'). */
+  darkMode?: DarkModePreference;
 }
 
 /** Contribution metric identifier. */

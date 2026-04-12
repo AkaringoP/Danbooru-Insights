@@ -1,4 +1,5 @@
 import {CONFIG} from '../config';
+import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {SettingsManager} from '../core/settings';
@@ -80,6 +81,10 @@ export class UserAnalyticsApp {
     const overlay = document.createElement('div');
     overlay.id = `${this.modalId}-overlay`;
 
+    // Apply dashboard theme attribute
+    const effective = resolveEffectiveDashboardTheme(this.settings.getDarkMode());
+    if (effective === 'dark') overlay.setAttribute('data-di-theme', 'dark');
+
     // Window Container
     const windowDiv = document.createElement('div');
     windowDiv.id = `${this.modalId}-window`;
@@ -95,8 +100,8 @@ export class UserAnalyticsApp {
     const content = document.createElement('div');
     content.id = `${this.modalId}-content`;
     content.innerHTML = `
-      <h1 style="margin-top:0; color:#333;">Analytics Dashboard</h1>
-      <p style="color:#555;">Select a metric to view detailed reports.</p>
+      <h1 style="margin-top:0; color:var(--di-text, #333);">Analytics Dashboard</h1>
+      <p style="color:var(--di-text-secondary, #666);">Select a metric to view detailed reports.</p>
       <!-- Placeholder for future charts -->
     `;
     windowDiv.appendChild(content);
@@ -190,7 +195,7 @@ export class UserAnalyticsApp {
       statusText.id = `${this.modalId}-header-status`;
       statusText.style.fontSize = '0.5em'; // Relative to H1
       statusText.style.fontWeight = 'normal';
-      statusText.style.color = '#888';
+      statusText.style.color = 'var(--di-text-muted, #888)';
       statusText.style.marginLeft = '12px';
       statusText.style.lineHeight = '1.2';
       statusText.innerHTML = ''; // Init empty
@@ -251,7 +256,7 @@ export class UserAnalyticsApp {
       } else {
         containerColor = '#ff4444';
         headerHtml = `<div style="font-weight:bold;">Synced: ${state.current.toLocaleString()} / ${state.total.toLocaleString()} (${percent}%)</div>`;
-        subHtml = `<div style="font-size:0.8em; color:#888; margin-top:2px;">${state.message || `Fetching data${dotStr}`}</div>`;
+        subHtml = `<div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-top:2px;">${state.message || `Fetching data${dotStr}`}</div>`;
       }
 
       void this.updateHeaderStatus(headerHtml + subHtml, containerColor);
@@ -412,24 +417,30 @@ export class UserAnalyticsApp {
    * @param {HTMLElement} target The settings button element.
    */
   showSyncSettingsPopover(target: HTMLElement) {
-    // Remove existing
+    // Toggle: if already open, close and return
     const existing = document.getElementById('danbooru-grass-sync-settings');
-    if (existing) existing.remove();
+    if (existing) {
+      existing.remove();
+      return;
+    }
 
     const settingsManager = new SettingsManager();
     const currentVal = settingsManager.getSyncThreshold();
 
     const popover = document.createElement('div');
     popover.id = 'danbooru-grass-sync-settings';
+    // Sync dashboard theme (popover is appended to body, outside dashboard containers)
+    const effective = resolveEffectiveDashboardTheme(settingsManager.getDarkMode());
+    if (effective === 'dark') popover.setAttribute('data-di-theme', 'dark');
     popover.style.position = 'absolute';
     popover.style.zIndex = '10001';
-    popover.style.background = '#fff';
-    popover.style.border = '1px solid #ccc';
+    popover.style.background = 'var(--di-bg, #fff)';
+    popover.style.border = '1px solid var(--di-border, #e1e4e8)';
     popover.style.borderRadius = '6px';
     popover.style.padding = '12px';
-    popover.style.boxShadow = '0 2px 10px rgba(0,0,0,0.1)';
+    popover.style.boxShadow = '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
     popover.style.fontSize = '11px'; // Reduced by 20%
-    popover.style.color = '#333';
+    popover.style.color = 'var(--di-text, #333)';
     popover.style.width = '220px';
 
     // Position logic
@@ -448,12 +459,33 @@ export class UserAnalyticsApp {
         (Total - Synced) <= Threshold
       </div>
       <div style="display:flex; align-items:center; justify-content:space-between;">
-         <input type="number" id="sync-thresh-input" value="${currentVal}" min="0" style="width:60px; padding:3px; border:1px solid #ddd; border-radius:3px; background:#ffffff; color:#000000;">
+         <input type="number" id="sync-thresh-input" value="${currentVal}" min="0" style="width:60px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333);">
          <button id="sync-thresh-save" style="background:none; border:1px solid #28a745; color:#28a745; border-radius:4px; cursor:pointer; padding:2px 8px; font-size:11px;">✅ Save</button>
+      </div>
+      <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--di-border-light, #eee);">
+        <strong>Dashboard Theme</strong>
+        <select id="dark-mode-select" style="width:100%; margin-top:4px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333); font-size:11px;">
+          <option value="auto">Auto (follow Danbooru)</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
       </div>
     `;
 
     document.body.appendChild(popover);
+
+    // Set current dark mode selection
+    const darkModeSelect = popover.querySelector(
+      '#dark-mode-select',
+    ) as HTMLSelectElement;
+    if (darkModeSelect) {
+      darkModeSelect.value = settingsManager.getDarkMode();
+      darkModeSelect.addEventListener('change', () => {
+        const pref = darkModeSelect.value as 'auto' | 'light' | 'dark';
+        settingsManager.setDarkMode(pref);
+        applyDashboardTheme(settingsManager);
+      });
+    }
 
     // Close on click outside
     const closeHandler = (e: MouseEvent) => {
@@ -567,9 +599,9 @@ export class UserAnalyticsApp {
 
     const subWindow = document.createElement('div');
     Object.assign(subWindow.style, {
-      backgroundColor: '#fff',
+      backgroundColor: 'var(--di-bg, #fff)',
       borderRadius: '12px',
-      boxShadow: '0 10px 25px rgba(0,0,0,0.2)',
+      boxShadow: '0 10px 25px var(--di-shadow, rgba(0,0,0,0.2))',
       width: '90%',
       maxWidth: '800px', // Smaller than main dashboard
       maxHeight: '90vh',
@@ -584,11 +616,11 @@ export class UserAnalyticsApp {
     const header = document.createElement('div');
     Object.assign(header.style, {
       padding: '15px 20px',
-      borderBottom: '1px solid #eee',
+      borderBottom: '1px solid var(--di-border-light, #eee)',
       display: 'flex',
       justifyContent: 'space-between',
       alignItems: 'center',
-      backgroundColor: '#f9f9f9',
+      backgroundColor: 'var(--di-card-bg, #f9f9f9)',
       position: 'relative',
     });
 
@@ -596,7 +628,7 @@ export class UserAnalyticsApp {
     const titleWrapper = document.createElement('div');
     titleWrapper.style.display = 'flex';
     titleWrapper.style.alignItems = 'center';
-    titleWrapper.innerHTML = `<h3 style="margin:0; font-size:1.2em; color:#333;">${title}</h3>`;
+    titleWrapper.innerHTML = `<h3 style="margin:0; font-size:1.2em; color:var(--di-text, #333);">${title}</h3>`;
 
     // Help Button if helpHtml exists
     if (helpHtml) {
@@ -606,7 +638,7 @@ export class UserAnalyticsApp {
         marginLeft: '10px',
         cursor: 'help',
         fontSize: '14px',
-        color: '#888', // Replaces opacity to prevent child inheritance issues
+        color: 'var(--di-text-muted, #888)', // Replaces opacity to prevent child inheritance issues
         position: 'relative',
       });
 
@@ -646,7 +678,7 @@ export class UserAnalyticsApp {
       fontSize: '1.5em',
       lineHeight: '1',
       cursor: 'pointer',
-      color: '#666',
+      color: 'var(--di-text-secondary, #666)',
     });
     closeBtn.onclick = () => closeSubModal();
     header.appendChild(closeBtn);
@@ -699,10 +731,10 @@ export class UserAnalyticsApp {
 
       // Show Loading State Immediately
       content.innerHTML = `
-        <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:#555;">
+        <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
            <div class="di-spinner"></div>
            <div style="font-size:1.2em; font-weight:600; margin-top: 20px;">Generating Report...</div>
-           <div style="font-size:0.9em; color:#888; margin-top:10px;">Analyzing contributions and trends</div>
+           <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
         </div>
       `;
 
@@ -721,11 +753,11 @@ export class UserAnalyticsApp {
           preStats.count < preTotal
         ) {
           content.innerHTML = `
-            <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:#555;">
+            <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
               <div class="di-spinner"></div>
               <div style="font-size:1.2em; font-weight:600; margin-top:20px;">Syncing Data...</div>
-              <div id="analytics-quick-sync-msg" style="font-size:0.9em; color:#888; margin-top:10px;">Fetching posts...</div>
-              <div style="width:300px; height:8px; background:#e1e4e8; border-radius:4px; overflow:hidden; margin-top:15px;">
+              <div id="analytics-quick-sync-msg" style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Fetching posts...</div>
+              <div style="width:300px; height:8px; background:var(--di-border-light, #eee); border-radius:4px; overflow:hidden; margin-top:15px;">
                 <div id="analytics-quick-sync-bar" style="width:0%; height:100%; background:#2da44e; transition:width 0.2s;"></div>
               </div>
             </div>
@@ -752,10 +784,10 @@ export class UserAnalyticsApp {
 
           // Restore loading spinner before heavy data fetch
           content.innerHTML = `
-            <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:#555;">
+            <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
                <div class="di-spinner"></div>
                <div style="font-size:1.2em; font-weight:600; margin-top: 20px;">Generating Report...</div>
-               <div style="font-size:0.9em; color:#888; margin-top:10px;">Analyzing contributions and trends</div>
+               <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
             </div>
           `;
         }
@@ -801,19 +833,19 @@ export class UserAnalyticsApp {
       header.style.marginBottom = '25px'; // Increased Spacing
       header.innerHTML = `
       <div>
-         <h2 style="margin-top:0; color:#333; margin-bottom:4px;">Analytics Dashboard</h2>
-         <p style="color:#555; margin:0;">Detailed statistics and history for <span class="${getLevelClass(this.context.targetUser.level_string)}">${this.context.targetUser.name}</span></p>
+         <h2 style="margin-top:0; color:var(--di-text, #333); margin-bottom:4px;">Analytics Dashboard</h2>
+         <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(this.context.targetUser.level_string)}">${this.context.targetUser.name}</span></p>
       </div>
        <div id="analytics-header-controls" style="display:none; align-items:center;">
-         <label style="display:flex; align-items:center; margin-right:15px; font-size:13px; color:#57606a; cursor:pointer; user-select:none;">
+         <label style="display:flex; align-items:center; margin-right:15px; font-size:13px; color:var(--di-text-secondary, #666); cursor:pointer; user-select:none;">
             <input type="checkbox" id="user-analytics-nsfw-toggle" ${isNsfwEnabled ? 'checked' : ''} style="margin-right:6px;">
             Enable NSFW
          </label>
           <button id="analytics-reset-btn" title="Full Reset (Delete All Data)" style="
              background: none; 
-             border: 1px solid #e1e4e8; 
-             border-radius: 6px; 
-             padding: 6px 10px; 
+             border: 1px solid var(--di-border-light, #eee);
+             border-radius: 6px;
+             padding: 6px 10px;
              cursor: pointer;
              color: #d73a49;
              transition: all 0.2s;
@@ -858,7 +890,7 @@ export class UserAnalyticsApp {
           };
           dBtn.onmouseout = () => {
             dBtn.style.background = 'none';
-            dBtn.style.borderColor = '#e1e4e8';
+            dBtn.style.borderColor = 'var(--di-border-light, #eee)';
           };
         }
 
@@ -880,13 +912,13 @@ export class UserAnalyticsApp {
               top: -45px;
               right: 0px; 
               background: #ffeb3b;
-              color: #333;
+              color: var(--di-text, #333);
               padding: 8px 12px;
               border-radius: 6px;
               font-size: 12px;
               z-index: 10001;
               white-space: nowrap;
-              box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+              box-shadow: 0 2px 8px var(--di-shadow, rgba(0,0,0,0.2));
             `;
 
             // Arrow
@@ -930,7 +962,7 @@ export class UserAnalyticsApp {
         const syncDiv = document.createElement('div');
         syncDiv.style.textAlign = 'center';
         syncDiv.style.padding = '40px 20px';
-        syncDiv.style.color = '#555';
+        syncDiv.style.color = 'var(--di-text-secondary, #666)';
 
         let msg = `We have <strong>${stats.count}</strong> posts synced, but the user has <strong>${total || 'more'}</strong>.`;
         if (total === 0 && stats.count > 0)
@@ -942,25 +974,25 @@ export class UserAnalyticsApp {
         <div style="font-size:48px; margin-bottom:20px;">💾</div>
         <h3 style="margin-top:0;">Data Synchronization Required</h3>
         <p>${msg}</p>
-        <p style="font-size:0.9em; color:#777; margin-bottom:30px;">
+        <p style="font-size:0.9em; color:var(--di-text-muted, #888); margin-bottom:30px;">
            This one-time process might take a while depending on the post count.<br>
            You can close this window - data collection will continue in the background.
         </p>
         <button id="analytics-start-sync" style="
-          background-color: #0969da; color: white; border: none; padding: 10px 20px;
+          background-color: var(--di-link, #007bff); color: white; border: none; padding: 10px 20px;
           font-size: 16px; font-weight: 600; border-radius: 6px; cursor: pointer;
-          box-shadow: 0 1px 3px rgba(0,0,0,0.12); transition: background 0.2s;
+          box-shadow: 0 1px 3px var(--di-shadow-light, rgba(0,0,0,0.1)); transition: background 0.2s;
         ">${stats.count > 0 ? 'Resume Sync' : 'Start Data Fetch'}</button>
-        
+
         <div id="analytics-main-progress" style="margin-top:25px; display:none; max-width:400px; margin-left:auto; margin-right:auto;">
-           <div style="display:flex; justify-content:space-between; font-size:0.85em; margin-bottom:5px; color:#555;">
+           <div style="display:flex; justify-content:space-between; font-size:0.85em; margin-bottom:5px; color:var(--di-text-secondary, #666);">
               <span>Fetching metadata...</span>
               <span id="analytics-main-percent">0%</span>
            </div>
-           <div style="width:100%; height:8px; background:#e1e4e8; border-radius:4px; overflow:hidden;">
+           <div style="width:100%; height:8px; background:var(--di-border-light, #eee); border-radius:4px; overflow:hidden;">
               <div id="analytics-main-bar" style="width:0%; height:100%; background:#2da44e; transition: width 0.2s;"></div>
            </div>
-           <div id="analytics-main-count" style="font-size:0.8em; color:#666; margin-top:5px; text-align:right;"></div>
+           <div id="analytics-main-count" style="font-size:0.8em; color:var(--di-text-secondary, #666); margin-top:5px; text-align:right;"></div>
         </div>
       `;
 
@@ -1086,12 +1118,12 @@ export class UserAnalyticsApp {
         icon: string,
         details: string = '',
       ) => `
-          <div style="background:#fff; border:1px solid #e1e4e8; border-radius:8px; padding:15px; display:flex; align-items:flex-start;">
+          <div style="background:var(--di-bg, #fff); border:1px solid var(--di-border-light, #eee); border-radius:8px; padding:15px; display:flex; align-items:flex-start;">
              <div style="font-size:2em; margin-right:15px; margin-top:5px;">${icon}</div>
              <div style="flex:1; min-width:0;">
-                <div style="font-size:0.85em; color:#666; text-transform:uppercase; letter-spacing:0.5px;">${title}</div>
-                ${val ? `<div style="font-size:1.5em; font-weight:bold; color:#333;">${val}</div>` : ''}
-                ${details ? `<div style="font-size:0.85em; color:#555;">${details}</div>` : ''}
+                <div style="font-size:0.85em; color:var(--di-text-secondary, #666); text-transform:uppercase; letter-spacing:0.5px;">${title}</div>
+                ${val ? `<div style="font-size:1.5em; font-weight:bold; color:var(--di-text, #333);">${val}</div>` : ''}
+                ${details ? `<div style="font-size:0.85em; color:var(--di-text-secondary, #666);">${details}</div>` : ''}
              </div>
           </div>
        `;
@@ -1109,9 +1141,9 @@ export class UserAnalyticsApp {
       }
 
       const uploadDetailsAll = `
-       <div style="display:flex; flex-direction:column; gap:4px; border-left:2px solid #eee; padding-left:12px;">
+       <div style="display:flex; flex-direction:column; gap:4px; border-left:2px solid var(--di-border-light, #eee); padding-left:12px;">
            <div>📈 <strong>Average:</strong> ${avgUploads} posts / day</div>
-           <div>🔥 <strong>Max:</strong> ${maxUploads} posts <span style="color:#888;">(${maxDate})</span></div>
+           <div>🔥 <strong>Max:</strong> ${maxUploads} posts <span style="color:var(--di-text-muted, #888);">(${maxDate})</span></div>
        </div>
     `;
 
@@ -1124,9 +1156,9 @@ export class UserAnalyticsApp {
       }
 
       const uploadDetails1Year = `
-       <div style="display:flex; flex-direction:column; gap:4px; border-left:2px solid #eee; padding-left:12px;">
+       <div style="display:flex; flex-direction:column; gap:4px; border-left:2px solid var(--di-border-light, #eee); padding-left:12px;">
            <div>📈 <strong>Average:</strong> ${avgUploads1Year} posts / day</div>
-           <div>🔥 <strong>Max:</strong> ${maxUploads1Year || 0} posts <span style="color:#888;">(${maxDate1Year || 'N/A'})</span></div>
+           <div>🔥 <strong>Max:</strong> ${maxUploads1Year || 0} posts <span style="color:var(--di-text-muted, #888);">(${maxDate1Year || 'N/A'})</span></div>
        </div>
     `;
 
@@ -1147,46 +1179,46 @@ export class UserAnalyticsApp {
 
       const streakPeriod =
         maxStreakStart && maxStreakEnd
-          ? ` <span style="color:#888;">(${maxStreakStart} ~ ${maxStreakEnd})</span>`
+          ? ` <span style="color:var(--di-text-muted, #888);">(${maxStreakStart} ~ ${maxStreakEnd})</span>`
           : '';
 
       const consistencyDetails = `
-       <div style="display:flex; flex-direction:column; gap:4px; border-left:2px solid #eee; padding-left:12px;">
+       <div style="display:flex; flex-direction:column; gap:4px; border-left:2px solid var(--di-border-light, #eee); padding-left:12px;">
            <div>🏃‍♂️ <strong>Max Streak:</strong> ${maxStreak} days${streakPeriod}</div>
-           <div>🌟 <strong>Active Ratio:</strong> ${activeRatio}% <span style="color:#888;">(${activeDays}/${daysSinceFirst.toLocaleString()} days)</span></div>
+           <div>🌟 <strong>Active Ratio:</strong> ${activeRatio}% <span style="color:var(--di-text-muted, #888);">(${activeDays}/${daysSinceFirst.toLocaleString()} days)</span></div>
            <div>🎯 <strong>Active Avg:</strong> ${activeAvg} posts/day</div>
        </div>
     `;
 
       // Animated Slide Card for Uploads (Static Icon, Slide Out Left, Slide In Right, 3 Panes)
       const uploadCardHtml = `
-          <div id="danbooru-insights-upload-card" style="background:#fff; border:1px solid #e1e4e8; border-radius:8px; padding:15px; display:flex; align-items:flex-start; overflow:hidden; position:relative; min-height:106px;">
+          <div id="danbooru-insights-upload-card" style="background:var(--di-bg, #fff); border:1px solid var(--di-border-light, #eee); border-radius:8px; padding:15px; display:flex; align-items:flex-start; overflow:hidden; position:relative; min-height:106px;">
                  <div style="font-size:2em; margin-right:15px; margin-top:5px; flex-shrink:0;">🖼️</div>
                  
                  <div style="position:relative; flex-grow:1; display:grid; height:100%;">
                      <!-- All Time Pane -->
                      <div class="di-upload-card-pane" style="grid-area: 1 / 1; animation-name: di-slide-in-out-a;">
-                        <div style="font-size:0.85em; color:#666; text-transform:uppercase; letter-spacing:0.5px;">TOTAL UPLOADS</div>
+                        <div style="font-size:0.85em; color:var(--di-text-secondary, #666); text-transform:uppercase; letter-spacing:0.5px;">TOTAL UPLOADS</div>
                         <div class="di-upload-card-inner" style="display:flex; align-items:center; gap:12px;">
-                            <div style="font-size:1.5em; font-weight:bold; color:#333;">${stats.count.toLocaleString()}</div>
-                            <div style="font-size:0.85em; color:#555;">${uploadDetailsAll}</div>
+                            <div style="font-size:1.5em; font-weight:bold; color:var(--di-text, #333);">${stats.count.toLocaleString()}</div>
+                            <div style="font-size:0.85em; color:var(--di-text-secondary, #666);">${uploadDetailsAll}</div>
                         </div>
                      </div>
 
                      <!-- Last 1 Year Pane -->
                      <div class="di-upload-card-pane" style="grid-area: 1 / 1; animation-name: di-slide-in-out-b;">
-                        <div style="font-size:0.85em; color:#666; text-transform:uppercase; letter-spacing:0.5px;">LAST 1 YEAR</div>
+                        <div style="font-size:0.85em; color:var(--di-text-secondary, #666); text-transform:uppercase; letter-spacing:0.5px;">LAST 1 YEAR</div>
                         <div class="di-upload-card-inner" style="display:flex; align-items:center; gap:12px;">
-                            <div style="font-size:1.5em; font-weight:bold; color:#333;">${(count1Year || 0).toLocaleString()}</div>
-                            <div style="font-size:0.85em; color:#555;">${uploadDetails1Year}</div>
+                            <div style="font-size:1.5em; font-weight:bold; color:var(--di-text, #333);">${(count1Year || 0).toLocaleString()}</div>
+                            <div style="font-size:0.85em; color:var(--di-text-secondary, #666);">${uploadDetails1Year}</div>
                         </div>
                      </div>
                      
                      <!-- Consistency Pane -->
                      <div class="di-upload-card-pane" style="grid-area: 1 / 1; animation-name: di-slide-in-out-c;">
-                        <div style="font-size:0.85em; color:#666; text-transform:uppercase; letter-spacing:0.5px;">UPLOAD HABITS</div>
+                        <div style="font-size:0.85em; color:var(--di-text-secondary, #666); text-transform:uppercase; letter-spacing:0.5px;">UPLOAD HABITS</div>
                         <div class="di-upload-card-inner" style="display:flex; align-items:center; gap:12px;">
-                            <div style="font-size:0.85em; color:#555; margin-left: -12px;">${consistencyDetails}</div>
+                            <div style="font-size:0.85em; color:var(--di-text-secondary, #666); margin-left: -12px;">${consistencyDetails}</div>
                         </div>
                      </div>
                  </div>
@@ -1234,7 +1266,7 @@ export class UserAnalyticsApp {
         tlEvents.push({
           date: joinDate,
           icon: '🎊',
-          html: `🎊 <strong>Join:</strong> ${daysSinceJoin.toLocaleString()} days ago <span style="color:#888;">(${joinDateStr})</span>`,
+          html: `🎊 <strong>Join:</strong> ${daysSinceJoin.toLocaleString()} days ago <span style="color:var(--di-text-muted, #888);">(${joinDateStr})</span>`,
         });
       }
 
@@ -1243,7 +1275,7 @@ export class UserAnalyticsApp {
         tlEvents.push({
           date: firstUploadDate,
           icon: '🚀',
-          html: `🚀 <strong>1st Post:</strong> ${daysSinceFirst.toLocaleString()} days ago <span style="color:#888;">(${firstUploadDateStr})</span>`,
+          html: `🚀 <strong>1st Post:</strong> ${daysSinceFirst.toLocaleString()} days ago <span style="color:var(--di-text-muted, #888);">(${firstUploadDateStr})</span>`,
         });
       }
 
@@ -1259,7 +1291,7 @@ export class UserAnalyticsApp {
         tlEvents.push({
           date: m.date,
           icon,
-          html: `${icon} <strong>${label}:</strong> ${daysAgo.toLocaleString()} days ago <span style="color:#888;">(${dateStr})</span>`,
+          html: `${icon} <strong>${label}:</strong> ${daysAgo.toLocaleString()} days ago <span style="color:var(--di-text-muted, #888);">(${dateStr})</span>`,
         });
       });
 
@@ -1275,7 +1307,7 @@ export class UserAnalyticsApp {
         tlEvents.push({
           date: lc.date,
           icon,
-          html: `${icon} <strong class="${fromLevelClass}">${lc.fromLevel}</strong> → <strong class="${toLevelClass}">${lc.toLevel}</strong> ${daysAgo.toLocaleString()} days ago <span style="color:#888;">(${dateStr})</span>`,
+          html: `${icon} <strong class="${fromLevelClass}">${lc.fromLevel}</strong> → <strong class="${toLevelClass}">${lc.toLevel}</strong> ${daysAgo.toLocaleString()} days ago <span style="color:var(--di-text-muted, #888);">(${dateStr})</span>`,
         });
       });
 
@@ -1289,7 +1321,7 @@ export class UserAnalyticsApp {
         tlEvents.push({
           date: lastUploadDate,
           icon: '📌',
-          html: `📌 <strong>${latestLabel}:</strong> ${daysAgoLast.toLocaleString()} days ago <span style="color:#888;">(${lastDate})</span>`,
+          html: `📌 <strong>${latestLabel}:</strong> ${daysAgoLast.toLocaleString()} days ago <span style="color:var(--di-text-muted, #888);">(${lastDate})</span>`,
         });
       }
 
@@ -1313,7 +1345,7 @@ export class UserAnalyticsApp {
       // so scrollHeight can be measured.
       const dateDetails = `
        <div class="di-user-history-wrap">
-         <div class="di-user-history-timeline" style="display:flex; flex-direction:column; gap:4px; border-left:2px solid #eee; padding-left:12px; max-height:66px; overflow-y:auto;">
+         <div class="di-user-history-timeline" style="display:flex; flex-direction:column; gap:4px; border-left:2px solid var(--di-border-light, #eee); padding-left:12px; max-height:66px; overflow-y:auto;">
              ${timelineRows}
          </div>
        </div>
@@ -1388,17 +1420,17 @@ export class UserAnalyticsApp {
       topStatsRow.style.marginBottom = '35px'; // Increased Spacing
 
       const pieContainer = document.createElement('div');
-      pieContainer.style.background = '#fff';
-      pieContainer.style.border = '1px solid #e1e4e8';
+      pieContainer.style.background = 'var(--di-bg, #fff)';
+      pieContainer.style.border = '1px solid var(--di-border-light, #eee)';
       pieContainer.style.borderRadius = '8px';
       pieContainer.style.padding = '15px';
       pieContainer.style.display = 'flex';
       pieContainer.style.flexDirection = 'column';
-      pieContainer.style.color = '#888';
+      pieContainer.style.color = 'var(--di-text-muted, #888)';
 
       const topPostContainer = document.createElement('div');
-      topPostContainer.style.background = '#fff';
-      topPostContainer.style.border = '1px solid #e1e4e8';
+      topPostContainer.style.background = 'var(--di-bg, #fff)';
+      topPostContainer.style.border = '1px solid var(--di-border-light, #eee)';
       topPostContainer.style.borderRadius = '8px';
       topPostContainer.style.padding = '15px';
       topPostContainer.style.display = 'flex';
