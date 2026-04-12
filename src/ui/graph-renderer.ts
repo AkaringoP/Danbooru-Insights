@@ -312,7 +312,7 @@ export class GraphRenderer {
           <div id="grass-controls" style="gap:10px; display:flex;"></div>
         </div>
         <div id="cal-heatmap" style="overflow-x:auto; padding-bottom:5px;"></div>
-        <div id="grass-loading" style="text-align:center; padding:20px; color:var(--di-text-muted);">Initializing...</div>
+        <div id="grass-loading" style="text-align:center; padding:20px; color:#888;">Initializing...</div>
       `;
 
     // Append handles AFTER innerHTML to prevent them from being overwritten
@@ -679,9 +679,9 @@ export class GraphRenderer {
             font-family: inherit;
             font-size: inherit;
             font-weight: normal;
-            color: var(--di-text);
-            background-color: var(--di-bg-tertiary);
-            border: 1px solid var(--di-border-input);
+            color: #24292f;
+            background-color: #f6f8fa;
+            border: 1px solid #d0d7de;
             border-radius: 6px;
             padding: 2px 4px;
             margin-left: 6px;
@@ -769,11 +769,11 @@ export class GraphRenderer {
             font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
             font-weight: normal !important;
           }
-          /* Controls */
+          /* Controls — always light (GrassApp chrome is theme-independent) */
           #grass-controls select {
-            background-color: var(--di-bg-tertiary) !important;
-            color: var(--di-text) !important;
-            border: 1px solid var(--di-border-input) !important;
+            background-color: #f6f8fa !important;
+            color: #24292f !important;
+            border: 1px solid #d0d7de !important;
             border-radius: 6px;
             padding: 2px 2px;
           }
@@ -960,7 +960,7 @@ export class GraphRenderer {
             transform: scale(1.1);
             background-color: var(--grass-text, #30363d);
             opacity: 0.15;
-            box-shadow: 0 2px 6px var(--di-shadow-light);
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
           }
           #danbooru-approvals-popover .gallery-btn {
             cursor: pointer;
@@ -1093,13 +1093,13 @@ export class GraphRenderer {
       settingsBtn.title = 'Settings';
       settingsBtn.style.cssText = `
           padding: 2px 8px;
-          border: 1px solid var(--di-border-input);
+          border: 1px solid #d0d7de;
           border-radius: 6px;
-          background-color: var(--di-bg-tertiary);
+          background-color: #f6f8fa;
           cursor: pointer;
           display: flex;
           align-items: center;
-          color: var(--di-text-secondary);
+          color: #57606a;
         `;
       settingsBtn.innerHTML = `
           <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;">
@@ -1113,11 +1113,11 @@ export class GraphRenderer {
       };
 
       settingsBtn.onmouseover = () => {
-        settingsBtn.style.backgroundColor = 'var(--di-bg-tertiary)';
+        settingsBtn.style.backgroundColor = '#f6f8fa';
         settingsBtn.style.filter = 'brightness(0.95)';
       };
       settingsBtn.onmouseout = () => {
-        settingsBtn.style.backgroundColor = 'var(--di-bg-tertiary)';
+        settingsBtn.style.backgroundColor = '#f6f8fa';
         settingsBtn.style.filter = '';
       };
       footerLeft.appendChild(settingsBtn);
@@ -1128,13 +1128,13 @@ export class GraphRenderer {
       toggleBtn.title = 'Show Details';
       toggleBtn.style.cssText = `
           padding: 2px 8px;
-          border: 1px solid var(--di-border-input);
+          border: 1px solid #d0d7de;
           border-radius: 6px;
-          background-color: var(--di-bg-tertiary);
+          background-color: #f6f8fa;
           cursor: pointer;
           display: flex;
           align-items: center;
-          color: var(--di-text-secondary);
+          color: #57606a;
         `;
       // Chevron Down SVG
       const chevronDown =
@@ -1145,11 +1145,11 @@ export class GraphRenderer {
       toggleBtn.innerHTML = chevronDown;
 
       toggleBtn.onmouseover = () => {
-        toggleBtn.style.backgroundColor = 'var(--di-bg-tertiary)';
+        toggleBtn.style.backgroundColor = '#f6f8fa';
         toggleBtn.style.filter = 'brightness(0.95)';
       };
       toggleBtn.onmouseout = () => {
-        toggleBtn.style.backgroundColor = 'var(--di-bg-tertiary)';
+        toggleBtn.style.backgroundColor = '#f6f8fa';
         toggleBtn.style.filter = '';
       };
 
@@ -1190,11 +1190,11 @@ export class GraphRenderer {
         panel.style.cssText = `
                 width: fit-content;
                 min-width: 310px;
-                background: var(--grass-bg, var(--di-bg));
-                border: 1px solid var(--di-border-input);
+                background: var(--grass-bg, #fff);
+                border: 1px solid #d0d7de;
                 border-radius: 8px;
                 margin-top: 10px;
-                box-shadow: 0 1px 3px var(--di-shadow-light);
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 
                 /* Animation Styles */
                 height: 0;
@@ -1604,13 +1604,13 @@ export class GraphRenderer {
           <div style="font-size:0.9em; margin-bottom:12px; color: var(--grass-text, #57606a);">${message}</div>
           <button id="grass-retry-btn" style="
             padding: 5px 16px;
-            background-color: var(--di-bg-tertiary);
-            border: 1px solid var(--di-border-input);
+            background-color: #f6f8fa;
+            border: 1px solid #d0d7de;
             border-radius: 6px;
             cursor: pointer;
             font-size: 12px;
             font-weight: 500;
-            color: var(--di-text);
+            color: #24292f;
           ">Retry</button>
         </div>
       `;
