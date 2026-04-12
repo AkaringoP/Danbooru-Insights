@@ -1,5 +1,5 @@
 import {CONFIG} from '../config';
-import type {Metric, SettingsData, Theme} from '../types';
+import type {DarkModePreference, Metric, SettingsData, Theme} from '../types';
 
 /**
  * Manages user settings and persistence using localStorage.
@@ -253,5 +253,15 @@ export class SettingsManager {
     this.save({
       syncThreshold: parseInt(String(val), 10),
     });
+  }
+
+  /** Gets dark mode preference (default: 'auto'). */
+  getDarkMode(): DarkModePreference {
+    return this.settings.darkMode ?? 'auto';
+  }
+
+  /** Sets dark mode preference and persists it. */
+  setDarkMode(pref: DarkModePreference): void {
+    this.save({darkMode: pref});
   }
 }

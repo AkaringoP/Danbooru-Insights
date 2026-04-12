@@ -312,6 +312,54 @@ export function createSettingsPopover(
   modeSelect.addEventListener('change', () => renderEditor(modeSelect.value));
   renderEditor(modeSelect.value); // Initial Render
 
+  // --- 2b. Dark Mode Section ---
+  const darkSection = document.createElement('div');
+  darkSection.style.marginTop = '15px';
+  darkSection.style.borderTop = '1px solid var(--di-border-input)';
+  darkSection.style.paddingTop = '10px';
+
+  const darkHeader = document.createElement('div');
+  darkHeader.className = 'popover-header';
+  darkHeader.textContent = 'Dark Mode';
+  darkSection.appendChild(darkHeader);
+
+  const darkSelect = document.createElement('select');
+  darkSelect.className = 'popover-select';
+  darkSelect.style.marginTop = '6px';
+  const darkOptions: {value: string; label: string}[] = [
+    {value: 'auto', label: 'Auto (follow Danbooru)'},
+    {value: 'light', label: 'Light'},
+    {value: 'dark', label: 'Dark'},
+  ];
+  darkOptions.forEach(opt => {
+    const el = document.createElement('option');
+    el.value = opt.value;
+    el.textContent = opt.label;
+    if (opt.value === settingsManager.getDarkMode()) el.selected = true;
+    darkSelect.appendChild(el);
+  });
+  darkSelect.addEventListener('change', () => {
+    const pref = darkSelect.value as 'auto' | 'light' | 'dark';
+    settingsManager.setDarkMode(pref);
+    // Apply immediately
+    if (pref === 'auto') {
+      // Restore Danbooru's native attribute — reload to let Danbooru set it
+      const danbooruTheme =
+        document.body.getAttribute('data-current-user-theme') ?? 'light';
+      document.body.setAttribute('data-current-user-theme', danbooruTheme);
+    } else {
+      document.body.setAttribute('data-current-user-theme', pref);
+    }
+    // Notify widgets to re-render
+    window.dispatchEvent(
+      new CustomEvent('DanbooruInsights:ThemeChanged', {
+        detail: {source: 'darkMode', pref},
+      }),
+    );
+  });
+  darkSection.appendChild(darkSelect);
+  popover.appendChild(darkSection);
+
   // --- 3. Cache Info Section ---
   const cacheSection = document.createElement('div');
   cacheSection.style.marginTop = '15px';
