@@ -1,5 +1,10 @@
 # Danbooru Insights
 
+![license](https://img.shields.io/badge/license-MIT-green)
+![typescript](https://img.shields.io/badge/typescript-✓-blue)
+![platform](https://img.shields.io/badge/platform-Userscript-orange)
+![build](https://img.shields.io/badge/build-Vite-646CFF)
+
 **Danbooru Insights** (formerly **Danbooru Grass**) is a comprehensive analytics suite for Danbooru users and tags. It injects GitHub-style contribution graphs and advanced dashboards directly into profile and wiki pages.
 
 The script consists of three main components:
