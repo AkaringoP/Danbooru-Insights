@@ -22,8 +22,7 @@ export default defineConfig({
         ],
         grant: 'none',
         icon: 'https://danbooru.donmai.us/favicon.ico',
-        homepageURL:
-          'https://github.com/AkaringoP/Danbooru-Insights',
+        homepageURL: 'https://github.com/AkaringoP/Danbooru-Insights',
         updateURL:
           'https://github.com/AkaringoP/Danbooru-Insights/raw/build/danbooruinsights.user.js',
         downloadURL:

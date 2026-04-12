@@ -50,10 +50,12 @@ export class ProfileContext {
 
       if (!id && name) {
         const messagesLink = document.querySelector(
-          'a[href*="/messages?search%5Bto_user_id%5D="]'
+          'a[href*="/messages?search%5Bto_user_id%5D="]',
         );
         if (messagesLink) {
-          const match = (messagesLink as HTMLAnchorElement).href.match(/to_user_id%5D=(\d+)/);
+          const match = (messagesLink as HTMLAnchorElement).href.match(
+            /to_user_id%5D=(\d+)/,
+          );
           if (match) id = match[1];
         }
       }
@@ -61,17 +63,21 @@ export class ProfileContext {
       // Look for "My Account" if we are on our own profile
       if (!id && window.location.pathname === '/profile') {
         const editLink = document.querySelector(
-          'a[href^="/users/"][href$="/edit"]'
+          'a[href^="/users/"][href$="/edit"]',
         );
         if (editLink) {
-          const m = editLink.getAttribute('href')?.match(/\/users\/(\d+)\/edit/);
+          const m = editLink
+            .getAttribute('href')
+            ?.match(/\/users\/(\d+)\/edit/);
           if (m) id = m[1];
         }
       }
 
       // Scrape generic user links that match the name
       if (!id && name) {
-        const userLinks = Array.from(document.querySelectorAll('a[href^="/users/"]'));
+        const userLinks = Array.from(
+          document.querySelectorAll('a[href^="/users/"]'),
+        );
         for (const link of userLinks) {
           const m = link.getAttribute('href')?.match(/\/users\/(\d+)(?:\?|$)/);
           if (m && link.textContent?.trim() === name) {
@@ -83,14 +89,19 @@ export class ProfileContext {
 
       // --- 3. Extract Join Date ---
       const cells = Array.from(document.querySelectorAll('th, td'));
-      const joinHeader = cells.find((el) => el.textContent?.trim() === 'Join Date');
+      const joinHeader = cells.find(
+        el => el.textContent?.trim() === 'Join Date',
+      );
 
       if (joinHeader) {
         const valEl = joinHeader.nextElementSibling;
         if (valEl) {
           const timeEl = valEl.querySelector('time');
           if (timeEl) {
-            joinDate = timeEl.getAttribute('datetime') || timeEl.textContent?.trim() || joinDate;
+            joinDate =
+              timeEl.getAttribute('datetime') ||
+              timeEl.textContent?.trim() ||
+              joinDate;
           } else {
             joinDate = valEl.textContent?.trim() || joinDate;
           }
@@ -99,7 +110,7 @@ export class ProfileContext {
 
       // --- 4. Extract Level ---
       let level_string = null;
-      const levelHeader = cells.find((el) => el.textContent?.trim() === 'Level');
+      const levelHeader = cells.find(el => el.textContent?.trim() === 'Level');
       if (levelHeader) {
         const valEl = levelHeader.nextElementSibling;
         if (valEl) {
@@ -109,7 +120,9 @@ export class ProfileContext {
 
       if (!name) return null;
       if (!id) {
-        console.warn('[Danbooru Grass] User ID not found. Functionality may be limited (Notes).');
+        console.warn(
+          '[Danbooru Grass] User ID not found. Functionality may be limited (Notes).',
+        );
       }
 
       return {
@@ -118,9 +131,8 @@ export class ProfileContext {
         id,
         created_at: joinDate,
         joinDate: new Date(joinDate),
-        level_string
+        level_string,
       };
-
     } catch (e: unknown) {
       console.warn('[Danbooru Grass] Extraction error:', e);
       return null;

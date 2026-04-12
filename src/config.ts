@@ -13,7 +13,11 @@ export const CONFIG: {
   CACHE_EXPIRY_MS: number;
   BACKOFF_DURATION_MS: number;
   RATE_LIMITER: {concurrency: number; jitter: [number, number]; rps: number};
-  TAB_COORDINATOR: {channelName: string; heartbeatInterval: number; staleTimeout: number};
+  TAB_COORDINATOR: {
+    channelName: string;
+    heartbeatInterval: number;
+    staleTimeout: number;
+  };
   SELECTORS: {STATISTICS_SECTION: string};
   THEMES: Record<string, Theme>;
 } = {
@@ -47,10 +51,22 @@ export const CONFIG: {
       text: '#24292f',
       levels: ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
       grassOptions: [
-        {name: 'Green', levels: ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39']},
-        {name: 'Blues', levels: ['#ebedf0', '#bdd7e7', '#6baed6', '#3182bd', '#08519c']},
-        {name: 'Purples', levels: ['#ebedf0', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f']},
-        {name: 'Oranges', levels: ['#ebedf0', '#fdbe85', '#fd8d3c', '#e6550d', '#a63603']},
+        {
+          name: 'Green',
+          levels: ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
+        },
+        {
+          name: 'Blues',
+          levels: ['#ebedf0', '#bdd7e7', '#6baed6', '#3182bd', '#08519c'],
+        },
+        {
+          name: 'Purples',
+          levels: ['#ebedf0', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f'],
+        },
+        {
+          name: 'Oranges',
+          levels: ['#ebedf0', '#fdbe85', '#fd8d3c', '#e6550d', '#a63603'],
+        },
       ],
     },
     solarized_light: {
@@ -60,10 +76,22 @@ export const CONFIG: {
       text: '#586e75',
       scrollbar: '#93a1a1',
       grassOptions: [
-        {name: 'Green', levels: ['#eee8d5', '#9be9a8', '#40c463', '#30a14e', '#216e39']},
-        {name: 'YlOrBr', levels: ['#eee8d5', '#fed98e', '#fe9929', '#d95f0e', '#993404']},
-        {name: 'Blues', levels: ['#eee8d5', '#bdd7e7', '#6baed6', '#3182bd', '#08519c']},
-        {name: 'BuGn', levels: ['#eee8d5', '#b2e2e2', '#66c2a4', '#2ca25f', '#006d2c']},
+        {
+          name: 'Green',
+          levels: ['#eee8d5', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
+        },
+        {
+          name: 'YlOrBr',
+          levels: ['#eee8d5', '#fed98e', '#fe9929', '#d95f0e', '#993404'],
+        },
+        {
+          name: 'Blues',
+          levels: ['#eee8d5', '#bdd7e7', '#6baed6', '#3182bd', '#08519c'],
+        },
+        {
+          name: 'BuGn',
+          levels: ['#eee8d5', '#b2e2e2', '#66c2a4', '#2ca25f', '#006d2c'],
+        },
       ],
     },
     sakura: {
@@ -72,10 +100,22 @@ export const CONFIG: {
       empty: '#ffe0ea',
       text: '#24292f',
       grassOptions: [
-        {name: 'Pink', levels: ['#ffe0ea', '#ffc0cb', '#ff85a2', '#e0245e', '#a8123c']},
-        {name: 'Green', levels: ['#ffe0ea', '#9be9a8', '#40c463', '#30a14e', '#216e39']},
-        {name: 'Purples', levels: ['#ffe0ea', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f']},
-        {name: 'RdPu', levels: ['#ffe0ea', '#fbb4b9', '#f768a1', '#c51b8a', '#7a0177']},
+        {
+          name: 'Pink',
+          levels: ['#ffe0ea', '#ffc0cb', '#ff85a2', '#e0245e', '#a8123c'],
+        },
+        {
+          name: 'Green',
+          levels: ['#ffe0ea', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
+        },
+        {
+          name: 'Purples',
+          levels: ['#ffe0ea', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f'],
+        },
+        {
+          name: 'RdPu',
+          levels: ['#ffe0ea', '#fbb4b9', '#f768a1', '#c51b8a', '#7a0177'],
+        },
       ],
     },
     lavender: {
@@ -85,10 +125,22 @@ export const CONFIG: {
       text: '#3d2c5e',
       scrollbar: '#c4b0e0',
       grassOptions: [
-        {name: 'Purple', levels: ['#e8dff5', '#d4a5f5', '#b36bdb', '#8a3db5', '#5e1d8a']},
-        {name: 'Green', levels: ['#e8dff5', '#9be9a8', '#40c463', '#30a14e', '#216e39']},
-        {name: 'Blues', levels: ['#e8dff5', '#bdd7e7', '#6baed6', '#3182bd', '#08519c']},
-        {name: 'PuRd', levels: ['#e8dff5', '#d4b9da', '#c994c7', '#dd1c77', '#980043']},
+        {
+          name: 'Purple',
+          levels: ['#e8dff5', '#d4a5f5', '#b36bdb', '#8a3db5', '#5e1d8a'],
+        },
+        {
+          name: 'Green',
+          levels: ['#e8dff5', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
+        },
+        {
+          name: 'Blues',
+          levels: ['#e8dff5', '#bdd7e7', '#6baed6', '#3182bd', '#08519c'],
+        },
+        {
+          name: 'PuRd',
+          levels: ['#e8dff5', '#d4b9da', '#c994c7', '#dd1c77', '#980043'],
+        },
       ],
     },
     ice: {
@@ -98,10 +150,22 @@ export const CONFIG: {
       text: '#006d75',
       scrollbar: '#5cdbd3',
       grassOptions: [
-        {name: 'Cyan', levels: ['#ffffff', '#b2e2e2', '#66c2a4', '#2ca25f', '#006d2c']},
-        {name: 'Green', levels: ['#ffffff', '#9be9a8', '#40c463', '#30a14e', '#216e39']},
-        {name: 'Blues', levels: ['#ffffff', '#bdd7e7', '#6baed6', '#3182bd', '#08519c']},
-        {name: 'Purples', levels: ['#ffffff', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f']},
+        {
+          name: 'Cyan',
+          levels: ['#ffffff', '#b2e2e2', '#66c2a4', '#2ca25f', '#006d2c'],
+        },
+        {
+          name: 'Green',
+          levels: ['#ffffff', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
+        },
+        {
+          name: 'Blues',
+          levels: ['#ffffff', '#bdd7e7', '#6baed6', '#3182bd', '#08519c'],
+        },
+        {
+          name: 'Purples',
+          levels: ['#ffffff', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f'],
+        },
       ],
     },
     aurora: {
@@ -111,10 +175,22 @@ export const CONFIG: {
       text: '#2e3338',
       scrollbar: '#9FB5C6',
       grassOptions: [
-        {name: 'Blues', levels: ['#ffffff', '#bdd7e7', '#6baed6', '#3182bd', '#08519c']},
-        {name: 'Green', levels: ['#ffffff', '#9be9a8', '#40c463', '#30a14e', '#216e39']},
-        {name: 'BuPu', levels: ['#ffffff', '#b3cde3', '#8c96c6', '#8856a7', '#810f7c']},
-        {name: 'YlGn', levels: ['#ffffff', '#d9f0a3', '#addd8e', '#41ab5d', '#006837']},
+        {
+          name: 'Blues',
+          levels: ['#ffffff', '#bdd7e7', '#6baed6', '#3182bd', '#08519c'],
+        },
+        {
+          name: 'Green',
+          levels: ['#ffffff', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
+        },
+        {
+          name: 'BuPu',
+          levels: ['#ffffff', '#b3cde3', '#8c96c6', '#8856a7', '#810f7c'],
+        },
+        {
+          name: 'YlGn',
+          levels: ['#ffffff', '#d9f0a3', '#addd8e', '#41ab5d', '#006837'],
+        },
       ],
     },
 
@@ -126,10 +202,22 @@ export const CONFIG: {
       text: '#f0f6fc',
       levels: ['#222222', '#0e4429', '#006d32', '#26a641', '#39d353'],
       grassOptions: [
-        {name: 'Neon Green', levels: ['#222222', '#0e4429', '#006d32', '#26a641', '#39d353']},
-        {name: 'Viridis', levels: ['#222222', '#31446b', '#21908d', '#5dc863', '#fde725']},
-        {name: 'Plasma', levels: ['#222222', '#6a00a8', '#b12a90', '#e16462', '#fca636']},
-        {name: 'Cool', levels: ['#222222', '#4a36b0', '#6e80e0', '#76d7c4', '#afffaf']},
+        {
+          name: 'Neon Green',
+          levels: ['#222222', '#0e4429', '#006d32', '#26a641', '#39d353'],
+        },
+        {
+          name: 'Viridis',
+          levels: ['#222222', '#31446b', '#21908d', '#5dc863', '#fde725'],
+        },
+        {
+          name: 'Plasma',
+          levels: ['#222222', '#6a00a8', '#b12a90', '#e16462', '#fca636'],
+        },
+        {
+          name: 'Cool',
+          levels: ['#222222', '#4a36b0', '#6e80e0', '#76d7c4', '#afffaf'],
+        },
       ],
     },
     solarized_dark: {
@@ -139,10 +227,22 @@ export const CONFIG: {
       text: '#93a1a1',
       scrollbar: '#586e75',
       grassOptions: [
-        {name: 'Neon Green', levels: ['#073642', '#0e4429', '#006d32', '#26a641', '#39d353']},
-        {name: 'Viridis', levels: ['#073642', '#31446b', '#21908d', '#5dc863', '#fde725']},
-        {name: 'Inferno', levels: ['#073642', '#6a176e', '#bb3754', '#f0732a', '#fcffa4']},
-        {name: 'Cool', levels: ['#073642', '#4a36b0', '#6e80e0', '#76d7c4', '#afffaf']},
+        {
+          name: 'Neon Green',
+          levels: ['#073642', '#0e4429', '#006d32', '#26a641', '#39d353'],
+        },
+        {
+          name: 'Viridis',
+          levels: ['#073642', '#31446b', '#21908d', '#5dc863', '#fde725'],
+        },
+        {
+          name: 'Inferno',
+          levels: ['#073642', '#6a176e', '#bb3754', '#f0732a', '#fcffa4'],
+        },
+        {
+          name: 'Cool',
+          levels: ['#073642', '#4a36b0', '#6e80e0', '#76d7c4', '#afffaf'],
+        },
       ],
     },
     newspaper: {
@@ -152,10 +252,22 @@ export const CONFIG: {
       text: '#24292f',
       scrollbar: '#d0d7de',
       grassOptions: [
-        {name: 'Green', levels: ['#dbdbdb', '#9be9a8', '#40c463', '#30a14e', '#216e39']},
-        {name: 'Blues', levels: ['#dbdbdb', '#bdd7e7', '#6baed6', '#3182bd', '#08519c']},
-        {name: 'Purples', levels: ['#dbdbdb', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f']},
-        {name: 'Oranges', levels: ['#dbdbdb', '#fdbe85', '#fd8d3c', '#e6550d', '#a63603']},
+        {
+          name: 'Green',
+          levels: ['#dbdbdb', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
+        },
+        {
+          name: 'Blues',
+          levels: ['#dbdbdb', '#bdd7e7', '#6baed6', '#3182bd', '#08519c'],
+        },
+        {
+          name: 'Purples',
+          levels: ['#dbdbdb', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f'],
+        },
+        {
+          name: 'Oranges',
+          levels: ['#dbdbdb', '#fdbe85', '#fd8d3c', '#e6550d', '#a63603'],
+        },
       ],
     },
     ocean: {
@@ -164,10 +276,22 @@ export const CONFIG: {
       empty: '#2b3d68',
       text: '#e6edf3',
       grassOptions: [
-        {name: 'Neon Blue', levels: ['#2b3d68', '#1b5e80', '#2188ff', '#58a6ff', '#79c0ff']},
-        {name: 'Neon Green', levels: ['#2b3d68', '#0e4429', '#006d32', '#26a641', '#39d353']},
-        {name: 'Viridis', levels: ['#2b3d68', '#31446b', '#21908d', '#5dc863', '#fde725']},
-        {name: 'Plasma', levels: ['#2b3d68', '#6a00a8', '#b12a90', '#e16462', '#fca636']},
+        {
+          name: 'Neon Blue',
+          levels: ['#2b3d68', '#1b5e80', '#2188ff', '#58a6ff', '#79c0ff'],
+        },
+        {
+          name: 'Neon Green',
+          levels: ['#2b3d68', '#0e4429', '#006d32', '#26a641', '#39d353'],
+        },
+        {
+          name: 'Viridis',
+          levels: ['#2b3d68', '#31446b', '#21908d', '#5dc863', '#fde725'],
+        },
+        {
+          name: 'Plasma',
+          levels: ['#2b3d68', '#6a00a8', '#b12a90', '#e16462', '#fca636'],
+        },
       ],
     },
     monokai: {
@@ -177,10 +301,22 @@ export const CONFIG: {
       text: '#f8f8f2',
       scrollbar: '#75715e',
       grassOptions: [
-        {name: 'Neon Green', levels: ['#3e3d32', '#0e4429', '#006d32', '#26a641', '#39d353']},
-        {name: 'Inferno', levels: ['#3e3d32', '#6a176e', '#bb3754', '#f0732a', '#fcffa4']},
-        {name: 'Magma', levels: ['#3e3d32', '#51127c', '#b73779', '#fb8861', '#fcfdbf']},
-        {name: 'Turbo', levels: ['#3e3d32', '#3e49bb', '#1ac7c2', '#aad833', '#f5e642']},
+        {
+          name: 'Neon Green',
+          levels: ['#3e3d32', '#0e4429', '#006d32', '#26a641', '#39d353'],
+        },
+        {
+          name: 'Inferno',
+          levels: ['#3e3d32', '#6a176e', '#bb3754', '#f0732a', '#fcffa4'],
+        },
+        {
+          name: 'Magma',
+          levels: ['#3e3d32', '#51127c', '#b73779', '#fb8861', '#fcfdbf'],
+        },
+        {
+          name: 'Turbo',
+          levels: ['#3e3d32', '#3e49bb', '#1ac7c2', '#aad833', '#f5e642'],
+        },
       ],
     },
     ember: {
@@ -190,10 +326,22 @@ export const CONFIG: {
       text: '#f0c0a0',
       scrollbar: '#6b3030',
       grassOptions: [
-        {name: 'Ember', levels: ['#3a1a1d', '#5c1a1a', '#a93226', '#e74c3c', '#ff8a75']},
-        {name: 'Neon Green', levels: ['#3a1a1d', '#0e4429', '#006d32', '#26a641', '#39d353']},
-        {name: 'Inferno', levels: ['#3a1a1d', '#6a176e', '#bb3754', '#f0732a', '#fcffa4']},
-        {name: 'OrRd', levels: ['#3a1a1d', '#7a3014', '#b35900', '#e67e22', '#f5b041']},
+        {
+          name: 'Ember',
+          levels: ['#3a1a1d', '#5c1a1a', '#a93226', '#e74c3c', '#ff8a75'],
+        },
+        {
+          name: 'Neon Green',
+          levels: ['#3a1a1d', '#0e4429', '#006d32', '#26a641', '#39d353'],
+        },
+        {
+          name: 'Inferno',
+          levels: ['#3a1a1d', '#6a176e', '#bb3754', '#f0732a', '#fcffa4'],
+        },
+        {
+          name: 'OrRd',
+          levels: ['#3a1a1d', '#7a3014', '#b35900', '#e67e22', '#f5b041'],
+        },
       ],
     },
   },

@@ -42,7 +42,7 @@ describe('isTopLevelTag', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await isTopLevelTag(mockRateLimiter as any, 'tag with spaces');
     expect(mockRateLimiter.fetch).toHaveBeenCalledWith(
-      expect.stringContaining('tag%20with%20spaces')
+      expect.stringContaining('tag%20with%20spaces'),
     );
   });
 
@@ -53,7 +53,7 @@ describe('isTopLevelTag', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await isTopLevelTag(mockRateLimiter as any, 'original');
     expect(mockRateLimiter.fetch).toHaveBeenCalledWith(
-      expect.stringContaining('/tag_implications.json')
+      expect.stringContaining('/tag_implications.json'),
     );
   });
 });

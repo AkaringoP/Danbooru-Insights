@@ -4,6 +4,55 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.1.0 — Dark Mode, Code Quality Overhaul & Perf Fix
+
+### Dashboard Dark Mode (UserAnalyticsApp, TagAnalyticsApp)
+- **Auto / Light / Dark selector** in each app's ⚙️ settings popover. Default `auto` follows Danbooru's `data-current-user-theme` attribute; manual choices override and persist in localStorage.
+- **Scoped to dashboard containers**: dark overrides apply to our modals and popovers only (`[data-di-theme="dark"]`), never to `body` or `:root`. This avoided the full-page style recalculation that would otherwise hit Danbooru's large DOM.
+- **Semantic CSS variable system** (`--di-bg`, `--di-text`, `--di-border`, …) with light values as `var()` fallbacks — light mode is zero-cost (no variables defined). ~410 color references migrated across 11 files.
+- **Runtime palette helper** (`src/ui/theme-palette.ts`) for canvas contexts where CSS variables can't be used directly. Scatter plot reads computed styles from its nearest themed ancestor so grid / axis / labels flip with the dashboard.
+- **Cross-tab sync** via the `storage` event: changing the theme in one tab reapplies it in any other tab that already has a dashboard open.
+- **GrassApp scope carve-outs**:
+  - Contribution graph chrome (year selector, ⚙️/∨ buttons, panel border, legend, retry) stays fixed in light colors — its existing 12-theme palette system is independent of the dashboard dark mode.
+  - GrassApp settings popover follows the *selected grass theme* (top 6 themes → light popover, bottom 6 → dark) via `applyPopoverPalette` — no Danbooru theme detection, so no overhead on open.
+  - Approvals popover uses the same palette helper.
+- **Semantic point color** for the scatter plot `gentags < 10` highlight: `#000` → ruby red `#e0115f`, visible on both themes (slightly larger dots).
+
+### GrassApp Delta-Fetch Performance (hotfix)
+- **Reload with cached data: ~2,100 ms → ~300 ms.** Two fixes in `DataManager.getMetricData`:
+  1. **Batch size 1 for delta fetches.** `fetchAllPages` fired 5 `/posts.json` pages in parallel even when the delta range held <200 items, wasting 4 empty-page requests (~1.5 s). Added an `isDelta` parameter; set when `lastEntry` exists and no force-full-fetch is requested. Initial full loads still use 5 for parallelism.
+  2. **Narrow `endDate` for current-year delta fetches.** The range ran from `lastEntry − 3 days` to *Jan 1 of next year*, forcing the API to scan months of empty range. Now clamped to tomorrow when cached data exists for the current year.
+- Past-year paths unchanged — once `markYearComplete` caches a year, the API call is skipped entirely on subsequent opens.
+
+### Code Quality Initiative (no user-facing changes)
+#### Lint as a hard CI gate
+- ESLint v9 flat config (`eslint.config.js`) vendor-bypasses the broken `gts@7.0.0` path under ESLint v9. Prettier brought in for formatting. `.github/workflows/build.yml` lint step is now a hard gate (no `continue-on-error`).
+- Full strict posture: **5,037 → 0** lint errors with **no rule relaxations**.
+  - 285 `no-explicit-any` → replaced with real types (Danbooru API response interfaces in `src/types.ts` covering `/posts.json`, `/post_approvals.json`, `/note_versions.json`, `/counts/posts.json`, `/related_tag.json`, `/users.json`, `/tags.json`, `/reports/posts.json`, …). Two documented escape hatches: `D3Any` and `CalHeatmapAny` (single disable on alias definition — libraries lack type packages).
+  - 42 `no-floating-promises` → case-by-case fixes. Several latent missing `await`s on `saveToCache` discovered and fixed; others marked `void` with intent comments; one detached chain gained `.catch()` so fetch failures log instead of disappearing silently.
+  - Plus miscellaneous cleanup: `== null` → `=== undefined`, empty-catch drops, dead-code removal, `function`-expression d3 callbacks to arrow functions.
+- Tests included — no `warn` escape valve.
+
+#### Structural refactors
+- **Inline `style="..."` → `GLOBAL_CSS`**: `tag-analytics-app.ts` template literals migrated to ~350 new lines of `di-` prefixed CSS (`buildMainGrid`, `buildDashboardHeader`, `buildRankingsSection`, `buildBottomSections`, `showSettingsPopover`, `createButton`, `createModal`). One intentional dynamic survivor: the category-driven `<h2 style="color: ${titleColor};">`. Fixed a `.di-nsfw-monitor` base rule that would have crushed milestone-card layout (added the same `:not(.di-milestone-card)` carve-out the mobile override already used).
+- **`TagAnalyticsApp._fetchAndRender()` split**: 878-line method → 67-line orchestrator + 6 private helpers (`_checkCache`, `_fetchSmallTag`, `_calculateLocalTagDistribution`, `_fetchLargeTag`, `_runQuickStatsPhase`, `_buildHeavyStatPromises`). Cache-first / delta-sync / small-tag-optimization semantics preserved.
+- **Scatter plot decomposition**: `renderScatterPlot()` 1,252-line closure → 50-line orchestrator calling 22 top-level helpers. All 11 closure-captured variables moved into a `ScatterState` interface; 17 DOM references into `ScatterDom`. Pure helpers (`computeScatterScale`, `filterVisiblePoints`, `createInitialScatterState`) now testable without DOM mocking.
+- **Shared two-step tap utility** (`src/ui/two-step-tap.ts`): consolidated the touch-then-tap pattern used by the tag cloud, pie chart, and CalHeatmap. Exports a generic `createTwoStepTap<T>({onFirstTap, onSecondTap, onReset, …})` factory and a single `isTouchDevice()` detector — replaces 5 inline duplicates across widgets.
+
+#### Backfill error recovery (user-facing for heavy uploaders)
+- Scatter plot `down_score` backfill no longer retries indefinitely on failure. Tracks `{lastAttemptAt, failureCount}` per user in `localStorage`; skips if `failureCount ≥ 3` within a 24h cooldown. HTTP 429 is *not* counted (rate-limiter already backs off). 17 unit tests cover the threshold / cooldown / HTTP-status logic.
+
+### Minor features & fixes
+- **Created Tags sort control**: The Created Tags widget gains a segmented control to sort by creation date (default) or alias post count, with alias-aware tag links opening the consequent tag's search page.
+- **Scatter plot mobile layout fix**: Downvote filter bar moved below the rating buttons to avoid overlap on narrow viewports.
+
+### Internal
+- **42 files changed** across the quality initiative, +7,706 / −3,489 lines.
+- **153 tests pass**, architecture fitness tests enforced (dependency direction `core/ → ui/ → apps/`, no `[key: string]: any`, no raw `fetch()`).
+- **Build**: 526 kB → 544 kB (+18 kB: mostly CSS variables, shared utilities, and type boundaries).
+
+---
+
 ## v9.0.1 — Repository Migration
 
 No functional changes. The project now lives in its own repository at

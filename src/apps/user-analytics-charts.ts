@@ -1,20 +1,60 @@
 import * as d3 from 'd3';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
+import type {
+  LevelChangeEvent,
+  MonthlyStatEntry,
+} from '../core/analytics-data-manager';
 import {getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
+import type {
+  D3Any,
+  TargetUser,
+  DistributionItem,
+  DanbooruPost,
+  MilestoneEntry,
+} from '../types';
+import {
+  isTouchDevice,
+  createTwoStepTap,
+  type TwoStepTapController,
+} from '../ui/two-step-tap';
 import type {PieSlice} from './user-analytics-data';
 
 /** Context needed by chart widgets that access user data. */
 export interface ChartContext {
-  targetUser: {
-    name: string;
-    normalizedName: string;
-    id: string | null;
-    created_at?: string;
-    joinDate: Date;
-    level_string: string | null;
-  };
+  targetUser: TargetUser;
 }
+
+/**
+ * Union type for pie chart tab data. The `status` and `rating` tabs return
+ * different shapes from getStatusDistribution/getRatingDistribution —
+ * those don't include `frequency`, `thumb`, or `isOther`. All other tabs
+ * return full `DistributionItem`s.
+ */
+type PieTabItem =
+  | DistributionItem
+  | {
+      name?: string;
+      rating?: string;
+      count: number;
+      label?: string;
+      isOther?: boolean;
+      color?: string;
+      frequency?: number;
+      thumb?: string | null;
+    };
+
+/**
+ * Real types returned by getTopPostsByType / getRecentPopularPosts / getRandomPosts.
+ * These are indexed by rating key or sfw/nsfw — NOT a single DanbooruPost.
+ */
+type TopPostsByRating = {
+  g: DanbooruPost | null;
+  s: DanbooruPost | null;
+  q: DanbooruPost | null;
+  e: DanbooruPost | null;
+};
+type TopPostsBySfw = {sfw: DanbooruPost | null; nsfw: DanbooruPost | null};
 
 // ============================================================
 // PIE CHART WIDGET
@@ -32,15 +72,14 @@ export interface ChartContext {
  */
 export function renderPieWidget(
   container: HTMLElement,
-  distributions: Record<string, any[]>,
+  distributions: Record<string, PieTabItem[]>,
   initialNsfwEnabled: boolean,
   dataManager: AnalyticsDataManager,
   context: ChartContext,
   firstUploadDate: Date | null,
 ): {onNsfwChange: (enabled: boolean) => void} {
   // Local state (closure variables)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pieData: Record<string, any[]> = {...distributions};
+  const pieData: Record<string, PieTabItem[]> = {...distributions};
   let currentPieTab = 'copyright';
   let renderPending = false;
   let isNsfwEnabled = initialNsfwEnabled;
@@ -49,8 +88,11 @@ export function renderPieWidget(
   for (const key of ['breasts', 'gender', 'commentary', 'translation']) {
     if (pieData[key]) {
       const data = pieData[key];
-      const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-      pieData[key] = data.map((d: any) => ({
+      const total = data.reduce(
+        (acc: number, c: PieTabItem) => acc + c.count,
+        0,
+      );
+      pieData[key] = data.map((d: PieTabItem) => ({
         ...d,
         frequency: total > 0 ? d.count / total : 0,
         value: total > 0 ? d.count / total : 0,
@@ -72,31 +114,38 @@ export function renderPieWidget(
   // Listen for lazy-loaded thumbnail updates
   const onPieDataUpdate = (e: Event) => {
     if (!document.body.contains(container)) {
-      window.removeEventListener('DanbooruInsights:DataUpdated', onPieDataUpdate);
+      window.removeEventListener(
+        'DanbooruInsights:DataUpdated',
+        onPieDataUpdate,
+      );
       return;
     }
     const {contentType, data} = (e as CustomEvent).detail;
     const keyMap: Record<string, string> = {
-      'character_dist': 'character',
-      'copyright_dist': 'copyright',
-      'fav_copyright_dist': 'fav_copyright',
-      'breasts_dist': 'breasts',
-      'hair_length_dist': 'hair_length',
-      'hair_color_dist': 'hair_color',
-      'rating_dist': 'rating',
+      character_dist: 'character',
+      copyright_dist: 'copyright',
+      fav_copyright_dist: 'fav_copyright',
+      breasts_dist: 'breasts',
+      hair_length_dist: 'hair_length',
+      hair_color_dist: 'hair_color',
+      rating_dist: 'rating',
     };
     const key = keyMap[contentType as string];
 
-    if (key && (pieData as Record<string, unknown[]>)[key]) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const incomingMap = new Map((data as any[]).map((d: any) => [d.name, d]));
-      const currentData = (pieData as Record<string, unknown[]>)[key];
+    if (key && pieData[key]) {
+      const incomingMap = new Map(
+        (data as PieTabItem[]).map((d: PieTabItem) => [d.name, d]),
+      );
+      const currentData = pieData[key];
 
-      currentData.forEach((item: any) => {
-        const update = incomingMap.get(item.name) as any;
+      currentData.forEach((item: PieTabItem) => {
+        const update = incomingMap.get(item.name);
         if (update && update.thumb && item.thumb !== update.thumb) {
           item.thumb = update.thumb;
-          if (item.details) item.details.thumb = update.thumb;
+          const withDetails = item as PieTabItem & {
+            details?: {thumb: string | null};
+          };
+          if (withDetails.details) withDetails.details.thumb = update.thumb;
         }
       });
 
@@ -111,7 +160,10 @@ export function renderPieWidget(
    * Handles click events on pie chart slices.
    */
   const handlePieClick = (d: d3.PieArcDatum<PieSlice>) => {
-    const targetName = context.targetUser.normalizedName || context.targetUser.name.replace(/ /g, '_') || '';
+    const targetName =
+      context.targetUser.normalizedName ||
+      context.targetUser.name.replace(/ /g, '_') ||
+      '';
     if (!targetName) return;
     let query = '';
     const details = d.data.details;
@@ -124,10 +176,21 @@ export function renderPieWidget(
       return;
     } else if (currentPieTab === 'status') {
       query = `status:${details.name}`;
-    } else if (['breasts', 'hair_length', 'hair_color', 'gender', 'commentary', 'translation'].includes(currentPieTab)) {
+    } else if (
+      [
+        'breasts',
+        'hair_length',
+        'hair_color',
+        'gender',
+        'commentary',
+        'translation',
+      ].includes(currentPieTab)
+    ) {
       if (details.originalTag) query = details.originalTag;
-      else if (details.tagName === 'untagged_commentary') query = 'has:commentary -commentary -commentary_request';
-      else if (details.tagName === 'untagged_translation') query = '*_text -english_text -translation_request -translated';
+      else if (details.tagName === 'untagged_commentary')
+        query = 'has:commentary -commentary -commentary_request';
+      else if (details.tagName === 'untagged_translation')
+        query = '*_text -english_text -translation_request -translated';
       else if (details.tagName) query = details.tagName;
       else query = d.data.label.toLowerCase().replace(/ /g, '_');
     } else {
@@ -136,7 +199,10 @@ export function renderPieWidget(
 
     if (query) {
       const urlPrefix = `user:${targetName}`;
-      window.open(`/posts?tags=${encodeURIComponent(`${urlPrefix} ${query}`)}`, '_blank');
+      window.open(
+        `/posts?tags=${encodeURIComponent(`${urlPrefix} ${query}`)}`,
+        '_blank',
+      );
     }
   };
 
@@ -144,19 +210,20 @@ export function renderPieWidget(
    * Renders the Pie Chart content based on the current tab.
    */
   const renderPieContent = () => {
-    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    let lastTouchedPieDatum: d3.PieArcDatum<PieSlice> | null = null;
+    const isTouch = isTouchDevice();
     const contextUser = context.targetUser;
     const data = pieData[currentPieTab];
     const pieContent = container.querySelector('.pie-content') as HTMLElement;
 
     if (!data) {
-      pieContent.innerHTML = '<div style="color:#888; padding:30px; text-align:center;">Loading...</div>';
+      pieContent.innerHTML =
+        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">Loading...</div>';
       return;
     }
 
     if (data.length === 0) {
-      pieContent.innerHTML = '<div style="color:#888; padding:30px; text-align:center;">No data available</div>';
+      pieContent.innerHTML =
+        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">No data available</div>';
       return;
     }
 
@@ -166,8 +233,19 @@ export function renderPieWidget(
 
     // Sort: Hair Length has a specific order (custom sort)
     if (currentPieTab === 'hair_length') {
-      const order = ['Bald', 'Very Short Hair', 'Short Hair', 'Medium Hair', 'Long Hair', 'Very Long Hair', 'Absurdly Long Hair'];
-      data.sort((a: {name: string}, b: {name: string}) => order.indexOf(a.name) - order.indexOf(b.name));
+      const order = [
+        'Bald',
+        'Very Short Hair',
+        'Short Hair',
+        'Medium Hair',
+        'Long Hair',
+        'Very Long Hair',
+        'Absurdly Long Hair',
+      ];
+      data.sort(
+        (a: PieTabItem, b: PieTabItem) =>
+          order.indexOf(a.name ?? '') - order.indexOf(b.name ?? ''),
+      );
     }
 
     pieContent.style.display = 'flex';
@@ -181,51 +259,105 @@ export function renderPieWidget(
       pieContent.style.perspective = '1000px';
     }
 
-    const ratingColors: Record<string, string> = {'g': '#28a745', 's': '#fd7e14', 'q': '#6f42c1', 'e': '#dc3545'};
-    const ratingLabels: Record<string, string> = {'g': 'General', 's': 'Sensitive', 'q': 'Questionable', 'e': 'Explicit'};
+    const ratingColors: Record<string, string> = {
+      g: '#28a745',
+      s: '#fd7e14',
+      q: '#6f42c1',
+      e: '#dc3545',
+    };
+    const ratingLabels: Record<string, string> = {
+      g: 'General',
+      s: 'Sensitive',
+      q: 'Questionable',
+      e: 'Explicit',
+    };
 
     const palette = [
-      '#e91e63', '#9c27b0', '#673ab7', '#3f51b5',
-      '#2196f3', '#03a9f4', '#00bcd4', '#009688',
-      '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b',
-      '#ffc107', '#ff9800', '#ff5722', '#795548',
+      '#e91e63',
+      '#9c27b0',
+      '#673ab7',
+      '#3f51b5',
+      '#2196f3',
+      '#03a9f4',
+      '#00bcd4',
+      '#009688',
+      '#4caf50',
+      '#8bc34a',
+      '#cddc39',
+      '#ffeb3b',
+      '#ffc107',
+      '#ff9800',
+      '#ff5722',
+      '#795548',
     ];
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const processedData: PieSlice[] = data.map((d: any, i: number) => {
-      if (['rating', 'status', 'breasts', 'hair_length', 'hair_color', 'gender', 'commentary', 'translation'].includes(currentPieTab)) {
-        return {
-          value: d.count,
-          label: (currentPieTab === 'rating') ? (ratingLabels[d.rating as keyof typeof ratingLabels] || d.rating) : d.label || d.name,
-          color: (currentPieTab === 'rating') ? (ratingColors[d.rating as keyof typeof ratingColors] || '#999') : (
-            (currentPieTab === 'hair_color' && d.color) ? d.color : (d.color || (d.isOther ? '#bdbdbd' : palette[i % palette.length]))
-          ),
-          details: d,
-        };
+    const processedData: PieSlice[] = data.map((d: PieTabItem, i: number) => {
+      if (
+        [
+          'rating',
+          'status',
+          'breasts',
+          'hair_length',
+          'hair_color',
+          'gender',
+          'commentary',
+          'translation',
+        ].includes(currentPieTab)
+      ) {
+        {
+          // d may be {rating, label} (status/rating tabs) or DistributionItem
+          const dFlexible = d as {rating?: string; label?: string};
+          return {
+            value: d.count,
+            label:
+              currentPieTab === 'rating'
+                ? ratingLabels[dFlexible.rating as keyof typeof ratingLabels] ||
+                  dFlexible.rating ||
+                  ''
+                : dFlexible.label || d.name || '',
+            color:
+              currentPieTab === 'rating'
+                ? ratingColors[dFlexible.rating as keyof typeof ratingColors] ||
+                  '#999'
+                : currentPieTab === 'hair_color' && d.color
+                  ? d.color
+                  : d.color ||
+                    (d.isOther ? '#bdbdbd' : palette[i % palette.length]),
+            details: d,
+          };
+        }
       } else {
         let sliceColor = d.isOther ? '#bdbdbd' : palette[i % palette.length];
         if (currentPieTab === 'hair_color' && d.color) {
           sliceColor = d.color;
         }
         return {
-          value: d.frequency,
-          label: d.name,
+          value: d.frequency ?? 0,
+          label: d.name ?? '',
           color: sliceColor,
           details: d,
         };
       }
     });
 
-    const validData = processedData.filter((d: PieSlice) => Number.isFinite(d.value) && d.value > 0);
-    const totalValue = validData.reduce((acc: number, curr: PieSlice) => acc + curr.value, 0);
+    const validData = processedData.filter(
+      (d: PieSlice) => Number.isFinite(d.value) && d.value > 0,
+    );
+    const totalValue = validData.reduce(
+      (acc: number, curr: PieSlice) => acc + curr.value,
+      0,
+    );
 
     if (validData.length === 0 || totalValue === 0) {
-      pieContent.innerHTML = '<div style="color:#888; padding:30px; text-align:center;">No data available (Total count is 0)</div>';
+      pieContent.innerHTML =
+        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">No data available (Total count is 0)</div>';
       return;
     }
 
     // D3 Chart (Join Pattern)
-    let chartWrapper = pieContent.querySelector('.pie-chart-wrapper') as HTMLElement;
+    let chartWrapper = pieContent.querySelector(
+      '.pie-chart-wrapper',
+    ) as HTMLElement;
 
     if (!chartWrapper) {
       pieContent.innerHTML = '';
@@ -240,7 +372,8 @@ export function renderPieWidget(
         // 3D tilt effect (Chrome/Safari/Edge only — Firefox breaks SVG pointer events)
         chartWrapper.style.transformStyle = 'preserve-3d';
         chartWrapper.style.transform = 'rotateX(40deg) rotateY(0deg)';
-        chartWrapper.style.transition = 'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+        chartWrapper.style.transition =
+          'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
 
         const shadow = document.createElement('div');
         shadow.style.position = 'absolute';
@@ -250,13 +383,14 @@ export function renderPieWidget(
         shadow.style.height = '140px';
         shadow.style.transform = 'translate(-50%, -50%) translateZ(-10px)';
         shadow.style.borderRadius = '50%';
-        shadow.style.background = 'rgba(0,0,0,0.2)';
+        shadow.style.background = 'var(--di-shadow, rgba(0,0,0,0.2))';
         shadow.style.filter = 'blur(5px)';
         chartWrapper.appendChild(shadow);
 
         chartWrapper.addEventListener('mouseenter', () => {
           chartWrapper.style.transform = 'rotateX(0deg) scale(1.1)';
-          shadow.style.transform = 'translate(-50%, -50%) translateZ(-30px) scale(0.9)';
+          shadow.style.transform =
+            'translate(-50%, -50%) translateZ(-30px) scale(0.9)';
           shadow.style.opacity = '0.5';
         });
         chartWrapper.addEventListener('mouseleave', () => {
@@ -310,11 +444,24 @@ export function renderPieWidget(
     const radius = Math.min(width, height) / 2 - 20;
 
     const svg = d3.select(chartWrapper).select('svg g');
-    const pie = d3.pie<PieSlice>().value(d => d.value).sort(null);
-    const arc = d3.arc<d3.PieArcDatum<PieSlice>>().innerRadius(0).outerRadius(radius);
-    const arcHover = d3.arc<d3.PieArcDatum<PieSlice>>().innerRadius(0).outerRadius(radius * 1.2);
+    const pie = d3
+      .pie<PieSlice>()
+      .value(d => d.value)
+      .sort(null);
+    const arc = d3
+      .arc<d3.PieArcDatum<PieSlice>>()
+      .innerRadius(0)
+      .outerRadius(radius);
+    const arcHover = d3
+      .arc<d3.PieArcDatum<PieSlice>>()
+      .innerRadius(0)
+      .outerRadius(radius * 1.2);
 
-    const tooltip = d3.select('body').selectAll('.danbooru-grass-pie-tooltip').data([0]).join('div')
+    const tooltip = d3
+      .select('body')
+      .selectAll('.danbooru-grass-pie-tooltip')
+      .data([0])
+      .join('div')
       .attr('class', 'danbooru-grass-pie-tooltip')
       .style('position', 'absolute')
       .style('background', 'rgba(30, 30, 30, 0.95)')
@@ -322,41 +469,56 @@ export function renderPieWidget(
       .style('padding', '8px 12px')
       .style('border-radius', '6px')
       .style('font-size', '12px')
-      .style('pointer-events', isTouchDevice ? 'auto' : 'none')
-      .style('cursor', isTouchDevice ? 'pointer' : 'default')
+      .style('pointer-events', isTouch ? 'auto' : 'none')
+      .style('cursor', isTouch ? 'pointer' : 'default')
       .style('z-index', '2147483647')
       .style('opacity', '0');
 
-    svg.selectAll('path')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .data(pie(validData), (d: any) => d.data.label)
+    svg
+      .selectAll('path')
+      .data(pie(validData), (d: D3Any) => d.data.label)
       .join(
-        enter => enter.append('path')
-          .attr('class', 'danbooru-grass-pie-path')
-          .attr('d', arc)
-          .attr('fill', d => d.data.color)
-          .style('opacity', '0.9')
-          .style('cursor', 'pointer'),
-        update => update
-          .attr('class', 'danbooru-grass-pie-path')
-          .attr('d', arc)
-          .call(update => update.transition().duration(500)
-            .attr('fill', d => d.data.color)),
+        enter =>
+          enter
+            .append('path')
+            .attr('class', 'danbooru-grass-pie-path')
+            .attr('d', arc)
+            .attr('fill', d => d.data.color)
+            .style('opacity', '0.9')
+            .style('cursor', 'pointer'),
+        update =>
+          update
+            .attr('class', 'danbooru-grass-pie-path')
+            .attr('d', arc)
+            .call(update =>
+              update
+                .transition()
+                .duration(500)
+                .attr('fill', d => d.data.color),
+            ),
       )
-      .attr('stroke', '#fff')
+      .attr('stroke', 'var(--di-chart-bg, #fff)')
       .style('stroke-width', '1px')
-      .on('mouseover', function(_event, d) {
-        d3.select(this).transition().duration(200).attr('d', (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '')
+      .on('mouseover', function (_event, d) {
+        d3.select(this)
+          .transition()
+          .duration(200)
+          .attr(
+            'd',
+            (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
+          )
           .style('opacity', '1')
           .style('filter', 'drop-shadow(0px 0px 8px rgba(255,255,255,0.4))');
 
         let html = '';
         const details = d.data.details;
         const thumbUrl = details.thumb;
-        const thumbHtml = thumbUrl ? `
+        const thumbHtml = thumbUrl
+          ? `
         <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
           <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;">
-        </div>` : '';
+        </div>`
+          : '';
 
         if (currentPieTab === 'rating') {
           html = `
@@ -370,7 +532,8 @@ export function renderPieWidget(
           </div>
         `;
         } else {
-          const percentage = ((d.data.value / totalValue) * 100).toFixed(1) + '%';
+          const percentage =
+            ((d.data.value / totalValue) * 100).toFixed(1) + '%';
           html = `
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
@@ -385,39 +548,79 @@ export function renderPieWidget(
 
         tooltip.html(html).style('opacity', 1);
       })
-      .on('mousemove', function(event) {
-        tooltip.style('left', (event.pageX + 15) + 'px').style('top', (event.pageY + 15) + 'px');
+      .on('mousemove', event => {
+        tooltip
+          .style('left', event.pageX + 15 + 'px')
+          .style('top', event.pageY + 15 + 'px');
       })
-      .on('mouseout', function() {
-        d3.select(this).transition().duration(200).attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '').style('opacity', '0.9').style('filter', 'none');
+      .on('mouseout', function () {
+        d3.select(this)
+          .transition()
+          .duration(200)
+          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
+          .style('opacity', '0.9')
+          .style('filter', 'none');
         tooltip.style('opacity', 0);
       })
       .on('click', (_event, d) => {
-        if (isTouchDevice) return;
+        if (isTouch) return;
         handlePieClick(d);
       });
 
-    if (isTouchDevice) {
+    if (isTouch) {
+      // Reset all slices to normal appearance
+      const resetSlices = () => {
+        svg
+          .selectAll('path.danbooru-grass-pie-path')
+          .transition()
+          .duration(200)
+          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
+          .style('opacity', '0.9')
+          .style('filter', 'none');
+      };
+
+      // Two-step tap: touch slice → show tooltip, tap tooltip → navigate
+      const pieTap: TwoStepTapController<d3.PieArcDatum<PieSlice>> =
+        createTwoStepTap({
+          insideElements: () => [
+            tooltip.node() as Element | null,
+            svg.node() as Element | null,
+          ],
+          onFirstTap: () => {
+            // Visual updates handled in handleSliceTouch (needs touch coordinates)
+          },
+          onSecondTap: datum => {
+            handlePieClick(datum);
+            tooltip.style('opacity', 0);
+          },
+          onReset: () => {
+            tooltip.style('opacity', 0);
+            resetSlices();
+          },
+        });
+
       // Helper to handle touch on a slice
       const handleSliceTouch = (event: TouchEvent) => {
         const touch = event.touches[0];
-        const target = document.elementFromPoint(touch.clientX, touch.clientY) as Element;
+        const target = document.elementFromPoint(
+          touch.clientX,
+          touch.clientY,
+        ) as Element;
         if (!target) return;
         const datum = d3.select(target).datum() as d3.PieArcDatum<PieSlice>;
         if (!datum || !datum.data) return;
 
-        // Reset all slices to normal size first
-        svg.selectAll('path.danbooru-grass-pie-path')
-          .transition().duration(200)
-          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
-          .style('opacity', '0.9')
-          .style('filter', 'none');
+        // Reset all slices, then enlarge touched slice
+        resetSlices();
+        pieTap.tap(datum);
 
-        lastTouchedPieDatum = datum;
-
-        // Enlarge slice (same as mouseover)
-        d3.select(target).transition().duration(200)
-          .attr('d', (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '')
+        d3.select(target)
+          .transition()
+          .duration(200)
+          .attr(
+            'd',
+            (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
+          )
           .style('opacity', '1')
           .style('filter', 'drop-shadow(0px 0px 8px rgba(255,255,255,0.4))');
 
@@ -425,10 +628,12 @@ export function renderPieWidget(
         let html = '';
         const details = datum.data.details;
         const thumbUrl = details.thumb;
-        const thumbHtml = thumbUrl ? `
+        const thumbHtml = thumbUrl
+          ? `
         <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
           <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;">
-        </div>` : '';
+        </div>`
+          : '';
 
         if (currentPieTab === 'rating') {
           html = `
@@ -441,7 +646,8 @@ export function renderPieWidget(
             </div>
           </div>`;
         } else {
-          const percentage = ((datum.data.value / totalValue) * 100).toFixed(1) + '%';
+          const percentage =
+            ((datum.data.value / totalValue) * 100).toFixed(1) + '%';
           html = `
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
@@ -479,33 +685,19 @@ export function renderPieWidget(
         tooltip.style('left', left + 'px').style('top', top + 'px');
       };
 
-      svg.selectAll('path.danbooru-grass-pie-path')
-        .on('touchstart', function(event) { handleSliceTouch(event as TouchEvent); })
-        .on('touchmove', function(event) { handleSliceTouch(event as TouchEvent); });
+      svg
+        .selectAll('path.danbooru-grass-pie-path')
+        .on('touchstart', event => {
+          handleSliceTouch(event as TouchEvent);
+        })
+        .on('touchmove', event => {
+          handleSliceTouch(event as TouchEvent);
+        });
 
-      // Tooltip tap → navigate
+      // Tooltip tap → navigate via controller
       tooltip.on('click', () => {
-        if (lastTouchedPieDatum) {
-          handlePieClick(lastTouchedPieDatum);
-          tooltip.style('opacity', 0);
-          lastTouchedPieDatum = null;
-        }
+        pieTap.navigateActive();
       });
-
-      // Outside tap → close tooltip + reset slices
-      document.addEventListener('touchstart', (e) => {
-        const tooltipEl = tooltip.node() as HTMLElement;
-        const svgEl = svg.node() as Element;
-        if (tooltipEl && !tooltipEl.contains(e.target as Node) && !svgEl?.contains(e.target as Node)) {
-          tooltip.style('opacity', 0);
-          svg.selectAll('path.danbooru-grass-pie-path')
-            .transition().duration(200)
-            .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
-            .style('opacity', '0.9')
-            .style('filter', 'none');
-          lastTouchedPieDatum = null;
-        }
-      }, {passive: true});
     }
 
     const legendDiv = pieContent.querySelector('.danbooru-grass-legend-scroll');
@@ -513,7 +705,8 @@ export function renderPieWidget(
       let legendTitle = 'DIST.';
       if (currentPieTab === 'copyright') legendTitle = 'COPYRIGHTS';
       else if (currentPieTab === 'character') legendTitle = 'CHARACTERS';
-      else if (currentPieTab === 'fav_copyright') legendTitle = 'FAVORITE COPYRIGHTS';
+      else if (currentPieTab === 'fav_copyright')
+        legendTitle = 'FAVORITE COPYRIGHTS';
       else if (currentPieTab === 'status') legendTitle = 'STATUS';
       else if (currentPieTab === 'rating') legendTitle = 'RATINGS';
       else if (currentPieTab === 'hair_length') legendTitle = 'HAIR LENGTH';
@@ -525,56 +718,61 @@ export function renderPieWidget(
 
       const styleTag = legendDiv.querySelector('style')?.outerHTML ?? '';
 
-      const listHtml = processedData.map(d => {
-        const val = (d.value / totalValue) * 100;
-        const pct = val.toFixed(1) + '%';
-        let targetUrl = '#';
-        let query = '';
+      const listHtml = processedData
+        .map(d => {
+          const val = (d.value / totalValue) * 100;
+          const pct = val.toFixed(1) + '%';
+          let targetUrl = '#';
+          let query = '';
 
-        if (!d.details.isOther) {
-          if (currentPieTab === 'rating') {
-            query = `rating:${d.details.rating}`;
-            targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
-          } else if (currentPieTab === 'breasts') {
-            const tag = d.label.toLowerCase().replace(/ /g, '_');
-            targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${tag}`)}`;
-          } else if (currentPieTab === 'fav_copyright') {
-            query = `ordfav:${contextUser.normalizedName} ${d.details.tagName || d.label}`;
-            targetUrl = `/posts?tags=${encodeURIComponent(query)}`;
-          } else if (currentPieTab === 'status') {
-            query = `status:${d.details.name}`;
-            targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
-          } else {
-            // Mirror handlePieClick's logic so the legend link matches the pie-slice click target.
-            // Critical for categories where the count query is multi-tag (gender, untagged_commentary,
-            // untagged_translation): originalTag preserves the OR/exclusion query so navigation
-            // points to the same post set the count represents.
-            if (d.details.originalTag) {
-              query = d.details.originalTag;
-            } else if (d.details.tagName === 'untagged_commentary') {
-              query = 'has:commentary -commentary -commentary_request';
-            } else if (d.details.tagName === 'untagged_translation') {
-              query = '*_text -english_text -translation_request -translated';
+          if (!d.details.isOther) {
+            if (currentPieTab === 'rating') {
+              query = `rating:${d.details.rating}`;
+              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
+            } else if (currentPieTab === 'breasts') {
+              const tag = d.label.toLowerCase().replace(/ /g, '_');
+              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${tag}`)}`;
+            } else if (currentPieTab === 'fav_copyright') {
+              query = `ordfav:${contextUser.normalizedName} ${d.details.tagName || d.label}`;
+              targetUrl = `/posts?tags=${encodeURIComponent(query)}`;
+            } else if (currentPieTab === 'status') {
+              query = `status:${d.details.name}`;
+              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
             } else {
-              query = d.details.tagName || d.label;
+              // Mirror handlePieClick's logic so the legend link matches the pie-slice click target.
+              // Critical for categories where the count query is multi-tag (gender, untagged_commentary,
+              // untagged_translation): originalTag preserves the OR/exclusion query so navigation
+              // points to the same post set the count represents.
+              if (d.details.originalTag) {
+                query = d.details.originalTag;
+              } else if (d.details.tagName === 'untagged_commentary') {
+                query = 'has:commentary -commentary -commentary_request';
+              } else if (d.details.tagName === 'untagged_translation') {
+                query = '*_text -english_text -translation_request -translated';
+              } else {
+                query = d.details.tagName || d.label;
+              }
+              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
             }
-            targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
           }
-        }
 
-        return `
+          return `
                <div style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
-                  <div style="width:12px; height:12px; background:${d.color}; border-radius:2px; margin-right:8px; border:1px solid rgba(0,0,0,0.1); flex-shrink:0;"></div>
-                  ${d.details.isOther
-          ? `<div style="color:#555; width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${d.label}">${d.label}</div>`
-          : `<a href="${targetUrl}" target="_blank" class="di-hover-underline" style="color:#555; width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${d.label}">${d.label}</a>`
-        }
-                  <div style="font-weight:bold; color:#333; margin-left:auto;" title="${d.details.count ? d.details.count.toLocaleString() : ''}">${pct}</div>
+                  <div style="width:12px; height:12px; background:${d.color}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
+                  ${
+                    d.details.isOther
+                      ? `<div style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${d.label}">${d.label}</div>`
+                      : `<a href="${targetUrl}" target="_blank" class="di-hover-underline" style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${d.label}">${d.label}</a>`
+                  }
+                  <div style="font-weight:bold; color:var(--di-text, #333); margin-left:auto;" title="${d.details.count ? d.details.count.toLocaleString() : ''}">${pct}</div>
                </div>`;
-      }).join('');
+        })
+        .join('');
 
-      legendDiv.innerHTML = styleTag + `
-           <div style="font-size:0.8em; color:#888; margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:#fff; padding-bottom:4px; border-bottom:1px solid #eee;">${legendTitle}</div>
+      legendDiv.innerHTML =
+        styleTag +
+        `
+           <div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:var(--di-chart-bg, #fff); padding-bottom:4px; border-bottom:1px solid var(--di-border-light, #eee);">${legendTitle}</div>
            ${listHtml}
       `;
     }
@@ -586,12 +784,12 @@ export function renderPieWidget(
       const el = btn as HTMLElement;
       const mode = el.getAttribute('data-mode');
       if (mode === currentPieTab) {
-        el.style.background = '#555';
-        el.style.color = '#fff';
-        el.style.boxShadow = '0 1px 3px rgba(0,0,0,0.2)';
+        el.style.background = 'var(--di-text-secondary, #666)';
+        el.style.color = 'var(--di-bg, #fff)';
+        el.style.boxShadow = '0 1px 3px var(--di-shadow-light, rgba(0,0,0,0.1))';
       } else {
-        el.style.background = '#eee';
-        el.style.color = '#555';
+        el.style.background = 'var(--di-bg-tertiary, #f0f0f0)';
+        el.style.color = 'var(--di-text-secondary, #666)';
         el.style.boxShadow = 'none';
       }
     });
@@ -632,40 +830,42 @@ export function renderPieWidget(
     }
 
     const pieContent = container.querySelector('.pie-content');
-    if (pieContent) pieContent.innerHTML = '<div style="color:#666;">Loading...</div>';
+    if (pieContent)
+      pieContent.innerHTML =
+        '<div style="color:var(--di-chart-axis-secondary, #666);">Loading...</div>';
 
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let data: any[] = [];
+      let data: PieTabItem[] = [];
+      const user = context.targetUser;
       if (tabName === 'rating') {
-        data = await dataManager.getRatingDistribution(context.targetUser as any, firstUploadDate);
+        data = await dataManager.getRatingDistribution(user, firstUploadDate);
       } else if (tabName === 'status') {
-        data = await dataManager.getStatusDistribution(context.targetUser as any, firstUploadDate);
+        data = await dataManager.getStatusDistribution(user, firstUploadDate);
         const statusColors: Record<string, string> = {
-          'active': '#2da44e',
-          'deleted': '#d73a49',
-          'pending': '#0969da',
-          'flagged': '#cf222e',
-          'banned': '#6e7781',
-          'appealed': '#bf3989',
+          active: '#2da44e',
+          deleted: '#d73a49',
+          pending: '#0969da',
+          flagged: '#cf222e',
+          banned: '#6e7781',
+          appealed: '#bf3989',
         };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data = data.map((d: any) => ({
+        data = data.map((d: PieTabItem) => ({
           ...d,
           color: statusColors[d.name as keyof typeof statusColors] || '#888',
         }));
       } else if (tabName === 'character') {
-        data = await dataManager.getCharacterDistribution(context.targetUser as any);
+        data = await dataManager.getCharacterDistribution(user);
       } else if (tabName === 'copyright') {
-        data = await dataManager.getCopyrightDistribution(context.targetUser as any);
+        data = await dataManager.getCopyrightDistribution(user);
       } else if (tabName === 'fav_copyright') {
-        data = await dataManager.getFavCopyrightDistribution(context.targetUser as any);
+        data = await dataManager.getFavCopyrightDistribution(user);
       } else if (tabName === 'breasts') {
-        data = await dataManager.getBreastsDistribution(context.targetUser as any);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data = data.map((d: any) => ({
+        data = await dataManager.getBreastsDistribution(user);
+        const total = data.reduce(
+          (acc: number, c: PieTabItem) => acc + c.count,
+          0,
+        );
+        data = data.map((d: PieTabItem) => ({
           ...d,
           frequency: total > 0 ? d.count / total : 0,
           value: total > 0 ? d.count / total : 0,
@@ -673,11 +873,12 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'gender') {
-        data = await dataManager.getGenderDistribution(context.targetUser as any);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        data = data.map((d: any) => ({
+        data = await dataManager.getGenderDistribution(user);
+        const total = data.reduce(
+          (acc: number, c: PieTabItem) => acc + c.count,
+          0,
+        );
+        data = data.map((d: PieTabItem) => ({
           ...d,
           frequency: total > 0 ? d.count / total : 0,
           value: total > 0 ? d.count / total : 0,
@@ -685,9 +886,12 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'commentary') {
-        data = await dataManager.getCommentaryDistribution(context.targetUser as any);
-        const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-        data = data.map((d: any) => ({
+        data = await dataManager.getCommentaryDistribution(user);
+        const total = data.reduce(
+          (acc: number, c: PieTabItem) => acc + c.count,
+          0,
+        );
+        data = data.map((d: PieTabItem) => ({
           ...d,
           frequency: total > 0 ? d.count / total : 0,
           value: total > 0 ? d.count / total : 0,
@@ -695,9 +899,12 @@ export function renderPieWidget(
           details: {...d, thumb: null},
         }));
       } else if (tabName === 'translation') {
-        data = await dataManager.getTranslationDistribution(context.targetUser as any);
-        const total = data.reduce((acc: number, c: any) => acc + c.count, 0);
-        data = data.map((d: any) => ({
+        data = await dataManager.getTranslationDistribution(user);
+        const total = data.reduce(
+          (acc: number, c: PieTabItem) => acc + c.count,
+          0,
+        );
+        data = data.map((d: PieTabItem) => ({
           ...d,
           frequency: total > 0 ? d.count / total : 0,
           value: total > 0 ? d.count / total : 0,
@@ -719,31 +926,33 @@ export function renderPieWidget(
     }
   };
 
-  container.addEventListener('click', (e) => {
+  container.addEventListener('click', e => {
     if ((e.target as HTMLElement).classList.contains('di-pie-tab')) {
       const mode = (e.target as HTMLElement).getAttribute('data-mode') ?? '';
       if (mode && currentPieTab !== mode) {
         currentPieTab = mode;
         updatePieTabs();
-        loadTab(mode);
+        void loadTab(mode);
       }
     }
   });
 
   updatePieTabs();
-  loadTab(currentPieTab);
+  void loadTab(currentPieTab);
 
   return {
     onNsfwChange: (enabled: boolean) => {
       isNsfwEnabled = enabled;
-      const boobsBtn = container.querySelector('.di-pie-tab[data-mode="breasts"]') as HTMLElement;
+      const boobsBtn = container.querySelector(
+        '.di-pie-tab[data-mode="breasts"]',
+      ) as HTMLElement;
       if (boobsBtn) {
         boobsBtn.style.display = isNsfwEnabled ? 'block' : 'none';
       }
       if (!isNsfwEnabled && currentPieTab === 'breasts') {
         currentPieTab = 'copyright';
         updatePieTabs();
-        loadTab('copyright');
+        void loadTab('copyright');
       }
     },
   };
@@ -766,21 +975,21 @@ export function renderPieWidget(
  */
 export function renderTopPostsWidget(
   container: HTMLElement,
-  topPosts: any,
-  recentPopularPosts: any,
-  randomPosts: any,
+  topPosts: TopPostsByRating | null,
+  recentPopularPosts: TopPostsBySfw | null,
+  randomPosts: TopPostsBySfw | null,
   initialNsfwEnabled: boolean,
   db: Database,
   context: ChartContext,
 ): {onNsfwChange: (enabled: boolean) => void} {
   let isNsfwEnabled = initialNsfwEnabled;
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const topPostGroups: Record<string, any> = {
-    most: topPosts,
-    recent: recentPopularPosts,
-    random: randomPosts,
-  };
+  const topPostGroups: Record<string, TopPostsByRating | TopPostsBySfw | null> =
+    {
+      most: topPosts,
+      recent: recentPopularPosts,
+      random: randomPosts,
+    };
 
   let currentWidgetMode = 'recent';
   let currentMostTab = 'g';
@@ -788,30 +997,49 @@ export function renderTopPostsWidget(
 
   const renderTopPostContent = () => {
     const group = topPostGroups[currentWidgetMode];
-    const tabKey = currentWidgetMode === 'most' ? currentMostTab : currentSfwTab;
-    const data = group ? group[tabKey] : null;
-    const contentDiv = container.querySelector('.top-post-content') as HTMLElement | null;
+    const tabKey =
+      currentWidgetMode === 'most' ? currentMostTab : currentSfwTab;
+    const data = group
+      ? (group as Record<string, DanbooruPost | null>)[tabKey]
+      : null;
+    const contentDiv = container.querySelector(
+      '.top-post-content',
+    ) as HTMLElement | null;
     if (!contentDiv) return;
 
     if (!data) {
-      contentDiv.innerHTML = '<div style="color:#888; padding:20px 0;">No posts found or loading...</div>';
+      contentDiv.innerHTML =
+        '<div style="color:var(--di-text-muted, #888); padding:20px 0;">No posts found or loading...</div>';
       return;
     }
 
     const thumbUrl = getBestThumbnailUrl(data);
-    const dateStr = data.created_at ? new Date(data.created_at).toISOString().split('T')[0] : 'N/A';
+    const dateStr = data.created_at
+      ? new Date(data.created_at).toISOString().split('T')[0]
+      : 'N/A';
     const link = `/posts/${data.id}`;
-    const ratingMap: Record<string, string> = {'g': 'General', 's': 'Sensitive', 'q': 'Questionable', 'e': 'Explicit'};
+    const ratingMap: Record<string, string> = {
+      g: 'General',
+      s: 'Sensitive',
+      q: 'Questionable',
+      e: 'Explicit',
+    };
     const ratingLabel = ratingMap[data.rating] || data.rating;
 
-    const refreshBtn = container.querySelector('#analytics-random-refresh') as HTMLElement;
+    const refreshBtn = container.querySelector(
+      '#analytics-random-refresh',
+    ) as HTMLElement;
     if (refreshBtn) {
-      refreshBtn.style.display = (currentWidgetMode === 'random') ? 'inline-block' : 'none';
+      refreshBtn.style.display =
+        currentWidgetMode === 'random' ? 'inline-block' : 'none';
     }
 
-    const searchLinkBtn = container.querySelector('#analytics-more-post-link') as HTMLElement;
+    const searchLinkBtn = container.querySelector(
+      '#analytics-more-post-link',
+    ) as HTMLElement;
     if (searchLinkBtn) {
-      searchLinkBtn.style.display = (currentWidgetMode === 'recent') ? 'inline-block' : 'none';
+      searchLinkBtn.style.display =
+        currentWidgetMode === 'recent' ? 'inline-block' : 'none';
 
       const normalizedName = context.targetUser.normalizedName;
       const ratingTag = currentSfwTab === 'sfw' ? 'is:sfw' : 'is:nsfw';
@@ -825,32 +1053,45 @@ export function renderTopPostsWidget(
     const createTagLine = (label: string, icon: string, tags: string) => {
       if (!tags) return '';
       const tagList = tags.replace(/_/g, ' ');
-      const displayTags = (label === 'Char' && tags.split(' ').length > 5)
-        ? tagList.split(' ').slice(0, 5).join(', ') + '...'
-        : tagList;
+      const displayTags =
+        label === 'Char' && tags.split(' ').length > 5
+          ? tagList.split(' ').slice(0, 5).join(', ') + '...'
+          : tagList;
       return `<div>${icon} <strong>${label}:</strong> ${displayTags}</div>`;
     };
 
-    const artistLine = createTagLine('Artist', '🎨', data.tag_string_artist);
-    const copyrightLine = createTagLine('Copy', '©️', data.tag_string_copyright);
-    const charLine = createTagLine('Char', '👤', data.tag_string_character);
+    const artistLine = createTagLine(
+      'Artist',
+      '🎨',
+      data.tag_string_artist ?? '',
+    );
+    const copyrightLine = createTagLine(
+      'Copy',
+      '©️',
+      data.tag_string_copyright ?? '',
+    );
+    const charLine = createTagLine(
+      'Char',
+      '👤',
+      data.tag_string_character ?? '',
+    );
 
     contentDiv.innerHTML = `
       <div class="di-top-post-layout" style="display:flex; gap:15px; align-items:flex-start;">
-          <a class="di-top-post-thumb" href="${link}" target="_blank" style="display:block; width:150px; height:150px; flex-shrink:0; background:#eee; border-radius:4px; overflow:hidden; position:relative;">
+          <a class="di-top-post-thumb" href="${link}" target="_blank" style="display:block; width:150px; height:150px; flex-shrink:0; background:var(--di-bg-tertiary, #f0f0f0); border-radius:4px; overflow:hidden; position:relative;">
               <img src="${thumbUrl}" style="width:100%; height:100%; object-fit:cover;" alt="#${data.id}">
           </a>
           <div style="flex:1;">
-              <div style="font-weight:bold; font-size:1.1em; color:#0969da; margin-bottom:4px;">
+              <div style="font-weight:bold; font-size:1.1em; color:var(--di-link, #007bff); margin-bottom:4px;">
                   <a href="${link}" target="_blank" style="text-decoration:none; color:inherit;">Post #${data.id}</a>
               </div>
-              <div style="font-size:0.9em; color:#555; line-height:1.5;">
+              <div style="font-size:0.9em; color:var(--di-text-secondary, #666); line-height:1.5;">
                   📅 ${dateStr}<br>
                   ❤️ Score: <strong>${data.score}</strong><br>
                   ⭐ Favs: <strong>${data.fav_count || '?'}</strong><br>
                   🤔 Rating: <strong>${ratingLabel}</strong>
 
-                  <div style="margin-top:8px; border-top:1px solid #eee; padding-top:6px;">
+                  <div style="margin-top:8px; border-top:1px solid var(--di-border-light, #eee); padding-top:6px;">
                       ${artistLine}
                       ${copyrightLine}
                       ${charLine}
@@ -864,25 +1105,35 @@ export function renderTopPostsWidget(
   const updateTabs = () => {
     const setStyle = (btn: HTMLElement | null, isActive: boolean) => {
       if (!btn) return;
-      btn.style.background = isActive ? '#0969da' : '#f6f8fa';
-      btn.style.color = isActive ? '#fff' : '#24292f';
+      btn.style.background = isActive
+        ? 'var(--di-link, #007bff)'
+        : 'var(--di-bg-tertiary, #f0f0f0)';
+      btn.style.color = isActive ? 'var(--di-bg, #fff)' : 'var(--di-text, #333)';
     };
 
-    const gsqeGroup = container.querySelector('#top-post-tabs-gsqe') as HTMLElement | null;
-    const sfwnsfwGroup = container.querySelector('#top-post-tabs-sfwnsfw') as HTMLElement | null;
+    const gsqeGroup = container.querySelector(
+      '#top-post-tabs-gsqe',
+    ) as HTMLElement | null;
+    const sfwnsfwGroup = container.querySelector(
+      '#top-post-tabs-sfwnsfw',
+    ) as HTMLElement | null;
 
     if (currentWidgetMode === 'most') {
       if (gsqeGroup) gsqeGroup.style.display = 'flex';
       if (sfwnsfwGroup) sfwnsfwGroup.style.display = 'none';
       for (const mode of ['g', 's', 'q', 'e']) {
-        const btn = container.querySelector(`button[data-mode="${mode}"]`) as HTMLElement | null;
+        const btn = container.querySelector(
+          `button[data-mode="${mode}"]`,
+        ) as HTMLElement | null;
         setStyle(btn, currentMostTab === mode);
       }
     } else {
       if (gsqeGroup) gsqeGroup.style.display = 'none';
       if (sfwnsfwGroup) sfwnsfwGroup.style.display = 'flex';
       for (const mode of ['sfw', 'nsfw']) {
-        const btn = container.querySelector(`button[data-mode="${mode}"]`) as HTMLElement | null;
+        const btn = container.querySelector(
+          `button[data-mode="${mode}"]`,
+        ) as HTMLElement | null;
         setStyle(btn, currentSfwTab === mode);
       }
     }
@@ -891,8 +1142,8 @@ export function renderTopPostsWidget(
   container.style.padding = '15px';
   container.innerHTML = `
      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-        <div style="font-size:0.85em; color:#666; letter-spacing:0.5px; display:flex; align-items:center; gap:5px;">
-           <select id="analytics-top-post-select" style="border:none; background:transparent; font-weight:bold; color:#666; cursor:pointer; text-transform:uppercase; font-size:1em; outline:none;">
+        <div style="font-size:0.85em; color:var(--di-chart-axis-secondary, #666); letter-spacing:0.5px; display:flex; align-items:center; gap:5px;">
+           <select id="analytics-top-post-select" style="border:none; background:transparent; font-weight:bold; color:var(--di-chart-axis-secondary, #666); cursor:pointer; text-transform:uppercase; font-size:1em; outline:none;">
               <option value="recent">🔥 Recent Popular Post</option>
               <option value="most">🏆 Most Popular Post</option>
               <option value="random">🎲 Random Post</option>
@@ -904,44 +1155,52 @@ export function renderTopPostsWidget(
                  ↗️
              </button>
          </div>
-        <div id="top-post-tabs-sfwnsfw" style="display:flex; gap:0px; border:1px solid #d0d7de; border-radius:6px; overflow:hidden;">
-           <button class="top-post-tab" data-mode="sfw" style="border:none; background:#0969da; color:#fff; padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">SFW</button>
-           <button class="top-post-tab" id="analytics-top-nsfw-btn" data-mode="nsfw" style="border:none; border-left:1px solid #d0d7de; background:#f6f8fa; color:#24292f; padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">NSFW</button>
+        <div id="top-post-tabs-sfwnsfw" style="display:flex; gap:0px; border:1px solid var(--di-border-input, #ddd); border-radius:6px; overflow:hidden;">
+           <button class="top-post-tab" data-mode="sfw" style="border:none; background:var(--di-link, #007bff); color:var(--di-bg, #fff); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">SFW</button>
+           <button class="top-post-tab" id="analytics-top-nsfw-btn" data-mode="nsfw" style="border:none; border-left:1px solid var(--di-border-input, #ddd); background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">NSFW</button>
         </div>
-        <div id="top-post-tabs-gsqe" style="display:none; gap:0px; border:1px solid #d0d7de; border-radius:6px; overflow:hidden;">
-           <button class="top-post-tab" data-mode="g" style="border:none; background:#f6f8fa; color:#24292f; padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">G</button>
-           <button class="top-post-tab" data-mode="s" style="border:none; border-left:1px solid #d0d7de; background:#f6f8fa; color:#24292f; padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">S</button>
-           <button class="top-post-tab" id="analytics-top-q-btn" data-mode="q" style="border:none; border-left:1px solid #d0d7de; background:#f6f8fa; color:#24292f; padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">Q</button>
-           <button class="top-post-tab" id="analytics-top-e-btn" data-mode="e" style="border:none; border-left:1px solid #d0d7de; background:#f6f8fa; color:#24292f; padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">E</button>
+        <div id="top-post-tabs-gsqe" style="display:none; gap:0px; border:1px solid var(--di-border-input, #ddd); border-radius:6px; overflow:hidden;">
+           <button class="top-post-tab" data-mode="g" style="border:none; background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">G</button>
+           <button class="top-post-tab" data-mode="s" style="border:none; border-left:1px solid var(--di-border-input, #ddd); background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">S</button>
+           <button class="top-post-tab" id="analytics-top-q-btn" data-mode="q" style="border:none; border-left:1px solid var(--di-border-input, #ddd); background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">Q</button>
+           <button class="top-post-tab" id="analytics-top-e-btn" data-mode="e" style="border:none; border-left:1px solid var(--di-border-input, #ddd); background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">E</button>
         </div>
      </div>
      <div class="top-post-content">
-         <div style="color:#666; font-size:0.9em;">Loading stats...</div>
+         <div style="color:var(--di-chart-axis-secondary, #666); font-size:0.9em;">Loading stats...</div>
      </div>
   `;
 
-  const modeSelect = container.querySelector('#analytics-top-post-select') as HTMLSelectElement;
+  const modeSelect = container.querySelector(
+    '#analytics-top-post-select',
+  ) as HTMLSelectElement;
   if (modeSelect) {
-    modeSelect.addEventListener('change', (e) => {
+    modeSelect.addEventListener('change', e => {
       currentWidgetMode = (e.target as HTMLSelectElement).value;
       updateTabs();
       renderTopPostContent();
     });
   }
 
-  const refreshBtn = container.querySelector('#analytics-random-refresh') as HTMLElement;
+  const refreshBtn = container.querySelector(
+    '#analytics-random-refresh',
+  ) as HTMLElement;
   if (refreshBtn) {
-    refreshBtn.onclick = async (e) => {
+    refreshBtn.onclick = async e => {
       e.stopPropagation();
       refreshBtn.style.transform = 'rotate(360deg)';
-      setTimeout(() => refreshBtn.style.transform = 'rotate(0deg)', 400);
+      setTimeout(() => (refreshBtn.style.transform = 'rotate(0deg)'), 400);
 
-      const contentDiv = container.querySelector('.top-post-content') as HTMLElement;
+      const contentDiv = container.querySelector(
+        '.top-post-content',
+      ) as HTMLElement;
       contentDiv.style.opacity = '0.5';
 
       try {
-        const newRandoms = await (new AnalyticsDataManager(db)).getRandomPosts(context.targetUser as any);
-        topPostGroups.random = newRandoms;
+        const newRandoms = await new AnalyticsDataManager(db).getRandomPosts(
+          context.targetUser,
+        );
+        topPostGroups['random'] = newRandoms;
         renderTopPostContent();
       } catch (err) {
         console.error('Failed to refresh random post:', err);
@@ -951,7 +1210,7 @@ export function renderTopPostsWidget(
     };
   }
 
-  container.addEventListener('click', (e) => {
+  container.addEventListener('click', e => {
     if ((e.target as HTMLElement).classList.contains('top-post-tab')) {
       const mode = (e.target as HTMLElement).getAttribute('data-mode') ?? '';
       if (currentWidgetMode === 'most') {
@@ -971,12 +1230,19 @@ export function renderTopPostsWidget(
     onNsfwChange: (enabled: boolean) => {
       isNsfwEnabled = enabled;
 
-      for (const id of ['analytics-top-q-btn', 'analytics-top-e-btn', 'analytics-top-nsfw-btn']) {
+      for (const id of [
+        'analytics-top-q-btn',
+        'analytics-top-e-btn',
+        'analytics-top-nsfw-btn',
+      ]) {
         const btn = document.getElementById(id);
         if (btn) btn.style.display = isNsfwEnabled ? 'inline-block' : 'none';
       }
 
-      if (!isNsfwEnabled && (currentMostTab === 'q' || currentMostTab === 'e')) {
+      if (
+        !isNsfwEnabled &&
+        (currentMostTab === 'q' || currentMostTab === 'e')
+      ) {
         currentMostTab = 'g';
         updateTabs();
         if (currentWidgetMode === 'most') renderTopPostContent();
@@ -1015,7 +1281,11 @@ export async function renderMilestonesWidget(
 
   const renderMilestones = async () => {
     const dm = new AnalyticsDataManager(db);
-    const milestones = await dm.getMilestones(context.targetUser as any, isNsfwEnabled, currentMilestoneStep);
+    const milestones = await dm.getMilestones(
+      context.targetUser,
+      isNsfwEnabled,
+      currentMilestoneStep,
+    );
     // Local DB count — same source `getMilestones` uses internally to build
     // its target sequence. Avoids an extra API call.
     const uploaderId = parseInt(context.targetUser?.id ?? '0');
@@ -1024,11 +1294,12 @@ export async function renderMilestonesWidget(
       : 0;
     const nextTarget = dm.getNextMilestone(totalPosts, currentMilestoneStep);
 
-    let msHtml = '<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee; padding-bottom:8px; margin-bottom:10px;">';
-    msHtml += '<h3 style="color:#333; margin:0;">🏆 Milestones</h3>';
+    let msHtml =
+      '<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--di-border-light, #eee); padding-bottom:8px; margin-bottom:10px;">';
+    msHtml += '<h3 style="color:var(--di-text, #333); margin:0;">🏆 Milestones</h3>';
     msHtml += '<div style="display:flex; align-items:center; gap:10px;">';
 
-    msHtml += `<select id="analytics-milestone-step" style="border:1px solid #d0d7de; border-radius:4px; padding:2px 4px; font-size:0.85em; color:#555; background-color:#f6f8fa;">
+    msHtml += `<select id="analytics-milestone-step" style="border:1px solid var(--di-border-input, #ddd); border-radius:4px; padding:2px 4px; font-size:0.85em; color:var(--di-text-secondary, #666); background-color:var(--di-bg-tertiary, #f0f0f0);">
       <option value="auto" ${currentMilestoneStep === 'auto' ? 'selected' : ''}>Auto</option>
       <option value="1000" ${currentMilestoneStep === 1000 || String(currentMilestoneStep) === '1000' ? 'selected' : ''}>Every 1k</option>
       <option value="2500" ${currentMilestoneStep === 2500 || String(currentMilestoneStep) === '2500' ? 'selected' : ''}>Every 2.5k</option>
@@ -1037,44 +1308,50 @@ export async function renderMilestonesWidget(
       <option value="repdigit" ${currentMilestoneStep === 'repdigit' ? 'selected' : ''}>Repdigit</option>
     </select>`;
 
-    msHtml += '<button id="analytics-milestone-toggle" style="background:none; border:none; color:#0969da; cursor:pointer; font-size:0.9em; display:none;">Show More</button>';
+    msHtml +=
+      '<button id="analytics-milestone-toggle" style="background:none; border:none; color:var(--di-link, #007bff); cursor:pointer; font-size:0.9em; display:none;">Show More</button>';
     msHtml += '</div>';
     msHtml += '</div>';
 
     if (milestones.length === 0) {
-      container.innerHTML = msHtml + '<div style="color:#888; font-size:0.9em;">No milestones found.</div>';
-      const sel = container.querySelector('#analytics-milestone-step') as HTMLSelectElement;
+      container.innerHTML =
+        msHtml +
+        '<div style="color:var(--di-text-muted, #888); font-size:0.9em;">No milestones found.</div>';
+      const sel = container.querySelector(
+        '#analytics-milestone-step',
+      ) as HTMLSelectElement;
       if (sel) {
-        sel.onchange = (e) => {
+        sel.onchange = e => {
           const v = (e.target as HTMLSelectElement).value;
-          currentMilestoneStep = v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
-          renderMilestones();
+          currentMilestoneStep =
+            v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
+          void renderMilestones();
         };
       }
       return;
     }
 
     const containerId = 'analytics-milestone-container';
-    msHtml += `<div id="${containerId}" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap:10px; max-height:110px; overflow:hidden; transition: max-height 0.3s ease;">`;
+    msHtml += `<div id="${containerId}" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap:10px; max-height:110px; overflow:hidden; transition: max-height 0.3s ease;">`;
 
-    milestones.forEach((m: any) => {
+    milestones.forEach((m: MilestoneEntry) => {
       const p = m.post;
-      const isSafe = (p.rating === 's' || p.rating === 'g');
+      const isSafe = p.rating === 's' || p.rating === 'g';
       const thumbUrl = getBestThumbnailUrl(p);
       const showThumb = isNsfwEnabled || isSafe;
 
       msHtml += `
       <a href="/posts/${p.id}" target="_blank" class="di-hover-scale" style="
          display:flex; justify-content:space-between; align-items:center; text-decoration:none; color:inherit;
-         background:#fff; border:1px solid #e1e4e8; border-radius:6px; padding:10px;
+         background:var(--di-chart-bg, #fff); border:1px solid var(--di-border-light, #eee); border-radius:6px; padding:10px;
       ">
          <div>
-             <div style="font-size:0.8em; color:#888; letter-spacing:0.5px;">#${p.id}</div>
-             <div style="font-size:1.1em; font-weight:bold; color:#0969da; margin-top:4px;">${m.type}</div>
-             <div style="font-size:0.8em; color:#555; margin-top:2px;">${new Date(p.created_at).toLocaleDateString()}</div>
-             <div style="font-size:0.75em; color:#aaa; margin-top:4px;">Score: ${p.score}</div>
+             <div style="font-size:0.8em; color:var(--di-text-muted, #888); letter-spacing:0.5px;">#${p.id}</div>
+             <div style="font-size:1.1em; font-weight:bold; color:var(--di-link, #007bff); margin-top:4px;">${m.type}</div>
+             <div style="font-size:0.8em; color:var(--di-text-secondary, #666); margin-top:2px;">${new Date(p.created_at).toLocaleDateString()}</div>
+             <div style="font-size:0.75em; color:var(--di-text-faint, #999); margin-top:4px;">Score: ${p.score}</div>
          </div>
-         ${(showThumb && thumbUrl) ? `<div style="width:60px; height:60px; margin-left:10px; flex-shrink:0; background:#f0f0f0; border-radius:4px; overflow:hidden; display:flex; align-items:center; justify-content:center;"><img src="${thumbUrl}" style="width:100%; height:100%; object-fit:cover;"></div>` : ''}
+         ${showThumb && thumbUrl ? `<div style="width:60px; height:60px; margin-left:10px; flex-shrink:0; background:var(--di-bg-tertiary, #f0f0f0); border-radius:4px; overflow:hidden; display:flex; align-items:center; justify-content:center;"><img src="${thumbUrl}" style="width:100%; height:100%; object-fit:cover;"></div>` : ''}
       </a>
     `;
     });
@@ -1095,33 +1372,36 @@ export async function renderMilestonesWidget(
     // post list (e.g. show the placeholder before milestones load).
     if (nextTarget !== null && nextTarget > totalPosts) {
       const remaining = nextTarget - totalPosts;
-      const prevTarget = milestones.length > 0 ? milestones[milestones.length - 1].index : 0;
+      const prevTarget =
+        milestones.length > 0 ? milestones[milestones.length - 1].milestone : 0;
       const span = nextTarget - prevTarget;
-      const progressPct = span > 0
-        ? Math.max(0, Math.min(100, ((totalPosts - prevTarget) / span) * 100))
-        : 0;
-      const nextLabel = nextTarget === 1
-        ? 'First'
-        : nextTarget >= 1000 && nextTarget % 1000 === 0
-          ? `${nextTarget / 1000} k`
-          : nextTarget.toLocaleString();
+      const progressPct =
+        span > 0
+          ? Math.max(0, Math.min(100, ((totalPosts - prevTarget) / span) * 100))
+          : 0;
+      const nextLabel =
+        nextTarget === 1
+          ? 'First'
+          : nextTarget >= 1000 && nextTarget % 1000 === 0
+            ? `${nextTarget / 1000} k`
+            : nextTarget.toLocaleString();
 
       msHtml += `
       <div class="di-next-milestone-card" style="
          display:flex; flex-direction:column; justify-content:space-between;
-         background:#f6f8fa; border:1px dashed #d0d7de; border-radius:6px; padding:10px;
-         color:#57606a;
+         background:var(--di-bg-tertiary, #f0f0f0); border:1px dashed var(--di-border-input, #ddd); border-radius:6px; padding:10px;
+         color:var(--di-text-secondary, #666);
       ">
          <div>
-             <div style="font-size:0.7em; color:#888; letter-spacing:0.5px; text-transform:uppercase;">Next</div>
-             <div style="font-size:1.1em; font-weight:bold; color:#57606a; margin-top:4px;">${nextLabel}</div>
-             <div style="font-size:0.8em; color:#666; margin-top:6px;">${remaining.toLocaleString()} remaining</div>
+             <div style="font-size:0.7em; color:var(--di-text-muted, #888); letter-spacing:0.5px; text-transform:uppercase;">Next</div>
+             <div style="font-size:1.1em; font-weight:bold; color:var(--di-text-secondary, #666); margin-top:4px;">${nextLabel}</div>
+             <div style="font-size:0.8em; color:var(--di-chart-axis-secondary, #666); margin-top:6px;">${remaining.toLocaleString()} remaining</div>
          </div>
          <div style="margin-top:8px;">
-             <div style="height:6px; background:#e1e4e8; border-radius:3px; overflow:hidden;">
-                 <div style="width:${progressPct.toFixed(1)}%; height:100%; background:#0969da;"></div>
+             <div style="height:6px; background:var(--di-border-light, #eee); border-radius:3px; overflow:hidden;">
+                 <div style="width:${progressPct.toFixed(1)}%; height:100%; background:var(--di-link, #007bff);"></div>
              </div>
-             <div style="font-size:0.7em; color:#888; margin-top:3px; text-align:right;">${progressPct.toFixed(0)}%</div>
+             <div style="font-size:0.7em; color:var(--di-text-muted, #888); margin-top:3px; text-align:right;">${progressPct.toFixed(0)}%</div>
          </div>
       </div>
     `;
@@ -1129,18 +1409,25 @@ export async function renderMilestonesWidget(
     msHtml += '</div>';
     container.innerHTML = msHtml;
 
-    const stepSelect = container.querySelector('#analytics-milestone-step') as HTMLSelectElement;
+    const stepSelect = container.querySelector(
+      '#analytics-milestone-step',
+    ) as HTMLSelectElement;
     if (stepSelect) {
-      stepSelect.onchange = (e) => {
+      stepSelect.onchange = e => {
         const v = (e.target as HTMLSelectElement).value;
-        currentMilestoneStep = v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
-        renderMilestones();
+        currentMilestoneStep =
+          v === 'auto' ? 'auto' : v === 'repdigit' ? 'repdigit' : parseInt(v);
+        void renderMilestones();
       };
     }
 
     if (milestones.length > 6) {
-      const btn = container.querySelector('#analytics-milestone-toggle') as HTMLElement;
-      const milestoneContainer = container.querySelector(`#${containerId}`) as HTMLElement;
+      const btn = container.querySelector(
+        '#analytics-milestone-toggle',
+      ) as HTMLElement;
+      const milestoneContainer = container.querySelector(
+        `#${containerId}`,
+      ) as HTMLElement;
       btn.style.display = 'block';
 
       if (isMilestoneExpanded) {
@@ -1187,22 +1474,26 @@ export async function renderHistoryChart(
   container: HTMLElement,
   db: Database,
   context: ChartContext,
-  milestones1k: any[],
-  levelChanges: any[],
+  milestones1k: MilestoneEntry[],
+  levelChanges: LevelChangeEvent[],
 ): Promise<void> {
   let minDate = null;
   if (levelChanges.length > 0) {
     minDate = levelChanges[0].date;
   }
 
-  const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isTouch2 = isTouchDevice();
 
-  const monthly = await (new AnalyticsDataManager(db)).getMonthlyStats(context.targetUser as any, minDate);
+  const monthly = await new AnalyticsDataManager(db).getMonthlyStats(
+    context.targetUser,
+    minDate,
+  );
   if (monthly.length === 0) return;
 
   const chartDiv = document.createElement('div');
   chartDiv.style.marginTop = '24px';
-  let chartHtml = '<h3 style="color:#333; border-bottom:1px solid #eee; padding-bottom:10px; margin-bottom:15px;">📅 Monthly Activity</h3>';
+  const chartHtml =
+    '<h3 style="color:var(--di-chart-axis, #333); border-bottom:1px solid var(--di-border-light, #eee); padding-bottom:10px; margin-bottom:15px;">📅 Monthly Activity</h3>';
 
   const minBarWidth = 25;
   const padLeftScroll = 10;
@@ -1211,8 +1502,8 @@ export async function renderHistoryChart(
   const padTop = 20;
   const yAxisWidth = 45;
 
-  const maxCount = Math.max(...monthly.map((m: any) => m.count));
-  const requiredWidth = padLeftScroll + padRight + (monthly.length * minBarWidth);
+  const maxCount = Math.max(...monthly.map(m => m.count));
+  const requiredWidth = padLeftScroll + padRight + monthly.length * minBarWidth;
   const vWidth = Math.max(800, requiredWidth);
   const vHeight = 200;
 
@@ -1221,17 +1512,17 @@ export async function renderHistoryChart(
   mainWrapper.style.display = 'flex';
   mainWrapper.style.width = '100%';
   mainWrapper.style.position = 'relative';
-  mainWrapper.style.border = '1px solid #e1e4e8';
+  mainWrapper.style.border = '1px solid var(--di-border-light, #eee)';
   mainWrapper.style.borderRadius = '8px';
-  mainWrapper.style.backgroundColor = '#fff';
+  mainWrapper.style.backgroundColor = 'var(--di-chart-bg, #fff)';
   mainWrapper.style.overflow = 'hidden';
 
   const yAxisWrapper = document.createElement('div');
   yAxisWrapper.style.width = `${yAxisWidth}px`;
   yAxisWrapper.style.flexShrink = '0';
-  yAxisWrapper.style.borderRight = '1px solid #f0f0f0';
+  yAxisWrapper.style.borderRight = '1px solid var(--di-bg-tertiary, #f0f0f0)';
   yAxisWrapper.style.zIndex = '5';
-  yAxisWrapper.style.backgroundColor = '#fff';
+  yAxisWrapper.style.backgroundColor = 'var(--di-chart-bg, #fff)';
   mainWrapper.appendChild(yAxisWrapper);
 
   const chartWrapper = document.createElement('div');
@@ -1254,8 +1545,9 @@ export async function renderHistoryChart(
   let ySvg = `<svg width="${yAxisWidth}" height="${vHeight}">`;
   for (let i = 0; i <= numTicks; i++) {
     const val = i * tickStep;
-    const y = (vHeight - padBottom) - ((val / tickMax) * (vHeight - padBottom - padTop));
-    ySvg += `<text x="${yAxisWidth - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="#888">${val}</text>`;
+    const y =
+      vHeight - padBottom - (val / tickMax) * (vHeight - padBottom - padTop);
+    ySvg += `<text x="${yAxisWidth - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--di-chart-axis-secondary, #666)">${val}</text>`;
   }
   ySvg += '</svg>';
   yAxisWrapper.innerHTML = ySvg;
@@ -1264,21 +1556,22 @@ export async function renderHistoryChart(
 
   for (let i = 1; i <= numTicks; i++) {
     const val = i * tickStep;
-    const y = (vHeight - padBottom) - ((val / tickMax) * (vHeight - padBottom - padTop));
-    svg += `<line x1="0" y1="${y}" x2="${vWidth}" y2="${y}" stroke="#eee" stroke-width="1" />`;
+    const y =
+      vHeight - padBottom - (val / tickMax) * (vHeight - padBottom - padTop);
+    svg += `<line x1="0" y1="${y}" x2="${vWidth}" y2="${y}" stroke="var(--di-chart-grid, #eee)" stroke-width="1" />`;
   }
-  svg += `<line x1="0" y1="${vHeight - padBottom}" x2="${vWidth}" y2="${vHeight - padBottom}" stroke="#ccc" />`;
+  svg += `<line x1="0" y1="${vHeight - padBottom}" x2="${vWidth}" y2="${vHeight - padBottom}" stroke="var(--di-border, #e1e4e8)" />`;
 
   const barAreaWidth = vWidth - padLeftScroll - padRight;
   const step = barAreaWidth / monthly.length;
   const barWidth = step * 0.75;
 
-  monthly.forEach((m: any, idx: number) => {
-    const x = padLeftScroll + (step * idx) + (step - barWidth) / 2;
+  monthly.forEach((m: MonthlyStatEntry, idx: number) => {
+    const x = padLeftScroll + step * idx + (step - barWidth) / 2;
     const barH = (m.count / tickMax) * (vHeight - padBottom - padTop);
-    const y = (vHeight - padBottom) - barH;
+    const y = vHeight - padBottom - barH;
 
-    const colX = padLeftScroll + (step * idx);
+    const colX = padLeftScroll + step * idx;
     const colWidth = step;
 
     const nextDate = idx < monthly.length - 1 ? monthly[idx + 1].date : null;
@@ -1310,14 +1603,14 @@ export async function renderHistoryChart(
       const ty = vHeight - 5;
       const text = isJan ? year : `${year}-${month}`;
 
-      svg += `<text x="${tx}" y="${ty}" text-anchor="middle" font-size="10" fill="#666">${text}</text>`;
-      svg += `<line x1="${tx}" y1="${vHeight - padBottom}" x2="${tx}" y2="${vHeight - padBottom + 3}" stroke="#ccc" />`;
+      svg += `<text x="${tx}" y="${ty}" text-anchor="middle" font-size="10" fill="var(--di-chart-axis-secondary, #666)">${text}</text>`;
+      svg += `<line x1="${tx}" y1="${vHeight - padBottom}" x2="${tx}" y2="${vHeight - padBottom + 3}" stroke="var(--di-border, #e1e4e8)" />`;
     }
   });
 
   if (levelChanges && levelChanges.length > 0) {
     const [sY, sM] = monthly[0].date.split('-').map(Number);
-    levelChanges.forEach((lc: any) => {
+    levelChanges.forEach((lc: LevelChangeEvent) => {
       const pY = lc.date.getFullYear();
       const pM = lc.date.getMonth() + 1;
       const pD = lc.date.getDate();
@@ -1327,7 +1620,7 @@ export async function renderHistoryChart(
       const idx = monthDiff + frac;
 
       if (idx < 0 || idx > monthly.length) return;
-      const x = padLeftScroll + (step * idx);
+      const x = padLeftScroll + step * idx;
 
       svg += `
         <g class="promotion-marker">
@@ -1340,38 +1633,38 @@ export async function renderHistoryChart(
     });
   }
 
-  monthly.forEach((mo: any, idx: number) => {
+  monthly.forEach((mo: MonthlyStatEntry, idx: number) => {
     const mKey = mo.date;
-    const stars = milestones1k.filter((m: any) => {
+    const stars = milestones1k.filter((m: MilestoneEntry) => {
       const pDate = new Date(m.post.created_at);
       const k = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}`;
       return k === mKey;
     });
 
     if (stars.length > 0) {
-      const x = padLeftScroll + (step * idx) + (step / 2);
+      const x = padLeftScroll + step * idx + step / 2;
 
-      stars.forEach((m: any, si: number) => {
-        const y = 14 + (si * 18);
+      stars.forEach((m: MilestoneEntry, si: number) => {
+        const y = 14 + si * 18;
 
         let fill = '#ffd700';
         let stroke = '#b8860b';
-        let style = 'filter: drop-shadow(0px 1px 1px rgba(0,0,0,0.3));';
+        const style = 'filter: drop-shadow(0px 1px 1px rgba(0,0,0,0.3));';
         let animClass = '';
 
-        if (m.index === 1) {
+        if (m.milestone === 1) {
           fill = '#00e676';
           stroke = '#00a050';
-        } else if (m.index % 10000 === 0) {
+        } else if (m.milestone % 10000 === 0) {
           fill = '#ffb300';
           animClass = 'star-shiny';
         }
 
-        if (isTouchDevice) {
+        if (isTouch2) {
           svg += `
                <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}; pointer-events: none;">
                    ★
-                   <title>Milestone #${m.index} (${new Date(m.post.created_at).toLocaleDateString()})</title>
+                   <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
                </text>
              `;
         } else {
@@ -1379,7 +1672,7 @@ export async function renderHistoryChart(
                <a href="/posts/${m.post.id}" target="_blank" style="cursor: pointer; pointer-events: all;" onclick="event.stopPropagation()">
                   <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}">
                      ★
-                     <title>Milestone #${m.index} (${new Date(m.post.created_at).toLocaleDateString()})</title>
+                     <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
                   </text>
                </a>
              `;

@@ -2,6 +2,7 @@ import {CONFIG} from './config';
 import {injectGlobalStyles} from './styles';
 import {Database} from './core/database';
 import {SettingsManager} from './core/settings';
+import type {DarkModePreference} from './types';
 import {RateLimitedFetch} from './core/rate-limiter';
 import {TabCoordinator} from './core/tab-coordinator';
 import {ProfileContext} from './core/profile-context';
@@ -46,12 +47,87 @@ export function detectCurrentTag(): string | null {
     // 2b. "View posts" Link (Fallback)
     const postLink = document.querySelector('a[href^="/posts?tags="]');
     if (postLink) {
-      const urlParams = new URLSearchParams((postLink as HTMLAnchorElement).search);
+      const urlParams = new URLSearchParams(
+        (postLink as HTMLAnchorElement).search,
+      );
       return urlParams.get('tags');
     }
   }
 
   return null;
+}
+
+/* --- Dashboard Theme Helpers --- */
+
+/** All top-level container IDs that receive the dashboard theme attribute. */
+const DASHBOARD_CONTAINERS = [
+  'danbooru-grass-modal-overlay',
+  'tag-analytics-modal',
+  'scatter-popover-ui',
+  'danbooru-grass-sync-settings',
+  'tag-analytics-settings-popover',
+  'di-post-hover-card',
+];
+
+/**
+ * Resolves the effective dashboard theme from the user preference
+ * and Danbooru's current page theme (for 'auto' mode).
+ */
+export function resolveEffectiveDashboardTheme(
+  pref: DarkModePreference,
+): 'light' | 'dark' {
+  if (pref === 'light' || pref === 'dark') return pref;
+  return document.body.getAttribute('data-current-user-theme') === 'dark'
+    ? 'dark'
+    : 'light';
+}
+
+/**
+ * Sets or removes `data-di-theme="dark"` on all existing dashboard containers.
+ * Called when the dashboard theme setting changes or on Danbooru theme change (auto).
+ */
+export function applyDashboardTheme(settings: SettingsManager): void {
+  const effective = resolveEffectiveDashboardTheme(settings.getDarkMode());
+  for (const id of DASHBOARD_CONTAINERS) {
+    const el = document.getElementById(id);
+    if (el) {
+      if (effective === 'dark') {
+        el.setAttribute('data-di-theme', 'dark');
+      } else {
+        el.removeAttribute('data-di-theme');
+      }
+    }
+  }
+}
+
+/**
+ * Watches for Danbooru page theme changes (auto mode only).
+ * Updates dashboard containers when Danbooru's theme toggles.
+ */
+function observeDanbooruTheme(settings: SettingsManager): void {
+  const observer = new MutationObserver(() => {
+    if (settings.getDarkMode() !== 'auto') return;
+    applyDashboardTheme(settings);
+  });
+  observer.observe(document.body, {
+    attributes: true,
+    attributeFilter: ['data-current-user-theme'],
+  });
+}
+
+/**
+ * Syncs dashboard theme across tabs. When another tab changes the theme
+ * preference in localStorage, the `storage` event fires here (not in the
+ * originating tab), and we re-read settings + re-apply the theme.
+ */
+function observeCrossTabSettings(settings: SettingsManager): void {
+  const settingsKey = `${CONFIG.STORAGE_PREFIX}settings`;
+  window.addEventListener('storage', e => {
+    if (e.key !== settingsKey) return;
+    // Reload settings from localStorage and re-apply theme
+    settings.settings = settings.load();
+    applyDashboardTheme(settings);
+  });
 }
 
 /**
@@ -71,21 +147,25 @@ async function main(): Promise<void> {
   const db = new Database();
   const settings = new SettingsManager();
 
+  // Dashboard theme: observe Danbooru's theme for 'auto' mode
+  observeDanbooruTheme(settings);
+  observeCrossTabSettings(settings);
+
   // Shared rate limiter — one per tab, coordinated across tabs
   const rl = CONFIG.RATE_LIMITER;
   const rateLimiter = new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
 
   // Cross-tab coordination
   const coordinator = new TabCoordinator();
-  coordinator.onTabCountChange = (count) => {
+  coordinator.onTabCountChange = count => {
     const rps = Math.max(1, Math.floor(rl.rps / count));
     const conc = Math.max(1, Math.floor(rl.concurrency / count));
     rateLimiter.updateLimits(rps, conc);
   };
-  coordinator.onBackoffReceived = (until) => {
+  coordinator.onBackoffReceived = until => {
     rateLimiter.setBackoff(until);
   };
-  rateLimiter.onBackoff = (until) => {
+  rateLimiter.onBackoff = until => {
     coordinator.broadcastBackoff(until);
   };
   coordinator.start();
@@ -95,8 +175,14 @@ async function main(): Promise<void> {
 
   if (targetTagName) {
     // Tag Analytics Mode (Wiki or Artist)
-    const tagAnalytics = new TagAnalyticsApp(db, settings, targetTagName, rateLimiter);
-    tagAnalytics.run();
+    const tagAnalytics = new TagAnalyticsApp(
+      db,
+      settings,
+      targetTagName,
+      rateLimiter,
+    );
+    // Fire-and-forget: top-level app entry; errors logged inside.
+    void tagAnalytics.run();
   } else {
     // Profile Mode
     const context = new ProfileContext();
@@ -105,17 +191,22 @@ async function main(): Promise<void> {
     }
 
     const grass = new GrassApp(db, settings, context, rateLimiter);
-    const userAnalytics = new UserAnalyticsApp(db, settings, context, rateLimiter);
+    const userAnalytics = new UserAnalyticsApp(
+      db,
+      settings,
+      context,
+      rateLimiter,
+    );
 
-    // Execution
-    grass.run();
-    userAnalytics.run();
+    // Execution — fire-and-forget: top-level app entries.
+    void grass.run();
+    void userAnalytics.run();
   }
 }
 
 // Run
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', main);
+  document.addEventListener('DOMContentLoaded', () => void main());
 } else {
-  main();
+  void main();
 }

@@ -35,12 +35,17 @@ describe('Architecture constraints', () => {
       const imports = extractImports(file.content);
       for (const imp of imports) {
         if (imp.includes('/apps/') || imp.includes('../apps/')) {
-          violations.push(`${path.relative(SRC_DIR, file.path)} imports "${imp}"`);
+          violations.push(
+            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
+          );
         }
       }
     }
 
-    expect(violations, 'core/ must not import from apps/. Move shared code to core/ or utils.').toEqual([]);
+    expect(
+      violations,
+      'core/ must not import from apps/. Move shared code to core/ or utils.',
+    ).toEqual([]);
   });
 
   it('core/ should not import from ui/', () => {
@@ -51,12 +56,17 @@ describe('Architecture constraints', () => {
       const imports = extractImports(file.content);
       for (const imp of imports) {
         if (imp.includes('/ui/') || imp.includes('../ui/')) {
-          violations.push(`${path.relative(SRC_DIR, file.path)} imports "${imp}"`);
+          violations.push(
+            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
+          );
         }
       }
     }
 
-    expect(violations, 'core/ must not import from ui/. Data layer should not depend on UI.').toEqual([]);
+    expect(
+      violations,
+      'core/ must not import from ui/. Data layer should not depend on UI.',
+    ).toEqual([]);
   });
 
   it('ui/ should not import from apps/', () => {
@@ -67,12 +77,17 @@ describe('Architecture constraints', () => {
       const imports = extractImports(file.content);
       for (const imp of imports) {
         if (imp.includes('/apps/') || imp.includes('../apps/')) {
-          violations.push(`${path.relative(SRC_DIR, file.path)} imports "${imp}"`);
+          violations.push(
+            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
+          );
         }
       }
     }
 
-    expect(violations, 'ui/ must not import from apps/. UI components should not depend on app orchestration.').toEqual([]);
+    expect(
+      violations,
+      'ui/ must not import from apps/. UI components should not depend on app orchestration.',
+    ).toEqual([]);
   });
 
   it('should not contain [key: string]: any index signatures', () => {
@@ -87,14 +102,17 @@ describe('Architecture constraints', () => {
       }
     }
 
-    expect(violations, 'Use concrete types instead of [key: string]: any.').toEqual([]);
+    expect(
+      violations,
+      'Use concrete types instead of [key: string]: any.',
+    ).toEqual([]);
   });
 
   it('should not use raw fetch() — use RateLimitedFetch instead', () => {
     const violations: string[] = [];
     // Only check non-core files (core/rate-limiter.ts itself uses fetch internally)
-    const filesToCheck = allFiles.filter(f =>
-      !f.path.includes('rate-limiter.ts') && !f.path.includes('.test.')
+    const filesToCheck = allFiles.filter(
+      f => !f.path.includes('rate-limiter.ts') && !f.path.includes('.test.'),
     );
 
     for (const file of filesToCheck) {
@@ -102,13 +120,21 @@ describe('Architecture constraints', () => {
       for (let i = 0; i < lines.length; i++) {
         // Match standalone fetch( but not this.rateLimiter.fetch( or rateLimiter.fetch(
         const line = lines[i];
-        if (/(?<!rateLimiter\.)(?<!this\.)(?<!\.)\bfetch\s*\(/.test(line) &&
-            !line.trim().startsWith('//') && !line.trim().startsWith('*')) {
-          violations.push(`${path.relative(SRC_DIR, file.path)}:${i + 1}: ${line.trim()}`);
+        if (
+          /(?<!rateLimiter\.)(?<!this\.)(?<!\.)\bfetch\s*\(/.test(line) &&
+          !line.trim().startsWith('//') &&
+          !line.trim().startsWith('*')
+        ) {
+          violations.push(
+            `${path.relative(SRC_DIR, file.path)}:${i + 1}: ${line.trim()}`,
+          );
         }
       }
     }
 
-    expect(violations, 'Use this.rateLimiter.fetch() instead of raw fetch() to respect API rate limits.').toEqual([]);
+    expect(
+      violations,
+      'Use this.rateLimiter.fetch() instead of raw fetch() to respect API rate limits.',
+    ).toEqual([]);
   });
 });
