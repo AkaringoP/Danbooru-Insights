@@ -204,7 +204,7 @@ export class TagAnalyticsChartRenderer {
       .style('pointer-events', 'none')
       .style('z-index', '2147483647')
       .style('opacity', '0')
-      .style('box-shadow', '0 2px 5px var(--di-shadow)');
+      .style('box-shadow', '0 2px 5px var(--di-shadow, rgba(0,0,0,0.2))');
 
     const totalValue = d3.sum(data, (d: D3Any) => d.count);
     const arcs = pie(data);
@@ -356,7 +356,7 @@ export class TagAnalyticsChartRenderer {
 
         label.textContent = `${d.name} (${d.count.toLocaleString()})`;
         label.style.textDecoration = 'none';
-        label.style.color = 'var(--di-text-secondary)';
+        label.style.color = 'var(--di-text-secondary, #666)';
         label.style.transition = 'color 0.2s';
 
         item.appendChild(colorBox);
@@ -388,7 +388,7 @@ export class TagAnalyticsChartRenderer {
 
     if (milestonePosts.length === 0) {
       grid.innerHTML =
-        '<div style="color:var(--di-text-muted); grid-column:1/-1; text-align:center;">No milestones found.</div>';
+        '<div style="color:var(--di-text-muted, #888); grid-column:1/-1; text-align:center;">No milestones found.</div>';
       if (toggleBtn) toggleBtn.style.display = 'none';
       return;
     }
@@ -438,8 +438,8 @@ export class TagAnalyticsChartRenderer {
       const card = document.createElement('div');
       card.className = 'di-milestone-card di-nsfw-monitor';
       card.setAttribute('data-rating', p.rating);
-      card.style.background = 'var(--di-bg)';
-      card.style.border = '1px solid var(--di-border)';
+      card.style.background = 'var(--di-bg, #fff)';
+      card.style.border = '1px solid var(--di-border, #e1e4e8)';
       card.style.borderRadius = '6px';
       card.style.padding = '10px 80px 10px 10px';
       card.style.position = 'relative';
@@ -448,13 +448,13 @@ export class TagAnalyticsChartRenderer {
       card.classList.add('di-hover-translate-up');
 
       card.innerHTML = `
-            <div style="font-size: 0.8em; color: var(--di-text-muted); letter-spacing: 0.3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">#${p.id}</div>
-            <a href="/posts/${p.id}" target="_blank" class="di-milestone-link" style="font-weight: bold; font-size: 1.1em; color: var(--di-link); text-decoration: none; display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${label}</a>
-            <div style="font-size: 0.8em; color: var(--di-text-secondary); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${dateStr}</div>
-            <div style="font-size: 0.75em; color: var(--di-text-muted); margin-top: 4px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            <div style="font-size: 0.8em; color: var(--di-text-muted, #888); letter-spacing: 0.3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">#${p.id}</div>
+            <a href="/posts/${p.id}" target="_blank" class="di-milestone-link" style="font-weight: bold; font-size: 1.1em; color: var(--di-link, #007bff); text-decoration: none; display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${label}</a>
+            <div style="font-size: 0.8em; color: var(--di-text-secondary, #666); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${dateStr}</div>
+            <div style="font-size: 0.75em; color: var(--di-text-muted, #888); margin-top: 4px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                 <a href="/users/${p.uploader_id}" target="_blank" class="${getLevelClass(p.uploader_level ?? null)}" style="text-decoration: none;">${escapeHtml(uploaderName)}</a>
             </div>
-            <a href="/posts/${p.id}" target="_blank" style="position: absolute; top: 10px; right: 10px; width: 60px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--di-bg-tertiary); display: block;">
+            <a href="/posts/${p.id}" target="_blank" style="position: absolute; top: 10px; right: 10px; width: 60px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--di-bg-tertiary, #f0f0f0); display: block;">
                 <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
             </a>
         `;
@@ -514,15 +514,15 @@ export class TagAnalyticsChartRenderer {
       nextCard.style.color = '#57606a';
       nextCard.innerHTML = `
         <div>
-          <div style="font-size: 0.7em; color: var(--di-text-muted); letter-spacing: 0.3px; text-transform: uppercase;">Next</div>
+          <div style="font-size: 0.7em; color: var(--di-text-muted, #888); letter-spacing: 0.3px; text-transform: uppercase;">Next</div>
           <div style="font-weight: bold; font-size: 1.1em; color: #57606a; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${nextLabel}</div>
-          <div style="font-size: 0.8em; color: var(--di-chart-axis-secondary); margin-top: 4px;">${remaining.toLocaleString()} remaining</div>
+          <div style="font-size: 0.8em; color: var(--di-chart-axis-secondary, #666); margin-top: 4px;">${remaining.toLocaleString()} remaining</div>
         </div>
         <div style="margin-top: 6px;">
-          <div style="height: 6px; background: var(--di-border); border-radius: 3px; overflow: hidden;">
-            <div style="width: ${progressPct.toFixed(1)}%; height: 100%; background: var(--di-link);"></div>
+          <div style="height: 6px; background: var(--di-border, #e1e4e8); border-radius: 3px; overflow: hidden;">
+            <div style="width: ${progressPct.toFixed(1)}%; height: 100%; background: var(--di-link, #007bff);"></div>
           </div>
-          <div style="font-size: 0.7em; color: var(--di-text-muted); margin-top: 3px; text-align: right;">${progressPct.toFixed(0)}%</div>
+          <div style="font-size: 0.7em; color: var(--di-text-muted, #888); margin-top: 3px; text-align: right;">${progressPct.toFixed(0)}%</div>
         </div>
       `;
       grid.appendChild(nextCard);
@@ -640,10 +640,10 @@ export class TagAnalyticsChartRenderer {
     titleEl.textContent = title;
     titleEl.style.fontSize = '14px';
     titleEl.style.fontWeight = 'bold';
-    titleEl.style.color = 'var(--di-text-heading)';
+    titleEl.style.color = 'var(--di-text-heading, #444)';
     titleEl.style.marginBottom = '5px';
     titleEl.style.textAlign = 'left'; // Left aligned
-    titleEl.style.borderLeft = '4px solid var(--di-link)';
+    titleEl.style.borderLeft = '4px solid var(--di-link, #007bff)';
     titleEl.style.paddingLeft = '10px';
     container.appendChild(titleEl);
 
@@ -660,7 +660,7 @@ export class TagAnalyticsChartRenderer {
     yAxisContainer.className = 'y-axis-container';
     yAxisContainer.style.width = '45px'; // Fixed width
     yAxisContainer.style.flexShrink = '0';
-    yAxisContainer.style.background = 'var(--di-chart-bg)';
+    yAxisContainer.style.background = 'var(--di-chart-bg, #fff)';
     yAxisContainer.style.zIndex = '5';
     mainWrapper.appendChild(yAxisContainer);
 
@@ -929,10 +929,10 @@ export class TagAnalyticsChartRenderer {
     titleEl.textContent = title;
     titleEl.style.fontSize = '14px';
     titleEl.style.fontWeight = 'bold';
-    titleEl.style.color = 'var(--di-text-heading)';
+    titleEl.style.color = 'var(--di-text-heading, #444)';
     titleEl.style.marginBottom = '5px';
     titleEl.style.textAlign = 'left'; // Left aligned
-    titleEl.style.borderLeft = '4px solid var(--di-link)';
+    titleEl.style.borderLeft = '4px solid var(--di-link, #007bff)';
     titleEl.style.paddingLeft = '10px';
     container.appendChild(titleEl);
 
@@ -1125,8 +1125,8 @@ export class TagAnalyticsChartRenderer {
     if (!data || data.length === 0) {
       return `
           <div class="di-card-sm">
-              <h4 style="margin: 0 0 10px 0; font-size: 0.9em; color: var(--di-text-secondary); text-align: center; border-bottom: 1px solid var(--di-border-input); padding-bottom: 5px;">${title}</h4>
-              <div style="text-align: center; color: var(--di-text-faint); font-size: 0.8em; padding: 20px 0;">No Data</div>
+              <h4 style="margin: 0 0 10px 0; font-size: 0.9em; color: var(--di-text-secondary, #666); text-align: center; border-bottom: 1px solid var(--di-border-input, #ddd); padding-bottom: 5px;">${title}</h4>
+              <div style="text-align: center; color: var(--di-text-faint, #999); font-size: 0.8em; padding: 20px 0;">No Data</div>
           </div>`;
     }
 
@@ -1176,14 +1176,14 @@ export class TagAnalyticsChartRenderer {
         return `
           <div style="display: flex; justify-content: space-between; font-size: 0.85em; padding: 3px 5px; border-bottom: 1px solid #f5f5f5; background: linear-gradient(90deg, rgba(0,0,0,0.06) ${percentage}%, transparent ${percentage}%);">
               <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px;" title="${safeName}">${i + 1}. ${nameHtml}</span>
-              <span style="color: var(--di-chart-axis-secondary); font-weight: bold;">${count}</span>
+              <span style="color: var(--di-chart-axis-secondary, #666); font-weight: bold;">${count}</span>
           </div>`;
       })
       .join('');
 
     return `
       <div class="di-card-sm">
-          <h4 style="margin: 0 0 10px 0; font-size: 0.9em; color: var(--di-text-secondary); text-align: center; border-bottom: 1px solid var(--di-border-input); padding-bottom: 5px;">${title}</h4>
+          <h4 style="margin: 0 0 10px 0; font-size: 0.9em; color: var(--di-text-secondary, #666); text-align: center; border-bottom: 1px solid var(--di-border-input, #ddd); padding-bottom: 5px;">${title}</h4>
           <div>${list}</div>
       </div>`;
   }

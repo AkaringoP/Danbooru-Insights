@@ -37,8 +37,8 @@ export function renderCreatedTagsWidget(
   let currentPage = 0;
 
   // Build DOM
-  container.style.background = 'var(--di-bg)';
-  container.style.border = '1px solid var(--di-border)';
+  container.style.background = 'var(--di-bg, #fff)';
+  container.style.border = '1px solid var(--di-border, #e1e4e8)';
   container.style.borderRadius = '8px';
   container.style.padding = '15px';
 
@@ -48,7 +48,7 @@ export function renderCreatedTagsWidget(
 
   const titleDiv = document.createElement('div');
   titleDiv.style.cssText =
-    'font-size:0.9em;color:var(--di-text-secondary);font-weight:bold;';
+    'font-size:0.9em;color:var(--di-text-secondary, #666);font-weight:bold;';
   titleDiv.textContent = `🏷️ Tags created by ${targetUser.name}`;
 
   const controlsDiv = document.createElement('div');
@@ -69,11 +69,11 @@ export function renderCreatedTagsWidget(
       const isActive = mode === sortMode;
       const arrow = isActive ? (sortDir === 'desc' ? ' ▼' : ' ▲') : '';
       btn.textContent = SORT_LABELS[mode] + arrow;
-      btn.style.background = isActive ? 'var(--di-link)' : 'var(--di-bg)';
-      btn.style.color = isActive ? '#fff' : 'var(--di-text-secondary)';
+      btn.style.background = isActive ? 'var(--di-link, #007bff)' : 'var(--di-bg, #fff)';
+      btn.style.color = isActive ? '#fff' : 'var(--di-text-secondary, #666)';
       btn.style.borderColor = isActive
-        ? 'var(--di-link)'
-        : 'var(--di-border-input)';
+        ? 'var(--di-link, #007bff)'
+        : 'var(--di-border-input, #ddd)';
       btn.title = isActive
         ? `Sorted by ${SORT_LABELS[mode]} (${sortDir === 'desc' ? 'descending' : 'ascending'}). Click to toggle direction.`
         : `Sort by ${SORT_LABELS[mode]}`;
@@ -83,7 +83,7 @@ export function renderCreatedTagsWidget(
   (['posts', 'name', 'date'] as SortMode[]).forEach(mode => {
     const btn = document.createElement('button');
     btn.style.cssText =
-      'font-size:11px;padding:2px 8px;border:1px solid var(--di-border-input);border-radius:4px;background:var(--di-bg);color:var(--di-text-secondary);cursor:pointer;transition:all 0.15s;';
+      'font-size:11px;padding:2px 8px;border:1px solid var(--di-border-input, #ddd);border-radius:4px;background:var(--di-bg, #fff);color:var(--di-text-secondary, #666);cursor:pointer;transition:all 0.15s;';
     btn.onclick = () => {
       if (sortMode === mode) {
         sortDir = sortDir === 'desc' ? 'asc' : 'desc';
@@ -117,7 +117,7 @@ export function renderCreatedTagsWidget(
       return '<span class="di-created-tags-status" style="color:#cf222e;background:#ffebe9;">⚠️ Deprecated</span>';
     }
     if (item.postCount === 0) {
-      return '<span class="di-created-tags-status" style="color:var(--di-text-muted);background:var(--di-bg-tertiary);">➖ Empty</span>';
+      return '<span class="di-created-tags-status" style="color:var(--di-text-muted, #888);background:var(--di-bg-tertiary, #f0f0f0);">➖ Empty</span>';
     }
     return '<span class="di-created-tags-status" style="color:#1a7f37;background:#dafbe1;">✅ Active</span>';
   };
@@ -155,7 +155,7 @@ export function renderCreatedTagsWidget(
         <td><a href="/wiki_pages/${wikiTarget}" target="_blank" style="color:#0075f8;">${item.displayName}</a></td>
         <td style="text-align:right;font-variant-numeric:tabular-nums;">${item.postCount.toLocaleString()}</td>
         <td>${getStatusHtml(item)}</td>
-        <td style="color:var(--di-text-muted);font-size:0.85em;">${item.reportDate}</td>
+        <td style="color:var(--di-text-muted, #888);font-size:0.85em;">${item.reportDate}</td>
       </tr>`;
     }
 
@@ -186,7 +186,7 @@ export function renderCreatedTagsWidget(
   const loadData = async () => {
     const progressId = 'di-created-tags-progress';
     contentDiv.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:center;padding:30px;color:var(--di-text-muted);">
+      <div style="display:flex;align-items:center;justify-content:center;padding:30px;color:var(--di-text-muted, #888);">
         <div class="di-spinner" style="width:24px;height:24px;border-width:3px;margin-right:10px;"></div>
         <span id="${progressId}">Initializing...</span>
       </div>`;
@@ -200,7 +200,7 @@ export function renderCreatedTagsWidget(
       items = await dataManager.getCreatedTags(targetUser, onProgress);
       if (items.length === 0) {
         contentDiv.innerHTML =
-          '<div style="color:var(--di-text-muted);text-align:center;padding:20px;font-size:0.9em;">No created tags found in NNTBot reports.</div>';
+          '<div style="color:var(--di-text-muted, #888);text-align:center;padding:20px;font-size:0.9em;">No created tags found in NNTBot reports.</div>';
         return;
       }
 
@@ -220,11 +220,11 @@ export function renderCreatedTagsWidget(
   contentDiv.innerHTML = `
     <div style="text-align:center;padding:20px;">
       <button id="di-load-created-tags" style="
-        background:var(--di-card-bg);border:1px solid var(--di-border-input);border-radius:6px;
-        padding:8px 16px;cursor:pointer;color:var(--di-text);font-size:13px;
+        background:var(--di-card-bg, #f9f9f9);border:1px solid var(--di-border-input, #ddd);border-radius:6px;
+        padding:8px 16px;cursor:pointer;color:var(--di-text, #333);font-size:13px;
         transition:background 0.2s;
       ">Load Created Tags</button>
-      <div style="font-size:0.8em;color:var(--di-text-muted);margin-top:6px;">Searches NNTBot tag reports for tags created by this user</div>
+      <div style="font-size:0.8em;color:var(--di-text-muted, #888);margin-top:6px;">Searches NNTBot tag reports for tags created by this user</div>
     </div>`;
 
   const loadBtn = contentDiv.querySelector(
@@ -232,10 +232,10 @@ export function renderCreatedTagsWidget(
   ) as HTMLElement;
   if (loadBtn) {
     loadBtn.onmouseover = () => {
-      loadBtn.style.background = 'var(--di-bg-tertiary)';
+      loadBtn.style.background = 'var(--di-bg-tertiary, #f0f0f0)';
     };
     loadBtn.onmouseout = () => {
-      loadBtn.style.background = 'var(--di-card-bg)';
+      loadBtn.style.background = 'var(--di-card-bg, #f9f9f9)';
     };
     loadBtn.onclick = () => loadData();
   }

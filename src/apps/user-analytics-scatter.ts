@@ -179,13 +179,13 @@ function buildScatterDom(): ScatterDom {
   const headerContainer = document.createElement('div');
   headerContainer.style.display = 'flex';
   headerContainer.style.alignItems = 'center';
-  headerContainer.style.borderBottom = '1px solid var(--di-border-light)';
+  headerContainer.style.borderBottom = '1px solid var(--di-border-light, #eee)';
   headerContainer.style.paddingBottom = '10px';
   headerContainer.style.marginBottom = '15px';
 
   const headerEl = document.createElement('h3');
   headerEl.textContent = '📊 Post Performance';
-  headerEl.style.color = 'var(--di-text)';
+  headerEl.style.color = 'var(--di-text, #333)';
   headerEl.style.margin = '0';
   headerContainer.appendChild(headerEl);
 
@@ -194,7 +194,7 @@ function buildScatterDom(): ScatterDom {
   // Widget Box
   const scatterDiv = document.createElement('div');
   scatterDiv.className = 'dashboard-widget';
-  scatterDiv.style.background = 'var(--di-chart-bg)';
+  scatterDiv.style.background = 'var(--di-chart-bg, #fff)';
   scatterDiv.style.border = '1px solid #e1e4e8';
   scatterDiv.style.borderRadius = '6px';
   scatterDiv.style.padding = '15px';
@@ -225,8 +225,8 @@ function buildScatterDom(): ScatterDom {
     btn.style.borderRadius = '20px';
     btn.style.padding = '2px 10px';
     const isActive = i === 0;
-    btn.style.background = isActive ? 'var(--di-link)' : 'var(--di-bg)';
-    btn.style.color = isActive ? 'var(--di-btn-active-text)' : 'var(--di-text)';
+    btn.style.background = isActive ? 'var(--di-link, #007bff)' : 'var(--di-bg, #fff)';
+    btn.style.color = isActive ? 'var(--di-btn-active-text, #fff)' : 'var(--di-text, #333)';
     btn.style.cursor = 'pointer';
     btn.style.transition = 'all 0.2s';
     btn.style.fontSize = '12px';
@@ -267,10 +267,10 @@ function buildScatterDom(): ScatterDom {
   downvoteContainer.style.display = 'flex';
   downvoteContainer.style.alignItems = 'center';
   downvoteContainer.style.gap = '5px';
-  downvoteContainer.style.background = 'var(--di-bg-glass)';
+  downvoteContainer.style.background = 'var(--di-bg-glass, rgba(255, 255, 255, 0.9))';
   downvoteContainer.style.padding = '2px 8px';
   downvoteContainer.style.borderRadius = '12px';
-  downvoteContainer.style.border = '1px solid var(--di-border-light)';
+  downvoteContainer.style.border = '1px solid var(--di-border-light, #eee)';
 
   const downvoteLabel = document.createElement('span');
   downvoteLabel.textContent = '👎';
@@ -284,11 +284,11 @@ function buildScatterDom(): ScatterDom {
     const btn = document.createElement('button');
     btn.textContent = `>${t}`;
     btn.dataset.threshold = String(t);
-    btn.style.border = '1px solid #d0d7de';
+    btn.style.border = '1px solid var(--di-border-input, #ddd)';
     btn.style.borderRadius = '12px';
     btn.style.padding = '1px 8px';
-    btn.style.background = 'var(--di-bg)';
-    btn.style.color = 'var(--di-text)';
+    btn.style.background = 'var(--di-bg, #fff)';
+    btn.style.color = 'var(--di-text, #333)';
     btn.style.cursor = 'pointer';
     btn.style.fontSize = '11px';
     btn.style.transition = 'all 0.2s';
@@ -306,8 +306,9 @@ function buildScatterDom(): ScatterDom {
   resetBtn.style.bottom = '10px';
   resetBtn.style.left = '15px';
   resetBtn.style.zIndex = '5';
-  resetBtn.style.border = '1px solid #d0d7de';
-  resetBtn.style.background = 'var(--di-bg)';
+  resetBtn.style.border = '1px solid var(--di-border-input, #ddd)';
+  resetBtn.style.background = 'var(--di-bg, #fff)';
+  resetBtn.style.color = 'var(--di-text, #333)';
   resetBtn.style.borderRadius = '4px';
   resetBtn.style.padding = '2px 8px';
   resetBtn.style.cursor = 'pointer';
@@ -323,7 +324,7 @@ function buildScatterDom(): ScatterDom {
   yearLabel.style.zIndex = '4';
   yearLabel.style.fontSize = '16px';
   yearLabel.style.fontWeight = 'bold';
-  yearLabel.style.color = '#000000';
+  yearLabel.style.color = 'var(--di-text, #333)';
   yearLabel.style.pointerEvents = 'none';
   yearLabel.style.display = 'none';
   scatterDiv.appendChild(yearLabel);
@@ -335,10 +336,10 @@ function buildScatterDom(): ScatterDom {
   filterContainer.style.top = '15px';
   filterContainer.style.right = '15px';
   filterContainer.style.zIndex = '5';
-  filterContainer.style.background = 'var(--di-bg-glass)';
+  filterContainer.style.background = 'var(--di-bg-glass, rgba(255, 255, 255, 0.9))';
   filterContainer.style.padding = '2px 8px';
   filterContainer.style.borderRadius = '12px';
-  filterContainer.style.border = '1px solid var(--di-border-light)';
+  filterContainer.style.border = '1px solid var(--di-border-light, #eee)';
   filterContainer.style.display = 'flex';
   filterContainer.style.alignItems = 'center';
   filterContainer.style.gap = '15px';
@@ -347,7 +348,7 @@ function buildScatterDom(): ScatterDom {
   countLabel.textContent = '...';
   countLabel.style.fontSize = '12px';
   countLabel.style.fontWeight = 'bold';
-  countLabel.style.color = 'var(--di-text)';
+  countLabel.style.color = 'var(--di-text, #333)';
   countLabel.style.marginRight = '5px';
   filterContainer.appendChild(countLabel);
 
@@ -370,7 +371,7 @@ function buildScatterDom(): ScatterDom {
     const labelEl = document.createElement('span');
     labelEl.textContent = label;
     labelEl.style.fontWeight = 'normal';
-    labelEl.style.color = '#000000';
+    labelEl.style.color = 'var(--di-text, #333)';
     labelEl.style.fontSize = '12px';
 
     const circle = document.createElement('div');
@@ -378,7 +379,7 @@ function buildScatterDom(): ScatterDom {
     circle.style.height = '16px';
     circle.style.borderRadius = '50%';
     circle.style.background = color;
-    circle.style.boxShadow = '0 1px 3px var(--di-shadow)';
+    circle.style.boxShadow = '0 1px 3px var(--di-shadow, rgba(0,0,0,0.2))';
     circle.style.transition = 'background 0.3s, transform 0.3s';
 
     root.appendChild(labelEl);
@@ -445,7 +446,7 @@ function buildScatterDom(): ScatterDom {
   const popover = document.createElement('div');
   popover.id = 'scatter-popover-ui';
   popover.style.cssText =
-    'position: fixed; z-index: 10000; background: var(--di-bg); border: 1px solid var(--di-border); border-radius: 4px; box-shadow: 0 4px 12px var(--di-shadow); display: none; max-height: 300px; width: 320px; flex-direction: column; font-family: sans-serif; color: var(--di-text);';
+    'position: fixed; z-index: 10000; background: var(--di-bg, #fff); border: 1px solid var(--di-border, #e1e4e8); border-radius: 4px; box-shadow: 0 4px 12px var(--di-shadow, rgba(0,0,0,0.2)); display: none; max-height: 300px; width: 320px; flex-direction: column; font-family: sans-serif; color: var(--di-text, #333);';
   document.body.appendChild(popover);
 
   return {
@@ -588,8 +589,9 @@ function drawScatterGrid(
   ctx: CanvasRenderingContext2D,
   scale: ScatterScale,
   w: number,
+  canvas: HTMLCanvasElement,
 ): {y10Pos: number | null} {
-  const pal = getPalette();
+  const pal = getPalette(canvas);
   ctx.beginPath();
   ctx.strokeStyle = pal.chartGrid;
   ctx.lineWidth = 1;
@@ -657,8 +659,9 @@ function drawScatterAxis(
   state: ScatterState,
   scale: ScatterScale,
   w: number,
+  canvas: HTMLCanvasElement,
 ): void {
-  const pal = getPalette();
+  const pal = getPalette(canvas);
   // Bottom axis line
   ctx.beginPath();
   ctx.strokeStyle = pal.border;
@@ -766,9 +769,12 @@ function drawScatterPoints(
 
   if (highlightActive) {
     ctx.globalAlpha = 1;
-    ctx.fillStyle = '#000';
+    // Bold red — visible on both light and dark backgrounds. Shares color
+    // with rating:e points, but acceptable because other ratings dim out
+    // while the gentags<10 highlight is active.
+    ctx.fillStyle = '#e0115f';
     highlightedPoints.forEach(([x, y]) => {
-      ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+      ctx.fillRect(x - 2, y - 2, 4, 4);
     });
   }
 }
@@ -876,7 +882,7 @@ function renderScatterCanvas(
   const w = rect.width;
   const h = rect.height;
 
-  ctx.fillStyle = getPalette().chartBg;
+  ctx.fillStyle = getPalette(canvas).chartBg;
   ctx.fillRect(0, 0, w, h);
 
   overlayDiv.innerHTML = '';
@@ -899,7 +905,7 @@ function renderScatterCanvas(
   dom.countLabel.textContent = `${visiblePoints.length} items`;
 
   // Draw grid + Y=10 emphasis (tag mode only)
-  const {y10Pos} = drawScatterGrid(ctx, state.scale, w);
+  const {y10Pos} = drawScatterGrid(ctx, state.scale, w, canvas);
   const finalY10 = drawY10Emphasis(ctx, state.scale, w, y10Pos);
 
   // Position the clickable Y=10 overlay (formerly updateY10Overlay closure)
@@ -911,7 +917,7 @@ function renderScatterCanvas(
   }
 
   // Draw axis (months when zoomed into a year, years otherwise)
-  drawScatterAxis(ctx, state, state.scale, w);
+  drawScatterAxis(ctx, state, state.scale, w, canvas);
 
   // Draw points (with optional Y=10 highlight pass)
   drawScatterPoints(ctx, visiblePoints, state, state.scale);
@@ -935,9 +941,9 @@ function updateDownvoteButtonStyles(
     btn.disabled = isDisabled;
     btn.style.opacity = isDisabled ? '0.5' : '1';
     btn.style.cursor = isDisabled ? 'not-allowed' : 'pointer';
-    btn.style.background = isActive ? '#d73a49' : 'var(--di-bg)';
-    btn.style.color = isActive ? '#fff' : 'var(--di-text)';
-    btn.style.borderColor = isActive ? '#d73a49' : 'var(--di-border-input)';
+    btn.style.background = isActive ? '#d73a49' : 'var(--di-bg, #fff)';
+    btn.style.color = isActive ? '#fff' : 'var(--di-text, #333)';
+    btn.style.borderColor = isActive ? '#d73a49' : 'var(--di-border-input, #ddd)';
     btn.title = isDisabled
       ? state.backfillFailed
         ? 'Downvote data unavailable (fetch failed)'
@@ -968,11 +974,11 @@ function wireModeToggle(
       Array.from(dom.toggleContainer.children).forEach(b => {
         const bEl = b as HTMLElement;
         bEl.style.background =
-          bEl.dataset.mode === id ? 'var(--di-link)' : 'var(--di-bg)';
+          bEl.dataset.mode === id ? 'var(--di-link, #007bff)' : 'var(--di-bg, #fff)';
         bEl.style.color =
           bEl.dataset.mode === id
-            ? 'var(--di-btn-active-text)'
-            : 'var(--di-text)';
+            ? 'var(--di-btn-active-text, #fff)'
+            : 'var(--di-text, #333)';
       });
       // Reset downvote filter when leaving Score mode
       if (id !== 'score' && state.activeDownvoteFilter !== null) {
@@ -1120,7 +1126,7 @@ function wireBackfillUi(
 
   const progressLabel = document.createElement('span');
   progressLabel.style.cssText =
-    'font-size:10px;color:var(--di-text-secondary);margin-left:6px;';
+    'font-size:10px;color:var(--di-text-secondary, #666);margin-left:6px;';
   progressLabel.textContent = 'updating…';
   dom.downvoteContainer.appendChild(progressLabel);
 
@@ -1466,11 +1472,11 @@ function createScatterPopover(
         const titleAttr = statusTitle ? ` title="${statusTitle}"` : '';
 
         chunkHtml += `
-         <div class="pop-item" data-id="${it.id}" style="padding: 8px 15px; border-bottom: 1px solid var(--di-table-border); display: flex; align-items: center; cursor: pointer; transition: bg 0.2s;">
+         <div class="pop-item" data-id="${it.id}" style="padding: 8px 15px; border-bottom: 1px solid var(--di-table-border, #f0f0f0); display: flex; align-items: center; cursor: pointer; transition: bg 0.2s;">
            <div${titleAttr} style="width: 10px; height: 10px; border-radius: 50%; background: ${color}; margin-right: 10px;"></div>
-           <span style="width: 60px; color: var(--di-link); font-weight: 500; font-size: 13px; margin-right: 10px;">#${it.id}</span>
-           <span style="flex: 1; color: var(--di-text-secondary); font-size: 12px;">${itDate}</span>
-           <span style="font-weight: bold; color: var(--di-text); font-size: 13px;">${val}</span>
+           <span style="width: 60px; color: var(--di-link, #007bff); font-weight: 500; font-size: 13px; margin-right: 10px;">#${it.id}</span>
+           <span style="flex: 1; color: var(--di-text-secondary, #666); font-size: 12px;">${itDate}</span>
+           <span style="font-weight: bold; color: var(--di-text, #333); font-size: 13px;">${val}</span>
          </div>
        `;
       });
@@ -1478,21 +1484,21 @@ function createScatterPopover(
     };
 
     const headerHtml = `
-     <div style="padding: 10px 15px; background: var(--di-bg-secondary); border-bottom: 1px solid var(--di-border-light); display: flex; justify-content: space-between; align-items: start;">
+     <div style="padding: 10px 15px; background: var(--di-bg-secondary, #f9f9f9); border-bottom: 1px solid var(--di-border-light, #eee); display: flex; justify-content: space-between; align-items: start;">
        <div style="display:flex; flex-direction:column;">
-          <span style="font-weight: 600; font-size: 13px; color: var(--di-text);">${xLabel}</span>
-          <span style="font-size: 11px; color: var(--di-text-secondary); margin-top:2px;">${isTags ? 'Tag Count' : 'Score'}: ${sm1} ~ ${sm2}</span>
+          <span style="font-weight: 600; font-size: 13px; color: var(--di-text, #333);">${xLabel}</span>
+          <span style="font-size: 11px; color: var(--di-text-secondary, #666); margin-top:2px;">${isTags ? 'Tag Count' : 'Score'}: ${sm1} ~ ${sm2}</span>
        </div>
        <div style="display:flex; align-items:center; gap: 10px; margin-top:2px;">
-         <span id="pop-count-label" style="font-size: 12px; color: var(--di-text-muted);">${Math.min(visibleLimit, totalCount)} / ${totalCount} items</span>
-         <button id="scatter-pop-close" style="background:none; border:none; color:var(--di-text-faint); font-size:16px; cursor:pointer; line-height:1; padding:0;">&times;</button>
+         <span id="pop-count-label" style="font-size: 12px; color: var(--di-text-muted, #888);">${Math.min(visibleLimit, totalCount)} / ${totalCount} items</span>
+         <button id="scatter-pop-close" style="background:none; border:none; color:var(--di-text-faint, #999); font-size:16px; cursor:pointer; line-height:1; padding:0;">&times;</button>
        </div>
      </div>
      <div id="pop-list-container" style="flex: 1; overflow-y: auto;">
        ${renderItems(0, visibleLimit)}
      </div>
-     <div id="pop-load-more" style="display: ${totalCount > visibleLimit ? 'block' : 'none'}; padding: 10px; text-align: center; border-top: 1px solid var(--di-border-light); background: var(--di-bg);">
-        <button id="btn-load-more" style="width: 100%; padding: 6px; background: var(--di-bg-tertiary); border: none; border-radius: 4px; color: var(--di-text-secondary); cursor: pointer; font-size: 12px;">Load More (+50)</button>
+     <div id="pop-load-more" style="display: ${totalCount > visibleLimit ? 'block' : 'none'}; padding: 10px; text-align: center; border-top: 1px solid var(--di-border-light, #eee); background: var(--di-bg, #fff);">
+        <button id="btn-load-more" style="width: 100%; padding: 6px; background: var(--di-bg-tertiary, #f0f0f0); border: none; border-radius: 4px; color: var(--di-text-secondary, #666); cursor: pointer; font-size: 12px;">Load More (+50)</button>
      </div>
    `;
 
@@ -1565,6 +1571,14 @@ function createScatterPopover(
           loadMoreContainer.style.display = 'none';
         }
       };
+    }
+
+    // Sync dashboard theme from the scatter's ancestor container
+    const themedAncestor = dom.wrapper.closest('[data-di-theme]');
+    if (themedAncestor?.getAttribute('data-di-theme') === 'dark') {
+      dom.popover.setAttribute('data-di-theme', 'dark');
+    } else {
+      dom.popover.removeAttribute('data-di-theme');
     }
 
     dom.popover.style.display = 'flex';

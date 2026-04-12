@@ -217,13 +217,13 @@ export function renderPieWidget(
 
     if (!data) {
       pieContent.innerHTML =
-        '<div style="color:var(--di-text-muted); padding:30px; text-align:center;">Loading...</div>';
+        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">Loading...</div>';
       return;
     }
 
     if (data.length === 0) {
       pieContent.innerHTML =
-        '<div style="color:var(--di-text-muted); padding:30px; text-align:center;">No data available</div>';
+        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">No data available</div>';
       return;
     }
 
@@ -350,7 +350,7 @@ export function renderPieWidget(
 
     if (validData.length === 0 || totalValue === 0) {
       pieContent.innerHTML =
-        '<div style="color:var(--di-text-muted); padding:30px; text-align:center;">No data available (Total count is 0)</div>';
+        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">No data available (Total count is 0)</div>';
       return;
     }
 
@@ -383,7 +383,7 @@ export function renderPieWidget(
         shadow.style.height = '140px';
         shadow.style.transform = 'translate(-50%, -50%) translateZ(-10px)';
         shadow.style.borderRadius = '50%';
-        shadow.style.background = 'var(--di-shadow)';
+        shadow.style.background = 'var(--di-shadow, rgba(0,0,0,0.2))';
         shadow.style.filter = 'blur(5px)';
         chartWrapper.appendChild(shadow);
 
@@ -497,7 +497,7 @@ export function renderPieWidget(
                 .attr('fill', d => d.data.color),
             ),
       )
-      .attr('stroke', 'var(--di-chart-bg)')
+      .attr('stroke', 'var(--di-chart-bg, #fff)')
       .style('stroke-width', '1px')
       .on('mouseover', function (_event, d) {
         d3.select(this)
@@ -758,13 +758,13 @@ export function renderPieWidget(
 
           return `
                <div style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
-                  <div style="width:12px; height:12px; background:${d.color}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light); flex-shrink:0;"></div>
+                  <div style="width:12px; height:12px; background:${d.color}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
                   ${
                     d.details.isOther
-                      ? `<div style="color:var(--di-text-secondary); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${d.label}">${d.label}</div>`
-                      : `<a href="${targetUrl}" target="_blank" class="di-hover-underline" style="color:var(--di-text-secondary); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${d.label}">${d.label}</a>`
+                      ? `<div style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${d.label}">${d.label}</div>`
+                      : `<a href="${targetUrl}" target="_blank" class="di-hover-underline" style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${d.label}">${d.label}</a>`
                   }
-                  <div style="font-weight:bold; color:var(--di-text); margin-left:auto;" title="${d.details.count ? d.details.count.toLocaleString() : ''}">${pct}</div>
+                  <div style="font-weight:bold; color:var(--di-text, #333); margin-left:auto;" title="${d.details.count ? d.details.count.toLocaleString() : ''}">${pct}</div>
                </div>`;
         })
         .join('');
@@ -772,7 +772,7 @@ export function renderPieWidget(
       legendDiv.innerHTML =
         styleTag +
         `
-           <div style="font-size:0.8em; color:var(--di-text-muted); margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:var(--di-chart-bg); padding-bottom:4px; border-bottom:1px solid var(--di-border-light);">${legendTitle}</div>
+           <div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:var(--di-chart-bg, #fff); padding-bottom:4px; border-bottom:1px solid var(--di-border-light, #eee);">${legendTitle}</div>
            ${listHtml}
       `;
     }
@@ -784,12 +784,12 @@ export function renderPieWidget(
       const el = btn as HTMLElement;
       const mode = el.getAttribute('data-mode');
       if (mode === currentPieTab) {
-        el.style.background = 'var(--di-text-secondary)';
-        el.style.color = 'var(--di-bg)';
-        el.style.boxShadow = '0 1px 3px var(--di-shadow-light)';
+        el.style.background = 'var(--di-text-secondary, #666)';
+        el.style.color = 'var(--di-bg, #fff)';
+        el.style.boxShadow = '0 1px 3px var(--di-shadow-light, rgba(0,0,0,0.1))';
       } else {
-        el.style.background = 'var(--di-bg-tertiary)';
-        el.style.color = 'var(--di-text-secondary)';
+        el.style.background = 'var(--di-bg-tertiary, #f0f0f0)';
+        el.style.color = 'var(--di-text-secondary, #666)';
         el.style.boxShadow = 'none';
       }
     });
@@ -832,7 +832,7 @@ export function renderPieWidget(
     const pieContent = container.querySelector('.pie-content');
     if (pieContent)
       pieContent.innerHTML =
-        '<div style="color:var(--di-chart-axis-secondary);">Loading...</div>';
+        '<div style="color:var(--di-chart-axis-secondary, #666);">Loading...</div>';
 
     try {
       let data: PieTabItem[] = [];
@@ -1009,7 +1009,7 @@ export function renderTopPostsWidget(
 
     if (!data) {
       contentDiv.innerHTML =
-        '<div style="color:var(--di-text-muted); padding:20px 0;">No posts found or loading...</div>';
+        '<div style="color:var(--di-text-muted, #888); padding:20px 0;">No posts found or loading...</div>';
       return;
     }
 
@@ -1078,20 +1078,20 @@ export function renderTopPostsWidget(
 
     contentDiv.innerHTML = `
       <div class="di-top-post-layout" style="display:flex; gap:15px; align-items:flex-start;">
-          <a class="di-top-post-thumb" href="${link}" target="_blank" style="display:block; width:150px; height:150px; flex-shrink:0; background:var(--di-bg-tertiary); border-radius:4px; overflow:hidden; position:relative;">
+          <a class="di-top-post-thumb" href="${link}" target="_blank" style="display:block; width:150px; height:150px; flex-shrink:0; background:var(--di-bg-tertiary, #f0f0f0); border-radius:4px; overflow:hidden; position:relative;">
               <img src="${thumbUrl}" style="width:100%; height:100%; object-fit:cover;" alt="#${data.id}">
           </a>
           <div style="flex:1;">
-              <div style="font-weight:bold; font-size:1.1em; color:var(--di-link); margin-bottom:4px;">
+              <div style="font-weight:bold; font-size:1.1em; color:var(--di-link, #007bff); margin-bottom:4px;">
                   <a href="${link}" target="_blank" style="text-decoration:none; color:inherit;">Post #${data.id}</a>
               </div>
-              <div style="font-size:0.9em; color:var(--di-text-secondary); line-height:1.5;">
+              <div style="font-size:0.9em; color:var(--di-text-secondary, #666); line-height:1.5;">
                   📅 ${dateStr}<br>
                   ❤️ Score: <strong>${data.score}</strong><br>
                   ⭐ Favs: <strong>${data.fav_count || '?'}</strong><br>
                   🤔 Rating: <strong>${ratingLabel}</strong>
 
-                  <div style="margin-top:8px; border-top:1px solid var(--di-border-light); padding-top:6px;">
+                  <div style="margin-top:8px; border-top:1px solid var(--di-border-light, #eee); padding-top:6px;">
                       ${artistLine}
                       ${copyrightLine}
                       ${charLine}
@@ -1106,9 +1106,9 @@ export function renderTopPostsWidget(
     const setStyle = (btn: HTMLElement | null, isActive: boolean) => {
       if (!btn) return;
       btn.style.background = isActive
-        ? 'var(--di-link)'
-        : 'var(--di-bg-tertiary)';
-      btn.style.color = isActive ? 'var(--di-bg)' : 'var(--di-text)';
+        ? 'var(--di-link, #007bff)'
+        : 'var(--di-bg-tertiary, #f0f0f0)';
+      btn.style.color = isActive ? 'var(--di-bg, #fff)' : 'var(--di-text, #333)';
     };
 
     const gsqeGroup = container.querySelector(
@@ -1142,8 +1142,8 @@ export function renderTopPostsWidget(
   container.style.padding = '15px';
   container.innerHTML = `
      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-        <div style="font-size:0.85em; color:var(--di-chart-axis-secondary); letter-spacing:0.5px; display:flex; align-items:center; gap:5px;">
-           <select id="analytics-top-post-select" style="border:none; background:transparent; font-weight:bold; color:var(--di-chart-axis-secondary); cursor:pointer; text-transform:uppercase; font-size:1em; outline:none;">
+        <div style="font-size:0.85em; color:var(--di-chart-axis-secondary, #666); letter-spacing:0.5px; display:flex; align-items:center; gap:5px;">
+           <select id="analytics-top-post-select" style="border:none; background:transparent; font-weight:bold; color:var(--di-chart-axis-secondary, #666); cursor:pointer; text-transform:uppercase; font-size:1em; outline:none;">
               <option value="recent">🔥 Recent Popular Post</option>
               <option value="most">🏆 Most Popular Post</option>
               <option value="random">🎲 Random Post</option>
@@ -1155,19 +1155,19 @@ export function renderTopPostsWidget(
                  ↗️
              </button>
          </div>
-        <div id="top-post-tabs-sfwnsfw" style="display:flex; gap:0px; border:1px solid var(--di-border-input); border-radius:6px; overflow:hidden;">
-           <button class="top-post-tab" data-mode="sfw" style="border:none; background:var(--di-link); color:var(--di-bg); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">SFW</button>
-           <button class="top-post-tab" id="analytics-top-nsfw-btn" data-mode="nsfw" style="border:none; border-left:1px solid var(--di-border-input); background:var(--di-bg-tertiary); color:var(--di-text); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">NSFW</button>
+        <div id="top-post-tabs-sfwnsfw" style="display:flex; gap:0px; border:1px solid var(--di-border-input, #ddd); border-radius:6px; overflow:hidden;">
+           <button class="top-post-tab" data-mode="sfw" style="border:none; background:var(--di-link, #007bff); color:var(--di-bg, #fff); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">SFW</button>
+           <button class="top-post-tab" id="analytics-top-nsfw-btn" data-mode="nsfw" style="border:none; border-left:1px solid var(--di-border-input, #ddd); background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">NSFW</button>
         </div>
-        <div id="top-post-tabs-gsqe" style="display:none; gap:0px; border:1px solid var(--di-border-input); border-radius:6px; overflow:hidden;">
-           <button class="top-post-tab" data-mode="g" style="border:none; background:var(--di-bg-tertiary); color:var(--di-text); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">G</button>
-           <button class="top-post-tab" data-mode="s" style="border:none; border-left:1px solid var(--di-border-input); background:var(--di-bg-tertiary); color:var(--di-text); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">S</button>
-           <button class="top-post-tab" id="analytics-top-q-btn" data-mode="q" style="border:none; border-left:1px solid var(--di-border-input); background:var(--di-bg-tertiary); color:var(--di-text); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">Q</button>
-           <button class="top-post-tab" id="analytics-top-e-btn" data-mode="e" style="border:none; border-left:1px solid var(--di-border-input); background:var(--di-bg-tertiary); color:var(--di-text); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">E</button>
+        <div id="top-post-tabs-gsqe" style="display:none; gap:0px; border:1px solid var(--di-border-input, #ddd); border-radius:6px; overflow:hidden;">
+           <button class="top-post-tab" data-mode="g" style="border:none; background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">G</button>
+           <button class="top-post-tab" data-mode="s" style="border:none; border-left:1px solid var(--di-border-input, #ddd); background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s;">S</button>
+           <button class="top-post-tab" id="analytics-top-q-btn" data-mode="q" style="border:none; border-left:1px solid var(--di-border-input, #ddd); background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">Q</button>
+           <button class="top-post-tab" id="analytics-top-e-btn" data-mode="e" style="border:none; border-left:1px solid var(--di-border-input, #ddd); background:var(--di-bg-tertiary, #f0f0f0); color:var(--di-text, #333); padding:2px 8px; font-size:11px; cursor:pointer; transition: background 0.5s, color 0.5s; display: ${isNsfwEnabled ? 'inline-block' : 'none'};">E</button>
         </div>
      </div>
      <div class="top-post-content">
-         <div style="color:var(--di-chart-axis-secondary); font-size:0.9em;">Loading stats...</div>
+         <div style="color:var(--di-chart-axis-secondary, #666); font-size:0.9em;">Loading stats...</div>
      </div>
   `;
 
@@ -1295,11 +1295,11 @@ export async function renderMilestonesWidget(
     const nextTarget = dm.getNextMilestone(totalPosts, currentMilestoneStep);
 
     let msHtml =
-      '<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--di-border-light); padding-bottom:8px; margin-bottom:10px;">';
-    msHtml += '<h3 style="color:var(--di-text); margin:0;">🏆 Milestones</h3>';
+      '<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--di-border-light, #eee); padding-bottom:8px; margin-bottom:10px;">';
+    msHtml += '<h3 style="color:var(--di-text, #333); margin:0;">🏆 Milestones</h3>';
     msHtml += '<div style="display:flex; align-items:center; gap:10px;">';
 
-    msHtml += `<select id="analytics-milestone-step" style="border:1px solid var(--di-border-input); border-radius:4px; padding:2px 4px; font-size:0.85em; color:var(--di-text-secondary); background-color:var(--di-bg-tertiary);">
+    msHtml += `<select id="analytics-milestone-step" style="border:1px solid var(--di-border-input, #ddd); border-radius:4px; padding:2px 4px; font-size:0.85em; color:var(--di-text-secondary, #666); background-color:var(--di-bg-tertiary, #f0f0f0);">
       <option value="auto" ${currentMilestoneStep === 'auto' ? 'selected' : ''}>Auto</option>
       <option value="1000" ${currentMilestoneStep === 1000 || String(currentMilestoneStep) === '1000' ? 'selected' : ''}>Every 1k</option>
       <option value="2500" ${currentMilestoneStep === 2500 || String(currentMilestoneStep) === '2500' ? 'selected' : ''}>Every 2.5k</option>
@@ -1309,14 +1309,14 @@ export async function renderMilestonesWidget(
     </select>`;
 
     msHtml +=
-      '<button id="analytics-milestone-toggle" style="background:none; border:none; color:var(--di-link); cursor:pointer; font-size:0.9em; display:none;">Show More</button>';
+      '<button id="analytics-milestone-toggle" style="background:none; border:none; color:var(--di-link, #007bff); cursor:pointer; font-size:0.9em; display:none;">Show More</button>';
     msHtml += '</div>';
     msHtml += '</div>';
 
     if (milestones.length === 0) {
       container.innerHTML =
         msHtml +
-        '<div style="color:var(--di-text-muted); font-size:0.9em;">No milestones found.</div>';
+        '<div style="color:var(--di-text-muted, #888); font-size:0.9em;">No milestones found.</div>';
       const sel = container.querySelector(
         '#analytics-milestone-step',
       ) as HTMLSelectElement;
@@ -1343,15 +1343,15 @@ export async function renderMilestonesWidget(
       msHtml += `
       <a href="/posts/${p.id}" target="_blank" class="di-hover-scale" style="
          display:flex; justify-content:space-between; align-items:center; text-decoration:none; color:inherit;
-         background:var(--di-chart-bg); border:1px solid var(--di-border-light); border-radius:6px; padding:10px;
+         background:var(--di-chart-bg, #fff); border:1px solid var(--di-border-light, #eee); border-radius:6px; padding:10px;
       ">
          <div>
-             <div style="font-size:0.8em; color:var(--di-text-muted); letter-spacing:0.5px;">#${p.id}</div>
-             <div style="font-size:1.1em; font-weight:bold; color:var(--di-link); margin-top:4px;">${m.type}</div>
-             <div style="font-size:0.8em; color:var(--di-text-secondary); margin-top:2px;">${new Date(p.created_at).toLocaleDateString()}</div>
-             <div style="font-size:0.75em; color:var(--di-text-faint); margin-top:4px;">Score: ${p.score}</div>
+             <div style="font-size:0.8em; color:var(--di-text-muted, #888); letter-spacing:0.5px;">#${p.id}</div>
+             <div style="font-size:1.1em; font-weight:bold; color:var(--di-link, #007bff); margin-top:4px;">${m.type}</div>
+             <div style="font-size:0.8em; color:var(--di-text-secondary, #666); margin-top:2px;">${new Date(p.created_at).toLocaleDateString()}</div>
+             <div style="font-size:0.75em; color:var(--di-text-faint, #999); margin-top:4px;">Score: ${p.score}</div>
          </div>
-         ${showThumb && thumbUrl ? `<div style="width:60px; height:60px; margin-left:10px; flex-shrink:0; background:var(--di-bg-tertiary); border-radius:4px; overflow:hidden; display:flex; align-items:center; justify-content:center;"><img src="${thumbUrl}" style="width:100%; height:100%; object-fit:cover;"></div>` : ''}
+         ${showThumb && thumbUrl ? `<div style="width:60px; height:60px; margin-left:10px; flex-shrink:0; background:var(--di-bg-tertiary, #f0f0f0); border-radius:4px; overflow:hidden; display:flex; align-items:center; justify-content:center;"><img src="${thumbUrl}" style="width:100%; height:100%; object-fit:cover;"></div>` : ''}
       </a>
     `;
     });
@@ -1389,19 +1389,19 @@ export async function renderMilestonesWidget(
       msHtml += `
       <div class="di-next-milestone-card" style="
          display:flex; flex-direction:column; justify-content:space-between;
-         background:var(--di-bg-tertiary); border:1px dashed var(--di-border-input); border-radius:6px; padding:10px;
-         color:var(--di-text-secondary);
+         background:var(--di-bg-tertiary, #f0f0f0); border:1px dashed var(--di-border-input, #ddd); border-radius:6px; padding:10px;
+         color:var(--di-text-secondary, #666);
       ">
          <div>
-             <div style="font-size:0.7em; color:var(--di-text-muted); letter-spacing:0.5px; text-transform:uppercase;">Next</div>
-             <div style="font-size:1.1em; font-weight:bold; color:var(--di-text-secondary); margin-top:4px;">${nextLabel}</div>
-             <div style="font-size:0.8em; color:var(--di-chart-axis-secondary); margin-top:6px;">${remaining.toLocaleString()} remaining</div>
+             <div style="font-size:0.7em; color:var(--di-text-muted, #888); letter-spacing:0.5px; text-transform:uppercase;">Next</div>
+             <div style="font-size:1.1em; font-weight:bold; color:var(--di-text-secondary, #666); margin-top:4px;">${nextLabel}</div>
+             <div style="font-size:0.8em; color:var(--di-chart-axis-secondary, #666); margin-top:6px;">${remaining.toLocaleString()} remaining</div>
          </div>
          <div style="margin-top:8px;">
-             <div style="height:6px; background:var(--di-border-light); border-radius:3px; overflow:hidden;">
-                 <div style="width:${progressPct.toFixed(1)}%; height:100%; background:var(--di-link);"></div>
+             <div style="height:6px; background:var(--di-border-light, #eee); border-radius:3px; overflow:hidden;">
+                 <div style="width:${progressPct.toFixed(1)}%; height:100%; background:var(--di-link, #007bff);"></div>
              </div>
-             <div style="font-size:0.7em; color:var(--di-text-muted); margin-top:3px; text-align:right;">${progressPct.toFixed(0)}%</div>
+             <div style="font-size:0.7em; color:var(--di-text-muted, #888); margin-top:3px; text-align:right;">${progressPct.toFixed(0)}%</div>
          </div>
       </div>
     `;
@@ -1493,7 +1493,7 @@ export async function renderHistoryChart(
   const chartDiv = document.createElement('div');
   chartDiv.style.marginTop = '24px';
   const chartHtml =
-    '<h3 style="color:var(--di-chart-axis); border-bottom:1px solid var(--di-border-light); padding-bottom:10px; margin-bottom:15px;">📅 Monthly Activity</h3>';
+    '<h3 style="color:var(--di-chart-axis, #333); border-bottom:1px solid var(--di-border-light, #eee); padding-bottom:10px; margin-bottom:15px;">📅 Monthly Activity</h3>';
 
   const minBarWidth = 25;
   const padLeftScroll = 10;
@@ -1512,17 +1512,17 @@ export async function renderHistoryChart(
   mainWrapper.style.display = 'flex';
   mainWrapper.style.width = '100%';
   mainWrapper.style.position = 'relative';
-  mainWrapper.style.border = '1px solid var(--di-border-light)';
+  mainWrapper.style.border = '1px solid var(--di-border-light, #eee)';
   mainWrapper.style.borderRadius = '8px';
-  mainWrapper.style.backgroundColor = 'var(--di-chart-bg)';
+  mainWrapper.style.backgroundColor = 'var(--di-chart-bg, #fff)';
   mainWrapper.style.overflow = 'hidden';
 
   const yAxisWrapper = document.createElement('div');
   yAxisWrapper.style.width = `${yAxisWidth}px`;
   yAxisWrapper.style.flexShrink = '0';
-  yAxisWrapper.style.borderRight = '1px solid var(--di-bg-tertiary)';
+  yAxisWrapper.style.borderRight = '1px solid var(--di-bg-tertiary, #f0f0f0)';
   yAxisWrapper.style.zIndex = '5';
-  yAxisWrapper.style.backgroundColor = 'var(--di-chart-bg)';
+  yAxisWrapper.style.backgroundColor = 'var(--di-chart-bg, #fff)';
   mainWrapper.appendChild(yAxisWrapper);
 
   const chartWrapper = document.createElement('div');
@@ -1547,7 +1547,7 @@ export async function renderHistoryChart(
     const val = i * tickStep;
     const y =
       vHeight - padBottom - (val / tickMax) * (vHeight - padBottom - padTop);
-    ySvg += `<text x="${yAxisWidth - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--di-chart-axis-secondary)">${val}</text>`;
+    ySvg += `<text x="${yAxisWidth - 5}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--di-chart-axis-secondary, #666)">${val}</text>`;
   }
   ySvg += '</svg>';
   yAxisWrapper.innerHTML = ySvg;
@@ -1558,9 +1558,9 @@ export async function renderHistoryChart(
     const val = i * tickStep;
     const y =
       vHeight - padBottom - (val / tickMax) * (vHeight - padBottom - padTop);
-    svg += `<line x1="0" y1="${y}" x2="${vWidth}" y2="${y}" stroke="var(--di-chart-grid)" stroke-width="1" />`;
+    svg += `<line x1="0" y1="${y}" x2="${vWidth}" y2="${y}" stroke="var(--di-chart-grid, #eee)" stroke-width="1" />`;
   }
-  svg += `<line x1="0" y1="${vHeight - padBottom}" x2="${vWidth}" y2="${vHeight - padBottom}" stroke="var(--di-border)" />`;
+  svg += `<line x1="0" y1="${vHeight - padBottom}" x2="${vWidth}" y2="${vHeight - padBottom}" stroke="var(--di-border, #e1e4e8)" />`;
 
   const barAreaWidth = vWidth - padLeftScroll - padRight;
   const step = barAreaWidth / monthly.length;
@@ -1603,8 +1603,8 @@ export async function renderHistoryChart(
       const ty = vHeight - 5;
       const text = isJan ? year : `${year}-${month}`;
 
-      svg += `<text x="${tx}" y="${ty}" text-anchor="middle" font-size="10" fill="var(--di-chart-axis-secondary)">${text}</text>`;
-      svg += `<line x1="${tx}" y1="${vHeight - padBottom}" x2="${tx}" y2="${vHeight - padBottom + 3}" stroke="var(--di-border)" />`;
+      svg += `<text x="${tx}" y="${ty}" text-anchor="middle" font-size="10" fill="var(--di-chart-axis-secondary, #666)">${text}</text>`;
+      svg += `<line x1="${tx}" y1="${vHeight - padBottom}" x2="${tx}" y2="${vHeight - padBottom + 3}" stroke="var(--di-border, #e1e4e8)" />`;
     }
   });
 

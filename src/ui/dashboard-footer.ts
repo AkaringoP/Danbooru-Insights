@@ -10,13 +10,13 @@ export function dashboardFooterHtml(): string {
     <div class="di-dashboard-footer" style="
       margin-top: 30px;
       padding: 16px 0 8px;
-      border-top: 1px solid var(--di-border-light);
+      border-top: 1px solid var(--di-border-light, #eee);
       text-align: center;
       font-size: 11px;
-      color: var(--di-text-muted);
+      color: var(--di-text-muted, #888);
       line-height: 1.5;
     ">
-      <a href="${APP_REPO_URL}" target="_blank" rel="noopener" style="color: var(--di-text-muted); text-decoration: none;">
+      <a href="${APP_REPO_URL}" target="_blank" rel="noopener" style="color: var(--di-text-muted, #888); text-decoration: none;">
         DanbooruInsights v${APP_VERSION}
       </a>
       <span style="margin: 0 6px; opacity: 0.6;">·</span>

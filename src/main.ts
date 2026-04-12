@@ -57,53 +57,76 @@ export function detectCurrentTag(): string | null {
   return null;
 }
 
-/* --- Dark Mode Helpers --- */
+/* --- Dashboard Theme Helpers --- */
+
+/** All top-level container IDs that receive the dashboard theme attribute. */
+const DASHBOARD_CONTAINERS = [
+  'danbooru-grass-modal-overlay',
+  'tag-analytics-modal',
+  'scatter-popover-ui',
+  'danbooru-grass-sync-settings',
+  'tag-analytics-settings-popover',
+  'di-post-hover-card',
+];
 
 /**
- * Resolves the effective theme ('light' | 'dark') from the user preference
- * and Danbooru's current theme attribute.
+ * Resolves the effective dashboard theme from the user preference
+ * and Danbooru's current page theme (for 'auto' mode).
  */
-function resolveEffectiveTheme(pref: DarkModePreference): 'light' | 'dark' {
+export function resolveEffectiveDashboardTheme(
+  pref: DarkModePreference,
+): 'light' | 'dark' {
   if (pref === 'light' || pref === 'dark') return pref;
-  // auto: follow Danbooru's theme attribute
   return document.body.getAttribute('data-current-user-theme') === 'dark'
     ? 'dark'
     : 'light';
 }
 
 /**
- * Applies dark mode by setting `data-current-user-theme` on `<body>` if it
- * isn't already set (e.g., on pages where Danbooru doesn't inject it).
- * Our CSS variables use `body[data-current-user-theme="dark"]` selector,
- * so we ensure the attribute exists.
+ * Sets or removes `data-di-theme="dark"` on all existing dashboard containers.
+ * Called when the dashboard theme setting changes or on Danbooru theme change (auto).
  */
-function applyDarkMode(pref: DarkModePreference): void {
-  const effective = resolveEffectiveTheme(pref);
-  const current = document.body.getAttribute('data-current-user-theme');
-  if (pref !== 'auto' && current !== effective) {
-    // User forced a mode — override Danbooru's attribute
-    document.body.setAttribute('data-current-user-theme', effective);
+export function applyDashboardTheme(settings: SettingsManager): void {
+  const effective = resolveEffectiveDashboardTheme(settings.getDarkMode());
+  for (const id of DASHBOARD_CONTAINERS) {
+    const el = document.getElementById(id);
+    if (el) {
+      if (effective === 'dark') {
+        el.setAttribute('data-di-theme', 'dark');
+      } else {
+        el.removeAttribute('data-di-theme');
+      }
+    }
   }
-  // When auto, Danbooru has already set the attribute; our CSS reacts to it.
 }
 
 /**
- * Watches for Danbooru theme changes (user toggling dark mode in Danbooru
- * settings). Re-renders scatter plots and other canvas-based widgets.
+ * Watches for Danbooru page theme changes (auto mode only).
+ * Updates dashboard containers when Danbooru's theme toggles.
  */
 function observeDanbooruTheme(settings: SettingsManager): void {
   const observer = new MutationObserver(() => {
     if (settings.getDarkMode() !== 'auto') return;
-    // Danbooru changed its theme and we're in auto mode — notify widgets
-    window.dispatchEvent(
-      new CustomEvent('DanbooruInsights:ThemeChanged', {
-        detail: {source: 'danbooru'},
-      }),
-    );
+    applyDashboardTheme(settings);
   });
   observer.observe(document.body, {
     attributes: true,
     attributeFilter: ['data-current-user-theme'],
+  });
+}
+
+/**
+ * Syncs dashboard theme across tabs. When another tab changes the theme
+ * preference in localStorage, the `storage` event fires here (not in the
+ * originating tab), and we re-read settings + re-apply the theme.
+ */
+function observeCrossTabSettings(settings: SettingsManager): void {
+  const settingsKey = `${CONFIG.STORAGE_PREFIX}settings`;
+  window.addEventListener('storage', e => {
+    if (e.key !== settingsKey) return;
+    // Reload settings from localStorage and re-apply theme
+    settings.settings = settings.load();
+    applyDashboardTheme(settings);
   });
 }
 
@@ -124,9 +147,9 @@ async function main(): Promise<void> {
   const db = new Database();
   const settings = new SettingsManager();
 
-  // Dark mode: apply early so CSS variables are set before any UI renders
-  applyDarkMode(settings.getDarkMode());
+  // Dashboard theme: observe Danbooru's theme for 'auto' mode
   observeDanbooruTheme(settings);
+  observeCrossTabSettings(settings);
 
   // Shared rate limiter — one per tab, coordinated across tabs
   const rl = CONFIG.RATE_LIMITER;
