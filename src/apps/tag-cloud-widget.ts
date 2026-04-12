@@ -425,9 +425,9 @@ export function renderTagCloudWidget(
       .forEach(t => t.classList.remove('active'));
     btn.classList.add('active');
 
-    loadTab(catId, true);
+    void loadTab(catId, true);
   });
 
   // Initial render (no animation)
-  loadTab(currentTab, false);
+  void loadTab(currentTab, false);
 }

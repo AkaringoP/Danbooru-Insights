@@ -1,4 +1,4 @@
-import type {PostVariant} from './types';
+import type {PostVariant, DanbooruPost} from './types';
 import type {RateLimitedFetch} from './core/rate-limiter';
 
 /* --- Helper: HTML Escaping --- */
@@ -47,7 +47,15 @@ export function getLevelClass(level: string | null): string {
  * Returns the best available thumbnail URL from a Danbooru post object.
  * Priority: 720x720 webp > 360x360 webp > other variants > preview > file.
  */
-export function getBestThumbnailUrl(post: any): string {
+export function getBestThumbnailUrl(
+  post:
+    | Pick<
+        DanbooruPost,
+        'variants' | 'preview_file_url' | 'file_url' | 'large_file_url'
+      >
+    | null
+    | undefined,
+): string {
   if (!post) return '';
 
   // 1. Try modern variants
@@ -93,7 +101,7 @@ export async function isTopLevelTag(
   try {
     const imps = await rateLimiter.fetch(impUrl).then(r => r.json());
     return !(Array.isArray(imps) && imps.length > 0);
-  } catch (e: unknown) {
+  } catch {
     return true; // default to include on error
   }
 }

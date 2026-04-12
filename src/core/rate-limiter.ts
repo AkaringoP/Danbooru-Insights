@@ -94,14 +94,16 @@ export class RateLimitedFetch {
     if (url.includes('/reports/')) {
       return new Promise((resolve, reject) => {
         this.reportQueue.push({url, options, resolve, reject});
-        this.processReportQueue();
+        // Fire-and-forget: queue drain; per-task resolve/reject handles errors.
+        void this.processReportQueue();
       });
     }
 
     // 2. General Queue (Token Bucket)
     return new Promise((resolve, reject) => {
       this.queue.push({url, options, resolve, reject});
-      this.processQueue();
+      // Fire-and-forget: queue drain; per-task resolve/reject handles errors.
+      void this.processQueue();
     });
   }
 
@@ -134,7 +136,8 @@ export class RateLimitedFetch {
       // Strict 3s cooldown for reports
       await new Promise(r => setTimeout(r, CONFIG.REPORT_COOLDOWN_MS));
       this.isProcessingReport = false;
-      this.processReportQueue();
+      // Fire-and-forget: recursive drain; errors handled per-task inside.
+      void this.processReportQueue();
     }
   }
 
@@ -185,8 +188,9 @@ export class RateLimitedFetch {
       task.reject(e);
     } finally {
       this.activeWorkers--;
-      // Immediately try next, token bucket will govern admission
-      this.processQueue();
+      // Immediately try next, token bucket will govern admission.
+      // Fire-and-forget: recursive drain; errors handled per-task inside.
+      void this.processQueue();
     }
   }
 

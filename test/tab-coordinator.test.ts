@@ -36,12 +36,13 @@ class MockBroadcastChannel {
 }
 
 // Minimal window mock for addEventListener/removeEventListener
-const windowListeners: Record<string, Function[]> = {};
+type Listener = (...args: unknown[]) => void;
+const windowListeners: Record<string, Listener[]> = {};
 const mockWindow = {
-  addEventListener: (event: string, fn: Function) => {
+  addEventListener: (event: string, fn: Listener) => {
     (windowListeners[event] ??= []).push(fn);
   },
-  removeEventListener: (event: string, fn: Function) => {
+  removeEventListener: (event: string, fn: Listener) => {
     const arr = windowListeners[event];
     if (arr) {
       const idx = arr.indexOf(fn);
@@ -53,8 +54,8 @@ const mockWindow = {
 beforeEach(() => {
   vi.useFakeTimers();
   MockBroadcastChannel.instances = [];
-  (globalThis as any).BroadcastChannel = MockBroadcastChannel;
-  (globalThis as any).window = mockWindow;
+  vi.stubGlobal('BroadcastChannel', MockBroadcastChannel);
+  vi.stubGlobal('window', mockWindow);
   // Mock crypto.randomUUID
   vi.stubGlobal('crypto', {
     randomUUID: () => Math.random().toString(36).slice(2),
@@ -68,8 +69,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   MockBroadcastChannel.instances = [];
-  delete (globalThis as any).window;
 });
 
 describe('TabCoordinator', () => {
@@ -173,7 +174,7 @@ describe('TabCoordinator', () => {
   });
 
   it('falls back to single-tab mode when BroadcastChannel is unavailable', () => {
-    delete (globalThis as any).BroadcastChannel;
+    vi.stubGlobal('BroadcastChannel', undefined);
 
     const coord = new TabCoordinator();
     coord.start();

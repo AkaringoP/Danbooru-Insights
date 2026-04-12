@@ -103,7 +103,8 @@ async function main(): Promise<void> {
       targetTagName,
       rateLimiter,
     );
-    tagAnalytics.run();
+    // Fire-and-forget: top-level app entry; errors logged inside.
+    void tagAnalytics.run();
   } else {
     // Profile Mode
     const context = new ProfileContext();
@@ -119,15 +120,15 @@ async function main(): Promise<void> {
       rateLimiter,
     );
 
-    // Execution
-    grass.run();
-    userAnalytics.run();
+    // Execution — fire-and-forget: top-level app entries.
+    void grass.run();
+    void userAnalytics.run();
   }
 }
 
 // Run
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', main);
+  document.addEventListener('DOMContentLoaded', () => void main());
 } else {
-  main();
+  void main();
 }

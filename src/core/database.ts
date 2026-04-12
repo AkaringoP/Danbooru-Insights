@@ -24,7 +24,7 @@ export class Database extends Dexie {
   posts!: Table<PostRecord, number>;
   piestats!: Table<PieStatRecord, [string, string | number]>;
   completed_years!: Table<CompletedYearRecord, string>;
-  approvals_detail!: Table<ApprovalDetailRecord, number>;
+  approvals_detail!: Table<ApprovalDetailRecord, string>;
   hourly_stats!: Table<HourlyStatRecord, string>;
   tag_analytics!: Table<TagAnalyticsReport, string>;
   grass_settings!: Table<GrassSettings, string>;

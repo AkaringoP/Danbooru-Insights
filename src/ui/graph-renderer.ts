@@ -1,7 +1,13 @@
 import * as d3 from 'd3';
 import {CONFIG} from '../config';
 import type {DataManager} from '../core/data-manager';
-import type {TargetUser, MetricData, CalHeatmapDatum} from '../types';
+import type {
+  TargetUser,
+  MetricData,
+  CalHeatmapDatum,
+  CalHeatmapAny,
+} from '../types';
+import type {Database} from '../core/database';
 import {SettingsManager} from '../core/settings';
 import {createSettingsPopover} from './settings-popover';
 import {showApprovalsDetail} from './approval-detail-popover';
@@ -12,15 +18,15 @@ import {showApprovalsDetail} from './approval-detail-popover';
  */
 export class GraphRenderer {
   containerId: string;
-  cal: any;
+  cal: CalHeatmapAny;
   settingsManager: SettingsManager;
-  db: any;
+  db: Database;
   dataManager: DataManager | null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
    */
-  constructor(settingsManager: SettingsManager, db: any) {
+  constructor(settingsManager: SettingsManager, db: Database) {
     this.containerId = 'danbooru-grass-container';
     this.cal = null;
     this.settingsManager = settingsManager;
@@ -279,7 +285,8 @@ export class GraphRenderer {
             parseFloat(
               container.style.transform.replace(/translateX\(|px\)/g, ''),
             ) || 0;
-          dataManager.saveGrassSettings(userId, {
+          // Fire-and-forget: persistence of layout settings on drag-end.
+          void dataManager.saveGrassSettings(userId, {
             width: container.style.width,
             xOffset: finalX,
           });
@@ -641,8 +648,7 @@ export class GraphRenderer {
     skipScroll = false,
   ): Promise<void> {
     // Handle new data format { daily, hourly } or legacy map
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let dailyData: any = dataMap;
+    let dailyData: Record<string, number> = dataMap as Record<string, number>;
     let hourlyData = null;
 
     if (dataMap && (dataMap as MetricData).daily) {
@@ -699,12 +705,10 @@ export class GraphRenderer {
       }
     }
 
-    if (
-      (window as any).cal &&
-      typeof (window as any).cal.destroy === 'function'
-    ) {
+    const win = window as CalHeatmapAny;
+    if (win.cal && typeof win.cal.destroy === 'function') {
       try {
-        (window as any).cal.destroy();
+        win.cal.destroy();
       } catch (e) {
         console.warn(
           '[Danbooru Grass] Failed to destroy previous instance:',
@@ -712,9 +716,9 @@ export class GraphRenderer {
         );
       }
     }
-    (window as any).cal = new (window as any).CalHeatmap();
+    win.cal = new win.CalHeatmap();
 
-    const userName = (userInfo as any).name || userInfo;
+    const userName = typeof userInfo === 'string' ? userInfo : userInfo.name;
 
     // Ensure our container structure supports the side-label + scrollable graph
     const container = document.getElementById('cal-heatmap');
@@ -726,9 +730,11 @@ export class GraphRenderer {
     }));
 
     const sanitizedName =
-      (userInfo as any).normalizedName ||
-      (userName as string).replace(/ /g, '_');
-    const userIdVal = (userInfo as any).id || (userInfo as any).name;
+      typeof userInfo === 'string'
+        ? userInfo.replace(/ /g, '_')
+        : userInfo.normalizedName || userName.replace(/ /g, '_');
+    const userIdVal =
+      typeof userInfo === 'string' ? userInfo : (userInfo.id ?? userInfo.name);
 
     const getUrl = (date: string, _count: number): string | null => {
       if (!date) return null;
@@ -1336,7 +1342,7 @@ export class GraphRenderer {
       theme: 'light',
     });
 
-    (window as any).cal
+    win.cal
       .paint(buildPaintConfig())
       .then(() => {
         // Listen for theme/grass changes — destroy + re-paint CalHeatmap
@@ -1346,8 +1352,8 @@ export class GraphRenderer {
             const sw = document.getElementById('cal-heatmap-scroll');
             const savedScroll = sw ? sw.scrollLeft : 0;
 
-            (window as any).cal.destroy();
-            (window as any).cal.paint(buildPaintConfig()).then(() => {
+            win.cal.destroy();
+            win.cal.paint(buildPaintConfig()).then(() => {
               // Restore scroll position after paint
               if (sw) sw.scrollLeft = savedScroll;
             });
@@ -1490,7 +1496,8 @@ export class GraphRenderer {
                 .split('T')[0];
 
               if (metric === 'approvals' && count > 0) {
-                this.showApprovalsDetail(dateStr, userIdVal, event);
+                // Fire-and-forget: click-triggered popover; errors logged inside.
+                void this.showApprovalsDetail(dateStr, userIdVal, event);
               } else {
                 const link = getUrl(dateStr, count);
                 if (link) window.open(link, '_blank');

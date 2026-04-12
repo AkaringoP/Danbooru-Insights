@@ -1,5 +1,5 @@
 import {CONFIG} from '../config';
-import type {Metric, SettingsData} from '../types';
+import type {Metric, SettingsData, Theme} from '../types';
 
 /**
  * Manages user settings and persistence using localStorage.
@@ -134,7 +134,8 @@ export class SettingsManager {
       return Math.max(0, Math.min(3, byTheme[themeKey]));
     }
     // Legacy fallback: single grassIndex (pre-v8.2.0)
-    const legacy = (this.settings as any).grassIndex;
+    const legacy = (this.settings as SettingsData & {grassIndex?: number})
+      .grassIndex;
     return typeof legacy === 'number' && legacy >= 0 && legacy <= 3
       ? legacy
       : 0;
@@ -147,9 +148,12 @@ export class SettingsManager {
     const byTheme = {...(this.settings.grassIndexByTheme || {})};
     byTheme[themeKey] = Math.max(0, Math.min(3, index));
     // Remove legacy field if present
-    const patch: any = {grassIndexByTheme: byTheme};
-    if ((this.settings as any).grassIndex !== undefined) {
-      delete (this.settings as any).grassIndex;
+    const patch: Partial<SettingsData> = {grassIndexByTheme: byTheme};
+    const legacySettings = this.settings as SettingsData & {
+      grassIndex?: number;
+    };
+    if (legacySettings.grassIndex !== undefined) {
+      delete legacySettings.grassIndex;
     }
     this.save(patch);
   }
@@ -157,7 +161,7 @@ export class SettingsManager {
   /**
    * Resolves the active levels array for a theme, considering grassOptions and per-theme grassIndex.
    */
-  resolveLevels(themeKey: string, theme: any): string[] {
+  resolveLevels(themeKey: string, theme: Theme): string[] {
     const defaultLevels = [
       '#ebedf0',
       '#9be9a8',
@@ -247,7 +251,7 @@ export class SettingsManager {
    */
   setSyncThreshold(val: number): void {
     this.save({
-      syncThreshold: parseInt(val as any, 10),
+      syncThreshold: parseInt(String(val), 10),
     });
   }
 }

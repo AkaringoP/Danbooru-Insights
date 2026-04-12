@@ -1,4 +1,5 @@
 import {getBestThumbnailUrl} from '../utils';
+import type {PostVariant} from '../types';
 
 /**
  * Reusable hover preview card for post lists (scatter popover, approval popover).
@@ -24,7 +25,7 @@ interface PostDetails {
   tag_string_character?: string;
   preview_file_url?: string;
   file_url?: string;
-  variants?: any[];
+  variants?: PostVariant[];
 }
 
 type PostFetcher = (postId: number) => Promise<PostDetails | null>;

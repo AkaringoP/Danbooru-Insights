@@ -2,6 +2,60 @@ import {CONFIG, DAY_MS} from '../config';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {isTopLevelTag} from '../utils';
 import type {Database} from '../core/database';
+import type {
+  DanbooruPost,
+  DanbooruTag,
+  DanbooruUser,
+  DanbooruRelatedTag,
+  DanbooruRelatedTagResponse,
+  DanbooruCountResponse,
+  HistoryEntry,
+  MilestoneEntry,
+  UserRanking,
+  TagAnalyticsMeta,
+} from '../types';
+
+type MonthlyCountsData = HistoryEntry[] & {historyCutoff?: string};
+
+type InitialStats = {
+  firstPost?: DanbooruPost;
+  hundredthPost?: DanbooruPost | null;
+  totalCount: number;
+  startDate?: Date;
+  timeToHundred?: number | null;
+  meta: DanbooruTag;
+  initialPosts?: DanbooruPost[] | null;
+  updatedAt?: number;
+  /** Cached first-100 stats for delta sync path. */
+  first100Stats?: LocalStats;
+};
+
+type LocalStats = {
+  ratingCounts: Record<string, number>;
+  uploaderRanking: UserRanking[];
+  approverRanking: UserRanking[];
+};
+
+type ReportEntry = {
+  id?: number | string;
+  name?: string;
+  uploader?: string;
+  approver?: string;
+  user?: string;
+  posts?: number;
+  count?: number;
+  post_count?: number;
+};
+
+type RankingResult = {
+  uploaderAll: UserRanking[];
+  approverAll: UserRanking[];
+  uploaderYear: UserRanking[];
+  approverYear: UserRanking[];
+};
+
+type UserEntry = {name: string; level: string};
+type UserEntryWithId = {id: number; name: string; level: string};
 
 /**
  * Data service for TagAnalyticsApp.
@@ -28,7 +82,7 @@ export class TagAnalyticsDataService {
    * Cache is considered stale after 24 hours.
    * @return {Promise<?Object>} The cached data object or null if not found/expired.
    */
-  async loadFromCache(): Promise<any> {
+  async loadFromCache(): Promise<TagAnalyticsMeta | null> {
     if (!this.db || !this.db.tag_analytics) return null;
     try {
       const cached = await this.db.tag_analytics.get(this.tagName);
@@ -53,7 +107,7 @@ export class TagAnalyticsDataService {
    * @param {!Object} data The analytics data to cache.
    * @return {Promise<void>}
    */
-  async saveToCache(data: any): Promise<void> {
+  async saveToCache(data: TagAnalyticsMeta): Promise<void> {
     if (!this.db || !this.db.tag_analytics) return;
     try {
       await this.db.tag_analytics.put({
@@ -74,7 +128,7 @@ export class TagAnalyticsDataService {
     try {
       const val = localStorage.getItem('danbooru_tag_analytics_retention');
       if (val) return parseInt(val, 10);
-    } catch (e) {
+    } catch {
       // Fallback to default
     }
     return 7;
@@ -88,7 +142,7 @@ export class TagAnalyticsDataService {
     try {
       const val = localStorage.getItem('danbooru_tag_analytics_sync_threshold');
       if (val) return parseInt(val, 10);
-    } catch (e) {
+    } catch {
       // Fallback
     }
     return 50;
@@ -144,10 +198,10 @@ export class TagAnalyticsDataService {
    */
   async fetchInitialStats(
     tagName: string,
-    cachedData?: any,
+    cachedData?: TagAnalyticsMeta | null,
     absoluteOldest?: boolean,
     foundEarliestDate?: string | null,
-  ): Promise<any> {
+  ): Promise<InitialStats | null> {
     // Get Tag Metadata first to know count and category
     const tagData = await this.fetchTagData(tagName); // Existing helper
     if (!tagData) return null;
@@ -176,7 +230,7 @@ export class TagAnalyticsDataService {
       tagCreatedAt = '2005-01-01';
     }
 
-    let posts: any[] = [];
+    let posts: DanbooruPost[] = [];
     const MAX_OPTIMIZED_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
     const isSmallTag = tagData.post_count <= MAX_OPTIMIZED_POSTS;
     const targetFetchCount = Math.min(tagData.post_count, MAX_OPTIMIZED_POSTS);
@@ -190,10 +244,10 @@ export class TagAnalyticsDataService {
         const fetchLimit = Math.min(limit, targetFetchCount - posts.length);
         const params = new URLSearchParams({
           tags: `${tagName} date:>=${tagCreatedAt}`,
-          limit: fetchLimit,
+          limit: String(fetchLimit),
           page: currentPage,
           only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
-        } as any);
+        });
         const url = `/posts.json?${params.toString()}`;
 
         const batch = await this.rateLimiter
@@ -236,10 +290,10 @@ export class TagAnalyticsDataService {
           const fetchLimit = Math.min(limit, targetFetchCount - posts.length);
           const fbParams = new URLSearchParams({
             tags: `${tagName}`,
-            limit: fetchLimit,
+            limit: String(fetchLimit),
             page: currentPage,
             only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
-          } as any);
+          });
           const fbBatch = await this.rateLimiter
             .fetch(`/posts.json?${fbParams.toString()}`)
             .then((r: Response) => r.json());
@@ -352,7 +406,9 @@ export class TagAnalyticsDataService {
    * @param {string} tagName - The tag to analyze.
    * @return {Promise<Object>} - Object containing counts for 'total', 'translated', and 'requested'.
    */
-  async fetchCommentaryCounts(tagName: string): Promise<any> {
+  async fetchCommentaryCounts(
+    tagName: string,
+  ): Promise<Record<string, number>> {
     const queries: Record<string, string> = {
       total: `tags=${encodeURIComponent(tagName)}+has:commentary`,
       translated: `tags=${encodeURIComponent(tagName)}+has:commentary+commentary`,
@@ -372,7 +428,7 @@ export class TagAnalyticsDataService {
 
     // [Integrity Check] Ensure all keys exist and are valid numbers
     keys.forEach(key => {
-      if (results[key] == null) {
+      if (results[key] === undefined) {
         console.warn(
           `[TagAnalyticsApp] Missing commentary key: ${key}. Defaulting to 0.`,
         );
@@ -387,7 +443,7 @@ export class TagAnalyticsDataService {
    * @param {string} tagName - The tag to analyze.
    * @return {Promise<Object>} - Map of status strings to counts.
    */
-  async fetchStatusCounts(tagName: string): Promise<any> {
+  async fetchStatusCounts(tagName: string): Promise<Record<string, number>> {
     const statuses = [
       'active',
       'appealed',
@@ -407,7 +463,7 @@ export class TagAnalyticsDataService {
 
     // [Integrity Check] Ensure all keys exist and are valid numbers
     statuses.forEach(status => {
-      if (results[status] == null) {
+      if (results[status] === undefined) {
         console.warn(
           `[TagAnalyticsApp] Missing status key: ${status}. Defaulting to 0.`,
         );
@@ -427,7 +483,7 @@ export class TagAnalyticsDataService {
   async fetchRatingCounts(
     tagName: string,
     startDate: string | null = null,
-  ): Promise<any> {
+  ): Promise<Record<string, number>> {
     const ratings = ['g', 's', 'q', 'e'];
     const results: Record<string, number> = {};
 
@@ -444,7 +500,7 @@ export class TagAnalyticsDataService {
 
     // [Integrity Check] Ensure all keys exist and are valid numbers
     ratings.forEach(rating => {
-      if (results[rating] == null) {
+      if (results[rating] === undefined) {
         console.warn(
           `[TagAnalyticsApp] Missing rating key: ${rating}. Defaulting to 0.`,
         );
@@ -459,32 +515,34 @@ export class TagAnalyticsDataService {
     tagName: string,
     categoryId: number,
     totalTagCount: number,
-  ): Promise<any> {
+  ): Promise<Record<string, number> | null> {
     const catName = categoryId === 3 ? 'Copyright' : 'Character';
 
     // 1. Fetch Related Tags
     const relatedUrl = `/related_tag.json?commit=Search&search[category]=${categoryId}&search[order]=Frequency&search[query]=${encodeURIComponent(tagName)}`;
 
     try {
-      const resp = await this.rateLimiter
+      const resp: DanbooruRelatedTagResponse = await this.rateLimiter
         .fetch(relatedUrl)
         .then((r: Response) => r.json());
       if (!resp || !resp.related_tags || !Array.isArray(resp.related_tags))
         return null;
 
-      const tags = resp.related_tags; // [{ "tag": {...}, "frequency": 0.5, "related_tag": {...} }]
+      const tags: DanbooruRelatedTag[] = resp.related_tags; // [{ "tag": {...}, "frequency": 0.5, "related_tag": {...} }]
 
       // Limit to top 20 candidates for performance
-      const candidates = tags.slice(0, 20);
+      const candidates: DanbooruRelatedTag[] = tags.slice(0, 20);
 
       // 2. Filter Top-Level (Check Implications)
       const checks = await Promise.all(
-        candidates.map(async (item: any) =>
+        candidates.map(async (item: DanbooruRelatedTag) =>
           (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
         ),
       );
 
-      const filtered = checks.filter(item => item !== null);
+      const filtered = checks.filter(
+        (item): item is DanbooruRelatedTag => item !== null,
+      );
 
       // 3. Take Top 10 by Frequency
       // Note: related_tag.json response item has `related_tag` property with `frequency`.
@@ -572,11 +630,11 @@ export class TagAnalyticsDataService {
     forwardStartDate: string,
     targetTotal: number,
     currentForwardTotal: number,
-  ): Promise<any[]> {
+  ): Promise<HistoryEntry[]> {
     console.log(
       `[TagAnalyticsApp] Starting Reverse Scan. Tag: ${tagName}, Start: ${forwardStartDate}, Target: ${targetTotal}, Current: ${currentForwardTotal}`,
     );
-    const history = [];
+    const history: HistoryEntry[] = [];
     let totalSum = currentForwardTotal;
     const currentMonth = new Date(forwardStartDate);
 
@@ -647,7 +705,7 @@ export class TagAnalyticsDataService {
     tagName: string,
     lastDate: Date | string,
     startDate: Date | string,
-  ): Promise<any[]> {
+  ): Promise<HistoryEntry[]> {
     if (!lastDate) return this.fetchMonthlyCounts(tagName, startDate);
 
     // Delta Sync: Check last 2 months only
@@ -664,8 +722,11 @@ export class TagAnalyticsDataService {
     return this.fetchMonthlyCounts(tagName, effectiveStart);
   }
 
-  mergeHistory(oldHistory: any[], newHistory: any[]): any[] {
-    if (!oldHistory || oldHistory.length === 0) return newHistory;
+  mergeHistory(
+    oldHistory: HistoryEntry[] | null,
+    newHistory: HistoryEntry[] | null,
+  ): HistoryEntry[] {
+    if (!oldHistory || oldHistory.length === 0) return newHistory ?? [];
     if (!newHistory || newHistory.length === 0) return oldHistory;
 
     // Map old history by date string (YYYY-MM-DD or time) for easy lookup?
@@ -705,9 +766,9 @@ export class TagAnalyticsDataService {
   async fetchMilestonesDelta(
     tagName: string,
     currentTotal: number,
-    cachedMilestones: any[],
-    fullHistory: any[],
-  ): Promise<any[]> {
+    cachedMilestones: MilestoneEntry[],
+    fullHistory: HistoryEntry[],
+  ): Promise<MilestoneEntry[]> {
     const allTargets = this.getMilestoneTargets(currentTotal);
     const existingTargets = new Set(cachedMilestones.map(m => m.milestone));
     const missingTargets = allTargets.filter(t => !existingTargets.has(t));
@@ -717,7 +778,10 @@ export class TagAnalyticsDataService {
     return this.fetchMilestones(tagName, fullHistory, missingTargets);
   }
 
-  mergeMilestones(oldMilestones: any[], newMilestones: any[]): any[] {
+  mergeMilestones<T extends {milestone: number}>(
+    oldMilestones: T[],
+    newMilestones: T[] | null,
+  ): T[] {
     if (!newMilestones || newMilestones.length === 0) return oldMilestones;
     // Sort by milestone number
     return [...oldMilestones, ...newMilestones].sort(
@@ -725,7 +789,7 @@ export class TagAnalyticsDataService {
     );
   }
 
-  async fetchLatestPost(tagName: string): Promise<any> {
+  async fetchLatestPost(tagName: string): Promise<DanbooruPost | null> {
     // Query for the single latest post
     const url = `/posts.json?tags=${encodeURIComponent(tagName)}&limit=1&only=id,created_at,variants,uploader_id,rating,preview_file_url`;
     try {
@@ -758,7 +822,7 @@ export class TagAnalyticsDataService {
   async fetchTrendingPost(
     tagName: string,
     isNSFW: boolean = false,
-  ): Promise<any> {
+  ): Promise<DanbooruPost | null> {
     // Query for the most popular SFW (or NSFW) post in the last 3 days
     // age:..3d, order:score, rating:g (or is:nsfw)
     const ratingQuery = isNSFW ? 'is:nsfw' : 'is:sfw';
@@ -776,7 +840,9 @@ export class TagAnalyticsDataService {
 
   // --- Helper Methods for Rankings ---
 
-  calculateLocalStats(posts: any[]): any {
+  calculateLocalStats(
+    posts: Array<Pick<DanbooruPost, 'rating' | 'uploader_id' | 'approver_id'>>,
+  ): LocalStats {
     const ratingCounts: Record<string, number> = {g: 0, s: 0, q: 0, e: 0};
     const uploaders: Record<string, number> = {};
     const approvers: Record<string, number> = {};
@@ -815,16 +881,16 @@ export class TagAnalyticsDataService {
     group: string,
     from: string,
     to: string,
-  ): Promise<any> {
+  ): Promise<ReportEntry[]> {
     // group: 'uploader' or 'approver'
     // from/to: YYYY-MM-DD
     const params = new URLSearchParams({
       'search[tags]': tagName,
       'search[group]': group,
       'search[mode]': 'table',
-      'search[group_limit]': 10, // Top 100
+      'search[group_limit]': '10', // Top 100
       commit: 'Search',
-    } as any);
+    });
 
     if (from) params.append('search[from]', from);
     if (to) params.append('search[to]', to);
@@ -835,11 +901,6 @@ export class TagAnalyticsDataService {
         headers: {Accept: 'application/json'},
       });
       const data = await resp.json();
-
-      // Debug Log
-
-      if (Array.isArray(data) && data.length > 0) {
-      }
 
       return data;
       // Let's verify format. The user provided link returns a standard JSON structure?
@@ -867,7 +928,7 @@ export class TagAnalyticsDataService {
   async fetchMonthlyCounts(
     tagName: string,
     startDate: Date | string,
-  ): Promise<any[]> {
+  ): Promise<MonthlyCountsData> {
     const startDateObj =
       startDate instanceof Date ? startDate : new Date(startDate);
 
@@ -875,7 +936,7 @@ export class TagAnalyticsDataService {
     const startMonth = startDateObj.getMonth(); // 0-based
 
     const now = new Date();
-    const monthlyData: any[] = [];
+    const monthlyData: MonthlyCountsData = [];
     let cumulative = 0;
 
     // Iterate Month by Month
@@ -931,7 +992,7 @@ export class TagAnalyticsDataService {
       return this.rateLimiter
         .fetch(url)
         .then((r: Response) => r.json())
-        .then((data: any) => {
+        .then((data: DanbooruCountResponse) => {
           // Handle different response formats: { "counts": { "posts": N } } or { "posts": N }
           const count =
             (data && data.counts ? data.counts.posts : data ? data.posts : 0) ||
@@ -961,7 +1022,7 @@ export class TagAnalyticsDataService {
     });
 
     // Attach the cutoff time (now) to the array for consistency check
-    (monthlyData as any).historyCutoff = now.toISOString();
+    monthlyData.historyCutoff = now.toISOString();
 
     return monthlyData;
   }
@@ -976,10 +1037,10 @@ export class TagAnalyticsDataService {
    */
   async fetchMilestones(
     tagName: string,
-    monthlyData: any[],
+    monthlyData: HistoryEntry[],
     targets: number[],
-  ): Promise<any[]> {
-    const milestones = [];
+  ): Promise<MilestoneEntry[]> {
+    const milestones: MilestoneEntry[] = [];
 
     // Sort targets
     targets.sort((a, b) => a - b);
@@ -1003,15 +1064,9 @@ export class TagAnalyticsDataService {
       if (targetData) {
         const offset = target - prevCumulative;
 
-        // targetData.date can be a "YYYY-MM-01" string (from fetchMonthlyCounts)
-        // OR a Date object (from calculateHistoryFromPosts or old cache).
+        // targetData.date is a "YYYY-MM-01" string (HistoryEntry.date: string)
         let y, m;
-
-        if (targetData.date instanceof Date) {
-          y = targetData.date.getFullYear();
-          m = targetData.date.getMonth() + 1; // 1-12
-        } else {
-          // Assume string "YYYY-MM-DD"
+        {
           const dParts = targetData.date.split('-');
           y = parseInt(dParts[0], 10);
           m = parseInt(dParts[1], 10); // 1-12
@@ -1041,19 +1096,22 @@ export class TagAnalyticsDataService {
         // Actually "count" is just total.
         const params = new URLSearchParams({
           tags: `${tagName} status:any date:>${prevDateStr} order:id`,
-          limit: limit,
-          page: page,
+          limit: String(limit),
+          page: String(page),
           only: 'id,created_at,uploader_id,uploader_name,variants,rating,preview_file_url',
-        } as any);
+        });
 
         const url = `/posts.json?${params.toString()}`;
 
         try {
-          const posts = await this.rateLimiter
+          const posts: DanbooruPost[] = await this.rateLimiter
             .fetch(url)
             .then((r: Response) => r.json());
           if (posts && posts[indexInPage]) {
-            milestones.push({milestone: target, post: posts[indexInPage]});
+            milestones.push({
+              milestone: target,
+              post: posts[indexInPage],
+            } as MilestoneEntry);
           } else {
             console.warn(
               `[TagAnalyticsApp] Milestone ${target} post not found at index ${indexInPage} (Page ${page}). Posts len: ${posts ? posts.length : 0}`,
@@ -1076,16 +1134,20 @@ export class TagAnalyticsDataService {
    * @param {!Array<Object>} items The items to process.
    * @return {Promise<!Array<Object>>} The items with names attached.
    */
-  async backfillUploaderNames(items: any[]): Promise<any[]> {
-    const userIds = new Set();
+  async backfillUploaderNames(
+    items: Array<DanbooruPost | MilestoneEntry>,
+  ): Promise<Array<DanbooruPost | MilestoneEntry>> {
+    const userIds = new Set<number | string>();
     items.forEach(item => {
-      const p = item.post || item; // Handle both raw post and { milestone, post } wrapper
+      const p = ('post' in item ? item.post : item) as DanbooruPost; // Handle both raw post and { milestone, post } wrapper
       if (p.uploader_id) userIds.add(p.uploader_id);
       if (p.approver_id) userIds.add(p.approver_id);
     });
 
     if (userIds.size > 0) {
-      const userMap = await this.fetchUserMap(Array.from(userIds) as any[]);
+      const userMap = await this.fetchUserMap(
+        Array.from(userIds) as (string | number)[],
+      );
 
       // Store in instance map for rankings
       userMap.forEach((uObj, id) => {
@@ -1094,16 +1156,16 @@ export class TagAnalyticsDataService {
 
       // Backfill names & levels
       items.forEach(item => {
-        const p = item.post || item;
+        const p = ('post' in item ? item.post : item) as DanbooruPost;
         const uId = String(p.uploader_id);
         if (p.uploader_id && userMap.has(uId)) {
-          const u = userMap.get(uId);
+          const u = userMap.get(uId)!;
           p.uploader_name = u.name;
           p.uploader_level = u.level;
         }
         const aId = String(p.approver_id);
         if (p.approver_id && userMap.has(aId)) {
-          const a = userMap.get(aId);
+          const a = userMap.get(aId)!;
           p.approver_name = a.name;
           p.approver_level = a.level;
         }
@@ -1118,8 +1180,10 @@ export class TagAnalyticsDataService {
    * @param {!Array<string|number>} userIds List of user IDs.
    * @return {Promise<!Map<string, {name: string, level: string}>>} Map of ID to user info.
    */
-  async fetchUserMap(userIds: any[]): Promise<Map<any, any>> {
-    const userMap = new Map();
+  async fetchUserMap(
+    userIds: (string | number)[],
+  ): Promise<Map<string, UserEntry>> {
+    const userMap = new Map<string, UserEntry>();
     if (!userIds || userIds.length === 0) return userMap;
 
     const uniqueIds = Array.from(new Set(userIds));
@@ -1139,9 +1203,9 @@ export class TagAnalyticsDataService {
       return this.rateLimiter
         .fetch(url)
         .then((r: Response) => r.json())
-        .then((users: any) => {
+        .then((users: DanbooruUser[]) => {
           if (Array.isArray(users)) {
-            users.forEach((u: any) =>
+            users.forEach((u: DanbooruUser) =>
               userMap.set(String(u.id), {name: u.name, level: u.level_string}),
             );
           }
@@ -1161,8 +1225,10 @@ export class TagAnalyticsDataService {
    * @param {!Array<string>} userNames List of user names.
    * @return {Promise<!Map<string, {id: number, name: string, level: string}>>} Map of name to user info.
    */
-  async fetchUserMapByNames(userNames: any[]): Promise<Map<any, any>> {
-    const userMap = new Map(); // Key: Name, Value: { id, name, level }
+  async fetchUserMapByNames(
+    userNames: string[],
+  ): Promise<Map<string, UserEntryWithId>> {
+    const userMap = new Map<string, UserEntryWithId>(); // Key: Name, Value: { id, name, level }
     if (!userNames || userNames.length === 0) return userMap;
 
     const uniqueNames = Array.from(new Set(userNames));
@@ -1174,13 +1240,13 @@ export class TagAnalyticsDataService {
       const params = new URLSearchParams({
         'search[name]': name, // Exact match usually
         only: 'id,name,level_string',
-      } as any);
+      });
       const url = `/users.json?${params.toString()}`;
 
       return this.rateLimiter
         .fetch(url)
         .then((r: Response) => r.json())
-        .then((users: any) => {
+        .then((users: DanbooruUser[]) => {
           if (Array.isArray(users) && users.length > 0) {
             // Should return 1 user if exact match
             const u = users[0];
@@ -1215,30 +1281,30 @@ export class TagAnalyticsDataService {
    * @param {!Object} stats The stats object containing rankings.
    * @return {Promise<!Object>} The updated stats object.
    */
-  async resolveFirst100Names(stats: any): Promise<any> {
-    const ids = new Set();
+  async resolveFirst100Names(stats: LocalStats): Promise<LocalStats> {
+    const ids = new Set<string>();
     if (stats.uploaderRanking)
-      stats.uploaderRanking.forEach((u: any) => ids.add(String(u.id)));
+      stats.uploaderRanking.forEach((u: UserRanking) => ids.add(String(u.id)));
     if (stats.approverRanking)
-      stats.approverRanking.forEach((u: any) => ids.add(String(u.id)));
+      stats.approverRanking.forEach((u: UserRanking) => ids.add(String(u.id)));
 
-    const userMap = await this.fetchUserMap(Array.from(ids) as any[]);
+    const userMap = await this.fetchUserMap(Array.from(ids));
 
     if (stats.uploaderRanking) {
-      stats.uploaderRanking.forEach((u: any) => {
+      stats.uploaderRanking.forEach((u: UserRanking) => {
         const uid = String(u.id);
         if (userMap.has(uid)) {
-          const uObj = userMap.get(uid);
+          const uObj = userMap.get(uid)!;
           u.name = uObj.name;
           u.level = uObj.level;
         }
       });
     }
     if (stats.approverRanking) {
-      stats.approverRanking.forEach((u: any) => {
+      stats.approverRanking.forEach((u: UserRanking) => {
         const uid = String(u.id);
         if (userMap.has(uid)) {
-          const uObj = userMap.get(uid);
+          const uObj = userMap.get(uid)!;
           u.name = uObj.name;
           u.level = uObj.level;
         }
@@ -1253,7 +1319,9 @@ export class TagAnalyticsDataService {
    * @param {!Array<Object>} posts The list of posts.
    * @return {!Array<{date: string, count: number, cumulative: number}>} Calculated history.
    */
-  calculateHistoryFromPosts(posts: any[]): any[] {
+  calculateHistoryFromPosts(
+    posts: Array<Pick<DanbooruPost, 'created_at'>> | null,
+  ): HistoryEntry[] {
     if (!posts || posts.length === 0) return [];
 
     // Sort by date asc
@@ -1374,8 +1442,8 @@ export class TagAnalyticsDataService {
     tagName: string,
     dateStr1Y: string,
     dateStrTomorrow: string,
-    measure: (label: string, promise: Promise<any>) => Promise<any>,
-  ): Promise<any> {
+    measure: <T>(label: string, promise: Promise<T>) => Promise<T>,
+  ): Promise<RankingResult> {
     // 1. Fetch all rankings in parallel (RateLimiter queues them)
     const [uAll, aAll, uYear, aYear] = await Promise.all([
       measure(
@@ -1418,9 +1486,10 @@ export class TagAnalyticsDataService {
 
     // 2. Resolve Users Immediately
     // --- Collect All User IDs & Names for Batch Backfill ---
-    const uRankingIds = new Set();
-    const uRankingNames = new Set();
-    const getKey = (r: any) => r.name || r.uploader || r.approver || r.user;
+    const uRankingIds = new Set<string>();
+    const uRankingNames = new Set<string>();
+    const getKey = (r: ReportEntry) =>
+      r.name || r.uploader || r.approver || r.user;
     const normalize = (n: string) => (n ? n.replace(/ /g, '_') : '');
 
     [uAll, uYear, aAll, aYear].forEach(report => {
@@ -1428,7 +1497,7 @@ export class TagAnalyticsDataService {
         report.forEach(r => {
           if (r.id) uRankingIds.add(String(r.id));
           else {
-            const n = normalize(getKey(r));
+            const n = normalize(getKey(r) ?? '');
             if (n && n !== 'Unknown') uRankingNames.add(n);
           }
         });
@@ -1436,7 +1505,7 @@ export class TagAnalyticsDataService {
 
     // Fetch User Metadata (ID)
     if (uRankingIds.size > 0) {
-      const userMap = await this.fetchUserMap(Array.from(uRankingIds) as any[]);
+      const userMap = await this.fetchUserMap(Array.from(uRankingIds));
       userMap.forEach((uObj, id) => {
         this.userNames[id] = uObj;
       });
@@ -1444,9 +1513,7 @@ export class TagAnalyticsDataService {
 
     // Fetch User Metadata (Name)
     if (uRankingNames.size > 0) {
-      const nameMap = await this.fetchUserMapByNames(
-        Array.from(uRankingNames) as any[],
-      );
+      const nameMap = await this.fetchUserMapByNames(Array.from(uRankingNames));
       nameMap.forEach((uObj, name) => {
         this.userNames[name] = uObj; // Map Name -> Object
         if (uObj.id) this.userNames[String(uObj.id)] = uObj; // Map ID -> Object
@@ -1454,9 +1521,9 @@ export class TagAnalyticsDataService {
     }
 
     // Process Report Data to Rankings
-    const processReport = (report: any) => {
+    const processReport = (report: ReportEntry[]): UserRanking[] => {
       if (Array.isArray(report)) {
-        return report.map(r => {
+        return report.map((r: ReportEntry) => {
           const rawKey = getKey(r) || 'Unknown';
           const nName = normalize(rawKey);
           // Lookup by ID first, then by Name
@@ -1467,7 +1534,7 @@ export class TagAnalyticsDataService {
           const level = u ? u.level : null;
           const finalName = u ? u.name : rawKey;
           const count = r.posts || r.count || r.post_count || 0;
-          return {id: r.id || (u ? u.id : null), name: finalName, level, count};
+          return {id: r.id ?? u?.id ?? 0, name: finalName, level, count};
         });
       }
       return [];
@@ -1482,7 +1549,7 @@ export class TagAnalyticsDataService {
     return result;
   }
 
-  async fetchTagData(tagName: string): Promise<any> {
+  async fetchTagData(tagName: string): Promise<DanbooruTag | null> {
     try {
       // use name_matches to find the exact tag
       const url = `/tags.json?search[name_matches]=${encodeURIComponent(tagName)}`;

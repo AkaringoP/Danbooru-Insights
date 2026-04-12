@@ -1,6 +1,12 @@
 import {CONFIG} from '../config';
 import {RateLimitedFetch} from './rate-limiter';
-import type {Metric, MetricData, TargetUser, GrassSettings} from '../types';
+import type {
+  Metric,
+  MetricData,
+  TargetUser,
+  GrassSettings,
+  DanbooruPost,
+} from '../types';
 
 /** A daily count entry stored in IndexedDB. */
 interface DailyEntry {
@@ -62,8 +68,7 @@ export class DataManager {
    * @param postId The post ID
    * @return The raw API post object, or null on failure
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async fetchPostDetails(postId: number): Promise<any | null> {
+  async fetchPostDetails(postId: number): Promise<DanbooruPost | null> {
     try {
       const url = `/posts/${postId}.json?only=id,created_at,score,fav_count,rating,variants,preview_file_url,tag_string_artist,tag_string_copyright,tag_string_character`;
       const resp = await this.rateLimiter.fetch(url);
@@ -279,8 +284,6 @@ export class DataManager {
         metric,
         year,
       );
-      if (isYearCompleteCache) {
-      }
 
       // 0. Integrity Check (Past Years Only - Uploads Only)
       // Fix for partial data persistence issues

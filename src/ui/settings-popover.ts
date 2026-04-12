@@ -1,12 +1,13 @@
 import {CONFIG} from '../config';
 import {DataManager} from '../core/data-manager';
 import type {SettingsManager} from '../core/settings';
-import type {Metric} from '../types';
+import type {Metric, GrassOption} from '../types';
+import type {Database} from '../core/database';
 
 /** Options for constructing the settings popover. */
 export interface SettingsPopoverOptions {
   settingsManager: SettingsManager;
-  db: any;
+  db: Database;
   metric: string;
   settingsBtn: HTMLElement;
   /** Called when settings have changed and the graph should re-render. */
@@ -118,13 +119,13 @@ export function createSettingsPopover(
     const icon = document.createElement('div');
     icon.className = 'theme-icon';
     if (key === currentTheme) icon.classList.add('active'); // Highlight active theme
-    icon.title = (theme as any).name;
-    icon.style.background = (theme as any).bg;
+    icon.title = theme.name;
+    icon.style.background = theme.bg;
 
     // Inner Circle (Empty Cell Color)
     const inner = document.createElement('div');
     inner.className = 'theme-icon-inner';
-    inner.style.background = (theme as any).empty;
+    inner.style.background = theme.empty;
     icon.appendChild(inner);
 
     icon.onclick = () => {
@@ -181,7 +182,7 @@ export function createSettingsPopover(
   const renderGrassFlyout = (themeKey: string) => {
     grassFlyout.innerHTML = '';
     const theme = CONFIG.THEMES[themeKey] || CONFIG.THEMES.light;
-    const options = (theme as any).grassOptions;
+    const options: GrassOption[] | undefined = theme.grassOptions;
     if (!options || !Array.isArray(options)) {
       grassFlyout.style.display = 'none';
       return;
@@ -195,7 +196,7 @@ export function createSettingsPopover(
     title.textContent = 'Grass Color';
     grassFlyout.appendChild(title);
 
-    options.forEach((opt: any, idx: number) => {
+    options.forEach((opt: GrassOption, idx: number) => {
       const row = document.createElement('div');
       row.style.cssText =
         'cursor:pointer;display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:4px;border:2px solid transparent;transition:all 0.15s;';
@@ -414,7 +415,8 @@ export function createSettingsPopover(
       if (statsInterval) clearInterval(statsInterval);
       statsInterval = setInterval(() => {
         if (isStatsVisible && popover.style.display === 'block') {
-          updateMyStats();
+          // Fire-and-forget: polling UI refresh tick.
+          void updateMyStats();
         } else {
           // Safety clear
           if (statsInterval) clearInterval(statsInterval);

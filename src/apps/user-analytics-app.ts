@@ -198,8 +198,8 @@ export class UserAnalyticsApp {
 
       targetElement.appendChild(container);
 
-      // Initial Status Check
-      this.updateHeaderStatus();
+      // Initial Status Check (fire-and-forget UI refresh)
+      void this.updateHeaderStatus();
     } else {
       console.warn('[AnalyticsApp] Could not find H1 to inject button');
     }
@@ -229,7 +229,7 @@ export class UserAnalyticsApp {
     };
 
     if (btn) {
-      (btn as any).disabled = true;
+      (btn as HTMLButtonElement).disabled = true;
       btn.style.cursor = 'wait';
     }
 
@@ -254,7 +254,7 @@ export class UserAnalyticsApp {
         subHtml = `<div style="font-size:0.8em; color:#888; margin-top:2px;">${state.message || `Fetching data${dotStr}`}</div>`;
       }
 
-      this.updateHeaderStatus(headerHtml + subHtml, containerColor);
+      void this.updateHeaderStatus(headerHtml + subHtml, containerColor);
     };
 
     // Start Animation
@@ -300,7 +300,7 @@ export class UserAnalyticsApp {
         const finalStats = await this.dataManager.getSyncStats(
           this.context.targetUser,
         );
-        this.updateHeaderStatus(
+        void this.updateHeaderStatus(
           `Synced: ${finalStats.count.toLocaleString()} / ${finalStats.count.toLocaleString()}`,
           '#00ba7c',
         );
@@ -308,7 +308,7 @@ export class UserAnalyticsApp {
 
       if (btn) {
         btn.innerHTML = originalText;
-        (btn as any).disabled = false;
+        (btn as HTMLButtonElement).disabled = false;
         btn.style.cursor = 'pointer';
       }
       if (shouldRender) {
@@ -319,10 +319,10 @@ export class UserAnalyticsApp {
       console.error(e);
       if (btn) {
         btn.innerHTML = 'ERR';
-        (btn as any).disabled = false;
+        (btn as HTMLButtonElement).disabled = false;
         btn.style.cursor = 'pointer';
       }
-      this.updateHeaderStatus('Sync Failed', '#ff4444');
+      void this.updateHeaderStatus('Sync Failed', '#ff4444');
     }
   }
 
@@ -474,7 +474,7 @@ export class UserAnalyticsApp {
         popover.remove();
         document.removeEventListener('click', closeHandler);
         // Refresh Header Status immediately to reflect new threshold state
-        this.updateHeaderStatus();
+        void this.updateHeaderStatus();
       } else {
         alert('Please enter a valid number.');
       }
@@ -505,7 +505,8 @@ export class UserAnalyticsApp {
       // Check Logic: If synced, show dashboard. If not, auto-sync?
       // User request: "Ask user if they want to fetch... if stop, resume later"
       // We will perform this check in renderDashboard
-      this.renderDashboard();
+      // Fire-and-forget: modal toggling should not block on dashboard render.
+      void this.renderDashboard();
     } else {
       // If history state still belongs to us, route through history.back()
       // so the URL stays in sync. The popstate listener will re-enter this
@@ -519,7 +520,7 @@ export class UserAnalyticsApp {
       setTimeout(() => {
         overlay.style.display = 'none';
         document.body.style.overflow = '';
-        this.updateHeaderStatus(); // Update menu status on close
+        void this.updateHeaderStatus(); // Update menu status on close
       }, 200); // Match transition duration
     }
   }
@@ -747,7 +748,7 @@ export class UserAnalyticsApp {
           );
 
           this.isFullySynced = true;
-          this.updateHeaderStatus();
+          void this.updateHeaderStatus();
 
           // Restore loading spinner before heavy data fetch
           content.innerHTML = `
@@ -833,7 +834,8 @@ export class UserAnalyticsApp {
             localStorage.setItem(nsfwKey, String(isNsfwEnabled));
 
             // Delegate all NSFW updates to the combined callback wired up after widget init
-            if (applyNsfwUpdate) applyNsfwUpdate();
+            // Fire-and-forget: UI update triggered by toggle change.
+            if (applyNsfwUpdate) void applyNsfwUpdate();
           };
         }
 
@@ -1043,8 +1045,8 @@ export class UserAnalyticsApp {
           ); // No-op: internal broadcast handles progress
 
           // Done
-          this.updateHeaderStatus();
-          this.renderDashboard();
+          void this.updateHeaderStatus();
+          void this.renderDashboard();
         };
 
         return; // Stop here, don't render dashboard
@@ -1513,7 +1515,7 @@ export class UserAnalyticsApp {
       dashboardDiv.insertAdjacentHTML('beforeend', dashboardFooterHtml());
 
       // Update header status (ensure it's green if ready)
-      this.updateHeaderStatus();
+      void this.updateHeaderStatus();
     } finally {
       this.isRendering = false;
     }

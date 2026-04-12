@@ -1,15 +1,43 @@
 // ESLint v9 flat config — composes the gts (Google TypeScript Style)
 // rules manually because gts@7.0.0's bundled `eslint.config.js` has a
-// broken path (`./src/index.js` instead of `./build/src/index.js`).
+// broken path (`./src/index.js` instead of `./build/src/index.js`) and
+// fails to load under ESLint v9. Instead we import the actual rule module
+// from `gts/build/src/index.js` and the ignore list from `gts/eslint.ignores.js`.
 //
 // Once gts ships a fix, this can be reduced to:
 //   import gtsConfig from 'gts/eslint.config.js';
 //   export default gtsConfig;
+//
+// Posture: strict. No rule is relaxed from gts defaults. The only override
+// below widens `no-unused-vars` to honor the conventional `_` prefix, which
+// is the standard escape hatch for intentionally-unused parameters and
+// avoids any need for file-level eslint-disable comments.
 import {defineConfig} from 'eslint/config';
 import gtsRules from 'gts/build/src/index.js';
 import gtsIgnores from 'gts/eslint.ignores.js';
 
 export default defineConfig([
-  {ignores: [...gtsIgnores, 'dist/']},
+  // Ignore build output and ESLint's own config file (which gts's TS parser
+  // tries to parse as a script despite `type: "module"` in package.json).
+  {ignores: [...gtsIgnores, 'dist/', 'eslint.config.js']},
   ...gtsRules,
+  // Project-wide overrides applied after gts so they take precedence.
+  {
+    rules: {
+      // Allow the `_foo` prefix convention for intentionally unused parameters,
+      // caught destructures, and rest siblings. Keeps the typical escape hatch
+      // working without introducing file-level disables.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          args: 'after-used',
+          argsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          ignoreRestSiblings: true,
+        },
+      ],
+    },
+  },
 ]);

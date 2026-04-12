@@ -82,7 +82,7 @@ export class GrassApp {
 
       const onYearChange = (y: number) => {
         currentYear = y;
-        updateView();
+        void updateView();
       };
 
       renderer.setLoading(true);
@@ -98,7 +98,7 @@ export class GrassApp {
           async () => {
             renderer.setLoading(true);
             await dataManager.clearCache(currentMetric, targetUser);
-            updateView();
+            void updateView();
           },
           /* skipScroll */ true,
         );
@@ -112,13 +112,13 @@ export class GrassApp {
             currentMetric = newMetric as Metric;
             // Save the new mode preference
             this.settings.setLastMode(userId, currentMetric);
-            updateView();
+            void updateView();
           },
           /* onRefresh */
           async () => {
             renderer.setLoading(true);
             await dataManager.clearCache(currentMetric, targetUser);
-            updateView();
+            void updateView();
           },
         );
 
@@ -143,7 +143,7 @@ export class GrassApp {
           async () => {
             renderer.setLoading(true);
             await dataManager.clearCache(currentMetric, targetUser);
-            updateView();
+            void updateView();
           },
         );
       } catch (e: unknown) {
@@ -157,6 +157,6 @@ export class GrassApp {
     };
 
     // Initial Load
-    updateView();
+    void updateView();
   }
 }

@@ -179,8 +179,11 @@ export interface CompletedYearRecord {
 
 /** Approval detail record. */
 export interface ApprovalDetailRecord {
-  id: number;
+  /** Composite key: `${userId}_${date}`. */
+  id: string;
   userId: string;
+  /** Ordered list of post IDs approved on this date. */
+  post_list?: number[];
 }
 
 /** Hourly stats cache record. */
@@ -261,7 +264,10 @@ export interface UserRanking {
 
 /** Milestone post entry. */
 export interface MilestoneEntry {
+  /** Milestone target number (e.g. 1, 100, 1000). */
   milestone: number;
+  /** Display label (e.g. "First", "1 k") — set by getMilestones, absent in tag milestones. */
+  type?: string;
   post: {
     id: number;
     created_at: string;
@@ -271,7 +277,7 @@ export interface MilestoneEntry {
     approver_id?: number;
     approver_name?: string;
     rating: string;
-    score: number;
+    score?: number;
     variants?: PostVariant[];
     preview_file_url?: string;
     file_url?: string;
@@ -498,8 +504,8 @@ export interface TagAnalyticsMeta {
   created_at: string;
   updatedAt: number;
   _isCached?: boolean;
-  firstPost?: PostRecord;
-  hundredthPost?: PostRecord;
+  firstPost?: DanbooruPost;
+  hundredthPost?: DanbooruPost;
   timeToHundred?: number;
   historyData: HistoryEntry[];
   precalculatedMilestones: MilestoneEntry[];
@@ -520,8 +526,8 @@ export interface TagAnalyticsMeta {
   commentaryCounts?: Record<string, number>;
   copyrightCounts?: Record<string, number>;
   characterCounts?: Record<string, number>;
-  latestPost?: PostRecord;
-  trendingPost?: PostRecord;
-  trendingPostNSFW?: PostRecord;
+  latestPost?: DanbooruPost;
+  trendingPost?: DanbooruPost;
+  trendingPostNSFW?: DanbooruPost;
   newPostCount?: number;
 }

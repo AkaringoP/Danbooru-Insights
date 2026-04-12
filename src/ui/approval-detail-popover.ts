@@ -1,4 +1,6 @@
 import {attachPostHoverCard, hidePostHoverCard} from './post-hover-card';
+import type {Database} from '../core/database';
+import type {DanbooruPost} from '../types';
 
 /**
  * Shows a paginated popover listing approval post IDs for a given date.
@@ -9,11 +11,11 @@ import {attachPostHoverCard, hidePostHoverCard} from './post-hover-card';
  * @param {Function} fetchPostDetails Optional fetcher used by the hover preview card.
  */
 export async function showApprovalsDetail(
-  db: any,
+  db: Database,
   dateStr: string,
   userId: string | number,
   event: MouseEvent,
-  fetchPostDetails?: (postId: number) => Promise<any | null>,
+  fetchPostDetails?: (postId: number) => Promise<DanbooruPost | null>,
 ): Promise<void> {
   const popoverId = 'danbooru-approvals-popover';
   let pop = document.getElementById(popoverId);

@@ -1,4 +1,7 @@
 import {describe, it, expect, vi, beforeAll} from 'vitest';
+import type {Database} from '../src/core/database';
+import type {RateLimitedFetch} from '../src/core/rate-limiter';
+import type {HistoryEntry} from '../src/types';
 
 // Mock all heavy dependencies so we can instantiate TagAnalyticsDataService cheaply
 vi.mock('d3', () => ({}));
@@ -28,8 +31,8 @@ beforeAll(async () => {
   const {TagAnalyticsDataService} =
     await import('../src/apps/tag-analytics-data');
   dataService = new TagAnalyticsDataService(
-    {} as any, // db
-    {} as any, // rateLimiter
+    {} as unknown as Database, // db
+    {} as unknown as RateLimitedFetch, // rateLimiter
     'test_tag',
   );
 });
@@ -157,7 +160,7 @@ describe('calculateLocalStats', () => {
 describe('calculateHistoryFromPosts', () => {
   it('returns empty array for empty input', () => {
     expect(dataService.calculateHistoryFromPosts([])).toEqual([]);
-    expect(dataService.calculateHistoryFromPosts(null as any)).toEqual([]);
+    expect(dataService.calculateHistoryFromPosts(null)).toEqual([]);
   });
 
   it('groups posts by month and computes cumulative', () => {
@@ -169,17 +172,17 @@ describe('calculateHistoryFromPosts', () => {
     const history = dataService.calculateHistoryFromPosts(posts);
 
     // Should have entries from 2024-01 through at least 2024-03
-    const jan = history.find((h: any) => h.date === '2024-01-01');
+    const jan = history.find((h: HistoryEntry) => h.date === '2024-01-01');
     expect(jan).toBeDefined();
     expect(jan!.count).toBe(2);
     expect(jan!.cumulative).toBe(2);
 
-    const feb = history.find((h: any) => h.date === '2024-02-01');
+    const feb = history.find((h: HistoryEntry) => h.date === '2024-02-01');
     expect(feb).toBeDefined();
     expect(feb!.count).toBe(0);
     expect(feb!.cumulative).toBe(2);
 
-    const mar = history.find((h: any) => h.date === '2024-03-01');
+    const mar = history.find((h: HistoryEntry) => h.date === '2024-03-01');
     expect(mar).toBeDefined();
     expect(mar!.count).toBe(1);
     expect(mar!.cumulative).toBe(3);
@@ -200,7 +203,7 @@ describe('calculateHistoryFromPosts', () => {
       {created_at: 'not-a-date'},
     ];
     const history = dataService.calculateHistoryFromPosts(posts);
-    const may = history.find((h: any) => h.date === '2024-05-01');
+    const may = history.find((h: HistoryEntry) => h.date === '2024-05-01');
     expect(may!.count).toBe(1);
   });
 
@@ -210,8 +213,8 @@ describe('calculateHistoryFromPosts', () => {
       {created_at: '2024-04-01T00:00:00Z'},
     ];
     const history = dataService.calculateHistoryFromPosts(posts);
-    const feb = history.find((h: any) => h.date === '2024-02-01');
-    const mar = history.find((h: any) => h.date === '2024-03-01');
+    const feb = history.find((h: HistoryEntry) => h.date === '2024-02-01');
+    const mar = history.find((h: HistoryEntry) => h.date === '2024-03-01');
     expect(feb!.count).toBe(0);
     expect(mar!.count).toBe(0);
   });
@@ -224,13 +227,13 @@ describe('mergeHistory', () => {
   it('returns newHistory when oldHistory is empty', () => {
     const newH = [{date: '2024-01-01', count: 5, cumulative: 5}];
     expect(dataService.mergeHistory([], newH)).toEqual(newH);
-    expect(dataService.mergeHistory(null as any, newH)).toEqual(newH);
+    expect(dataService.mergeHistory(null, newH)).toEqual(newH);
   });
 
   it('returns oldHistory when newHistory is empty', () => {
     const oldH = [{date: '2024-01-01', count: 5, cumulative: 5}];
     expect(dataService.mergeHistory(oldH, [])).toEqual(oldH);
-    expect(dataService.mergeHistory(oldH, null as any)).toEqual(oldH);
+    expect(dataService.mergeHistory(oldH, null)).toEqual(oldH);
   });
 
   it('merges without duplicating overlapping months', () => {
@@ -245,7 +248,7 @@ describe('mergeHistory', () => {
     ];
 
     const merged = dataService.mergeHistory(oldH, newH);
-    const dates = merged.map((h: any) => h.date);
+    const dates = merged.map((h: HistoryEntry) => h.date);
 
     // No duplicate months
     expect(new Set(dates).size).toBe(dates.length);
@@ -280,7 +283,7 @@ describe('mergeMilestones', () => {
   it('returns old milestones when new is empty', () => {
     const old = [{milestone: 100, post_id: 1}];
     expect(dataService.mergeMilestones(old, [])).toEqual(old);
-    expect(dataService.mergeMilestones(old, null as any)).toEqual(old);
+    expect(dataService.mergeMilestones(old, null)).toEqual(old);
   });
 
   it('merges and sorts by milestone number', () => {
@@ -291,7 +294,9 @@ describe('mergeMilestones', () => {
     const newM = [{milestone: 500, post_id: 5}];
     const merged = dataService.mergeMilestones(old, newM);
 
-    expect(merged.map((m: any) => m.milestone)).toEqual([100, 500, 1000]);
+    expect(merged.map((m: {milestone: number}) => m.milestone)).toEqual([
+      100, 500, 1000,
+    ]);
   });
 
   it('handles both empty arrays', () => {
