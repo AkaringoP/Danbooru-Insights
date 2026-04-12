@@ -38,7 +38,7 @@ export interface SummaryStats {
 export interface MilestoneEntry {
   type: string;
   post: PostRecord;
-  index: number;
+  milestone: number;
 }
 
 /** Monthly upload count entry. */
@@ -129,6 +129,78 @@ export function buildUntaggedTranslationQueries(normalizedName: string): {
     ac: `${u} english_text translated`,
     bc: `${u} translation_request translated`,
   };
+}
+
+// ============================================================
+// Backfill failure tracking (Task 4 — backfill error recovery)
+// ============================================================
+
+/**
+ * Persisted failure state for `backfillPostMetadata`. Stored in localStorage
+ * under {@link backfillFailureStorageKey} so the cooldown survives page
+ * reloads — without persistence, every dashboard open would retry a
+ * persistently-failing backfill, hammering the API in an infinite loop.
+ */
+export interface BackfillFailureState {
+  /** Unix ms of the most recent failed attempt. */
+  lastAttemptAt: number;
+  /** Number of consecutive failures since the last success. */
+  failureCount: number;
+}
+
+/** After this many consecutive failures, the user enters cooldown. */
+export const BACKFILL_FAILURE_THRESHOLD = 3;
+
+/** Cooldown duration. After this, one retry is allowed. */
+export const BACKFILL_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+/** localStorage key for a user's persisted failure state. */
+export function backfillFailureStorageKey(uploaderId: number): string {
+  return `di_backfill_failure_${uploaderId}`;
+}
+
+/**
+ * Pure cooldown decision. Returns true if the user has hit the failure
+ * threshold AND the last attempt is still within the cooldown window.
+ *
+ * Exported as a standalone function (not a class method) so unit tests can
+ * exercise the threshold/cooldown logic without instantiating the full
+ * AnalyticsDataManager (Dexie + RateLimiter).
+ */
+export function isBackfillInCooldown(
+  state: BackfillFailureState | null,
+  now: number = Date.now(),
+): boolean {
+  if (!state) return false;
+  return (
+    state.failureCount >= BACKFILL_FAILURE_THRESHOLD &&
+    now - state.lastAttemptAt < BACKFILL_COOLDOWN_MS
+  );
+}
+
+/**
+ * Pure increment. Returns the next failure state after recording one more
+ * failure. Does not touch localStorage.
+ */
+export function recordFailure(
+  prev: BackfillFailureState | null,
+  now: number = Date.now(),
+): BackfillFailureState {
+  return {
+    lastAttemptAt: now,
+    failureCount: (prev?.failureCount ?? 0) + 1,
+  };
+}
+
+/**
+ * Whether an HTTP status code should count as a hard failure for cooldown
+ * purposes. 429 is excluded because the rate-limiter already triggers a
+ * global backoff for it — counting 429 as a failure would double-penalize
+ * the user (rate-limiter cooldown + our cooldown), and the rate-limiter
+ * cooldown is the right place to handle it.
+ */
+export function shouldCountHttpAsFailure(status: number): boolean {
+  return status !== 429;
 }
 
 /**
@@ -578,12 +650,12 @@ export class AnalyticsDataManager extends DataManager {
           label = tStr;
         if (t === 1) label = 'First';
 
-        results.push({type: label, post: p, index: t});
+        results.push({type: label, post: p, milestone: t});
       }
     });
 
-    // Let's sort strictly by Index ASC.
-    results.sort((a, b) => a.index - b.index);
+    // Let's sort strictly by milestone ASC.
+    results.sort((a, b) => a.milestone - b.milestone);
 
     return results;
   }
@@ -1408,7 +1480,7 @@ export class AnalyticsDataManager extends DataManager {
               .then(r => r.json());
             if (Array.isArray(imps) && imps.length > 0) return null;
             return item;
-          } catch (e: unknown) {
+          } catch {
             return item;
           }
         },
@@ -1737,10 +1809,68 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
+   * Reads the persisted backfill failure state for a user. Returns null if
+   * absent or unparseable. Localized I/O wrapper around the storage key
+   * defined in {@link backfillFailureStorageKey}.
+   */
+  private getBackfillFailureState(
+    uploaderId: number,
+  ): BackfillFailureState | null {
+    const raw = localStorage.getItem(backfillFailureStorageKey(uploaderId));
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as BackfillFailureState;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Persists the backfill failure state for a user. */
+  private setBackfillFailureState(
+    uploaderId: number,
+    state: BackfillFailureState,
+  ): void {
+    localStorage.setItem(
+      backfillFailureStorageKey(uploaderId),
+      JSON.stringify(state),
+    );
+  }
+
+  /** Removes any persisted backfill failure state for a user. */
+  private clearBackfillFailureState(uploaderId: number): void {
+    localStorage.removeItem(backfillFailureStorageKey(uploaderId));
+  }
+
+  /**
+   * Records one more backfill failure and emits a console warning so devs
+   * can spot infinite-retry loops in dev tools.
+   */
+  private recordBackfillFailure(uploaderId: number): void {
+    const next = recordFailure(this.getBackfillFailureState(uploaderId));
+    this.setBackfillFailureState(uploaderId, next);
+    console.warn(
+      `[Backfill] Failure recorded for user ${uploaderId} (count=${next.failureCount}/${BACKFILL_FAILURE_THRESHOLD})`,
+    );
+  }
+
+  /**
    * Checks whether any of the user's cached posts are missing metadata fields
-   * introduced after the initial schema (down_score / is_deleted / is_banned).
-   * Uses a single localStorage flag to short-circuit on subsequent loads once
-   * the backfill has fully completed for this user.
+   * introduced after the initial schema (down_score / is_deleted / is_banned)
+   * AND whether a backfill should be attempted right now.
+   *
+   * Returns false if either:
+   * 1. The full-completion flag is set (backfill already finished for this
+   *    user, no missing fields).
+   * 2. The user is currently in failure cooldown (failed >=
+   *    {@link BACKFILL_FAILURE_THRESHOLD} times within the last
+   *    {@link BACKFILL_COOLDOWN_MS}). The next dashboard open after the
+   *    cooldown elapses will allow one retry.
+   * 3. A scan of the user's cached posts shows no missing fields.
+   *
+   * The cooldown gate lives here (rather than inside `backfillPostMetadata`)
+   * so that the scatter widget never sees `needsBackfill: true` during
+   * cooldown — avoids the brief 'updating…' label flicker that would
+   * otherwise appear if the backfill function returned immediately.
    */
   async needsPostMetadataBackfill(userInfo: TargetUser): Promise<boolean> {
     const uploaderId = parseInt(userInfo.id ?? '0');
@@ -1748,6 +1878,14 @@ export class AnalyticsDataManager extends DataManager {
 
     const flagKey = `di_post_metadata_v2_${uploaderId}`;
     if (localStorage.getItem(flagKey) === '1') return false;
+
+    // Cooldown gate. If we've failed too many times recently, skip until the
+    // window elapses. Existing tests expect needsPostMetadataBackfill to
+    // semantically mean "should we attempt a backfill right now"; the
+    // function name reflects intent more than the literal "is data missing".
+    if (isBackfillInCooldown(this.getBackfillFailureState(uploaderId))) {
+      return false;
+    }
 
     // Walk all posts and stop on the first one lacking any required metadata.
     // We cannot short-circuit on the first record by index order — a partial
@@ -1839,13 +1977,28 @@ export class AnalyticsDataManager extends DataManager {
       try {
         const resp = await this.rateLimiter.fetch(url);
         if (!resp.ok) {
-          console.warn(`[Backfill] HTTP ${resp.status} — pausing backfill`);
+          if (shouldCountHttpAsFailure(resp.status)) {
+            console.warn(`[Backfill] HTTP ${resp.status} — pausing backfill`);
+            this.recordBackfillFailure(uploaderId);
+          } else {
+            // 429: rate-limiter already triggered global backoff. Pause this
+            // batch but do NOT increment our failure counter — the
+            // rate-limiter cooldown is the right place to throttle.
+            console.warn(
+              '[Backfill] HTTP 429 — pausing batch (rate-limiter cooldown active)',
+            );
+          }
           return;
         }
         batch = await resp.json();
       } catch (e) {
+        // Network/parse exceptions: count as a hard failure. They're rarely
+        // transient at the page-load granularity (a real wifi blip would
+        // affect the whole dashboard load), and the cooldown gives the
+        // user 24h to recover before we try again.
         console.warn('[Backfill] Fetch failed:', e);
-        return; // Will retry on next dashboard open
+        this.recordBackfillFailure(uploaderId);
+        return;
       }
 
       if (!Array.isArray(batch) || batch.length === 0) {
@@ -1884,6 +2037,10 @@ export class AnalyticsDataManager extends DataManager {
 
     if (updated >= total) {
       localStorage.setItem(flagKey, '1');
+      // Full success: clear any prior failure state. Reaching this branch
+      // means the loop completed without recording a failure (failure paths
+      // return early), so the previous failure history is now stale.
+      this.clearBackfillFailureState(uploaderId);
     }
   }
 
@@ -2949,7 +3106,6 @@ export class AnalyticsDataManager extends DataManager {
           .equals(uploaderId)
           .filter((p: ApiItem) => p['id'] <= startId)
           .count();
-      } else {
       }
 
       // FIX: If total is 0 (Failed to fetch), we CANNOT assume "Already Synced".
