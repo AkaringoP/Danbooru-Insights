@@ -93,8 +93,8 @@ export function renderTagCloudWidget(
   cloudData[currentTab] = initialData;
 
   // Build DOM structure
-  container.style.background = '#fff';
-  container.style.border = '1px solid #e1e4e8';
+  container.style.background = 'var(--di-bg)';
+  container.style.border = '1px solid var(--di-border)';
   container.style.borderRadius = '8px';
   container.style.padding = '15px';
 
@@ -103,7 +103,8 @@ export function renderTagCloudWidget(
     'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;';
 
   const title = document.createElement('div');
-  title.style.cssText = 'font-size:0.9em;color:#666;font-weight:bold;';
+  title.style.cssText =
+    'font-size:0.9em;color:var(--di-text-secondary);font-weight:bold;';
   title.textContent = '🏷️ Tag Cloud';
 
   const tabsDiv = document.createElement('div');
@@ -368,7 +369,7 @@ export function renderTagCloudWidget(
     const loadingDiv = document.createElement('div');
     loadingDiv.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity ${TRANSITION_MS}ms ease;`;
     loadingDiv.innerHTML =
-      '<span style="color:#888;font-size:0.9em;">Loading...</span>';
+      '<span style="color:var(--di-text-muted);font-size:0.9em;">Loading...</span>';
     cloudContainer.appendChild(loadingDiv);
 
     requestAnimationFrame(() => {

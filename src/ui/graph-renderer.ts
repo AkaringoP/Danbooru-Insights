@@ -312,7 +312,7 @@ export class GraphRenderer {
           <div id="grass-controls" style="gap:10px; display:flex;"></div>
         </div>
         <div id="cal-heatmap" style="overflow-x:auto; padding-bottom:5px;"></div>
-        <div id="grass-loading" style="text-align:center; padding:20px; color:#888;">Initializing...</div>
+        <div id="grass-loading" style="text-align:center; padding:20px; color:var(--di-text-muted);">Initializing...</div>
       `;
 
     // Append handles AFTER innerHTML to prevent them from being overwritten
@@ -679,9 +679,9 @@ export class GraphRenderer {
             font-family: inherit;
             font-size: inherit;
             font-weight: normal;
-            color: #24292f;
-            background-color: #f6f8fa;
-            border: 1px solid #d0d7de;
+            color: var(--di-text);
+            background-color: var(--di-bg-tertiary);
+            border: 1px solid var(--di-border-input);
             border-radius: 6px;
             padding: 2px 4px;
             margin-left: 6px;
@@ -771,9 +771,9 @@ export class GraphRenderer {
           }
           /* Controls */
           #grass-controls select {
-            background-color: #f6f8fa !important;
-            color: #24292f !important;
-            border: 1px solid #d0d7de !important;
+            background-color: var(--di-bg-tertiary) !important;
+            color: var(--di-text) !important;
+            border: 1px solid var(--di-border-input) !important;
             border-radius: 6px;
             padding: 2px 2px;
           }
@@ -807,10 +807,10 @@ export class GraphRenderer {
             position: fixed;
             max-height: 70vh;
             overflow-y: auto;
-            background: #fff;
-            color: #24292f;
-            border: 1px solid #d0d7de;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            background: var(--di-bg);
+            color: var(--di-text);
+            border: 1px solid var(--di-border-input);
+            box-shadow: 0 4px 12px var(--di-shadow);
             border-radius: 8px;
             padding: 12px;
             z-index: 10000;
@@ -833,7 +833,7 @@ export class GraphRenderer {
             box-sizing: border-box;
           }
           .theme-icon:hover { transform: scale(1.1); }
-          .theme-icon.active { border-color: #0969da; }
+          .theme-icon.active { border-color: var(--di-link); }
           .theme-icon-inner {
             position: absolute;
             top: 50%; left: 50%;
@@ -844,7 +844,7 @@ export class GraphRenderer {
           .popover-header {
             font-weight: 600;
             font-size: 12px;
-            color: #24292f;
+            color: var(--di-text);
             margin-bottom: 8px;
           }
           .popover-select {
@@ -852,8 +852,8 @@ export class GraphRenderer {
             margin-bottom: 10px;
             padding: 4px;
             border-radius: 4px;
-            border: 1px solid #d0d7de;
-            background-color: #f6f8fa;
+            border: 1px solid var(--di-border-input);
+            background-color: var(--di-bg-tertiary);
             font-size: 12px;
           }
           .threshold-row {
@@ -866,17 +866,17 @@ export class GraphRenderer {
             width: 60px;
             margin-left: auto;
             padding: 2px 4px;
-            border: 1px solid #d0d7de;
+            border: 1px solid var(--di-border-input);
             border-radius: 4px;
           }
 
           /* Approvals Detail Popover */
           #danbooru-approvals-popover {
             position: absolute;
-            background: #fff;
-            color: #24292f;
-            border: 1px solid #d0d7de;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            background: var(--di-bg);
+            color: var(--di-text);
+            border: 1px solid var(--di-border-input);
+            box-shadow: 0 4px 20px var(--di-shadow);
             border-radius: 10px;
             padding: 16px;
             z-index: 100005;
@@ -890,7 +890,7 @@ export class GraphRenderer {
             align-items: center;
             margin-bottom: 12px;
             padding-bottom: 8px;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid var(--di-border-light);
           }
           #danbooru-approvals-popover .header-title {
             font-weight: 600;
@@ -898,7 +898,7 @@ export class GraphRenderer {
           }
           #danbooru-approvals-popover .close-btn {
             cursor: pointer;
-            color: #888;
+            color: var(--di-text-muted);
             font-size: 18px;
             line-height: 1;
           }
@@ -960,11 +960,11 @@ export class GraphRenderer {
             transform: scale(1.1);
             background-color: var(--grass-text, #30363d);
             opacity: 0.15;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 6px var(--di-shadow-light);
           }
           #danbooru-approvals-popover .gallery-btn {
             cursor: pointer;
-            color: #0969da;
+            color: var(--di-link);
             display: flex;
             align-items: center;
             padding: 2px;
@@ -973,8 +973,8 @@ export class GraphRenderer {
             text-decoration: none;
           }
           #danbooru-approvals-popover .gallery-btn:hover {
-            background: #f0f7ff;
-            color: #054ada;
+            background: var(--di-bg-tertiary);
+            color: var(--di-link);
           }
           #danbooru-approvals-popover .post-grid {
             display: grid;
@@ -988,15 +988,15 @@ export class GraphRenderer {
             display: block;
             text-align: center;
             padding: 4px;
-            background: #f6f8fa;
-            border: 1px solid #d0d7de;
+            background: var(--di-bg-tertiary);
+            border: 1px solid var(--di-border-input);
             border-radius: 4px;
             font-size: 11px;
-            color: #0969da;
+            color: var(--di-link);
             text-decoration: none;
           }
           #danbooru-approvals-popover .post-link:hover {
-            background: #0969da;
+            background: var(--di-link);
             color: #fff;
           }
           #danbooru-approvals-popover .pagination {
@@ -1008,8 +1008,8 @@ export class GraphRenderer {
           }
           #danbooru-approvals-popover .page-btn {
             padding: 2px 8px;
-            border: 1px solid #d0d7de;
-            background: #fff;
+            border: 1px solid var(--di-border-input);
+            background: var(--di-bg);
             border-radius: 4px;
             cursor: pointer;
           }
@@ -1093,13 +1093,13 @@ export class GraphRenderer {
       settingsBtn.title = 'Settings';
       settingsBtn.style.cssText = `
           padding: 2px 8px;
-          border: 1px solid #d0d7de;
+          border: 1px solid var(--di-border-input);
           border-radius: 6px;
-          background-color: #f6f8fa;
+          background-color: var(--di-bg-tertiary);
           cursor: pointer;
           display: flex;
           align-items: center;
-          color: #57606a;
+          color: var(--di-text-secondary);
         `;
       settingsBtn.innerHTML = `
           <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;">
@@ -1113,10 +1113,12 @@ export class GraphRenderer {
       };
 
       settingsBtn.onmouseover = () => {
-        settingsBtn.style.backgroundColor = '#eaeef2';
+        settingsBtn.style.backgroundColor = 'var(--di-bg-tertiary)';
+        settingsBtn.style.filter = 'brightness(0.95)';
       };
       settingsBtn.onmouseout = () => {
-        settingsBtn.style.backgroundColor = '#f6f8fa';
+        settingsBtn.style.backgroundColor = 'var(--di-bg-tertiary)';
+        settingsBtn.style.filter = '';
       };
       footerLeft.appendChild(settingsBtn);
 
@@ -1126,13 +1128,13 @@ export class GraphRenderer {
       toggleBtn.title = 'Show Details';
       toggleBtn.style.cssText = `
           padding: 2px 8px;
-          border: 1px solid #d0d7de;
+          border: 1px solid var(--di-border-input);
           border-radius: 6px;
-          background-color: #f6f8fa;
+          background-color: var(--di-bg-tertiary);
           cursor: pointer;
           display: flex;
           align-items: center;
-          color: #57606a;
+          color: var(--di-text-secondary);
         `;
       // Chevron Down SVG
       const chevronDown =
@@ -1143,10 +1145,12 @@ export class GraphRenderer {
       toggleBtn.innerHTML = chevronDown;
 
       toggleBtn.onmouseover = () => {
-        toggleBtn.style.backgroundColor = '#eaeef2';
+        toggleBtn.style.backgroundColor = 'var(--di-bg-tertiary)';
+        toggleBtn.style.filter = 'brightness(0.95)';
       };
       toggleBtn.onmouseout = () => {
-        toggleBtn.style.backgroundColor = '#f6f8fa';
+        toggleBtn.style.backgroundColor = 'var(--di-bg-tertiary)';
+        toggleBtn.style.filter = '';
       };
 
       footerLeft.appendChild(toggleBtn);
@@ -1186,11 +1190,11 @@ export class GraphRenderer {
         panel.style.cssText = `
                 width: fit-content;
                 min-width: 310px;
-                background: var(--grass-bg, #fff);
-                border: 1px solid #d0d7de;
+                background: var(--grass-bg, var(--di-bg));
+                border: 1px solid var(--di-border-input);
                 border-radius: 8px;
                 margin-top: 10px;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                box-shadow: 0 1px 3px var(--di-shadow-light);
 
                 /* Animation Styles */
                 height: 0;
@@ -1600,13 +1604,13 @@ export class GraphRenderer {
           <div style="font-size:0.9em; margin-bottom:12px; color: var(--grass-text, #57606a);">${message}</div>
           <button id="grass-retry-btn" style="
             padding: 5px 16px;
-            background-color: #f6f8fa;
-            border: 1px solid #d0d7de;
+            background-color: var(--di-bg-tertiary);
+            border: 1px solid var(--di-border-input);
             border-radius: 6px;
             cursor: pointer;
             font-size: 12px;
             font-weight: 500;
-            color: #24292f;
+            color: var(--di-text);
           ">Retry</button>
         </div>
       `;

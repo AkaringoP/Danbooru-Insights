@@ -49,15 +49,15 @@ const ensureCard = (): HTMLElement => {
   el.id = cardId;
   el.style.cssText = [
     'position: absolute',
-    'background: #fff',
-    'border: 1px solid #d0d7de',
+    'background: var(--di-bg)',
+    'border: 1px solid var(--di-border-input)',
     'border-radius: 8px',
-    'box-shadow: 0 6px 20px rgba(0,0,0,0.18)',
+    'box-shadow: 0 6px 20px var(--di-shadow)',
     'padding: 10px',
     'width: 300px',
     'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     'font-size: 12px',
-    'color: #333',
+    'color: var(--di-text)',
     'pointer-events: none',
     'z-index: 100000',
     'display: none',
@@ -101,12 +101,12 @@ const buildCardHtml = (post: PostDetails): string => {
 
   const tagLine = (icon: string, label: string, value: string) =>
     value
-      ? `<div style="font-size:11px;color:#444;"><strong>${icon} ${label}:</strong> ${escapeHtml(value)}</div>`
+      ? `<div style="font-size:11px;color:var(--di-text-heading);"><strong>${icon} ${label}:</strong> ${escapeHtml(value)}</div>`
       : '';
 
   const tagsBlock =
     artist || copyright || character
-      ? `<div style="margin-top:6px;border-top:1px solid #eee;padding-top:6px;display:flex;flex-direction:column;gap:2px;">
+      ? `<div style="margin-top:6px;border-top:1px solid var(--di-border-light);padding-top:6px;display:flex;flex-direction:column;gap:2px;">
         ${tagLine('🎨', 'Artist', artist)}
         ${tagLine('©', 'Copy', copyright)}
         ${tagLine('👤', 'Char', character)}
@@ -115,12 +115,12 @@ const buildCardHtml = (post: PostDetails): string => {
 
   return `
     <div style="display:flex;gap:10px;align-items:flex-start;">
-      <div style="width:80px;height:80px;flex-shrink:0;background:#eee;border-radius:4px;overflow:hidden;">
+      <div style="width:80px;height:80px;flex-shrink:0;background:var(--di-bg-tertiary);border-radius:4px;overflow:hidden;">
         ${thumb ? `<img src="${escapeHtml(thumb)}" style="width:100%;height:100%;object-fit:cover;">` : ''}
       </div>
       <div style="flex:1;min-width:0;">
-        <div style="font-weight:bold;color:#0969da;font-size:13px;">Post #${post.id}</div>
-        <div style="font-size:11px;color:#555;line-height:1.5;margin-top:2px;">
+        <div style="font-weight:bold;color:var(--di-link);font-size:13px;">Post #${post.id}</div>
+        <div style="font-size:11px;color:var(--di-text-secondary);line-height:1.5;margin-top:2px;">
           📅 ${dateStr}<br>
           ❤️ Score: <strong>${score}</strong><br>
           ⭐ Favs: <strong>${favs}</strong><br>

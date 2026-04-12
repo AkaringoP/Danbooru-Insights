@@ -148,7 +148,7 @@ export function createSettingsPopover(
   const grassFlyout = document.createElement('div');
   grassFlyout.id = 'danbooru-grass-flyout';
   grassFlyout.style.cssText =
-    'position:fixed;display:none;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);padding:8px;z-index:10001;flex-direction:column;gap:6px;';
+    'position:fixed;display:none;background:var(--di-bg);border:1px solid var(--di-border-input);border-radius:8px;box-shadow:0 4px 12px var(--di-shadow);padding:8px;z-index:10001;flex-direction:column;gap:6px;';
   document.body.appendChild(grassFlyout);
 
   let currentFlyoutKey = '';
@@ -192,7 +192,7 @@ export function createSettingsPopover(
 
     const title = document.createElement('div');
     title.style.cssText =
-      'font-size:10px;color:#888;font-weight:600;margin-bottom:2px;';
+      'font-size:10px;color:var(--di-text-muted);font-weight:600;margin-bottom:2px;';
     title.textContent = 'Grass Color';
     grassFlyout.appendChild(title);
 
@@ -200,7 +200,7 @@ export function createSettingsPopover(
       const row = document.createElement('div');
       row.style.cssText =
         'cursor:pointer;display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:4px;border:2px solid transparent;transition:all 0.15s;';
-      if (idx === currentIdx) row.style.borderColor = '#007bff';
+      if (idx === currentIdx) row.style.borderColor = 'var(--di-link)';
 
       // Mini heatmap (4 cells)
       const preview = document.createElement('div');
@@ -213,12 +213,13 @@ export function createSettingsPopover(
       row.appendChild(preview);
 
       const label = document.createElement('div');
-      label.style.cssText = 'font-size:10px;color:#555;white-space:nowrap;';
+      label.style.cssText =
+        'font-size:10px;color:var(--di-btn-text);white-space:nowrap;';
       label.textContent = idx === 0 ? `★ ${opt.name}` : opt.name;
       row.appendChild(label);
 
       row.onmouseover = () => {
-        if (idx !== currentIdx) row.style.background = '#f6f8fa';
+        if (idx !== currentIdx) row.style.background = 'var(--di-bg-tertiary)';
       };
       row.onmouseout = () => {
         row.style.background = '';
@@ -290,7 +291,7 @@ export function createSettingsPopover(
       input.style.color = '#ffffff';
       input.style.textShadow = '0px 1px 2px rgba(0,0,0,0.8)';
       input.style.fontWeight = 'bold';
-      input.style.border = '1px solid #d0d7de';
+      input.style.border = '1px solid var(--di-border-input)';
       input.style.borderRadius = '4px';
 
       input.onchange = () => {
@@ -314,7 +315,7 @@ export function createSettingsPopover(
   // --- 3. Cache Info Section ---
   const cacheSection = document.createElement('div');
   cacheSection.style.marginTop = '15px';
-  cacheSection.style.borderTop = '1px solid #d0d7de';
+  cacheSection.style.borderTop = '1px solid var(--di-border-input)';
   cacheSection.style.paddingTop = '10px';
 
   // Header with Purge Button
@@ -324,7 +325,7 @@ export function createSettingsPopover(
   cacheHeader.style.alignItems = 'center';
   cacheHeader.style.marginBottom = '5px';
   cacheHeader.innerHTML = `
-          <div style="font-weight:bold; color:#24292f;">Cache Info</div>
+          <div style="font-weight:bold; color:var(--di-text-heading);">Cache Info</div>
           <button id="grass-purge-btn" title="Purge Cache" style="
             padding: 2px 6px;
             background-color: #ffebe9;
@@ -343,7 +344,7 @@ export function createSettingsPopover(
   cacheStatsContainer.id = 'grass-cache-container';
   cacheStatsContainer.innerHTML = `
           <div style="font-size:12px; margin-bottom:10px;">
-            <a href="#" id="grass-cache-trigger" style="color:#0969da; text-decoration:none;">[ Show Stats ]</a>
+            <a href="#" id="grass-cache-trigger" style="color:var(--di-link); text-decoration:none;">[ Show Stats ]</a>
           </div>
           <div id="grass-cache-content" style="display:none;"></div>
         `;
@@ -372,7 +373,7 @@ export function createSettingsPopover(
     const stats = await dataManager.getCacheStats();
     (contentDiv as HTMLElement).innerHTML = `
             <table style="width:100%; border-collapse:collapse; font-size:11px;">
-              <tr style="border-bottom:1px solid #eee;">
+              <tr style="border-bottom:1px solid var(--di-border-light);">
                 <th style="text-align:left; padding:2px;">Source</th>
                 <th style="text-align:right; padding:2px;">Items</th>
                 <th style="text-align:right; padding:2px;">Size</th>

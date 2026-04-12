@@ -1154,13 +1154,13 @@ export class TagAnalyticsApp {
     popover.id = 'tag-analytics-settings-popover';
     popover.style.position = 'absolute';
     popover.style.zIndex = '11001';
-    popover.style.background = '#fff';
-    popover.style.border = '1px solid #ccc';
+    popover.style.background = 'var(--di-bg)';
+    popover.style.border = '1px solid var(--di-border)';
     popover.style.borderRadius = '6px';
     popover.style.padding = '12px';
-    popover.style.boxShadow = '0 2px 10px rgba(0,0,0,0.1)';
+    popover.style.boxShadow = '0 2px 10px var(--di-shadow-light)';
     popover.style.fontSize = '11px';
-    popover.style.color = '#333';
+    popover.style.color = 'var(--di-text)';
     popover.style.width = '260px';
 
     // Position logic
@@ -1280,7 +1280,7 @@ export class TagAnalyticsApp {
 
       btn.innerHTML = `
         <div class="di-tag-analytics-icon">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007bff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--di-link)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="18" y1="20" x2="18" y2="10"></line>
                 <line x1="12" y1="20" x2="12" y2="4"></line>
                 <line x1="6" y1="20" x2="6" y2="14"></line>
@@ -1297,7 +1297,7 @@ export class TagAnalyticsApp {
       statusLabel.id = 'tag-analytics-status';
       statusLabel.style.marginLeft = '10px';
       statusLabel.style.fontSize = '14px';
-      statusLabel.style.color = '#888';
+      statusLabel.style.color = 'var(--di-text-muted)';
       statusLabel.style.verticalAlign = 'middle';
       statusLabel.style.fontFamily = 'sans-serif';
 
@@ -1740,7 +1740,7 @@ export class TagAnalyticsApp {
       3: '#a800aa', // Copyright - Purple/Magenta
       4: '#00ab2c', // Character - Green
     };
-    const titleColor = colorMap[tagData.category] || '#333';
+    const titleColor = colorMap[tagData.category] || 'var(--di-text)';
 
     content.innerHTML = `
       ${this.buildDashboardHeader(tagData, titleColor, categoryLabel)}
@@ -1851,11 +1851,11 @@ export class TagAnalyticsApp {
             rankTabs.forEach(t => {
               t.classList.remove('active');
               (t as HTMLElement).style.fontWeight = 'normal';
-              (t as HTMLElement).style.color = '#888';
+              (t as HTMLElement).style.color = 'var(--di-text-muted)';
             });
             tab.classList.add('active');
             (tab as HTMLElement).style.fontWeight = 'bold';
-            (tab as HTMLElement).style.color = '#007bff';
+            (tab as HTMLElement).style.color = 'var(--di-link)';
 
             this.chartRenderer.updateRankingTabs(
               role ?? 'uploader',
