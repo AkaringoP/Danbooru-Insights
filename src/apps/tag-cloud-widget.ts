@@ -1,5 +1,10 @@
 import * as d3 from 'd3';
 import type {D3Any, TagCloudItem} from '../types';
+import {
+  isTouchDevice,
+  createTwoStepTap,
+  type TwoStepTapController,
+} from '../ui/two-step-tap';
 
 /** Category configuration for a tag cloud tab. */
 export interface TagCloudCategory {
@@ -77,14 +82,12 @@ export function renderTagCloudWidget(
   const isMobile = window.innerWidth <= 768;
   const MIN_FONT = isMobile ? 10 : 11;
   const MAX_FONT = isMobile ? 26 : 38;
-  const isTouchDevice =
-    'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isTouch = isTouchDevice();
 
   // Closure state
   const cloudData: Record<number, TagCloudItem[]> = {};
   const layoutCache: Record<number, D3Any[]> = {};
   let currentTab = categories[0]?.id ?? 0;
-  let activeTag: string | null = null;
 
   // Seed initial data
   cloudData[currentTab] = initialData;
@@ -151,32 +154,24 @@ export function renderTagCloudWidget(
     .style('opacity', '0')
     .style('white-space', 'nowrap');
 
-  // Reset mobile highlight + tooltip
-  const resetCloudHighlight = () => {
-    activeTag = null;
-    cloudTooltip.style.opacity = '0';
-    d3.select(cloudContainer).selectAll('text').style('opacity', 1);
-  };
-
-  // Close mobile tooltip on tap outside the cloud SVG
-  if (isTouchDevice) {
-    document.addEventListener('click', e => {
-      const svgEl = cloudContainer.querySelector('svg');
-      if (
-        svgEl &&
-        !svgEl.contains(e.target as Node) &&
-        !cloudTooltip.contains(e.target as Node)
-      ) {
-        resetCloudHighlight();
-      }
-    });
-    window.addEventListener(
-      'scroll',
-      () => {
-        resetCloudHighlight();
+  // Two-step tap controller for mobile: first tap → highlight, second tap → navigate
+  let tapController: TwoStepTapController<string> | null = null;
+  if (isTouch) {
+    tapController = createTwoStepTap<string>({
+      insideElements: () => [cloudContainer.querySelector('svg'), cloudTooltip],
+      onFirstTap: () => {
+        // Visual updates handled inline in the click handler (needs d3 `this` context)
       },
-      {passive: true},
-    );
+      onSecondTap: () => {
+        // Navigation handled inline in the click handler
+      },
+      onReset: () => {
+        cloudTooltip.style.opacity = '0';
+        d3.select(cloudContainer).selectAll('text').style('opacity', 1);
+      },
+      resetOnScroll: true,
+      isEqual: (a, b) => a === b,
+    });
   }
 
   const getCurrentColor = (): string => {
@@ -223,9 +218,9 @@ export function renderTagCloudWidget(
       .style('pointer-events', 'all')
       .style('paint-order', 'stroke')
       .style('stroke', 'transparent')
-      .style('stroke-width', isTouchDevice ? '8px' : '0px')
+      .style('stroke-width', isTouch ? '8px' : '0px')
       .on('mouseover', function (event: MouseEvent, d: D3Any) {
-        if (isTouchDevice) return;
+        if (isTouch) return;
         g.selectAll('text').style('opacity', 0.25);
         d3.select(this)
           .style('opacity', 1)
@@ -239,30 +234,29 @@ export function renderTagCloudWidget(
           .style('opacity', '1');
       })
       .on('mousemove', (event: MouseEvent) => {
-        if (isTouchDevice) return;
+        if (isTouch) return;
         tooltip
           .style('left', `${event.pageX + 15}px`)
           .style('top', `${event.pageY + 15}px`);
       })
       .on('mouseout', function (_event: MouseEvent, d: D3Any) {
-        if (isTouchDevice) return;
+        if (isTouch) return;
         g.selectAll('text').style('opacity', 1);
         d3.select(this).style('font-size', `${d.size}px`);
         tooltip.style('opacity', '0');
       })
       .on('click', function (_event: MouseEvent, d: D3Any) {
-        if (isTouchDevice) {
-          if (activeTag === d.tagName) {
+        if (tapController) {
+          const isSecondTap = tapController.tap(d.tagName as string);
+          if (isSecondTap) {
             // 2nd tap on same tag → navigate
             const query = `user:${userName} ${d.tagName}`;
             window.open(`/posts?tags=${encodeURIComponent(query)}`, '_blank');
-            activeTag = null;
             cloudTooltip.style.opacity = '0';
             g.selectAll('text').style('opacity', 1);
             d3.select(this).style('font-size', `${d.size}px`);
           } else {
             // 1st tap → show tooltip + highlight
-            activeTag = d.tagName;
             g.selectAll('text').style('opacity', 0.2);
             d3.select(this)
               .style('opacity', 1)
@@ -418,7 +412,7 @@ export function renderTagCloudWidget(
     currentTab = catId;
 
     // Reset mobile tooltip state on tab switch
-    resetCloudHighlight();
+    if (tapController) tapController.reset();
 
     tabsDiv
       .querySelectorAll('.di-pie-tab')

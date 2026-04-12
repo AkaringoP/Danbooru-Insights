@@ -2,6 +2,7 @@ import type {ScatterDataPoint, DanbooruPost} from '../types';
 import type {ChartContext} from './user-analytics-charts';
 import type {LevelChangeEvent} from '../core/analytics-data-manager';
 import {attachPostHoverCard, hidePostHoverCard} from '../ui/post-hover-card';
+import {isTouchDevice} from '../ui/two-step-tap';
 
 // ============================================================
 // SCATTER PLOT WIDGET
@@ -1211,13 +1212,12 @@ function wireDragSelection(
   scatterData: ScatterDataPoint[],
   showPopover: ShowPopoverFn,
 ): void {
-  const isTouchDevice =
-    'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isTouch = isTouchDevice();
 
   // Crosshair cursor for canvas
-  dom.canvas.style.cursor = isTouchDevice ? 'default' : 'crosshair';
+  dom.canvas.style.cursor = isTouch ? 'default' : 'crosshair';
 
-  if (isTouchDevice) return;
+  if (isTouch) return;
 
   dom.canvas.addEventListener('mousedown', e => {
     if (e.button !== 0) return;

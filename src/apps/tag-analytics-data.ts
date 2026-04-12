@@ -17,7 +17,7 @@ import type {
 
 type MonthlyCountsData = HistoryEntry[] & {historyCutoff?: string};
 
-type InitialStats = {
+export type InitialStats = {
   firstPost?: DanbooruPost;
   hundredthPost?: DanbooruPost | null;
   totalCount: number;
@@ -30,7 +30,7 @@ type InitialStats = {
   first100Stats?: LocalStats;
 };
 
-type LocalStats = {
+export type LocalStats = {
   ratingCounts: Record<string, number>;
   uploaderRanking: UserRanking[];
   approverRanking: UserRanking[];

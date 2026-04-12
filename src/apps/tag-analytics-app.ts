@@ -5,6 +5,7 @@ import {isTopLevelTag, escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
+import type {InitialStats, LocalStats} from './tag-analytics-data';
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import type {
@@ -17,6 +18,36 @@ import type {
 
 /** fetchMonthlyCounts attaches historyCutoff to the returned array object. */
 type MonthlyHistoryData = HistoryEntry[] & {historyCutoff?: string};
+
+/** Result from _checkCache(). null = served from cache (caller should return). */
+interface CacheCheckResult {
+  runDelta: boolean;
+  baseData: TagAnalyticsMeta | null;
+}
+
+/** Quick stats fetched in Phase 1 of the large-tag path. */
+interface QuickStatsResult {
+  statusCounts: Record<string, number>;
+  latestPost: DanbooruPost | null;
+  newPostCount: number;
+  trendingPost: DanbooruPost | null;
+  trendingPostNSFW: DanbooruPost | null;
+  copyrightCounts: Record<string, number> | null;
+  characterCounts: Record<string, number> | null;
+  commentaryCounts: Record<string, number>;
+}
+
+/** Promise bundle built by _buildHeavyStatPromises(). */
+interface HeavyStatPromises {
+  historyPromise: Promise<HistoryEntry[]>;
+  milestonesPromise: Promise<MilestoneEntry[]>;
+  first100StatsPromise: Promise<LocalStats | undefined>;
+}
+
+/** Mutable container for backward-scan first-100 stats override. */
+interface First100Override {
+  value: LocalStats | null;
+}
 
 export class TagAnalyticsApp {
   db: Database;
@@ -141,8 +172,11 @@ export class TagAnalyticsApp {
   /**
    * Performs the full data fetch and renders the modal when complete.
    * Triggered by the user clicking the analytics button.
-   * Contains the original run() fetch logic.
-   * @return {Promise<void>}
+   *
+   * Orchestrator — delegates to:
+   *   _checkCache()  → cache-first path (volatile update + early render)
+   *   _fetchSmallTag() → small tag (≤1200 posts) local computation
+   *   _fetchLargeTag() → large tag multi-phase parallel fetch
    */
   async _fetchAndRender(): Promise<void> {
     const tagName = this.tagName;
@@ -151,101 +185,21 @@ export class TagAnalyticsApp {
     this.isFetching = true;
 
     try {
-      // [IMMEDIATE UI] Show button in loading state
       this.injectAnalyticsButton(null, 0, 'Waiting...');
-
-      // 0. Auto-Cleanup Old Records (>7 days)
-      // Fire-and-forget: background sweep, failure is non-fatal.
       void this.dataService.cleanupOldCache();
 
-      // [CACHE] Check Cache First
-      const cachedData = await this.dataService.loadFromCache();
-      let runDelta = false;
-      let baseData = null;
+      // 1. Cache check — may serve from cache and return null
+      const cacheResult = await this._checkCache();
+      if (!cacheResult) return;
+      const {runDelta, baseData} = cacheResult;
 
-      if (cachedData) {
-        // Determine if Partial Sync is needed
-        // Conditions:
-        // 1. Time-based (Retention period expired? No, retention is for DELETION. Sync is for Update.)
-        //    Actually, previous logic was: if record.updatedAt > 24h -> Partial Sync.
-        // 2. Count-based: New posts >= Threshold
-
-        const age = Date.now() - cachedData.updatedAt;
-        const isTimeExpired = age >= CONFIG.CACHE_EXPIRY_MS;
-
-        let postCountDiff = 0;
-        try {
-          const currentTagData = await this.dataService.fetchTagData(tagName);
-          if (currentTagData) {
-            const currentTotal = currentTagData.post_count;
-            const cachedTotal = cachedData.post_count || 0;
-            postCountDiff = Math.max(0, currentTotal - cachedTotal);
-          }
-        } catch (e) {
-          console.warn('Failed to check post count diff', e);
-        }
-
-        const threshold = this.dataService.getSyncThreshold();
-        const isCountThresholdMet = postCountDiff >= threshold;
-
-        if (isTimeExpired || isCountThresholdMet) {
-          console.log(
-            `[TagAnalyticsApp] Partial Sync Triggered. TimeExpired=${isTimeExpired} (${(age / 3600000).toFixed(1)}h), CountThreshold=${isCountThresholdMet} (${postCountDiff} >= ${threshold})`,
-          );
-          baseData = cachedData;
-          runDelta = true;
-        } else {
-          // Use Cache
-          cachedData._isCached = true;
-          // Refactored flow:
-          // 1. Load Cache.
-          // 2. Check Sync Criteria (Time or Count).
-          // 3. If Sync needed -> Set runDelta=true, baseData=cache. Proceed to fetch loop.
-          // 4. If Sync NOT needed -> Update Volatile -> Save -> Open Modal.
-
-          try {
-            // Fetch 24h count for UI
-            const newPostCount24h =
-              await this.dataService.fetchNewPostCount(tagName);
-
-            const [latestPost, trendingPost, trendingPostNSFW] =
-              await Promise.all([
-                this.dataService.fetchLatestPost(tagName),
-                this.dataService.fetchTrendingPost(tagName, false),
-                this.dataService.fetchTrendingPost(tagName, true),
-              ]);
-
-            cachedData.latestPost = latestPost ?? undefined;
-            cachedData.trendingPost = trendingPost ?? undefined;
-            cachedData.trendingPostNSFW = trendingPostNSFW ?? undefined;
-            cachedData.newPostCount = newPostCount24h;
-
-            await this.dataService.saveToCache(cachedData);
-          } catch (e) {
-            console.warn(
-              '[TagAnalyticsApp] Failed to update volatile data for cache:',
-              e,
-            );
-          }
-
-          this.injectAnalyticsButton(cachedData);
-          this._showUpdatedStatus(cachedData.updatedAt);
-          this.toggleModal(true);
-          this.renderDashboard(cachedData);
-          return;
-        }
-      }
-
-      // If we are here, either No Cache OR Partial Sync triggered.
-
-      // 1. Fetch Initial Stats (Top 100, Metadata, First/Last Date)
+      // 2. Fetch initial stats + validate category
       const t0 = performance.now();
-      this.rateLimiter.requestCounter = 0; // Reset counter
+      this.rateLimiter.requestCounter = 0;
       const initialStats = await this.dataService.fetchInitialStats(
         tagName,
         baseData,
       );
-
       if (!initialStats || initialStats.totalCount === 0) {
         console.warn(
           `[TagAnalyticsApp] Could not fetch initial stats for tag: "${tagName}"`,
@@ -253,775 +207,868 @@ export class TagAnalyticsApp {
         return;
       }
 
-      let {firstPost, hundredthPost, timeToHundred} = initialStats;
       const {totalCount, startDate, initialPosts} = initialStats;
-      // meta starts as DanbooruTag but is mutated into TagAnalyticsMeta below
       const meta = initialStats.meta as unknown as TagAnalyticsMeta;
-
-      // Variable to hold updated First 100 Stats if backward scan happens
-      let realFirst100Stats = null;
-
       meta.updatedAt = Date.now();
 
-      // Check Category & Inject Button
-      // 0=General, 1=Artist, 3=Copyright, 4=Character, 5=Meta
-      const validCategories = [1, 3, 4];
-      if (validCategories.includes(meta.category)) {
-        this.injectAnalyticsButton(meta);
-      } else {
-        // Remove button if it was injected but category is invalid
+      // Validate category (1=Artist, 3=Copyright, 4=Character)
+      if (![1, 3, 4].includes(meta.category)) {
         const btn = document.getElementById('tag-analytics-btn');
         if (btn) btn.remove();
         const status = document.getElementById('tag-analytics-status');
         if (status) status.remove();
-        return; // Stop if not valid category
-      }
-
-      // OPTIMIZATION: Small Tag Handling (<= 1200 posts)
-      const MAX_OPTIMIZED_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
-      if (
-        initialPosts &&
-        totalCount <= MAX_OPTIMIZED_POSTS &&
-        initialPosts.length >= totalCount
-      ) {
-        this.injectAnalyticsButton(null, 0, 'Calculating history... (0%)');
-
-        // 2. Calculate History Locally
-        const historyData =
-          this.dataService.calculateHistoryFromPosts(initialPosts);
-
-        // 3. Extract Milestones Locally
-        const targets = this.dataService.getMilestoneTargets(totalCount);
-        const milestones: MilestoneEntry[] = [];
-        targets.forEach(target => {
-          const index = target - 1;
-          if (initialPosts[index]) {
-            milestones.push({
-              milestone: target,
-              post: initialPosts[index],
-            } as MilestoneEntry);
-          }
-        });
-
-        // 4. Calculate Ratings & Rankings Locally
-        this.injectAnalyticsButton(null, 15, 'Calculating rankings... (15%)');
-        const localStatsAllTime =
-          this.dataService.calculateLocalStats(initialPosts);
-
-        const oneYearAgo = new Date();
-        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-        const yearPosts = initialPosts.filter(
-          (p: DanbooruPost) =>
-            p.created_at && new Date(p.created_at) >= oneYearAgo,
-        );
-        const localStatsYear = this.dataService.calculateLocalStats(yearPosts);
-
-        const localStatsFirst100 = this.dataService.calculateLocalStats(
-          initialPosts.slice(0, 100),
-        );
-
-        // 5. Parallel Data Fetching (Volatile & Status)
-        // Note: backfillUploaderNames is CRITICAL for showing names instead of IDs
-        this.injectAnalyticsButton(null, 25, 'Fetching stats... (25%)');
-        let smallTagFetched = 0;
-        const smallTagTotalFetches = 6;
-        const trackSmall = <T>(
-          label: string,
-          promise: Promise<T>,
-        ): Promise<T> =>
-          promise.then((res: T) => {
-            smallTagFetched++;
-            const pct =
-              25 + Math.round((smallTagFetched / smallTagTotalFetches) * 55);
-            this.injectAnalyticsButton(null, pct, `${label}... (${pct}%)`);
-            return res;
-          });
-
-        const [
-          statusCounts,
-          latestPost,
-          trendingPost,
-          trendingPostNSFW,
-          newPostCount,
-          commentaryCounts,
-        ] = await Promise.all([
-          trackSmall(
-            'Fetching status',
-            this.dataService.fetchStatusCounts(tagName),
-          ),
-          trackSmall(
-            'Fetching latest post',
-            this.dataService.fetchLatestPost(tagName),
-          ),
-          trackSmall(
-            'Finding trending post',
-            this.dataService.fetchTrendingPost(tagName, false),
-          ),
-          trackSmall(
-            'Finding trending NSFW',
-            this.dataService.fetchTrendingPost(tagName, true),
-          ),
-          trackSmall(
-            'Counting new posts',
-            this.dataService.fetchNewPostCount(tagName),
-          ),
-          trackSmall(
-            'Analyzing commentary',
-            this.dataService.fetchCommentaryCounts(tagName),
-          ),
-          this.dataService.backfillUploaderNames(initialPosts), // Ensure ALL posts have names backfilled
-        ]);
-
-        // Attach Data
-        meta.historyData = historyData;
-        meta.firstPost = firstPost ?? undefined;
-        meta.hundredthPost = hundredthPost ?? undefined;
-        meta.timeToHundred = timeToHundred ?? undefined;
-        meta.statusCounts = statusCounts;
-        meta.commentaryCounts = commentaryCounts;
-        meta.ratingCounts = localStatsAllTime.ratingCounts;
-        meta.precalculatedMilestones = milestones;
-        meta.latestPost = latestPost ?? undefined;
-        meta.newPostCount = newPostCount;
-
-        // Trending (Local Fallback if parallel fetch fails, though we use the API result here for consistency)
-        meta.trendingPost = trendingPost ?? undefined;
-        meta.trendingPostNSFW = trendingPostNSFW ?? undefined;
-
-        // 6. Map User IDs to Names in Local Rankings
-        const mapNames = (ranking: UserRanking[]) =>
-          ranking.map((r: UserRanking) => {
-            const u = this.dataService.userNames[r.id];
-            return {
-              ...r,
-              name: (u ? u.name : null) || `user_${r.id}`,
-              level: u ? u.level : null,
-            };
-          });
-
-        meta.rankings = {
-          uploader: {
-            allTime: mapNames(localStatsAllTime.uploaderRanking),
-            year: mapNames(localStatsYear.uploaderRanking),
-            first100: mapNames(localStatsFirst100.uploaderRanking),
-          },
-          approver: {
-            allTime: mapNames(localStatsAllTime.approverRanking),
-            year: mapNames(localStatsYear.approverRanking),
-            first100: mapNames(localStatsFirst100.approverRanking),
-          },
-        };
-
-        // 7. Calculate Related Tag Distribution Locally
-        // Artist (1) -> Copyright + Character, Copyright (3) -> Character only
-        this.injectAnalyticsButton(
-          null,
-          85,
-          'Analyzing tag distribution... (85%)',
-        );
-        if (meta.category === 1 || meta.category === 3) {
-          const copyrightMap: Record<string, number> = {};
-          const characterMap: Record<string, number> = {};
-
-          initialPosts.forEach((p: DanbooruPost) => {
-            if (p.tag_string_copyright) {
-              p.tag_string_copyright.split(' ').forEach((tag: string) => {
-                if (tag) copyrightMap[tag] = (copyrightMap[tag] || 0) + 1;
-              });
-            }
-            if (p.tag_string_character) {
-              p.tag_string_character.split(' ').forEach((tag: string) => {
-                if (tag) characterMap[tag] = (characterMap[tag] || 0) + 1;
-              });
-            }
-          });
-
-          if (meta.category === 1) {
-            // Copyright: filter sub-copyrights out via isTopLevelTag
-            const copyrightCandidates = Object.entries(copyrightMap)
-              .sort((a, b) => (b[1] as number) - (a[1] as number))
-              .slice(0, 20);
-
-            const filteredCopyright = (
-              await Promise.all(
-                copyrightCandidates.map(async ([tag, count]) =>
-                  (await isTopLevelTag(this.dataService.rateLimiter, tag))
-                    ? [tag, count]
-                    : null,
-                ),
-              )
-            ).filter(e => e !== null);
-
-            const copyrightMap2: Record<string, number> = {};
-            (filteredCopyright as [string, number][])
-              .slice(0, 10)
-              .forEach(([name, count]) => {
-                copyrightMap2[name] = count;
-              });
-            meta.copyrightCounts = copyrightMap2;
-          }
-
-          // Character: take top 10 directly (no implication filtering needed)
-          const characterMap2: Record<string, number> = {};
-          Object.entries(characterMap)
-            .sort((a, b) => (b[1] as number) - (a[1] as number))
-            .slice(0, 10)
-            .forEach(([name, count]) => {
-              characterMap2[name] = count;
-            });
-          meta.characterCounts = characterMap2;
-        }
-
-        this.injectAnalyticsButton(meta, 100, ''); // Clear status
-        this._showUpdatedStatus(meta.updatedAt);
-        await this.dataService.saveToCache(meta); // Save Small Tag Data
-
-        const finalTime = performance.now();
-        console.log(
-          `[TagAnalytics] [Small Tag Optimization] Finished analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount}) in ${(finalTime - t0).toFixed(2)}ms`,
-        );
-
-        this.toggleModal(true);
-        this.renderDashboard(meta);
         return;
       }
+      this.injectAnalyticsButton(meta);
 
-      // 2. Fetch Monthly Counts (History) & Milestones & Status/Rating Counts in parallel
+      // 3. Route to small-tag or large-tag path
+      const isSmallTag =
+        initialPosts &&
+        totalCount <= CONFIG.MAX_OPTIMIZED_POSTS &&
+        initialPosts.length >= totalCount;
 
-      const milestoneTargets = this.dataService.getMilestoneTargets(totalCount);
-
-      const now = new Date();
-      const oneYearAgoDate = new Date(now);
-      oneYearAgoDate.setFullYear(oneYearAgoDate.getFullYear() - 1);
-
-      const tomorrow = new Date(now);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-
-      const dateStr1Y = oneYearAgoDate.toISOString().split('T')[0];
-      const dateStrTomorrow = tomorrow.toISOString().split('T')[0];
-
-      // Helper for granular logging
-      const measure = <T>(label: string, promise: Promise<T>): Promise<T> => {
-        const start = performance.now();
-        return promise.then((res: T) => {
-          console.log(
-            `[TagAnalytics] [Task] Finished: ${label} (${(performance.now() - start).toFixed(2)}ms)`,
-          );
-          return res;
-        });
-      };
-
-      // [DEBUG] Start Total Timer
-
-      // [DEBUG] Start Total Timer
-      console.time('TagAnalytics:Total');
-      console.log(
-        `[TagAnalytics] Starting analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount})`,
-      );
-
-      // [OPTIMIZATION] Start Quick Stats FIRST (so they get queue priority over the heavy history fetch)
-      console.log(
-        '[TagAnalytics] [Group 1] Queueing Quick Stats (Status, Rating, Latest, Trending, Related)...',
-      );
-      const tGroup1Start = performance.now();
-      const statusPromise = measure(
-        'Status Counts',
-        this.dataService.fetchStatusCounts(tagName),
-      );
-      // const ratingPromise = measure('Rating Counts', this.dataService.fetchRatingCounts(tagName)); // Removed from Phase 1
-      const latestPromise = measure(
-        'Latest Post',
-        this.dataService.fetchLatestPost(tagName),
-      );
-      const newPostPromise = measure(
-        'New Post Count',
-        this.dataService.fetchNewPostCount(tagName),
-      );
-      const trendingPromise = measure(
-        'Trending Post (SFW)',
-        this.dataService.fetchTrendingPost(tagName, false),
-      );
-      const trendingNsfwPromise = measure(
-        'Trending Post (NSFW)',
-        this.dataService.fetchTrendingPost(tagName, true),
-      );
-
-      // [OPTIMIZATION] Related Tags (Copyright/Character) - Queue immediately
-      // Category 1=Artist, 3=Copyright, 4=Character
-      let copyrightPromise: Promise<Record<string, number> | null> =
-        Promise.resolve(null);
-      let characterPromise: Promise<Record<string, number> | null> =
-        Promise.resolve(null);
-
-      if (meta.category === 1) {
-        // Artist -> Fetch Copyright & Character
-        copyrightPromise = measure(
-          'Related Copyrights',
-          this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount),
-        );
-        characterPromise = measure(
-          'Related Characters',
-          this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
-        );
-      } else if (meta.category === 3) {
-        // Copyright -> Fetch Character
-        characterPromise = measure(
-          'Related Characters',
-          this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
-        );
-      }
-
-      // [OPTIMIZATION] Rankings Moved to Phase 2
-      // console.log('[TagAnalytics] [Group 2] Queueing Ranking & User Resolution...');
-      // const rankingPromise = ... (Moved)
-
-      // --- [PHASE 1] QUICK STATS EXECUTION ---
-      const quickTasks = [
-        {
-          id: 'status',
-          label: 'Analyzing post status...',
-          promise: statusPromise,
-        },
-        // { id: 'rating', label: 'Calculating rating distribution...', promise: ratingPromise }, // Removed
-        {
-          id: 'latest',
-          label: 'Fetching latest info...',
-          promise: latestPromise,
-        },
-        {
-          id: 'new_count',
-          label: 'Counting new posts...',
-          promise: newPostPromise,
-        },
-        {
-          id: 'trending',
-          label: 'Finding trending posts...',
-          promise: trendingPromise,
-        },
-        {
-          id: 'trending_nsfw',
-          label: 'Finding trending NSFW...',
-          promise: trendingNsfwPromise,
-        },
-        {
-          id: 'related_copy',
-          label: 'Analyzing related copyrights...',
-          promise: copyrightPromise,
-        },
-        {
-          id: 'related_char',
-          label: 'Analyzing related characters...',
-          promise: characterPromise,
-        },
-        {
-          id: 'commentary',
-          label: 'Analyzing commentary status...',
-          promise: measure(
-            'Commentary Status',
-            this.dataService.fetchCommentaryCounts(tagName),
-          ),
-        },
-      ];
-
-      // --- [PHASE 2] HEAVY STATS DEFINITION (But delayed execution logic handled by promise creation timing) ---
-      // Note: rankingPromise is an async IIFE that starts immediately when defined above.
-      // Ideally, we want to delay its START until Phase 1 is done?
-      // The user said: "Group 2 is just independent... Group 1 finishes then Group 3 (History) starts".
-      // Actually, rankingPromise creation above ALREADY started it.
-      // To truly optimize queue, we should move the creation of heavy promises HERE, after Phase 1 await.
-      // BUT, let's stick to the structure:
-      // We will identify them here.
-
-      // We need to move the CREATION of historyPromise and rankingPromise to AFTER Phase 1 if we want to strictly serialize it.
-      // However, the rate limiter handles concurrency.
-      // The user wants: Quick Stats DONE -> Then start History & Rankings.
-      // So I need to move the DEFINITION of rankingPromise and historyPromise blocks down?
-      // Yes.
-
-      // Let's execute Phase 1 first.
-
-      // Progress Tracker Initialization
-      let completedCount = 0;
-      // We don't know total tasks yet because Phase 2 isn't defined.
-      // Let's estimate or update dynamically.
-      // Phase 1 has 8 tasks. Phase 2 has 4 tasks (Rank, History, Milestone, Resolve). Total 12.
-      const totalEstimatedTasks = 12;
-
-      this.injectAnalyticsButton(null, 0, 'Initializing...');
-
-      // Helper to wrap promise with progress update
-      const trackProgress = <T>(task: {
-        id: string;
-        label: string;
-        promise: Promise<T>;
-      }): Promise<T> => {
-        return task.promise.then((res: T) => {
-          completedCount++;
-          const pct = Math.round((completedCount / totalEstimatedTasks) * 100);
-          this.injectAnalyticsButton(null, pct, `${task.label} ${pct}%`);
-          return res;
-        });
-      };
-
-      console.log('[TagAnalytics] [Phase 1] Executing Quick Stats...');
-      const quickResults = await Promise.all(
-        (
-          quickTasks as Array<{
-            id: string;
-            label: string;
-            promise: Promise<unknown>;
-          }>
-        ).map(trackProgress),
-      );
-
-      // Extract Phase 1 Results — cast from unknown[] since quickTasks is heterogeneous
-      const [
-        statusCounts,
-        // ratingCounts, // Removed
-        latestPost,
-        newPostCount,
-        trendingPost,
-        trendingPostNSFW,
-        copyrightCounts,
-        characterCounts,
-        commentaryCounts,
-      ] = quickResults as [
-        Record<string, number>,
-        DanbooruPost | null,
-        number,
-        DanbooruPost | null,
-        DanbooruPost | null,
-        Record<string, number> | null,
-        Record<string, number> | null,
-        Record<string, number>,
-      ];
-
-      console.log(
-        `[TagAnalytics] [Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
-      );
-
-      // --- [PHASE 2] HEAVY STATS EXECUTION ---
-      console.log('[TagAnalytics] [Phase 2] Starting Rankings & History...');
-
-      const rankingPromise = this.dataService.fetchRankingsAndResolve(
-        tagName,
-        dateStr1Y,
-        dateStrTomorrow,
-        measure,
-      );
-
-      let historyPromise, milestonesPromise, first100StatsPromise;
-
-      if (runDelta && baseData) {
-        // [DELTA] History
-        const lastHistory =
-          baseData.historyData[baseData.historyData.length - 1];
-        const lastDate = lastHistory
-          ? new Date(lastHistory.date)
-          : (startDate ?? new Date());
-        const deltaStart = new Date(lastDate);
-        deltaStart.setDate(deltaStart.getDate() - 7);
-
-        historyPromise = this.dataService
-          .fetchHistoryDelta(tagName, deltaStart, startDate ?? new Date())
-          .then(delta =>
-            this.dataService.mergeHistory(baseData.historyData, delta),
-          );
-
-        // [DELTA] Milestones
-        milestonesPromise = historyPromise.then(fullHistory => {
-          return this.dataService
-            .fetchMilestonesDelta(
-              tagName,
-              totalCount,
-              baseData.precalculatedMilestones,
-              fullHistory,
-            )
-            .then(delta =>
-              this.dataService.mergeMilestones(
-                baseData.precalculatedMilestones,
-                delta,
-              ),
-            );
-        });
-
-        // [DELTA] First 100 Ranking
-        if (
-          baseData.rankings &&
-          baseData.rankings.uploader &&
-          baseData.rankings.uploader.first100
-        ) {
-          initialStats.first100Stats = {
-            uploaderRanking: baseData.rankings.uploader.first100,
-            approverRanking: baseData.rankings.approver.first100,
-            ratingCounts: {},
-          };
-          first100StatsPromise = Promise.resolve(initialStats.first100Stats);
-        } else {
-          first100StatsPromise = Promise.resolve(
-            this.dataService.calculateLocalStats(initialPosts || []),
-          );
-        }
+      if (isSmallTag) {
+        await this._fetchSmallTag(meta, initialStats, initialPosts, t0);
       } else {
-        // [FULL]
-        historyPromise = measure(
-          'Full History (Monthly)',
-          this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date()),
+        await this._fetchLargeTag(
+          meta,
+          initialStats,
+          runDelta,
+          baseData,
+          startDate,
+          initialPosts,
         );
       }
+    } finally {
+      this.isFetching = false;
+    }
+  }
 
-      // Chain Backward Scan
-      historyPromise = historyPromise.then(
-        async (monthlyData: MonthlyHistoryData) => {
-          const forwardTotal =
-            monthlyData && monthlyData.length > 0
-              ? monthlyData[monthlyData.length - 1].cumulative
-              : 0;
-          let referenceTotal = meta.post_count;
+  /**
+   * Cache-first path: load cache, update volatile data if fresh, render.
+   * @returns null if served from cache (caller should return), otherwise delta info.
+   */
+  private async _checkCache(): Promise<CacheCheckResult | null> {
+    const tagName = this.tagName;
+    const cachedData = await this.dataService.loadFromCache();
 
-          if (monthlyData.historyCutoff) {
-            try {
-              const cutoffUrl = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:any+date:<${encodeURIComponent(monthlyData.historyCutoff)}`;
-              const r = await this.rateLimiter
-                .fetch(cutoffUrl)
-                .then((res: Response) => res.json());
-              referenceTotal =
-                (r && r.counts ? r.counts.posts : r ? r.posts : 0) || 0;
-            } catch (e) {
-              console.warn(
-                'Failed to fetch cutoff total, falling back to meta.post_count',
-                e,
-              );
-            }
-          }
+    if (!cachedData) {
+      return {runDelta: false, baseData: null};
+    }
 
-          console.log(
-            `[TagAnalyticsApp] Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
-          );
+    const age = Date.now() - cachedData.updatedAt;
+    const isTimeExpired = age >= CONFIG.CACHE_EXPIRY_MS;
 
-          if (forwardTotal < referenceTotal && !runDelta) {
-            // Disable Reverse Scan on Partial Sync
-            this.injectAnalyticsButton(
-              null,
-              undefined,
-              'Scanning history backwards...',
-            );
-            const backwardResult = await this.dataService.fetchHistoryBackwards(
-              tagName,
-              (startDate ?? new Date()).toISOString().slice(0, 10),
-              referenceTotal,
-              forwardTotal,
-            );
+    let postCountDiff = 0;
+    try {
+      const currentTagData = await this.dataService.fetchTagData(tagName);
+      if (currentTagData) {
+        postCountDiff = Math.max(
+          0,
+          currentTagData.post_count - (cachedData.post_count || 0),
+        );
+      }
+    } catch (e) {
+      console.warn('Failed to check post count diff', e);
+    }
 
-            if (backwardResult.length > 0) {
-              const backwardShift =
-                backwardResult[backwardResult.length - 1].cumulative;
-              const adjustedForward = monthlyData.map((h: HistoryEntry) => ({
-                ...h,
-                cumulative: h.cumulative + backwardShift,
-              }));
-              const fullHistory = [...backwardResult, ...adjustedForward];
+    const threshold = this.dataService.getSyncThreshold();
+    const isCountThresholdMet = postCountDiff >= threshold;
 
-              // If reverse scan happened, we likely found an earlier start date than metadata suggested.
-              // We should use that to find the TRUE first post efficiently without scanning from 2005.
-              const earliestDateFound = backwardResult[0].date;
-
-              const realInitialStats = await this.dataService.fetchInitialStats(
-                tagName,
-                null,
-                true,
-                earliestDateFound,
-              );
-              if (realInitialStats) {
-                firstPost = realInitialStats.firstPost;
-                hundredthPost = realInitialStats.hundredthPost;
-                timeToHundred = realInitialStats.timeToHundred;
-
-                if (
-                  realInitialStats.initialPosts &&
-                  realInitialStats.initialPosts.length > 0
-                ) {
-                  console.log(
-                    '[TagAnalytics] Recalculating First 100 Rankings for older posts...',
-                  );
-                  const newStats = this.dataService.calculateLocalStats(
-                    realInitialStats.initialPosts,
-                  );
-                  realFirst100Stats = await this.dataService
-                    .resolveFirst100Names(newStats)
-                    .catch(e => {
-                      console.warn(
-                        '[TagAnalytics] Failed to resolve names for older posts',
-                        e,
-                      );
-                      return newStats;
-                    });
-                }
-              }
-              return fullHistory;
-            }
-          }
-          return monthlyData;
-        },
+    if (isTimeExpired || isCountThresholdMet) {
+      console.log(
+        `[TagAnalyticsApp] Partial Sync Triggered. TimeExpired=${isTimeExpired} (${(age / 3600000).toFixed(1)}h), CountThreshold=${isCountThresholdMet} (${postCountDiff} >= ${threshold})`,
       );
+      return {runDelta: true, baseData: cachedData};
+    }
 
-      // Milestones Chain
-      if (!milestonesPromise) {
-        milestonesPromise = historyPromise.then(monthlyData => {
-          return this.dataService.fetchMilestones(
-            tagName,
-            monthlyData || [],
-            milestoneTargets,
-          );
+    // Cache is fresh — update volatile data and render
+    cachedData._isCached = true;
+    try {
+      const newPostCount24h = await this.dataService.fetchNewPostCount(tagName);
+      const [latestPost, trendingPost, trendingPostNSFW] = await Promise.all([
+        this.dataService.fetchLatestPost(tagName),
+        this.dataService.fetchTrendingPost(tagName, false),
+        this.dataService.fetchTrendingPost(tagName, true),
+      ]);
+      cachedData.latestPost = latestPost ?? undefined;
+      cachedData.trendingPost = trendingPost ?? undefined;
+      cachedData.trendingPostNSFW = trendingPostNSFW ?? undefined;
+      cachedData.newPostCount = newPostCount24h;
+      await this.dataService.saveToCache(cachedData);
+    } catch (e) {
+      console.warn(
+        '[TagAnalyticsApp] Failed to update volatile data for cache:',
+        e,
+      );
+    }
+
+    this.injectAnalyticsButton(cachedData);
+    this._showUpdatedStatus(cachedData.updatedAt);
+    this.toggleModal(true);
+    this.renderDashboard(cachedData);
+    return null; // Served from cache
+  }
+
+  /**
+   * Small tag path (≤1200 posts): compute history, rankings, and distribution locally.
+   */
+  private async _fetchSmallTag(
+    meta: TagAnalyticsMeta,
+    initialStats: InitialStats,
+    initialPosts: DanbooruPost[],
+    t0: number,
+  ): Promise<void> {
+    const tagName = this.tagName;
+    const {firstPost, hundredthPost, timeToHundred, totalCount} = initialStats;
+
+    this.injectAnalyticsButton(null, 0, 'Calculating history... (0%)');
+
+    // Calculate History Locally
+    const historyData =
+      this.dataService.calculateHistoryFromPosts(initialPosts);
+
+    // Extract Milestones Locally
+    const targets = this.dataService.getMilestoneTargets(totalCount);
+    const milestones: MilestoneEntry[] = [];
+    targets.forEach(target => {
+      const index = target - 1;
+      if (initialPosts[index]) {
+        milestones.push({
+          milestone: target,
+          post: initialPosts[index],
+        } as MilestoneEntry);
+      }
+    });
+
+    // Calculate Ratings & Rankings Locally
+    this.injectAnalyticsButton(null, 15, 'Calculating rankings... (15%)');
+    const localStatsAllTime =
+      this.dataService.calculateLocalStats(initialPosts);
+
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    const yearPosts = initialPosts.filter(
+      (p: DanbooruPost) => p.created_at && new Date(p.created_at) >= oneYearAgo,
+    );
+    const localStatsYear = this.dataService.calculateLocalStats(yearPosts);
+    const localStatsFirst100 = this.dataService.calculateLocalStats(
+      initialPosts.slice(0, 100),
+    );
+
+    // Parallel Data Fetching (Volatile & Status)
+    this.injectAnalyticsButton(null, 25, 'Fetching stats... (25%)');
+    let smallTagFetched = 0;
+    const smallTagTotalFetches = 6;
+    const trackSmall = <T>(label: string, promise: Promise<T>): Promise<T> =>
+      promise.then((res: T) => {
+        smallTagFetched++;
+        const pct =
+          25 + Math.round((smallTagFetched / smallTagTotalFetches) * 55);
+        this.injectAnalyticsButton(null, pct, `${label}... (${pct}%)`);
+        return res;
+      });
+
+    const [
+      statusCounts,
+      latestPost,
+      trendingPost,
+      trendingPostNSFW,
+      newPostCount,
+      commentaryCounts,
+    ] = await Promise.all([
+      trackSmall(
+        'Fetching status',
+        this.dataService.fetchStatusCounts(tagName),
+      ),
+      trackSmall(
+        'Fetching latest post',
+        this.dataService.fetchLatestPost(tagName),
+      ),
+      trackSmall(
+        'Finding trending post',
+        this.dataService.fetchTrendingPost(tagName, false),
+      ),
+      trackSmall(
+        'Finding trending NSFW',
+        this.dataService.fetchTrendingPost(tagName, true),
+      ),
+      trackSmall(
+        'Counting new posts',
+        this.dataService.fetchNewPostCount(tagName),
+      ),
+      trackSmall(
+        'Analyzing commentary',
+        this.dataService.fetchCommentaryCounts(tagName),
+      ),
+      this.dataService.backfillUploaderNames(initialPosts),
+    ]);
+
+    // Attach Data
+    meta.historyData = historyData;
+    meta.firstPost = firstPost ?? undefined;
+    meta.hundredthPost = hundredthPost ?? undefined;
+    meta.timeToHundred = timeToHundred ?? undefined;
+    meta.statusCounts = statusCounts;
+    meta.commentaryCounts = commentaryCounts;
+    meta.ratingCounts = localStatsAllTime.ratingCounts;
+    meta.precalculatedMilestones = milestones;
+    meta.latestPost = latestPost ?? undefined;
+    meta.newPostCount = newPostCount;
+    meta.trendingPost = trendingPost ?? undefined;
+    meta.trendingPostNSFW = trendingPostNSFW ?? undefined;
+
+    // Map User IDs to Names in Local Rankings
+    const mapNames = (ranking: UserRanking[]) =>
+      ranking.map((r: UserRanking) => {
+        const u = this.dataService.userNames[r.id];
+        return {
+          ...r,
+          name: (u ? u.name : null) || `user_${r.id}`,
+          level: u ? u.level : null,
+        };
+      });
+
+    meta.rankings = {
+      uploader: {
+        allTime: mapNames(localStatsAllTime.uploaderRanking),
+        year: mapNames(localStatsYear.uploaderRanking),
+        first100: mapNames(localStatsFirst100.uploaderRanking),
+      },
+      approver: {
+        allTime: mapNames(localStatsAllTime.approverRanking),
+        year: mapNames(localStatsYear.approverRanking),
+        first100: mapNames(localStatsFirst100.approverRanking),
+      },
+    };
+
+    // Calculate Related Tag Distribution Locally
+    this.injectAnalyticsButton(null, 85, 'Analyzing tag distribution... (85%)');
+    await this._calculateLocalTagDistribution(initialPosts, meta);
+
+    this.injectAnalyticsButton(meta, 100, '');
+    this._showUpdatedStatus(meta.updatedAt);
+    await this.dataService.saveToCache(meta);
+
+    console.log(
+      `[TagAnalytics] [Small Tag Optimization] Finished analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount}) in ${(performance.now() - t0).toFixed(2)}ms`,
+    );
+
+    this.toggleModal(true);
+    this.renderDashboard(meta);
+  }
+
+  /**
+   * Calculates copyright/character tag distribution locally from post data.
+   * Used by the small-tag path where all posts are already in memory.
+   */
+  private async _calculateLocalTagDistribution(
+    posts: DanbooruPost[],
+    meta: TagAnalyticsMeta,
+  ): Promise<void> {
+    if (meta.category !== 1 && meta.category !== 3) return;
+
+    const copyrightMap: Record<string, number> = {};
+    const characterMap: Record<string, number> = {};
+
+    posts.forEach((p: DanbooruPost) => {
+      if (p.tag_string_copyright) {
+        p.tag_string_copyright.split(' ').forEach((tag: string) => {
+          if (tag) copyrightMap[tag] = (copyrightMap[tag] || 0) + 1;
         });
       }
+      if (p.tag_string_character) {
+        p.tag_string_character.split(' ').forEach((tag: string) => {
+          if (tag) characterMap[tag] = (characterMap[tag] || 0) + 1;
+        });
+      }
+    });
 
-      if (!first100StatsPromise) {
+    if (meta.category === 1) {
+      const copyrightCandidates = Object.entries(copyrightMap)
+        .sort((a, b) => (b[1] as number) - (a[1] as number))
+        .slice(0, 20);
+
+      const filteredCopyright = (
+        await Promise.all(
+          copyrightCandidates.map(async ([tag, count]) =>
+            (await isTopLevelTag(this.dataService.rateLimiter, tag))
+              ? [tag, count]
+              : null,
+          ),
+        )
+      ).filter(e => e !== null);
+
+      const copyrightMap2: Record<string, number> = {};
+      (filteredCopyright as [string, number][])
+        .slice(0, 10)
+        .forEach(([name, count]) => {
+          copyrightMap2[name] = count;
+        });
+      meta.copyrightCounts = copyrightMap2;
+    }
+
+    const characterMap2: Record<string, number> = {};
+    Object.entries(characterMap)
+      .sort((a, b) => (b[1] as number) - (a[1] as number))
+      .slice(0, 10)
+      .forEach(([name, count]) => {
+        characterMap2[name] = count;
+      });
+    meta.characterCounts = characterMap2;
+  }
+
+  /**
+   * Large tag path: multi-phase parallel fetch (quick stats → heavy stats → deferred counts).
+   */
+  private async _fetchLargeTag(
+    meta: TagAnalyticsMeta,
+    initialStats: InitialStats,
+    runDelta: boolean,
+    baseData: TagAnalyticsMeta | null,
+    startDate: Date | undefined,
+    initialPosts: DanbooruPost[] | null | undefined,
+  ): Promise<void> {
+    const tagName = this.tagName;
+    const {totalCount} = initialStats;
+    let {firstPost, hundredthPost} = initialStats;
+
+    // Date range helpers
+    const now = new Date();
+    const oneYearAgoDate = new Date(now);
+    oneYearAgoDate.setFullYear(oneYearAgoDate.getFullYear() - 1);
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const dateStr1Y = oneYearAgoDate.toISOString().split('T')[0];
+    const dateStrTomorrow = tomorrow.toISOString().split('T')[0];
+
+    // Timing + logging helper
+    const measure = <T>(label: string, promise: Promise<T>): Promise<T> => {
+      const start = performance.now();
+      return promise.then((res: T) => {
+        console.log(
+          `[TagAnalytics] [Task] Finished: ${label} (${(performance.now() - start).toFixed(2)}ms)`,
+        );
+        return res;
+      });
+    };
+
+    // Progress tracker (Phase 1: 8 tasks, Phase 2: 4 tasks = 12 total)
+    let completedCount = 0;
+    const totalEstimatedTasks = 12;
+    this.injectAnalyticsButton(null, 0, 'Initializing...');
+
+    const trackProgress = <T>(task: {
+      id: string;
+      label: string;
+      promise: Promise<T>;
+    }): Promise<T> => {
+      return task.promise.then((res: T) => {
+        completedCount++;
+        const pct = Math.round((completedCount / totalEstimatedTasks) * 100);
+        this.injectAnalyticsButton(null, pct, `${task.label} ${pct}%`);
+        return res;
+      });
+    };
+
+    // --- Phase 1: Quick Stats ---
+    console.time('TagAnalytics:Total');
+    console.log(
+      `[TagAnalytics] Starting analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount})`,
+    );
+
+    const tGroup1Start = performance.now();
+    const quickStats = await this._runQuickStatsPhase(
+      tagName,
+      meta,
+      totalCount,
+      measure,
+      trackProgress,
+    );
+
+    console.log(
+      `[TagAnalytics] [Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
+    );
+
+    // --- Phase 2: Heavy Stats (Rankings, History, Milestones) ---
+    console.log('[TagAnalytics] [Phase 2] Starting Rankings & History...');
+
+    const rankingPromise = this.dataService.fetchRankingsAndResolve(
+      tagName,
+      dateStr1Y,
+      dateStrTomorrow,
+      measure,
+    );
+
+    const first100Override: First100Override = {value: null};
+    const heavyPromises = this._buildHeavyStatPromises(
+      meta,
+      initialStats,
+      runDelta,
+      baseData,
+      startDate,
+      initialPosts,
+      first100Override,
+      measure,
+    );
+
+    const heavyTasks = [
+      {
+        id: 'rankings_full',
+        label: 'Fetching & resolving rankings...',
+        promise: rankingPromise,
+      },
+      {
+        id: 'history',
+        label: 'Analyzing monthly trends...',
+        promise: heavyPromises.historyPromise,
+      },
+      {
+        id: 'milestones',
+        label: 'Checking milestones...',
+        promise: heavyPromises.milestonesPromise,
+      },
+      {
+        id: 'resolve_names',
+        label: 'Resolving usernames...',
+        promise: heavyPromises.first100StatsPromise.then(stats => {
+          if (runDelta && baseData?.rankings?.uploader?.first100) return stats;
+          if (!stats) return stats;
+          return this.dataService.resolveFirst100Names(stats);
+        }),
+      },
+    ];
+
+    console.log('[TagAnalytics] [Phase 2] Awaiting Heavy Stats...');
+    const heavyResults = await Promise.all(
+      (
+        heavyTasks as Array<{
+          id: string;
+          label: string;
+          promise: Promise<unknown>;
+        }>
+      ).map(trackProgress),
+    );
+
+    const [resolvedRankings, historyData, milestones, first100StatsRaw] =
+      heavyResults as [
+        {
+          uploaderAll: UserRanking[];
+          approverAll: UserRanking[];
+          uploaderYear: UserRanking[];
+          approverYear: UserRanking[];
+        },
+        HistoryEntry[],
+        MilestoneEntry[],
+        (
+          | {uploaderRanking: UserRanking[]; approverRanking: UserRanking[]}
+          | undefined
+        ),
+      ];
+
+    // Apply backward-scan first-100 override if available
+    let first100Stats = first100StatsRaw;
+    if (first100Override.value) {
+      console.log(
+        '[TagAnalytics] Applying updated First 100 Rankings from backward scan.',
+      );
+      first100Stats = first100Override.value;
+    }
+    // Update firstPost/hundredthPost if backward scan found earlier data
+    if (first100Override.value) {
+      firstPost = initialStats.firstPost;
+      hundredthPost = initialStats.hundredthPost;
+    }
+
+    console.log(
+      `[TagAnalytics] [Group 1] Finished Quick Stats (approx) in ${(performance.now() - tGroup1Start).toFixed(2)}ms (Note: includes wait for longest item)`,
+    );
+    console.log('[TagAnalytics] All parallel tasks completed.');
+
+    const {uploaderAll, approverAll, uploaderYear, approverYear} =
+      resolvedRankings;
+
+    // --- Phase 3: Deferred Counts (Rating) ---
+    const minDate =
+      historyData && historyData.length > 0
+        ? new Date(historyData[0].date)
+        : new Date('2005-01-01');
+    const minDateStr = minDate.toISOString().split('T')[0];
+
+    console.log(
+      `[TagAnalytics] [Phase 3] Starting Deferred Counts (Rating) with startDate: ${minDateStr}`,
+    );
+    const ratingCounts = await measure(
+      'Rating Counts',
+      this.dataService.fetchRatingCounts(tagName, minDateStr),
+    );
+
+    console.timeEnd('TagAnalytics:Total');
+
+    // --- Assembly ---
+    meta.statusCounts = quickStats.statusCounts;
+    meta.ratingCounts = ratingCounts;
+    meta.latestPost = quickStats.latestPost ?? undefined;
+    meta.newPostCount = quickStats.newPostCount;
+    meta.trendingPost = quickStats.trendingPost ?? undefined;
+    meta.trendingPostNSFW = quickStats.trendingPostNSFW ?? undefined;
+    meta.copyrightCounts = quickStats.copyrightCounts ?? undefined;
+    meta.characterCounts = quickStats.characterCounts ?? undefined;
+    meta.commentaryCounts = quickStats.commentaryCounts;
+    meta.historyData = historyData;
+    meta.precalculatedMilestones = milestones;
+    meta.firstPost = firstPost ?? undefined;
+    meta.hundredthPost = hundredthPost ?? undefined;
+
+    meta.rankings = {
+      uploader: {
+        allTime: uploaderAll,
+        year: uploaderYear,
+        first100: first100Stats?.uploaderRanking ?? [],
+      },
+      approver: {
+        allTime: approverAll,
+        year: approverYear,
+        first100: first100Stats?.approverRanking ?? [],
+      },
+    };
+
+    this.injectAnalyticsButton(meta, 100, '');
+    this._showUpdatedStatus(meta.updatedAt);
+    await this.dataService.saveToCache(meta);
+    this.toggleModal(true);
+    this.renderDashboard(meta);
+  }
+
+  /**
+   * Phase 1: Fire off quick stat fetches and await them all.
+   */
+  private async _runQuickStatsPhase(
+    tagName: string,
+    meta: TagAnalyticsMeta,
+    totalCount: number,
+    measure: <T>(label: string, promise: Promise<T>) => Promise<T>,
+    trackProgress: <T>(task: {
+      id: string;
+      label: string;
+      promise: Promise<T>;
+    }) => Promise<T>,
+  ): Promise<QuickStatsResult> {
+    console.log(
+      '[TagAnalytics] [Group 1] Queueing Quick Stats (Status, Rating, Latest, Trending, Related)...',
+    );
+
+    const statusPromise = measure(
+      'Status Counts',
+      this.dataService.fetchStatusCounts(tagName),
+    );
+    const latestPromise = measure(
+      'Latest Post',
+      this.dataService.fetchLatestPost(tagName),
+    );
+    const newPostPromise = measure(
+      'New Post Count',
+      this.dataService.fetchNewPostCount(tagName),
+    );
+    const trendingPromise = measure(
+      'Trending Post (SFW)',
+      this.dataService.fetchTrendingPost(tagName, false),
+    );
+    const trendingNsfwPromise = measure(
+      'Trending Post (NSFW)',
+      this.dataService.fetchTrendingPost(tagName, true),
+    );
+
+    // Related Tags (Category 1=Artist → Copyright+Character, 3=Copyright → Character)
+    let copyrightPromise: Promise<Record<string, number> | null> =
+      Promise.resolve(null);
+    let characterPromise: Promise<Record<string, number> | null> =
+      Promise.resolve(null);
+
+    if (meta.category === 1) {
+      copyrightPromise = measure(
+        'Related Copyrights',
+        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount),
+      );
+      characterPromise = measure(
+        'Related Characters',
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
+      );
+    } else if (meta.category === 3) {
+      characterPromise = measure(
+        'Related Characters',
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
+      );
+    }
+
+    const quickTasks = [
+      {id: 'status', label: 'Analyzing post status...', promise: statusPromise},
+      {id: 'latest', label: 'Fetching latest info...', promise: latestPromise},
+      {
+        id: 'new_count',
+        label: 'Counting new posts...',
+        promise: newPostPromise,
+      },
+      {
+        id: 'trending',
+        label: 'Finding trending posts...',
+        promise: trendingPromise,
+      },
+      {
+        id: 'trending_nsfw',
+        label: 'Finding trending NSFW...',
+        promise: trendingNsfwPromise,
+      },
+      {
+        id: 'related_copy',
+        label: 'Analyzing related copyrights...',
+        promise: copyrightPromise,
+      },
+      {
+        id: 'related_char',
+        label: 'Analyzing related characters...',
+        promise: characterPromise,
+      },
+      {
+        id: 'commentary',
+        label: 'Analyzing commentary status...',
+        promise: measure(
+          'Commentary Status',
+          this.dataService.fetchCommentaryCounts(tagName),
+        ),
+      },
+    ];
+
+    console.log('[TagAnalytics] [Phase 1] Executing Quick Stats...');
+    const quickResults = await Promise.all(
+      (
+        quickTasks as Array<{
+          id: string;
+          label: string;
+          promise: Promise<unknown>;
+        }>
+      ).map(trackProgress),
+    );
+
+    const [
+      statusCounts,
+      latestPost,
+      newPostCount,
+      trendingPost,
+      trendingPostNSFW,
+      copyrightCounts,
+      characterCounts,
+      commentaryCounts,
+    ] = quickResults as [
+      Record<string, number>,
+      DanbooruPost | null,
+      number,
+      DanbooruPost | null,
+      DanbooruPost | null,
+      Record<string, number> | null,
+      Record<string, number> | null,
+      Record<string, number>,
+    ];
+
+    return {
+      statusCounts,
+      latestPost,
+      newPostCount,
+      trendingPost,
+      trendingPostNSFW,
+      copyrightCounts,
+      characterCounts,
+      commentaryCounts,
+    };
+  }
+
+  /**
+   * Builds the heavy stat promise chain (history, milestones, first-100 stats).
+   * Handles delta-sync vs full-fetch branching and the backward history scan.
+   *
+   * The backward scan may update `initialStats.firstPost/hundredthPost/timeToHundred`
+   * and `first100Override.value` as side effects.
+   */
+  private _buildHeavyStatPromises(
+    meta: TagAnalyticsMeta,
+    initialStats: InitialStats,
+    runDelta: boolean,
+    baseData: TagAnalyticsMeta | null,
+    startDate: Date | undefined,
+    initialPosts: DanbooruPost[] | null | undefined,
+    first100Override: First100Override,
+    measure: <T>(label: string, promise: Promise<T>) => Promise<T>,
+  ): HeavyStatPromises {
+    const tagName = this.tagName;
+    const {totalCount} = initialStats;
+    const milestoneTargets = this.dataService.getMilestoneTargets(totalCount);
+
+    let historyPromise: Promise<HistoryEntry[]>;
+    let milestonesPromise: Promise<MilestoneEntry[]> | undefined;
+    let first100StatsPromise: Promise<LocalStats | undefined>;
+
+    if (runDelta && baseData) {
+      // --- Delta path ---
+      const lastHistory = baseData.historyData[baseData.historyData.length - 1];
+      const lastDate = lastHistory
+        ? new Date(lastHistory.date)
+        : (startDate ?? new Date());
+      const deltaStart = new Date(lastDate);
+      deltaStart.setDate(deltaStart.getDate() - 7);
+
+      historyPromise = this.dataService
+        .fetchHistoryDelta(tagName, deltaStart, startDate ?? new Date())
+        .then(delta =>
+          this.dataService.mergeHistory(baseData.historyData, delta),
+        );
+
+      milestonesPromise = historyPromise.then(fullHistory => {
+        return this.dataService
+          .fetchMilestonesDelta(
+            tagName,
+            totalCount,
+            baseData.precalculatedMilestones,
+            fullHistory,
+          )
+          .then(delta =>
+            this.dataService.mergeMilestones(
+              baseData.precalculatedMilestones,
+              delta,
+            ),
+          );
+      });
+
+      if (baseData.rankings?.uploader?.first100) {
+        initialStats.first100Stats = {
+          uploaderRanking: baseData.rankings.uploader.first100,
+          approverRanking: baseData.rankings.approver.first100,
+          ratingCounts: {},
+        };
+        first100StatsPromise = Promise.resolve(initialStats.first100Stats);
+      } else {
         first100StatsPromise = Promise.resolve(
           this.dataService.calculateLocalStats(initialPosts || []),
         );
       }
-
-      // Phase 2 Task List
-      const heavyTasks = [
-        {
-          id: 'rankings_full',
-          label: 'Fetching & resolving rankings...',
-          promise: rankingPromise,
-        },
-        {
-          id: 'history',
-          label: 'Analyzing monthly trends...',
-          promise: historyPromise,
-        },
-        {
-          id: 'milestones',
-          label: 'Checking milestones...',
-          promise: milestonesPromise,
-        },
-        {
-          id: 'resolve_names',
-          label: 'Resolving usernames...',
-          promise: first100StatsPromise.then(stats => {
-            if (
-              runDelta &&
-              baseData &&
-              baseData.rankings &&
-              baseData.rankings.uploader.first100
-            )
-              return stats;
-            if (!stats) return stats;
-            return this.dataService.resolveFirst100Names(stats);
-          }),
-        },
-      ];
-
-      console.log('[TagAnalytics] [Phase 2] Awaiting Heavy Stats...');
-      const heavyResults = await Promise.all(
-        (
-          heavyTasks as Array<{
-            id: string;
-            label: string;
-            promise: Promise<unknown>;
-          }>
-        ).map(trackProgress),
+    } else {
+      // --- Full path ---
+      historyPromise = measure(
+        'Full History (Monthly)',
+        this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date()),
       );
-
-      // Extract results — cast from unknown[] since heavyTasks is heterogeneous
-      const [resolvedRankings, historyData, milestones, first100StatsRaw] =
-        heavyResults as [
-          {
-            uploaderAll: UserRanking[];
-            approverAll: UserRanking[];
-            uploaderYear: UserRanking[];
-            approverYear: UserRanking[];
-          },
-          HistoryEntry[],
-          MilestoneEntry[],
-          (
-            | {uploaderRanking: UserRanking[]; approverRanking: UserRanking[]}
-            | undefined
-          ),
-        ];
-      let first100Stats = first100StatsRaw;
-
-      // [FIX] Override First 100 Stats if backward scan updated them
-      if (realFirst100Stats) {
-        console.log(
-          '[TagAnalytics] Applying updated First 100 Rankings from backward scan.',
-        );
-        first100Stats = realFirst100Stats;
-      }
-
-      console.log(
-        `[TagAnalytics] [Group 1] Finished Quick Stats (approx) in ${(performance.now() - tGroup1Start).toFixed(2)}ms (Note: includes wait for longest item)`,
+      first100StatsPromise = Promise.resolve(
+        this.dataService.calculateLocalStats(initialPosts || []),
       );
-      console.log('[TagAnalytics] All parallel tasks completed.');
-
-      // Extract resolved rankings
-      const {uploaderAll, approverAll, uploaderYear, approverYear} =
-        resolvedRankings;
-
-      // --- [PHASE 3] DEFERRED COUNTS (Optimized with Date Range) ---
-      const minDate =
-        historyData && historyData.length > 0
-          ? new Date(historyData[0].date)
-          : new Date('2005-01-01');
-      const minDateStr = minDate.toISOString().split('T')[0];
-
-      console.log(
-        `[TagAnalytics] [Phase 3] Starting Deferred Counts (Rating) with startDate: ${minDateStr}`,
-      );
-      const ratingCounts = await measure(
-        'Rating Counts',
-        this.dataService.fetchRatingCounts(tagName, minDateStr),
-      );
-
-      // --- 6. Backward History Scan --- (MOVED TO historyPromise CHAIN ABOVE)
-      // The historyData and milestones returned from Promise.all are already fully corrected.
-
-      console.timeEnd('TagAnalytics:Total');
-
-      // Conditional Fetch for Copyright/Character - REMOVED (Moved to Start)
-      // The variables 'copyrightCounts' and 'characterCounts' are already populated from Promise.all above.
-
-      // Attach fetched data to meta
-      meta.statusCounts = statusCounts;
-      meta.ratingCounts = ratingCounts;
-      meta.latestPost = latestPost ?? undefined;
-      meta.newPostCount = newPostCount;
-      meta.trendingPost = trendingPost ?? undefined;
-      meta.trendingPostNSFW = trendingPostNSFW ?? undefined;
-      meta.copyrightCounts = copyrightCounts ?? undefined;
-      meta.characterCounts = characterCounts ?? undefined;
-      meta.commentaryCounts = commentaryCounts;
-      meta.historyData = historyData;
-      meta.precalculatedMilestones = milestones;
-      meta.firstPost = firstPost ?? undefined; // Ensure this is passed
-      meta.hundredthPost = hundredthPost ?? undefined; // Ensure this is passed
-
-      meta.rankings = {
-        uploader: {
-          allTime: uploaderAll,
-          year: uploaderYear,
-          first100: first100Stats?.uploaderRanking ?? [],
-        },
-        approver: {
-          allTime: approverAll,
-          year: approverYear,
-          first100: first100Stats?.approverRanking ?? [],
-        },
-      };
-
-      // Update Button state (Activation) and open modal
-      this.injectAnalyticsButton(meta, 100, '');
-      this._showUpdatedStatus(meta.updatedAt);
-      await this.dataService.saveToCache(meta); // Save Full Tag Data
-      this.toggleModal(true);
-      this.renderDashboard(meta);
-    } finally {
-      this.isFetching = false;
     }
+
+    // Chain backward scan onto history
+    historyPromise = historyPromise.then(
+      async (monthlyData: MonthlyHistoryData) => {
+        const forwardTotal =
+          monthlyData && monthlyData.length > 0
+            ? monthlyData[monthlyData.length - 1].cumulative
+            : 0;
+        let referenceTotal = meta.post_count;
+
+        if (monthlyData.historyCutoff) {
+          try {
+            const cutoffUrl = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:any+date:<${encodeURIComponent(monthlyData.historyCutoff)}`;
+            const r = await this.rateLimiter
+              .fetch(cutoffUrl)
+              .then((res: Response) => res.json());
+            referenceTotal =
+              (r && r.counts ? r.counts.posts : r ? r.posts : 0) || 0;
+          } catch (e) {
+            console.warn(
+              'Failed to fetch cutoff total, falling back to meta.post_count',
+              e,
+            );
+          }
+        }
+
+        console.log(
+          `[TagAnalyticsApp] Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
+        );
+
+        if (forwardTotal < referenceTotal && !runDelta) {
+          this.injectAnalyticsButton(
+            null,
+            undefined,
+            'Scanning history backwards...',
+          );
+          const backwardResult = await this.dataService.fetchHistoryBackwards(
+            tagName,
+            (startDate ?? new Date()).toISOString().slice(0, 10),
+            referenceTotal,
+            forwardTotal,
+          );
+
+          if (backwardResult.length > 0) {
+            const backwardShift =
+              backwardResult[backwardResult.length - 1].cumulative;
+            const adjustedForward = monthlyData.map((h: HistoryEntry) => ({
+              ...h,
+              cumulative: h.cumulative + backwardShift,
+            }));
+            const fullHistory = [...backwardResult, ...adjustedForward];
+
+            const earliestDateFound = backwardResult[0].date;
+            const realInitialStats = await this.dataService.fetchInitialStats(
+              tagName,
+              null,
+              true,
+              earliestDateFound,
+            );
+            if (realInitialStats) {
+              // Mutate initialStats so the caller picks up updated values
+              initialStats.firstPost = realInitialStats.firstPost;
+              initialStats.hundredthPost = realInitialStats.hundredthPost;
+              initialStats.timeToHundred = realInitialStats.timeToHundred;
+
+              if (
+                realInitialStats.initialPosts &&
+                realInitialStats.initialPosts.length > 0
+              ) {
+                console.log(
+                  '[TagAnalytics] Recalculating First 100 Rankings for older posts...',
+                );
+                const newStats = this.dataService.calculateLocalStats(
+                  realInitialStats.initialPosts,
+                );
+                first100Override.value = await this.dataService
+                  .resolveFirst100Names(newStats)
+                  .catch(e => {
+                    console.warn(
+                      '[TagAnalytics] Failed to resolve names for older posts',
+                      e,
+                    );
+                    return newStats;
+                  });
+              }
+            }
+            return fullHistory;
+          }
+        }
+        return monthlyData;
+      },
+    );
+
+    // Milestones chain (full path only — delta path already set above)
+    if (!milestonesPromise) {
+      milestonesPromise = historyPromise.then(monthlyData => {
+        return this.dataService.fetchMilestones(
+          tagName,
+          monthlyData || [],
+          milestoneTargets,
+        );
+      });
+    }
+
+    return {
+      historyPromise,
+      milestonesPromise,
+      first100StatsPromise,
+    };
   }
 
   /**

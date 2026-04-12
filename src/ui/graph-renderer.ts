@@ -11,6 +11,7 @@ import type {Database} from '../core/database';
 import {SettingsManager} from '../core/settings';
 import {createSettingsPopover} from './settings-popover';
 import {showApprovalsDetail} from './approval-detail-popover';
+import {isTouchDevice, createTwoStepTap} from './two-step-tap';
 
 /**
  * GraphRenderer: Handles rendering of the contribution heatmap graph.
@@ -1427,17 +1428,13 @@ export class GraphRenderer {
             tooltip.style('left', left + 'px').style('top', top + 'px');
           };
 
-          const isTouchDevice =
-            'ontouchstart' in window || navigator.maxTouchPoints > 0;
+          const isTouch = isTouchDevice();
 
           // --- Auto-Scroll to Current Date (Refined) ---
           const scrollContainer = document.getElementById('cal-heatmap-scroll');
           if (scrollContainer && !skipScroll) {
             if (year === new Date().getFullYear()) {
               const currentMonth = new Date().getMonth() + 1; // 1-12
-              // Find the Nth .ch-domain (Month) element
-              // We look for 'svg.ch-domain' or just '.ch-domain' that are direct children if possible
-              // Based on user feedback, it seems to be 'svg.ch-domain'
               const targetMonth = scrollContainer.querySelector(
                 `.ch-domain:nth-of-type(${currentMonth})`,
               );
@@ -1445,11 +1442,9 @@ export class GraphRenderer {
               if (targetMonth) {
                 const containerRect = scrollContainer.getBoundingClientRect();
                 const elementRect = targetMonth.getBoundingClientRect();
-                // Scroll to the element with a slight padding
                 scrollContainer.scrollLeft +=
                   elementRect.left - containerRect.left - 10;
               } else {
-                // Fallback: Scroll to end
                 scrollContainer.scrollLeft = scrollContainer.scrollWidth;
               }
             } else {
@@ -1458,17 +1453,37 @@ export class GraphRenderer {
           }
 
           // 1. Tooltips for Graph Cells
-          if (isTouchDevice) {
+          if (isTouch) {
             tooltip.style('pointer-events', 'auto').style('cursor', 'pointer');
           }
 
-          let lastTouchedDatum: CalHeatmapDatum | null = null;
+          // Two-step tap controller for mobile CalHeatmap cells
+          const calTap = isTouch
+            ? createTwoStepTap<CalHeatmapDatum>({
+                insideElements: () => [
+                  tooltip.node() as Element | null,
+                  document.getElementById('cal-heatmap-scroll'),
+                ],
+                onFirstTap: () => {
+                  // Tooltip shown in touchstart handler (needs touch coordinates)
+                },
+                onSecondTap: datum => {
+                  const count = datum.v ?? 0;
+                  const dateStr = new Date(datum.t).toISOString().split('T')[0];
+                  const link = getUrl(dateStr, count);
+                  if (link && link !== '#') window.open(link, '_blank');
+                  tooltip.style('opacity', 0);
+                },
+                onReset: () => {
+                  tooltip.style('opacity', 0);
+                },
+              })
+            : null;
 
           d3.selectAll('#cal-heatmap-scroll rect')
             .attr('rx', 2)
-            .attr('ry', 2) // Apply border radius
+            .attr('ry', 2)
             .on('mouseover', function (event, d) {
-              // Fallback for datum if D3 binding is tricky
               const datum = d || d3.select(this).datum();
               if (!datum || !(datum as CalHeatmapDatum).t) return;
 
@@ -1484,7 +1499,7 @@ export class GraphRenderer {
             })
             .on('mouseout', () => tooltip.style('opacity', 0))
             .on('click', (event, d) => {
-              if (isTouchDevice) return; // Mobile: click disabled, navigation via tooltip
+              if (isTouch) return; // Mobile: click disabled, navigation via tooltip
               const datum = d;
               if (!datum || !(datum as CalHeatmapDatum).t) {
                 return;
@@ -1496,7 +1511,6 @@ export class GraphRenderer {
                 .split('T')[0];
 
               if (metric === 'approvals' && count > 0) {
-                // Fire-and-forget: click-triggered popover; errors logged inside.
                 void this.showApprovalsDetail(dateStr, userIdVal, event);
               } else {
                 const link = getUrl(dateStr, count);
@@ -1504,76 +1518,38 @@ export class GraphRenderer {
               }
             });
 
-          if (isTouchDevice) {
+          if (calTap) {
+            const handleCellTouch = (event: TouchEvent) => {
+              const touch = event.touches[0];
+              const target = document.elementFromPoint(
+                touch.clientX,
+                touch.clientY,
+              );
+              if (!target) return;
+              const datum = d3.select(target).datum() as CalHeatmapDatum;
+              if (!datum || !datum.t) return;
+
+              calTap.tap(datum);
+              const count = datum.v ?? 0;
+              const dateStr = new Date(datum.t).toISOString().split('T')[0];
+              updateTooltipTouch(
+                touch,
+                `<strong>${dateStr}</strong>, ${count} ${metric}`,
+              );
+            };
+
             d3.selectAll('#cal-heatmap-scroll rect')
               .on('touchstart', (event: TouchEvent) => {
-                const touch = event.touches[0];
-                const target = document.elementFromPoint(
-                  touch.clientX,
-                  touch.clientY,
-                );
-                if (!target) return;
-                const datum = d3.select(target).datum() as CalHeatmapDatum;
-                if (!datum || !datum.t) return;
-
-                lastTouchedDatum = datum;
-                const count = datum.v ?? 0;
-                const dateStr = new Date(datum.t).toISOString().split('T')[0];
-                updateTooltipTouch(
-                  touch,
-                  `<strong>${dateStr}</strong>, ${count} ${metric}`,
-                );
+                handleCellTouch(event);
               })
               .on('touchmove', (event: TouchEvent) => {
-                const touch = event.touches[0];
-                const target = document.elementFromPoint(
-                  touch.clientX,
-                  touch.clientY,
-                );
-                if (!target) return;
-                const datum = d3.select(target).datum() as CalHeatmapDatum;
-                if (!datum || !datum.t) return;
-
-                lastTouchedDatum = datum;
-                const count = datum.v ?? 0;
-                const dateStr = new Date(datum.t).toISOString().split('T')[0];
-                updateTooltipTouch(
-                  touch,
-                  `<strong>${dateStr}</strong>, ${count} ${metric}`,
-                );
+                handleCellTouch(event);
               });
 
-            // Tooltip tap → navigate
+            // Tooltip tap → navigate via controller
             tooltip.on('click', () => {
-              if (!lastTouchedDatum) return;
-              const count = lastTouchedDatum.v ?? 0;
-              const dateStr = new Date(lastTouchedDatum.t)
-                .toISOString()
-                .split('T')[0];
-              const link = getUrl(dateStr, count);
-              if (link && link !== '#') window.open(link, '_blank');
-              tooltip.style('opacity', 0);
-              lastTouchedDatum = null;
+              calTap.navigateActive();
             });
-
-            // Tap outside tooltip and cells → close it
-            document.addEventListener(
-              'touchstart',
-              (e: TouchEvent) => {
-                const tooltipEl = tooltip.node() as HTMLElement | null;
-                const target = e.target as Node;
-                const heatmapEl = document.getElementById('cal-heatmap-scroll');
-                if (
-                  tooltipEl &&
-                  !tooltipEl.contains(target) &&
-                  !heatmapEl?.contains(target)
-                ) {
-                  tooltip.style('opacity', 0);
-                  lastTouchedDatum = null;
-                }
-              },
-              {passive: true},
-            );
           }
 
           // 2. Tooltips for Legend Cells

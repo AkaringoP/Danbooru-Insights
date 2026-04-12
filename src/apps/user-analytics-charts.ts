@@ -13,6 +13,11 @@ import type {
   DanbooruPost,
   MilestoneEntry,
 } from '../types';
+import {
+  isTouchDevice,
+  createTwoStepTap,
+  type TwoStepTapController,
+} from '../ui/two-step-tap';
 import type {PieSlice} from './user-analytics-data';
 
 /** Context needed by chart widgets that access user data. */
@@ -205,9 +210,7 @@ export function renderPieWidget(
    * Renders the Pie Chart content based on the current tab.
    */
   const renderPieContent = () => {
-    const isTouchDevice =
-      'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    let lastTouchedPieDatum: d3.PieArcDatum<PieSlice> | null = null;
+    const isTouch = isTouchDevice();
     const contextUser = context.targetUser;
     const data = pieData[currentPieTab];
     const pieContent = container.querySelector('.pie-content') as HTMLElement;
@@ -466,8 +469,8 @@ export function renderPieWidget(
       .style('padding', '8px 12px')
       .style('border-radius', '6px')
       .style('font-size', '12px')
-      .style('pointer-events', isTouchDevice ? 'auto' : 'none')
-      .style('cursor', isTouchDevice ? 'pointer' : 'default')
+      .style('pointer-events', isTouch ? 'auto' : 'none')
+      .style('cursor', isTouch ? 'pointer' : 'default')
       .style('z-index', '2147483647')
       .style('opacity', '0');
 
@@ -560,11 +563,42 @@ export function renderPieWidget(
         tooltip.style('opacity', 0);
       })
       .on('click', (_event, d) => {
-        if (isTouchDevice) return;
+        if (isTouch) return;
         handlePieClick(d);
       });
 
-    if (isTouchDevice) {
+    if (isTouch) {
+      // Reset all slices to normal appearance
+      const resetSlices = () => {
+        svg
+          .selectAll('path.danbooru-grass-pie-path')
+          .transition()
+          .duration(200)
+          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
+          .style('opacity', '0.9')
+          .style('filter', 'none');
+      };
+
+      // Two-step tap: touch slice → show tooltip, tap tooltip → navigate
+      const pieTap: TwoStepTapController<d3.PieArcDatum<PieSlice>> =
+        createTwoStepTap({
+          insideElements: () => [
+            tooltip.node() as Element | null,
+            svg.node() as Element | null,
+          ],
+          onFirstTap: () => {
+            // Visual updates handled in handleSliceTouch (needs touch coordinates)
+          },
+          onSecondTap: datum => {
+            handlePieClick(datum);
+            tooltip.style('opacity', 0);
+          },
+          onReset: () => {
+            tooltip.style('opacity', 0);
+            resetSlices();
+          },
+        });
+
       // Helper to handle touch on a slice
       const handleSliceTouch = (event: TouchEvent) => {
         const touch = event.touches[0];
@@ -576,18 +610,10 @@ export function renderPieWidget(
         const datum = d3.select(target).datum() as d3.PieArcDatum<PieSlice>;
         if (!datum || !datum.data) return;
 
-        // Reset all slices to normal size first
-        svg
-          .selectAll('path.danbooru-grass-pie-path')
-          .transition()
-          .duration(200)
-          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
-          .style('opacity', '0.9')
-          .style('filter', 'none');
+        // Reset all slices, then enlarge touched slice
+        resetSlices();
+        pieTap.tap(datum);
 
-        lastTouchedPieDatum = datum;
-
-        // Enlarge slice (same as mouseover)
         d3.select(target)
           .transition()
           .duration(200)
@@ -668,42 +694,10 @@ export function renderPieWidget(
           handleSliceTouch(event as TouchEvent);
         });
 
-      // Tooltip tap → navigate
+      // Tooltip tap → navigate via controller
       tooltip.on('click', () => {
-        if (lastTouchedPieDatum) {
-          handlePieClick(lastTouchedPieDatum);
-          tooltip.style('opacity', 0);
-          lastTouchedPieDatum = null;
-        }
+        pieTap.navigateActive();
       });
-
-      // Outside tap → close tooltip + reset slices
-      document.addEventListener(
-        'touchstart',
-        e => {
-          const tooltipEl = tooltip.node() as HTMLElement;
-          const svgEl = svg.node() as Element;
-          if (
-            tooltipEl &&
-            !tooltipEl.contains(e.target as Node) &&
-            !svgEl?.contains(e.target as Node)
-          ) {
-            tooltip.style('opacity', 0);
-            svg
-              .selectAll('path.danbooru-grass-pie-path')
-              .transition()
-              .duration(200)
-              .attr(
-                'd',
-                (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '',
-              )
-              .style('opacity', '0.9')
-              .style('filter', 'none');
-            lastTouchedPieDatum = null;
-          }
-        },
-        {passive: true},
-      );
     }
 
     const legendDiv = pieContent.querySelector('.danbooru-grass-legend-scroll');
@@ -1485,8 +1479,7 @@ export async function renderHistoryChart(
     minDate = levelChanges[0].date;
   }
 
-  const isTouchDevice =
-    'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  const isTouch2 = isTouchDevice();
 
   const monthly = await new AnalyticsDataManager(db).getMonthlyStats(
     context.targetUser,
@@ -1664,7 +1657,7 @@ export async function renderHistoryChart(
           animClass = 'star-shiny';
         }
 
-        if (isTouchDevice) {
+        if (isTouch2) {
           svg += `
                <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}; pointer-events: none;">
                    ★

@@ -1,5 +1,6 @@
 import {getBestThumbnailUrl} from '../utils';
 import type {PostVariant} from '../types';
+import {isTouchDevice} from './two-step-tap';
 
 /**
  * Reusable hover preview card for post lists (scatter popover, approval popover).
@@ -29,9 +30,6 @@ interface PostDetails {
 }
 
 type PostFetcher = (postId: number) => Promise<PostDetails | null>;
-
-const isTouchDevice = (): boolean =>
-  'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
 const cardId = 'di-post-hover-card';
 const cache = new Map<number, PostDetails>();
