@@ -440,7 +440,16 @@ export class DataManager {
         // [Strategy B] Server-Side Range Filtering (Uploads, Notes, Approvals)
         // Use range query to strictly limit what the API returns.
         const rangeStart = fetchFromDate || startDate;
-        const fetchRange = `${rangeStart}...${endDate}`;
+        // Narrow endDate when we have cached data for the current year:
+        // fetching to Jan 1 of NEXT year forces the API to scan months of
+        // empty range. Limit to tomorrow to keep the scan short.
+        let effectiveEndDate = endDate;
+        if (lastEntry && year === new Date().getFullYear()) {
+          const tomorrow = new Date();
+          tomorrow.setDate(tomorrow.getDate() + 1);
+          effectiveEndDate = tomorrow.toISOString().slice(0, 10);
+        }
+        const fetchRange = `${rangeStart}...${effectiveEndDate}`;
 
         if (metric === 'uploads') {
           params['tags'] = `user:${normalizedName} date:${fetchRange}`;
@@ -455,7 +464,10 @@ export class DataManager {
 
         // 2. Fetch missing range
         if (!isYearCompleteCache) {
-          // Pass explicit stopDate
+          // Delta fetch: we have cached data and are only fetching a small
+          // range (a few days to a few weeks). Use batch size 1 to avoid
+          // wasted parallel requests that return empty pages.
+          const isDeltaFetch = !!lastEntry && !forceFullFetch;
           const items = await this.fetchAllPages(
             endpoint,
             params,
@@ -463,6 +475,7 @@ export class DataManager {
             dateKey,
             fetchDirection,
             onProgress,
+            isDeltaFetch,
           );
 
           // 3. Aggregate
@@ -673,13 +686,18 @@ export class DataManager {
     dateKey = 'created_at',
     direction = 'desc',
     onProgress: ((count: number) => void) | null = null,
+    isDelta = false,
   ): Promise<ApiItem[]> {
     let allItems: ApiItem[] = [];
     let page = 1;
 
-    // [Modified] Dynamic Batch Size for Approvals
+    // [Modified] Dynamic Batch Size
+    // - Approvals: always 1 (per-request cooldown)
+    // - Delta fetches (narrow date range, usually <1 page): 1 to avoid
+    //   firing 4 empty pages in parallel
+    // - Full initial fetches: 5 to parallelize a large backlog
     const isApprovals = endpoint.includes('/post_approvals.json');
-    const BATCH_SIZE = isApprovals ? 1 : 5;
+    const BATCH_SIZE = isApprovals || isDelta ? 1 : 5;
     const DELAY_BETWEEN_BATCHES = 150;
 
     while (true) {
