@@ -31,7 +31,7 @@ export class UserAnalyticsDataService {
     const dataManager = new AnalyticsDataManager(this.db);
     // context.targetUser is guaranteed non-null when called from UserAnalyticsApp
     // (main.ts validates via isValidProfile() before instantiation).
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+
     const user = context.targetUser!;
 
     // NSFW State for milestones
@@ -40,7 +40,7 @@ export class UserAnalyticsDataService {
 
     // 1. Fetch Summary Stats first (Local DB) to get starting date for optimizations
     const summaryStats = await dataManager.getSummaryStats(user);
-    const { firstUploadDate } = summaryStats;
+    const {firstUploadDate} = summaryStats;
 
     const [
       stats,
@@ -55,7 +55,7 @@ export class UserAnalyticsDataService {
       timelineMilestones,
       tagCloudGeneral,
       userStats,
-      needsBackfill
+      needsBackfill,
     ] = await Promise.all([
       dataManager.getSyncStats(user),
       dataManager.getTotalPostCount(user),
@@ -70,10 +70,34 @@ export class UserAnalyticsDataService {
         dataManager.getHairColorDistribution(user),
         dataManager.getGenderDistribution(user),
         dataManager.getCommentaryDistribution(user),
-        dataManager.getTranslationDistribution(user)
-      ]).then(([status, rating, char, copy, favCopy, breasts, hairL, hairC, gender, commentary, translation]) => ({
-        status, rating, character: char, copyright: copy, fav_copyright: favCopy, breasts, hair_length: hairL, hair_color: hairC, gender, commentary, translation
-      })),
+        dataManager.getTranslationDistribution(user),
+      ]).then(
+        ([
+          status,
+          rating,
+          char,
+          copy,
+          favCopy,
+          breasts,
+          hairL,
+          hairC,
+          gender,
+          commentary,
+          translation,
+        ]) => ({
+          status,
+          rating,
+          character: char,
+          copyright: copy,
+          fav_copyright: favCopy,
+          breasts,
+          hair_length: hairL,
+          hair_color: hairC,
+          gender,
+          commentary,
+          translation,
+        }),
+      ),
       dataManager.getTopPostsByType(user),
       dataManager.getRecentPopularPosts(user),
       dataManager.getRandomPosts(user),
@@ -83,7 +107,7 @@ export class UserAnalyticsDataService {
       dataManager.getTimelineMilestones(user),
       dataManager.getTagCloudData(user, 0), // General category pre-fetch
       dataManager.getUserStats(user),
-      dataManager.needsPostMetadataBackfill(user)
+      dataManager.needsPostMetadataBackfill(user),
     ]);
 
     return {
@@ -101,7 +125,7 @@ export class UserAnalyticsDataService {
       tagCloudGeneral,
       userStats,
       needsBackfill,
-      dataManager
+      dataManager,
     };
   }
 }

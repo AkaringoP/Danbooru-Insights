@@ -43,7 +43,8 @@ export function renderCreatedTagsWidget(
   container.style.padding = '15px';
 
   const header = document.createElement('div');
-  header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;';
+  header.style.cssText =
+    'display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;';
 
   const titleDiv = document.createElement('div');
   titleDiv.style.cssText = 'font-size:0.9em;color:#666;font-weight:bold;';
@@ -56,7 +57,10 @@ export function renderCreatedTagsWidget(
   // Segmented sort control: 3 buttons (Posts / Name / Date).
   // Clicking the active button toggles direction; clicking another resets
   // to that mode's default direction.
-  const sortButtons: Record<SortMode, HTMLButtonElement> = {} as Record<SortMode, HTMLButtonElement>;
+  const sortButtons: Record<SortMode, HTMLButtonElement> = {} as Record<
+    SortMode,
+    HTMLButtonElement
+  >;
 
   const updateSortButtons = () => {
     (Object.keys(sortButtons) as SortMode[]).forEach(mode => {
@@ -75,7 +79,8 @@ export function renderCreatedTagsWidget(
 
   (['posts', 'name', 'date'] as SortMode[]).forEach(mode => {
     const btn = document.createElement('button');
-    btn.style.cssText = 'font-size:11px;padding:2px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;color:#555;cursor:pointer;transition:all 0.15s;';
+    btn.style.cssText =
+      'font-size:11px;padding:2px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;color:#555;cursor:pointer;transition:all 0.15s;';
     btn.onclick = () => {
       if (sortMode === mode) {
         sortDir = sortDir === 'desc' ? 'asc' : 'desc';
@@ -155,7 +160,8 @@ export function renderCreatedTagsWidget(
 
     // Pagination
     if (totalPages > 1) {
-      html += '<div style="display:flex;justify-content:center;gap:4px;margin-top:10px;">';
+      html +=
+        '<div style="display:flex;justify-content:center;gap:4px;margin-top:10px;">';
       for (let i = 0; i < totalPages; i++) {
         const active = i === currentPage;
         html += `<button class="di-pie-tab${active ? ' active' : ''}" data-page="${i}" style="min-width:28px;">${i + 1}</button>`;
@@ -190,7 +196,8 @@ export function renderCreatedTagsWidget(
     try {
       items = await dataManager.getCreatedTags(targetUser, onProgress);
       if (items.length === 0) {
-        contentDiv.innerHTML = '<div style="color:#888;text-align:center;padding:20px;font-size:0.9em;">No created tags found in NNTBot reports.</div>';
+        contentDiv.innerHTML =
+          '<div style="color:#888;text-align:center;padding:20px;font-size:0.9em;">No created tags found in NNTBot reports.</div>';
         return;
       }
 
@@ -201,7 +208,8 @@ export function renderCreatedTagsWidget(
       renderTable();
     } catch (e) {
       console.debug('[DI] Created tags load failed', e);
-      contentDiv.innerHTML = '<div style="color:#c00;text-align:center;padding:20px;font-size:0.9em;">Failed to load created tags.</div>';
+      contentDiv.innerHTML =
+        '<div style="color:#c00;text-align:center;padding:20px;font-size:0.9em;">Failed to load created tags.</div>';
     }
   };
 
@@ -216,10 +224,16 @@ export function renderCreatedTagsWidget(
       <div style="font-size:0.8em;color:#888;margin-top:6px;">Searches NNTBot tag reports for tags created by this user</div>
     </div>`;
 
-  const loadBtn = contentDiv.querySelector('#di-load-created-tags') as HTMLElement;
+  const loadBtn = contentDiv.querySelector(
+    '#di-load-created-tags',
+  ) as HTMLElement;
   if (loadBtn) {
-    loadBtn.onmouseover = () => { loadBtn.style.background = '#eaeef2'; };
-    loadBtn.onmouseout = () => { loadBtn.style.background = '#f6f8fa'; };
+    loadBtn.onmouseover = () => {
+      loadBtn.style.background = '#eaeef2';
+    };
+    loadBtn.onmouseout = () => {
+      loadBtn.style.background = '#f6f8fa';
+    };
     loadBtn.onclick = () => loadData();
   }
 }

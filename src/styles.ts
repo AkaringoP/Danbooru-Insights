@@ -293,6 +293,417 @@ export const GLOBAL_CSS = `
         filter: drop-shadow(0 0 5px #ffd700);
     }
 
+    /* -- Tag Analytics Dashboard --
+       Static styles extracted from tag-analytics-app.ts template literals
+       (Task 3). Dynamic values like \`color: \${titleColor}\` remain inline at
+       the call site. Runtime DOM .style.X = ... overrides in the same file
+       (e.g. rank-tab and pie-tab toggling) are intentionally untouched. */
+
+    /* Settings popover (showSettingsPopover) */
+    #tag-analytics-settings-popover .di-section {
+        margin-bottom: 8px;
+        line-height: 1.4;
+    }
+    #tag-analytics-settings-popover .di-section.di-divider {
+        border-top: 1px solid #eee;
+        padding-top: 8px;
+    }
+    #tag-analytics-settings-popover .di-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    #tag-analytics-settings-popover .di-row.di-gapped {
+        margin-bottom: 10px;
+    }
+    #tag-analytics-settings-popover input[type="number"] {
+        width: 60px;
+        padding: 3px;
+        border: 1px solid #ddd;
+        border-radius: 3px;
+        background: #fff;
+        color: #333;
+    }
+    #tag-analytics-settings-popover .di-save-btn {
+        background: none;
+        border: 1px solid #28a745;
+        color: #28a745;
+        border-radius: 4px;
+        cursor: pointer;
+        padding: 2px 8px;
+        font-size: 11px;
+    }
+
+    /* Tag analytics entry button (icon-container in createButton) */
+    .di-tag-analytics-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        background: #eef;
+        border: 1px solid #ccf;
+        border-radius: 6px;
+        transition: all 0.2s;
+    }
+
+    /* Modal scaffold (createModal) */
+    #tag-analytics-modal > div {
+        background: white;
+        border-radius: 8px;
+        width: 80%;
+        max-width: 800px;
+        max-height: 90vh;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+    }
+    #tag-analytics-close {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: none;
+        border: none;
+        font-size: 1.5rem;
+        cursor: pointer;
+        z-index: 10;
+    }
+    #tag-analytics-content {
+        padding: 20px;
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    /* Dashboard header (buildDashboardHeader) */
+    .di-tag-header {
+        border-bottom: 1px solid #eee;
+        padding-bottom: 15px;
+        margin-bottom: 20px;
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+    }
+    .di-tag-header h2 {
+        margin: 0 0 5px 0;
+        /* color is set inline (driven by tag category) */
+    }
+    .di-tag-header-meta {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .di-category-badge {
+        background: #eee;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.8em;
+        color: #555;
+    }
+    .di-tag-header-date {
+        font-size: 0.9em;
+        color: #777;
+    }
+    .di-tag-header-date-updated {
+        border-left: 1px solid #ddd;
+        padding-left: 10px;
+        display: flex;
+        align-items: center;
+    }
+    #tag-settings-anchor {
+        display: inline-flex;
+        align-items: center;
+        margin-left: 5px;
+    }
+    .di-tag-header-nsfw {
+        display: flex;
+        align-items: center;
+        font-size: 0.9em;
+        color: #555;
+        cursor: pointer;
+        user-select: none;
+    }
+    .di-tag-header-nsfw input[type="checkbox"] {
+        margin-right: 6px;
+    }
+
+    /* NSFW monitor cards (latest / trending / trending NSFW).
+       The :not(.di-milestone-card) carve-out mirrors the existing mobile
+       override at line 773: milestone cards re-use .di-nsfw-monitor only for
+       the shared NSFW visibility logic (data-rating attribute), but their
+       layout is block-style with an absolute-positioned thumbnail, not the
+       column-thumb pattern of latest/trending cards. */
+    .di-nsfw-monitor:not(.di-milestone-card) {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 80px;
+        flex-shrink: 0;
+    }
+    #trending-post-nsfw {
+        display: none;
+    }
+    .di-nsfw-monitor-thumb {
+        padding: 2px;
+        border-radius: 4px;
+        background: #fff;
+        width: 100%;
+        aspect-ratio: 1/1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+    }
+    .di-nsfw-monitor-thumb-latest {
+        border: 1px solid #ddd;
+    }
+    .di-nsfw-monitor-thumb-trending {
+        border: 1px solid #ffd700;
+        box-shadow: 0 0 5px rgba(255, 215, 0, 0.3);
+    }
+    .di-nsfw-monitor-thumb-trending-nsfw {
+        border: 1px solid #ff4444;
+        box-shadow: 0 0 5px rgba(255, 0, 0, 0.3);
+    }
+    .di-nsfw-monitor-thumb a {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+    .di-nsfw-monitor-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+    .di-nsfw-monitor-label {
+        font-size: 0.8em;
+        font-weight: bold;
+        color: #555;
+        margin-top: 5px;
+    }
+    .di-nsfw-monitor-label-trending {
+        font-size: 0.75em;
+        font-weight: bold;
+        color: #e0a800;
+        margin-top: 5px;
+    }
+    .di-nsfw-monitor-label-trending-nsfw {
+        font-size: 0.75em;
+        font-weight: bold;
+        color: #cc0000;
+        margin-top: 5px;
+    }
+    .di-nsfw-monitor-sublabel {
+        font-size: 0.7em;
+        color: #999;
+    }
+
+    /* Main grid: summary card + distribution card (buildMainGrid) */
+    .di-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 20px;
+        margin-bottom: 30px;
+    }
+    .di-summary-card {
+        min-height: 180px;
+        position: relative;
+    }
+    .di-summary-card-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+    }
+    .di-summary-stat-label {
+        font-size: 0.9em;
+        color: #666;
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+    .di-summary-stat-value {
+        font-size: 2.2em;
+        font-weight: bold;
+        color: #007bff;
+        line-height: 1.1;
+    }
+    .di-summary-stat-trend {
+        font-size: 0.8em;
+        color: #28a745;
+        margin-top: 5px;
+    }
+    .di-summary-stat-trend-meta {
+        color: #999;
+        font-weight: normal;
+    }
+    .di-summary-card-thumbs {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+    .di-distribution-card {
+        background: #f9f9f9;
+        padding: 15px;
+        border-radius: 8px;
+        min-height: 180px;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+    }
+    .di-distribution-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+    .di-distribution-title {
+        font-size: 0.9em;
+        color: #666;
+        font-weight: bold;
+    }
+    .pie-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        justify-content: flex-end;
+    }
+    #status-pie-chart-wrapper {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        opacity: 0;
+        transition: opacity 0.5s;
+    }
+    #status-pie-chart {
+        width: 120px;
+        height: 120px;
+        flex-shrink: 0;
+    }
+    #status-pie-legend {
+        margin-left: 15px;
+        font-size: 0.75em;
+        flex: 1;
+        min-width: 140px;
+        max-height: 140px;
+        overflow-y: auto;
+        padding-right: 10px;
+    }
+    #status-pie-loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #888;
+        font-size: 0.8em;
+    }
+
+    /* User rankings section (buildRankingsSection) */
+    .di-rankings-section {
+        margin-bottom: 30px;
+    }
+    .di-rankings-header {
+        border-bottom: 2px solid #eee;
+        margin-bottom: 15px;
+        display: flex;
+        gap: 20px;
+        align-items: center;
+    }
+    .di-rankings-title {
+        margin: 0;
+        padding-bottom: 10px;
+        font-size: 1.2em;
+        color: #444;
+        border-bottom: 3px solid #007bff;
+        margin-bottom: -2px;
+    }
+    .di-rank-tabs {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 10px;
+    }
+    .rank-tab {
+        border: none;
+        background: none;
+        font-weight: normal;
+        color: #888;
+        cursor: pointer;
+        padding: 5px 10px;
+    }
+    .rank-tab.active {
+        font-weight: bold;
+        color: #007bff;
+    }
+    #ranking-container {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 15px;
+    }
+
+    /* Milestones + charts containers (buildBottomSections) */
+    #tag-analytics-milestones {
+        margin-bottom: 30px;
+        display: none;
+    }
+    #tag-analytics-milestones .di-milestones-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+    }
+    #tag-analytics-milestones h2 {
+        color: #444;
+        border-left: 4px solid #ffc107;
+        padding-left: 10px;
+        margin: 0;
+    }
+    #tag-milestones-toggle {
+        background: none;
+        border: none;
+        color: #007bff;
+        cursor: pointer;
+        font-size: 0.9em;
+        display: none;
+    }
+    #milestones-loading {
+        color: #888;
+        text-align: center;
+        padding: 20px;
+    }
+    .milestones-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+        gap: 15px;
+        max-height: 120px;
+        overflow: hidden;
+        transition: max-height 0.3s ease;
+    }
+    #tag-analytics-charts {
+        margin-bottom: 30px;
+    }
+    #tag-analytics-charts h2 {
+        color: #444;
+        border-left: 4px solid #007bff;
+        padding-left: 10px;
+        margin-bottom: 15px;
+    }
+    #chart-loading {
+        color: #888;
+        text-align: center;
+        padding: 20px;
+    }
+    #history-chart-monthly {
+        width: 100%;
+        height: 300px;
+        margin-bottom: 20px;
+    }
+    #history-chart-cumulative {
+        width: 100%;
+        height: 300px;
+    }
+
     /* ===== Mobile Responsive ===== */
 
     @media (max-width: 768px) {

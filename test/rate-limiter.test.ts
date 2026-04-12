@@ -102,7 +102,10 @@ describe('RateLimitedFetch', () => {
       const p = rl.fetch('/reports/something');
       await vi.runAllTimersAsync();
       await p;
-      expect(global.fetch).toHaveBeenCalledWith('/reports/something', undefined);
+      expect(global.fetch).toHaveBeenCalledWith(
+        '/reports/something',
+        undefined,
+      );
       expect(rl.getRequestCount()).toBe(1);
     });
 

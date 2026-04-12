@@ -34,7 +34,7 @@ describe('SettingsManager', () => {
     it('migrates remembered_modes to rememberedModes', () => {
       localStorageMock.setItem(
         'danbooru_contrib_settings',
-        JSON.stringify({remembered_modes: {'123': 'uploads'}})
+        JSON.stringify({remembered_modes: {'123': 'uploads'}}),
       );
       const sm = new SettingsManager();
       expect(sm.getLastMode('123')).toBe('uploads');
@@ -43,7 +43,7 @@ describe('SettingsManager', () => {
     it('does not overwrite existing rememberedModes', () => {
       localStorageMock.setItem(
         'danbooru_contrib_settings',
-        JSON.stringify({rememberedModes: {'456': 'approvals'}})
+        JSON.stringify({rememberedModes: {'456': 'approvals'}}),
       );
       const sm = new SettingsManager();
       expect(sm.getLastMode('456')).toBe('approvals');
@@ -52,7 +52,7 @@ describe('SettingsManager', () => {
     it('deep-merges saved thresholds with defaults', () => {
       localStorageMock.setItem(
         'danbooru_contrib_settings',
-        JSON.stringify({thresholds: {uploads: [2, 20, 50, 100]}})
+        JSON.stringify({thresholds: {uploads: [2, 20, 50, 100]}}),
       );
       const sm = new SettingsManager();
       expect(sm.getThresholds('uploads')).toEqual([2, 20, 50, 100]);
@@ -71,7 +71,7 @@ describe('SettingsManager', () => {
     it('returns saved theme when valid', () => {
       localStorageMock.setItem(
         'danbooru_contrib_settings',
-        JSON.stringify({theme: 'midnight'})
+        JSON.stringify({theme: 'midnight'}),
       );
       const sm = new SettingsManager();
       expect(sm.getTheme()).toBe('midnight');
@@ -80,7 +80,7 @@ describe('SettingsManager', () => {
     it('falls back to light for invalid theme key', () => {
       localStorageMock.setItem(
         'danbooru_contrib_settings',
-        JSON.stringify({theme: 'nonexistent_theme'})
+        JSON.stringify({theme: 'nonexistent_theme'}),
       );
       const sm = new SettingsManager();
       expect(sm.getTheme()).toBe('light');

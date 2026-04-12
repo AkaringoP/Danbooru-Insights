@@ -1,4 +1,6 @@
 import {getBestThumbnailUrl} from '../utils';
+import type {PostVariant} from '../types';
+import {isTouchDevice} from './two-step-tap';
 
 /**
  * Reusable hover preview card for post lists (scatter popover, approval popover).
@@ -24,13 +26,10 @@ interface PostDetails {
   tag_string_character?: string;
   preview_file_url?: string;
   file_url?: string;
-  variants?: any[];
+  variants?: PostVariant[];
 }
 
 type PostFetcher = (postId: number) => Promise<PostDetails | null>;
-
-const isTouchDevice = (): boolean =>
-  'ontouchstart' in window || navigator.maxTouchPoints > 0;
 
 const cardId = 'di-post-hover-card';
 const cache = new Map<number, PostDetails>();
@@ -68,9 +67,19 @@ const ensureCard = (): HTMLElement => {
 };
 
 const escapeHtml = (s: string): string =>
-  s.replace(/[&<>"']/g, ch => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  } as Record<string, string>)[ch]!);
+  s.replace(
+    /[&<>"']/g,
+    ch =>
+      (
+        ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;',
+        }) as Record<string, string>
+      )[ch]!,
+  );
 
 const firstTag = (tagString?: string): string => {
   if (!tagString) return '';
@@ -83,22 +92,26 @@ const buildCardHtml = (post: PostDetails): string => {
   const dateStr = post.created_at ? post.created_at.slice(0, 10) : '?';
   const score = post.score ?? '?';
   const favs = post.fav_count ?? '?';
-  const rating = post.rating ? (RATING_LABELS[post.rating] ?? post.rating) : '?';
+  const rating = post.rating
+    ? (RATING_LABELS[post.rating] ?? post.rating)
+    : '?';
   const artist = firstTag(post.tag_string_artist);
   const copyright = firstTag(post.tag_string_copyright);
   const character = firstTag(post.tag_string_character);
 
-  const tagLine = (icon: string, label: string, value: string) => value
-    ? `<div style="font-size:11px;color:#444;"><strong>${icon} ${label}:</strong> ${escapeHtml(value)}</div>`
-    : '';
+  const tagLine = (icon: string, label: string, value: string) =>
+    value
+      ? `<div style="font-size:11px;color:#444;"><strong>${icon} ${label}:</strong> ${escapeHtml(value)}</div>`
+      : '';
 
-  const tagsBlock = (artist || copyright || character)
-    ? `<div style="margin-top:6px;border-top:1px solid #eee;padding-top:6px;display:flex;flex-direction:column;gap:2px;">
+  const tagsBlock =
+    artist || copyright || character
+      ? `<div style="margin-top:6px;border-top:1px solid #eee;padding-top:6px;display:flex;flex-direction:column;gap:2px;">
         ${tagLine('🎨', 'Artist', artist)}
         ${tagLine('©', 'Copy', copyright)}
         ${tagLine('👤', 'Char', character)}
       </div>`
-    : '';
+      : '';
 
   return `
     <div style="display:flex;gap:10px;align-items:flex-start;">
@@ -122,7 +135,7 @@ const buildCardHtml = (post: PostDetails): string => {
 const positionCard = (
   card: HTMLElement,
   anchor: HTMLElement,
-  positionRef: HTMLElement
+  positionRef: HTMLElement,
 ) => {
   // The card is positioned next to the *positionRef* element (typically the
   // enclosing popover), not the small list item itself. This keeps the card
@@ -176,7 +189,7 @@ const positionCard = (
 
 const fetchWithCache = async (
   postId: number,
-  fetcher: PostFetcher
+  fetcher: PostFetcher,
 ): Promise<PostDetails | null> => {
   const cached = cache.get(postId);
   if (cached) return cached;
@@ -208,7 +221,7 @@ export function attachPostHoverCard(
   el: HTMLElement,
   postId: number,
   fetcher: PostFetcher,
-  positionRef?: HTMLElement
+  positionRef?: HTMLElement,
 ): void {
   if (isTouchDevice()) return;
 

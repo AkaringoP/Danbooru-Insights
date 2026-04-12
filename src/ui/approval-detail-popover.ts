@@ -1,4 +1,6 @@
 import {attachPostHoverCard, hidePostHoverCard} from './post-hover-card';
+import type {Database} from '../core/database';
+import type {DanbooruPost} from '../types';
 
 /**
  * Shows a paginated popover listing approval post IDs for a given date.
@@ -9,11 +11,11 @@ import {attachPostHoverCard, hidePostHoverCard} from './post-hover-card';
  * @param {Function} fetchPostDetails Optional fetcher used by the hover preview card.
  */
 export async function showApprovalsDetail(
-  db: any,
+  db: Database,
   dateStr: string,
   userId: string | number,
   event: MouseEvent,
-  fetchPostDetails?: (postId: number) => Promise<any | null>,
+  fetchPostDetails?: (postId: number) => Promise<DanbooruPost | null>,
 ): Promise<void> {
   const popoverId = 'danbooru-approvals-popover';
   let pop = document.getElementById(popoverId);
@@ -27,11 +29,16 @@ export async function showApprovalsDetail(
   const detail = await db.approvals_detail.get(detailId);
 
   if (!detail) {
-    console.warn(`[Danbooru Grass] No entry found in approvals_detail for ID: ${detailId}. Did you clear cache?`);
+    console.warn(
+      `[Danbooru Grass] No entry found in approvals_detail for ID: ${detailId}. Did you clear cache?`,
+    );
     return;
   }
   if (!detail.post_list || detail.post_list.length === 0) {
-    console.warn(`[Danbooru Grass] Entry found but post_list is empty:`, detail);
+    console.warn(
+      '[Danbooru Grass] Entry found but post_list is empty:',
+      detail,
+    );
     return;
   }
 
@@ -73,11 +80,11 @@ export async function showApprovalsDetail(
       pop!.style.display = 'none';
       hidePostHoverCard();
     };
-    (pop!.querySelector('#popover-prev') as HTMLElement).onclick = (e) => {
+    (pop!.querySelector('#popover-prev') as HTMLElement).onclick = e => {
       e.stopPropagation();
       renderPage(currentPage - 1);
     };
-    (pop!.querySelector('#popover-next') as HTMLElement).onclick = (e) => {
+    (pop!.querySelector('#popover-next') as HTMLElement).onclick = e => {
       e.stopPropagation();
       renderPage(currentPage + 1);
     };
@@ -85,7 +92,7 @@ export async function showApprovalsDetail(
     // Attach hover preview cards (debounced + cached, desktop only).
     // Position next to the popover so the card doesn't overlap the list.
     if (fetchPostDetails) {
-      pop!.querySelectorAll('.post-link').forEach((linkEl) => {
+      pop!.querySelectorAll('.post-link').forEach(linkEl => {
         const a = linkEl as HTMLAnchorElement;
         const match = a.getAttribute('href')?.match(/\/posts\/(\d+)/);
         if (!match) return;

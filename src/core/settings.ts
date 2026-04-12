@@ -1,5 +1,5 @@
 import {CONFIG} from '../config';
-import type {Metric, SettingsData} from '../types';
+import type {Metric, SettingsData, Theme} from '../types';
 
 /**
  * Manages user settings and persistence using localStorage.
@@ -61,14 +61,17 @@ export class SettingsManager {
         ...saved,
         thresholds: {
           ...this.defaults.thresholds,
-          ...(saved.thresholds || {})
+          ...(saved.thresholds || {}),
         },
         rememberedModes: {
-          ...(saved.rememberedModes || {})
+          ...(saved.rememberedModes || {}),
         },
       };
     } catch (e) {
-      console.error('[Danbooru Grass] Error loading settings, using defaults:', e);
+      console.error(
+        '[Danbooru Grass] Error loading settings, using defaults:',
+        e,
+      );
       return this.defaults;
     }
   }
@@ -80,7 +83,7 @@ export class SettingsManager {
   save(newSettings: Partial<SettingsData>): void {
     this.settings = {
       ...this.settings,
-      ...newSettings
+      ...newSettings,
     };
     localStorage.setItem(this.key, JSON.stringify(this.settings));
   }
@@ -100,8 +103,10 @@ export class SettingsManager {
    * @return {!Array<number>} An array of 4 threshold integers.
    */
   getThresholds(metric: Metric): number[] {
-    return this.settings.thresholds[metric] ||
-      this.defaults.thresholds[metric] || [1, 5, 10, 20];
+    return (
+      this.settings.thresholds[metric] ||
+      this.defaults.thresholds[metric] || [1, 5, 10, 20]
+    );
   }
 
   /**
@@ -112,10 +117,10 @@ export class SettingsManager {
   setThresholds(metric: Metric, values: number[]): void {
     const newThresholds = {
       ...this.settings.thresholds,
-      [metric]: values
+      [metric]: values,
     };
     this.save({
-      thresholds: newThresholds
+      thresholds: newThresholds,
     });
   }
 
@@ -129,8 +134,11 @@ export class SettingsManager {
       return Math.max(0, Math.min(3, byTheme[themeKey]));
     }
     // Legacy fallback: single grassIndex (pre-v8.2.0)
-    const legacy = (this.settings as any).grassIndex;
-    return typeof legacy === 'number' && legacy >= 0 && legacy <= 3 ? legacy : 0;
+    const legacy = (this.settings as SettingsData & {grassIndex?: number})
+      .grassIndex;
+    return typeof legacy === 'number' && legacy >= 0 && legacy <= 3
+      ? legacy
+      : 0;
   }
 
   /**
@@ -140,9 +148,12 @@ export class SettingsManager {
     const byTheme = {...(this.settings.grassIndexByTheme || {})};
     byTheme[themeKey] = Math.max(0, Math.min(3, index));
     // Remove legacy field if present
-    const patch: any = {grassIndexByTheme: byTheme};
-    if ((this.settings as any).grassIndex !== undefined) {
-      delete (this.settings as any).grassIndex;
+    const patch: Partial<SettingsData> = {grassIndexByTheme: byTheme};
+    const legacySettings = this.settings as SettingsData & {
+      grassIndex?: number;
+    };
+    if (legacySettings.grassIndex !== undefined) {
+      delete legacySettings.grassIndex;
     }
     this.save(patch);
   }
@@ -150,8 +161,14 @@ export class SettingsManager {
   /**
    * Resolves the active levels array for a theme, considering grassOptions and per-theme grassIndex.
    */
-  resolveLevels(themeKey: string, theme: any): string[] {
-    const defaultLevels = ['#ebedf0', '#9be9a8', '#40c463', '#30a14e', '#216e39'];
+  resolveLevels(themeKey: string, theme: Theme): string[] {
+    const defaultLevels = [
+      '#ebedf0',
+      '#9be9a8',
+      '#40c463',
+      '#30a14e',
+      '#216e39',
+    ];
     if (theme.grassOptions && theme.grassOptions.length > 0) {
       const idx = this.getGrassIndex(themeKey);
       const option = theme.grassOptions[idx] || theme.grassOptions[0];
@@ -174,7 +191,7 @@ export class SettingsManager {
       root.style.setProperty('--grass-text', theme.text);
       root.style.setProperty(
         '--grass-scrollbar-thumb',
-        theme.scrollbar || '#d0d7de'
+        theme.scrollbar || '#d0d7de',
       );
       // Apply Level Colors using grassOptions
       const levels = this.resolveLevels(themeKey, theme);
@@ -183,13 +200,15 @@ export class SettingsManager {
       });
     }
     this.save({
-      theme: themeKey
+      theme: themeKey,
     });
 
     // Notify listeners (e.g. graph-renderer) to re-render with new colors
-    window.dispatchEvent(new CustomEvent('DanbooruInsights:ThemeChanged', {
-      detail: {themeKey}
-    }));
+    window.dispatchEvent(
+      new CustomEvent('DanbooruInsights:ThemeChanged', {
+        detail: {themeKey},
+      }),
+    );
   }
 
   /**
@@ -209,10 +228,10 @@ export class SettingsManager {
   setLastMode(userId: string, mode: string): void {
     const newModes = {
       ...this.settings.rememberedModes,
-      [userId]: mode
+      [userId]: mode,
     };
     this.save({
-      rememberedModes: newModes
+      rememberedModes: newModes,
     });
   }
 
@@ -221,7 +240,9 @@ export class SettingsManager {
    * @return {number} Threshold (default 5).
    */
   getSyncThreshold(): number {
-    return typeof this.settings.syncThreshold === 'number' ? this.settings.syncThreshold : 5;
+    return typeof this.settings.syncThreshold === 'number'
+      ? this.settings.syncThreshold
+      : 5;
   }
 
   /**
@@ -230,7 +251,7 @@ export class SettingsManager {
    */
   setSyncThreshold(val: number): void {
     this.save({
-      syncThreshold: parseInt(val as any, 10)
+      syncThreshold: parseInt(String(val), 10),
     });
   }
 }

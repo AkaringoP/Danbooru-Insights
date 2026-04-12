@@ -25,7 +25,14 @@ describe('computeUntaggedTranslation — inclusion-exclusion formula', () => {
     // t=100, a=10, b=20, c=30, ab=0, ac=0
     // Expected: 100 − 10 − 20 − 30 + 0 + 0 = 40
     // (Naive subtraction happens to match in this degenerate case.)
-    const counts: UntaggedTranslationCounts = {t: 100, a: 10, b: 20, c: 30, ab: 0, ac: 0};
+    const counts: UntaggedTranslationCounts = {
+      t: 100,
+      a: 10,
+      b: 20,
+      c: 30,
+      ab: 0,
+      ac: 0,
+    };
     expect(computeUntaggedTranslation(counts)).toBe(40);
   });
 
@@ -35,19 +42,35 @@ describe('computeUntaggedTranslation — inclusion-exclusion formula', () => {
     // t=100, a=30, b=10, c=50, ab=0, ac=25
     // Inclusion-exclusion: 100 − 30 − 10 − 50 + 0 + 25 = 35 ✓
     // Naive (t−a−b−c): 100 − 30 − 10 − 50 = 10 ❌ (over-subtracts 25)
-    const counts: UntaggedTranslationCounts = {t: 100, a: 30, b: 10, c: 50, ab: 0, ac: 25};
+    const counts: UntaggedTranslationCounts = {
+      t: 100,
+      a: 30,
+      b: 10,
+      c: 50,
+      ab: 0,
+      ac: 25,
+    };
     expect(computeUntaggedTranslation(counts)).toBe(35);
 
     // Verify we're NOT using the incorrect naive formula
     const naiveResult = 100 - 30 - 10 - 50;
-    expect(computeUntaggedTranslation(counts)).not.toBe(Math.max(0, naiveResult));
+    expect(computeUntaggedTranslation(counts)).not.toBe(
+      Math.max(0, naiveResult),
+    );
   });
 
   it('TC-C: translation_request with text (no TR∩E overlap, realistic)', () => {
     // Typical case: some english-text posts also have translation_request.
     // t=100, a=10, b=20, c=30, ab=0, ac=5
     // Formula: 100 − 10 − 20 − 30 + 0 + 5 = 45
-    const counts: UntaggedTranslationCounts = {t: 100, a: 10, b: 20, c: 30, ab: 0, ac: 5};
+    const counts: UntaggedTranslationCounts = {
+      t: 100,
+      a: 10,
+      b: 20,
+      c: 30,
+      ab: 0,
+      ac: 5,
+    };
     expect(computeUntaggedTranslation(counts)).toBe(45);
   });
 
@@ -55,19 +78,40 @@ describe('computeUntaggedTranslation — inclusion-exclusion formula', () => {
     // Pathological: subtotals exceed t (shouldn't happen in practice but must not return negative)
     // t=50, a=30, b=10, c=30, ab=5, ac=15
     // Formula: 50 − 30 − 10 − 30 + 5 + 15 = 0 (exactly at boundary)
-    const counts: UntaggedTranslationCounts = {t: 50, a: 30, b: 10, c: 30, ab: 5, ac: 15};
+    const counts: UntaggedTranslationCounts = {
+      t: 50,
+      a: 30,
+      b: 10,
+      c: 30,
+      ab: 5,
+      ac: 15,
+    };
     expect(computeUntaggedTranslation(counts)).toBe(0);
   });
 
   it('TC-D2: truly negative result also clips to 0', () => {
     // Even more degenerate: negative result clips
     // t=10, a=20, b=5, c=5, ab=0, ac=0 → 10 − 20 − 5 − 5 + 0 + 0 = −20 → 0
-    const counts: UntaggedTranslationCounts = {t: 10, a: 20, b: 5, c: 5, ab: 0, ac: 0};
+    const counts: UntaggedTranslationCounts = {
+      t: 10,
+      a: 20,
+      b: 5,
+      c: 5,
+      ab: 0,
+      ac: 0,
+    };
     expect(computeUntaggedTranslation(counts)).toBe(0);
   });
 
   it('TC-E: all zero counts returns 0', () => {
-    const counts: UntaggedTranslationCounts = {t: 0, a: 0, b: 0, c: 0, ab: 0, ac: 0};
+    const counts: UntaggedTranslationCounts = {
+      t: 0,
+      a: 0,
+      b: 0,
+      c: 0,
+      ab: 0,
+      ac: 0,
+    };
     expect(computeUntaggedTranslation(counts)).toBe(0);
   });
 
@@ -78,7 +122,14 @@ describe('computeUntaggedTranslation — inclusion-exclusion formula', () => {
     // Actual: 100 − 30 − 10 − 50 + 0 + 25 = 35
     // Ground truth with ab=5: 100 − 30 − 10 − 50 + 5 + 25 = 40
     // Degradation: 5 undercounted — acceptable
-    const counts: UntaggedTranslationCounts = {t: 100, a: 30, b: 10, c: 50, ab: 0, ac: 25};
+    const counts: UntaggedTranslationCounts = {
+      t: 100,
+      a: 30,
+      b: 10,
+      c: 50,
+      ab: 0,
+      ac: 25,
+    };
     const result = computeUntaggedTranslation(counts);
     expect(result).toBe(35);
     expect(result).toBeGreaterThanOrEqual(0);
@@ -114,8 +165,12 @@ describe('buildUntaggedTranslationQueries — query string construction', () => 
     // Verify URL encoding: space→%20, colon→%3A, asterisk→%2A
     expect(encodeURIComponent(q.t)).toBe('user%3Atestuser%20*_text');
     expect(encodeURIComponent(q.a)).toBe('user%3Atestuser%20english_text');
-    expect(encodeURIComponent(q.b)).toBe('user%3Atestuser%20*_text%20translation_request');
-    expect(encodeURIComponent(q.c)).toBe('user%3Atestuser%20*_text%20translated');
+    expect(encodeURIComponent(q.b)).toBe(
+      'user%3Atestuser%20*_text%20translation_request',
+    );
+    expect(encodeURIComponent(q.c)).toBe(
+      'user%3Atestuser%20*_text%20translated',
+    );
   });
 
   it('each query uses at most 2 real (non-meta) tags — Member(Blue) compatibility', () => {
@@ -124,8 +179,7 @@ describe('buildUntaggedTranslationQueries — query string construction', () => 
     const countRealTags = (query: string): number => {
       return query
         .split(/\s+/)
-        .filter(tok => tok.length > 0 && !tok.startsWith('user:'))
-        .length;
+        .filter(tok => tok.length > 0 && !tok.startsWith('user:')).length;
     };
     expect(countRealTags(q.t)).toBeLessThanOrEqual(2);
     expect(countRealTags(q.a)).toBeLessThanOrEqual(2);

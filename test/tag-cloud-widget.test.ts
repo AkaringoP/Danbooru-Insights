@@ -60,7 +60,8 @@ describe('computeFontSizes', () => {
     const items: TagCloudItem[] = Array.from({length: 10}, (_, i) => ({
       name: `tag${i}`,
       tagName: `tag${i}`,
-      frequency: 0.5 - i * 0.04, count: Math.round((0.5 - i * 0.04) * 1000),
+      frequency: 0.5 - i * 0.04,
+      count: Math.round((0.5 - i * 0.04) * 1000),
     }));
     const result = computeFontSizes(items);
     // Top 20% of 10 items = ceil(2) = 2 bold items
@@ -83,11 +84,16 @@ describe('computeFontSizes', () => {
     // Based on real data: General tags cluster at 0.1~0.84
     const items: TagCloudItem[] = [
       {name: '1girl', tagName: '1girl', frequency: 0.8354, count: 36576},
-      {name: 'blush', tagName: 'blush', frequency: 0.7580, count: 33188},
-      {name: 'solo', tagName: 'solo', frequency: 0.6620, count: 28984},
-      {name: 'smile', tagName: 'smile', frequency: 0.3900, count: 17069},
+      {name: 'blush', tagName: 'blush', frequency: 0.758, count: 33188},
+      {name: 'solo', tagName: 'solo', frequency: 0.662, count: 28984},
+      {name: 'smile', tagName: 'smile', frequency: 0.39, count: 17069},
       {name: 'shirt', tagName: 'shirt', frequency: 0.3308, count: 14481},
-      {name: 'short hair', tagName: 'short_hair', frequency: 0.1370, count: 5996},
+      {
+        name: 'short hair',
+        tagName: 'short_hair',
+        frequency: 0.137,
+        count: 5996,
+      },
     ];
     const result = computeFontSizes(items);
 
@@ -112,11 +118,36 @@ describe('computeFontSizes', () => {
   it('handles realistic Character tag distribution (low values)', () => {
     // Based on real data: Character tags are all < 4%
     const items: TagCloudItem[] = [
-      {name: 'producer', tagName: 'producer_(idolmaster)', frequency: 0.0366, count: 1602},
-      {name: 'fujita kotone', tagName: 'fujita_kotone', frequency: 0.0336, count: 1470},
-      {name: 'sensei', tagName: 'sensei_(blue_archive)', frequency: 0.0292, count: 1278},
-      {name: 'yuuka', tagName: 'yuuka_(blue_archive)', frequency: 0.0226, count: 989},
-      {name: 'aru', tagName: 'aru_(blue_archive)', frequency: 0.0092, count: 403},
+      {
+        name: 'producer',
+        tagName: 'producer_(idolmaster)',
+        frequency: 0.0366,
+        count: 1602,
+      },
+      {
+        name: 'fujita kotone',
+        tagName: 'fujita_kotone',
+        frequency: 0.0336,
+        count: 1470,
+      },
+      {
+        name: 'sensei',
+        tagName: 'sensei_(blue_archive)',
+        frequency: 0.0292,
+        count: 1278,
+      },
+      {
+        name: 'yuuka',
+        tagName: 'yuuka_(blue_archive)',
+        frequency: 0.0226,
+        count: 989,
+      },
+      {
+        name: 'aru',
+        tagName: 'aru_(blue_archive)',
+        frequency: 0.0092,
+        count: 403,
+      },
     ];
     const result = computeFontSizes(items);
 
@@ -134,8 +165,18 @@ describe('computeFontSizes', () => {
   it('handles extreme Copyright distribution (one dominant tag)', () => {
     // Based on real data: idolmaster=0.586, rest < 0.25
     const items: TagCloudItem[] = [
-      {name: 'idolmaster', tagName: 'idolmaster', frequency: 0.586, count: 25647},
-      {name: 'blue archive', tagName: 'blue_archive', frequency: 0.247, count: 10810},
+      {
+        name: 'idolmaster',
+        tagName: 'idolmaster',
+        frequency: 0.586,
+        count: 25647,
+      },
+      {
+        name: 'blue archive',
+        tagName: 'blue_archive',
+        frequency: 0.247,
+        count: 10810,
+      },
       {name: 'original', tagName: 'original', frequency: 0.0548, count: 2398},
       {name: 'pokemon', tagName: 'pokemon', frequency: 0.002, count: 88},
     ];
@@ -149,4 +190,3 @@ describe('computeFontSizes', () => {
     expect(ba.size).toBeGreaterThan(29);
   });
 });
-
