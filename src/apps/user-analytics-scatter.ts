@@ -225,8 +225,12 @@ function buildScatterDom(): ScatterDom {
     btn.style.borderRadius = '20px';
     btn.style.padding = '2px 10px';
     const isActive = i === 0;
-    btn.style.background = isActive ? 'var(--di-link, #007bff)' : 'var(--di-bg, #fff)';
-    btn.style.color = isActive ? 'var(--di-btn-active-text, #fff)' : 'var(--di-text, #333)';
+    btn.style.background = isActive
+      ? 'var(--di-link, #007bff)'
+      : 'var(--di-bg, #fff)';
+    btn.style.color = isActive
+      ? 'var(--di-btn-active-text, #fff)'
+      : 'var(--di-text, #333)';
     btn.style.cursor = 'pointer';
     btn.style.transition = 'all 0.2s';
     btn.style.fontSize = '12px';
@@ -267,7 +271,8 @@ function buildScatterDom(): ScatterDom {
   downvoteContainer.style.display = 'flex';
   downvoteContainer.style.alignItems = 'center';
   downvoteContainer.style.gap = '5px';
-  downvoteContainer.style.background = 'var(--di-bg-glass, rgba(255, 255, 255, 0.9))';
+  downvoteContainer.style.background =
+    'var(--di-bg-glass, rgba(255, 255, 255, 0.9))';
   downvoteContainer.style.padding = '2px 8px';
   downvoteContainer.style.borderRadius = '12px';
   downvoteContainer.style.border = '1px solid var(--di-border-light, #eee)';
@@ -336,7 +341,8 @@ function buildScatterDom(): ScatterDom {
   filterContainer.style.top = '15px';
   filterContainer.style.right = '15px';
   filterContainer.style.zIndex = '5';
-  filterContainer.style.background = 'var(--di-bg-glass, rgba(255, 255, 255, 0.9))';
+  filterContainer.style.background =
+    'var(--di-bg-glass, rgba(255, 255, 255, 0.9))';
   filterContainer.style.padding = '2px 8px';
   filterContainer.style.borderRadius = '12px';
   filterContainer.style.border = '1px solid var(--di-border-light, #eee)';
@@ -943,7 +949,9 @@ function updateDownvoteButtonStyles(
     btn.style.cursor = isDisabled ? 'not-allowed' : 'pointer';
     btn.style.background = isActive ? '#d73a49' : 'var(--di-bg, #fff)';
     btn.style.color = isActive ? '#fff' : 'var(--di-text, #333)';
-    btn.style.borderColor = isActive ? '#d73a49' : 'var(--di-border-input, #ddd)';
+    btn.style.borderColor = isActive
+      ? '#d73a49'
+      : 'var(--di-border-input, #ddd)';
     btn.title = isDisabled
       ? state.backfillFailed
         ? 'Downvote data unavailable (fetch failed)'
@@ -974,7 +982,9 @@ function wireModeToggle(
       Array.from(dom.toggleContainer.children).forEach(b => {
         const bEl = b as HTMLElement;
         bEl.style.background =
-          bEl.dataset.mode === id ? 'var(--di-link, #007bff)' : 'var(--di-bg, #fff)';
+          bEl.dataset.mode === id
+            ? 'var(--di-link, #007bff)'
+            : 'var(--di-bg, #fff)';
         bEl.style.color =
           bEl.dataset.mode === id
             ? 'var(--di-btn-active-text, #fff)'

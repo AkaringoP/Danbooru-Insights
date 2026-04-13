@@ -274,7 +274,8 @@ export function createSettingsPopover(
       row.appendChild(label);
 
       row.onmouseover = () => {
-        if (idx !== currentIdx) row.style.background = 'var(--di-bg-tertiary, #f0f0f0)';
+        if (idx !== currentIdx)
+          row.style.background = 'var(--di-bg-tertiary, #f0f0f0)';
       };
       row.onmouseout = () => {
         row.style.background = '';

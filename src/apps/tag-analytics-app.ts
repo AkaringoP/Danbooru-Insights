@@ -1154,7 +1154,9 @@ export class TagAnalyticsApp {
     const popover = document.createElement('div');
     popover.id = 'tag-analytics-settings-popover';
     // Sync dashboard theme (popover is appended to body, outside dashboard containers)
-    const effective = resolveEffectiveDashboardTheme(this.settings.getDarkMode());
+    const effective = resolveEffectiveDashboardTheme(
+      this.settings.getDarkMode(),
+    );
     if (effective === 'dark') popover.setAttribute('data-di-theme', 'dark');
     popover.style.position = 'absolute';
     popover.style.zIndex = '11001';
@@ -1162,7 +1164,8 @@ export class TagAnalyticsApp {
     popover.style.border = '1px solid var(--di-border, #e1e4e8)';
     popover.style.borderRadius = '6px';
     popover.style.padding = '12px';
-    popover.style.boxShadow = '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
+    popover.style.boxShadow =
+      '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
     popover.style.fontSize = '11px';
     popover.style.color = 'var(--di-text, #333)';
     popover.style.width = '260px';
@@ -1404,7 +1407,9 @@ export class TagAnalyticsApp {
     modal.id = 'tag-analytics-modal';
 
     // Apply dashboard theme attribute
-    const effective = resolveEffectiveDashboardTheme(this.settings.getDarkMode());
+    const effective = resolveEffectiveDashboardTheme(
+      this.settings.getDarkMode(),
+    );
     if (effective === 'dark') modal.setAttribute('data-di-theme', 'dark');
     modal.style.display = 'none';
     modal.style.position = 'fixed';

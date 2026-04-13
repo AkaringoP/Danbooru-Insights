@@ -69,7 +69,9 @@ export function renderCreatedTagsWidget(
       const isActive = mode === sortMode;
       const arrow = isActive ? (sortDir === 'desc' ? ' ▼' : ' ▲') : '';
       btn.textContent = SORT_LABELS[mode] + arrow;
-      btn.style.background = isActive ? 'var(--di-link, #007bff)' : 'var(--di-bg, #fff)';
+      btn.style.background = isActive
+        ? 'var(--di-link, #007bff)'
+        : 'var(--di-bg, #fff)';
       btn.style.color = isActive ? '#fff' : 'var(--di-text-secondary, #666)';
       btn.style.borderColor = isActive
         ? 'var(--di-link, #007bff)'

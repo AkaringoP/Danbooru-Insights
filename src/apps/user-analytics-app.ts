@@ -82,7 +82,9 @@ export class UserAnalyticsApp {
     overlay.id = `${this.modalId}-overlay`;
 
     // Apply dashboard theme attribute
-    const effective = resolveEffectiveDashboardTheme(this.settings.getDarkMode());
+    const effective = resolveEffectiveDashboardTheme(
+      this.settings.getDarkMode(),
+    );
     if (effective === 'dark') overlay.setAttribute('data-di-theme', 'dark');
 
     // Window Container
@@ -430,7 +432,9 @@ export class UserAnalyticsApp {
     const popover = document.createElement('div');
     popover.id = 'danbooru-grass-sync-settings';
     // Sync dashboard theme (popover is appended to body, outside dashboard containers)
-    const effective = resolveEffectiveDashboardTheme(settingsManager.getDarkMode());
+    const effective = resolveEffectiveDashboardTheme(
+      settingsManager.getDarkMode(),
+    );
     if (effective === 'dark') popover.setAttribute('data-di-theme', 'dark');
     popover.style.position = 'absolute';
     popover.style.zIndex = '10001';
@@ -438,7 +442,8 @@ export class UserAnalyticsApp {
     popover.style.border = '1px solid var(--di-border, #e1e4e8)';
     popover.style.borderRadius = '6px';
     popover.style.padding = '12px';
-    popover.style.boxShadow = '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
+    popover.style.boxShadow =
+      '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
     popover.style.fontSize = '11px'; // Reduced by 20%
     popover.style.color = 'var(--di-text, #333)';
     popover.style.width = '220px';

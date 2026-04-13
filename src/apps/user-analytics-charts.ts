@@ -786,7 +786,8 @@ export function renderPieWidget(
       if (mode === currentPieTab) {
         el.style.background = 'var(--di-text-secondary, #666)';
         el.style.color = 'var(--di-bg, #fff)';
-        el.style.boxShadow = '0 1px 3px var(--di-shadow-light, rgba(0,0,0,0.1))';
+        el.style.boxShadow =
+          '0 1px 3px var(--di-shadow-light, rgba(0,0,0,0.1))';
       } else {
         el.style.background = 'var(--di-bg-tertiary, #f0f0f0)';
         el.style.color = 'var(--di-text-secondary, #666)';
@@ -1108,7 +1109,9 @@ export function renderTopPostsWidget(
       btn.style.background = isActive
         ? 'var(--di-link, #007bff)'
         : 'var(--di-bg-tertiary, #f0f0f0)';
-      btn.style.color = isActive ? 'var(--di-bg, #fff)' : 'var(--di-text, #333)';
+      btn.style.color = isActive
+        ? 'var(--di-bg, #fff)'
+        : 'var(--di-text, #333)';
     };
 
     const gsqeGroup = container.querySelector(
@@ -1296,7 +1299,8 @@ export async function renderMilestonesWidget(
 
     let msHtml =
       '<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--di-border-light, #eee); padding-bottom:8px; margin-bottom:10px;">';
-    msHtml += '<h3 style="color:var(--di-text, #333); margin:0;">🏆 Milestones</h3>';
+    msHtml +=
+      '<h3 style="color:var(--di-text, #333); margin:0;">🏆 Milestones</h3>';
     msHtml += '<div style="display:flex; align-items:center; gap:10px;">';
 
     msHtml += `<select id="analytics-milestone-step" style="border:1px solid var(--di-border-input, #ddd); border-radius:4px; padding:2px 4px; font-size:0.85em; color:var(--di-text-secondary, #666); background-color:var(--di-bg-tertiary, #f0f0f0);">
