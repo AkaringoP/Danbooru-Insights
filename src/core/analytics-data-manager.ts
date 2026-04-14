@@ -1233,24 +1233,29 @@ export class AnalyticsDataManager extends DataManager {
         }));
 
       // Fetch Counts Concurrent
-      await this.mapConcurrent(top10, 3, async obj => {
-        const tagName = obj.tagName;
-        if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
-        try {
-          const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
-          const countResp: DanbooruCountResponse = await this.rateLimiter
-            .fetch(countUrl)
-            .then(r => r.json());
-          const c =
-            countResp.counts && countResp.counts.posts
-              ? countResp.counts.posts
-              : 0;
-          obj.count = c || obj._item?.tag.post_count || 0;
-        } catch (_e: unknown) {
-          console.debug('[DI] Failed to fetch user tag count', _e);
-        }
-        delete obj._item;
-      });
+      await perfLogger.wrap(
+        'sync.refreshStats.mapConcurrent',
+        () =>
+          this.mapConcurrent(top10, 3, async obj => {
+            const tagName = obj.tagName;
+            if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
+            try {
+              const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
+              const countResp: DanbooruCountResponse = await this.rateLimiter
+                .fetch(countUrl)
+                .then(r => r.json());
+              const c =
+                countResp.counts && countResp.counts.posts
+                  ? countResp.counts.posts
+                  : 0;
+              obj.count = c || obj._item?.tag.post_count || 0;
+            } catch (_e: unknown) {
+              console.debug('[DI] Failed to fetch user tag count', _e);
+            }
+            delete obj._item;
+          }),
+        {distribution: 'character', n: top10.length, concurrency: 3},
+      );
 
       const sumFreq = top10.reduce(
         (acc: number, curr: {frequency: number}) => acc + curr.frequency,
@@ -1351,24 +1356,29 @@ export class AnalyticsDataManager extends DataManager {
           _item: item,
         }));
 
-      await this.mapConcurrent(top10, 3, async obj => {
-        const tagName = obj.tagName;
-        if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
-        try {
-          const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
-          const countResp: DanbooruCountResponse = await this.rateLimiter
-            .fetch(countUrl)
-            .then(r => r.json());
-          const c =
-            countResp.counts && countResp.counts.posts
-              ? countResp.counts.posts
-              : 0;
-          obj.count = c || obj._item?.tag.post_count || 0;
-        } catch (_e: unknown) {
-          console.debug('[DI] Failed to fetch user tag count', _e);
-        }
-        delete obj._item;
-      });
+      await perfLogger.wrap(
+        'sync.refreshStats.mapConcurrent',
+        () =>
+          this.mapConcurrent(top10, 3, async obj => {
+            const tagName = obj.tagName;
+            if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
+            try {
+              const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
+              const countResp: DanbooruCountResponse = await this.rateLimiter
+                .fetch(countUrl)
+                .then(r => r.json());
+              const c =
+                countResp.counts && countResp.counts.posts
+                  ? countResp.counts.posts
+                  : 0;
+              obj.count = c || obj._item?.tag.post_count || 0;
+            } catch (_e: unknown) {
+              console.debug('[DI] Failed to fetch user tag count', _e);
+            }
+            delete obj._item;
+          }),
+        {distribution: 'copyright', n: top10.length, concurrency: 3},
+      );
 
       const sumFreq = top10.reduce(
         (acc: number, curr: {frequency: number}) => acc + curr.frequency,
@@ -3570,54 +3580,78 @@ export class AnalyticsDataManager extends DataManager {
     isFullSync: boolean = false,
   ): Promise<void> {
     const forceRefresh = true;
+    const progressReporter = (msg: string) => {
+      const {current, total} = AnalyticsDataManager.syncProgress;
+      if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
+        AnalyticsDataManager.onProgressCallback(current, total, msg);
+      }
+    };
+    perfLogger.start('sync.refreshStats.total');
     try {
       await Promise.all([
-        this.getRatingDistribution(userInfo),
-        this.getCharacterDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
-        this.getCopyrightDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
-        this.getFavCopyrightDistribution(userInfo, forceRefresh),
-        this.getBreastsDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
-        this.getHairLengthDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
-        this.getHairColorDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
+        perfLogger.wrap('sync.refreshStats.rating', () =>
+          this.getRatingDistribution(userInfo),
+        ),
+        perfLogger.wrap('sync.refreshStats.character', () =>
+          this.getCharacterDistribution(
+            userInfo,
+            forceRefresh,
+            progressReporter,
+          ),
+        ),
+        perfLogger.wrap('sync.refreshStats.copyright', () =>
+          this.getCopyrightDistribution(
+            userInfo,
+            forceRefresh,
+            progressReporter,
+          ),
+        ),
+        perfLogger.wrap('sync.refreshStats.favCopyright', () =>
+          this.getFavCopyrightDistribution(userInfo, forceRefresh),
+        ),
+        perfLogger.wrap('sync.refreshStats.breasts', () =>
+          this.getBreastsDistribution(userInfo, forceRefresh, progressReporter),
+        ),
+        perfLogger.wrap('sync.refreshStats.hairLength', () =>
+          this.getHairLengthDistribution(
+            userInfo,
+            forceRefresh,
+            progressReporter,
+          ),
+        ),
+        perfLogger.wrap('sync.refreshStats.hairColor', () =>
+          this.getHairColorDistribution(
+            userInfo,
+            forceRefresh,
+            progressReporter,
+          ),
+        ),
         // Always refresh Random Posts
-        this.getRandomPosts(userInfo),
+        perfLogger.wrap('sync.refreshStats.randomPosts', () =>
+          this.getRandomPosts(userInfo),
+        ),
         // Refresh Popular Posts only on Full Sync
         ...(isFullSync
           ? [
-              this.getTopPostsByType(userInfo),
-              this.getRecentPopularPosts(userInfo),
-              this.getTopScorePost(userInfo, 'sfw'),
-              this.getTopScorePost(userInfo, 'nsfw'),
+              perfLogger.wrap('sync.refreshStats.topPostsByType', () =>
+                this.getTopPostsByType(userInfo),
+              ),
+              perfLogger.wrap('sync.refreshStats.recentPopular', () =>
+                this.getRecentPopularPosts(userInfo),
+              ),
+              perfLogger.wrap('sync.refreshStats.topScoreSfw', () =>
+                this.getTopScorePost(userInfo, 'sfw'),
+              ),
+              perfLogger.wrap('sync.refreshStats.topScoreNsfw', () =>
+                this.getTopScorePost(userInfo, 'nsfw'),
+              ),
             ]
           : []),
       ]);
     } catch (e: unknown) {
       console.warn('[Analytics] Failed to refresh stats', e);
+    } finally {
+      perfLogger.end('sync.refreshStats.total', {isFullSync});
     }
   }
 
