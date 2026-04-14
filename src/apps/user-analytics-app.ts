@@ -3,6 +3,7 @@ import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {SettingsManager} from '../core/settings';
+import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
 import {getLevelClass} from '../utils';
 import {
@@ -730,6 +731,12 @@ export class UserAnalyticsApp {
     if (this.isRendering) return;
     this.isRendering = true;
 
+    const perfMeta = {
+      path: 'unknown' as 'quickSync' | 'syncSkipped' | 'unknown',
+      preTotal: 0,
+    };
+    perfLogger.start('render.total');
+
     try {
       const content = document.getElementById(`${this.modalId}-content`);
       if (!content) return;
@@ -747,16 +754,23 @@ export class UserAnalyticsApp {
       // fetch all posts inline (no sync UI required) before rendering the dashboard.
       const MAX_QUICK_SYNC_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
       {
+        perfLogger.start('render.precheck');
         const [preStats, preTotal] = await Promise.all([
           this.dataManager.getSyncStats(this.context.targetUser),
           this.dataManager.getTotalPostCount(this.context.targetUser),
         ]);
+        perfLogger.end('render.precheck', {
+          total: preTotal,
+          synced: preStats.count,
+        });
+        perfMeta.preTotal = preTotal;
 
         if (
           preTotal > 0 &&
           preTotal <= MAX_QUICK_SYNC_POSTS &&
           preStats.count < preTotal
         ) {
+          perfMeta.path = 'quickSync';
           content.innerHTML = `
             <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
               <div class="di-spinner"></div>
@@ -795,12 +809,15 @@ export class UserAnalyticsApp {
                <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
             </div>
           `;
+        } else {
+          perfMeta.path = 'syncSkipped';
         }
       }
 
       // Pre-fetch all data!
-      const dashboardData = await this.dataService.fetchDashboardData(
-        this.context,
+      const dashboardData = await perfLogger.wrap(
+        'render.fetchData.total',
+        () => this.dataService.fetchDashboardData(this.context),
       );
       const {
         stats,
@@ -1442,6 +1459,7 @@ export class UserAnalyticsApp {
       topPostContainer.style.flexDirection = 'column';
 
       // --- PIE CHART WIDGET ---
+      perfLogger.start('render.widget.pie');
       const pieResult = renderPieWidget(
         pieContainer,
         distributions,
@@ -1450,8 +1468,10 @@ export class UserAnalyticsApp {
         this.context,
         firstUploadDate,
       );
+      perfLogger.end('render.widget.pie');
 
       // --- TOP POSTS WIDGET ---
+      perfLogger.start('render.widget.topPosts');
       const topPostsResult = renderTopPostsWidget(
         topPostContainer,
         topPosts,
@@ -1461,6 +1481,7 @@ export class UserAnalyticsApp {
         this.db,
         this.context,
       );
+      perfLogger.end('render.widget.topPosts');
 
       topStatsRow.appendChild(pieContainer);
       topStatsRow.appendChild(topPostContainer);
@@ -1472,11 +1493,15 @@ export class UserAnalyticsApp {
       milestonesDiv.style.marginTop = '20px';
       dashboardDiv.appendChild(milestonesDiv);
 
-      const milestonesResult = await renderMilestonesWidget(
-        milestonesDiv,
-        this.db,
-        this.context,
-        isNsfwEnabled,
+      const milestonesResult = await perfLogger.wrap(
+        'render.widget.milestones',
+        () =>
+          renderMilestonesWidget(
+            milestonesDiv,
+            this.db,
+            this.context,
+            isNsfwEnabled,
+          ),
       );
 
       // Wire up NSFW toggle to delegate to all widget callbacks
@@ -1487,28 +1512,33 @@ export class UserAnalyticsApp {
       };
 
       // 4. Monthly Activity Chart
-      await renderHistoryChart(
-        dashboardDiv,
-        this.db,
-        this.context,
-        milestones1k,
-        levelChanges,
+      await perfLogger.wrap('render.widget.history', () =>
+        renderHistoryChart(
+          dashboardDiv,
+          this.db,
+          this.context,
+          milestones1k,
+          levelChanges,
+        ),
       );
 
       // 5. Created Tags Widget (lazy load) — after Monthly Activity
       const createdTagsContainer = document.createElement('div');
       createdTagsContainer.style.marginTop = '35px';
       dashboardDiv.appendChild(createdTagsContainer);
+      perfLogger.start('render.widget.createdTags');
       renderCreatedTagsWidget(
         createdTagsContainer,
         this.dataManager,
         this.context.targetUser,
       );
+      perfLogger.end('render.widget.createdTags');
 
       // 6. Tag Cloud Widget
       const tagCloudContainer = document.createElement('div');
       tagCloudContainer.style.marginTop = '35px';
       dashboardDiv.appendChild(tagCloudContainer);
+      perfLogger.start('render.widget.tagCloud');
       renderTagCloudWidget(tagCloudContainer, {
         initialData: tagCloudGeneral,
         fetchData: (catId: number) =>
@@ -1521,9 +1551,11 @@ export class UserAnalyticsApp {
           {id: 4, label: 'Char', color: '#00ab2c'},
         ],
       });
+      perfLogger.end('render.widget.tagCloud');
 
       // 6. Scatter Plot Widget
       if (scatterData.length > 0) {
+        perfLogger.start('render.widget.scatter');
         renderScatterPlot(
           dashboardDiv,
           scatterData,
@@ -1546,6 +1578,7 @@ export class UserAnalyticsApp {
               dataManager.fetchPostDetails(postId),
           },
         );
+        perfLogger.end('render.widget.scatter', {points: scatterData.length});
       }
 
       // 7. Footer credit (always last)
@@ -1554,6 +1587,7 @@ export class UserAnalyticsApp {
       // Update header status (ensure it's green if ready)
       void this.updateHeaderStatus();
     } finally {
+      perfLogger.end('render.total', perfMeta);
       this.isRendering = false;
     }
   }

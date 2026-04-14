@@ -1,4 +1,5 @@
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
+import {perfLogger} from '../core/perf-logger';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
 
@@ -39,7 +40,10 @@ export class UserAnalyticsDataService {
     const isNsfwEnabled = localStorage.getItem(nsfwKey) === 'true';
 
     // 1. Fetch Summary Stats first (Local DB) to get starting date for optimizations
-    const summaryStats = await dataManager.getSummaryStats(user);
+    const summaryStats = await perfLogger.wrap(
+      'render.fetchData.summaryStats',
+      () => dataManager.getSummaryStats(user),
+    );
     const {firstUploadDate} = summaryStats;
 
     const [
@@ -57,57 +61,83 @@ export class UserAnalyticsDataService {
       userStats,
       needsBackfill,
     ] = await Promise.all([
-      dataManager.getSyncStats(user),
-      dataManager.getTotalPostCount(user),
-      Promise.all([
-        dataManager.getStatusDistribution(user, firstUploadDate),
-        dataManager.getRatingDistribution(user, firstUploadDate), // Optimized with date range
-        dataManager.getCharacterDistribution(user),
-        dataManager.getCopyrightDistribution(user),
-        dataManager.getFavCopyrightDistribution(user),
-        dataManager.getBreastsDistribution(user),
-        dataManager.getHairLengthDistribution(user),
-        dataManager.getHairColorDistribution(user),
-        dataManager.getGenderDistribution(user),
-        dataManager.getCommentaryDistribution(user),
-        dataManager.getTranslationDistribution(user),
-      ]).then(
-        ([
-          status,
-          rating,
-          char,
-          copy,
-          favCopy,
-          breasts,
-          hairL,
-          hairC,
-          gender,
-          commentary,
-          translation,
-        ]) => ({
-          status,
-          rating,
-          character: char,
-          copyright: copy,
-          fav_copyright: favCopy,
-          breasts,
-          hair_length: hairL,
-          hair_color: hairC,
-          gender,
-          commentary,
-          translation,
-        }),
+      perfLogger.wrap('render.fetchData.syncStats', () =>
+        dataManager.getSyncStats(user),
       ),
-      dataManager.getTopPostsByType(user),
-      dataManager.getRecentPopularPosts(user),
-      dataManager.getRandomPosts(user),
-      dataManager.getMilestones(user, isNsfwEnabled, 1000),
-      dataManager.getScatterData(user),
-      dataManager.getLevelChangeHistory(user),
-      dataManager.getTimelineMilestones(user),
-      dataManager.getTagCloudData(user, 0), // General category pre-fetch
-      dataManager.getUserStats(user),
-      dataManager.needsPostMetadataBackfill(user),
+      perfLogger.wrap('render.fetchData.totalCount', () =>
+        dataManager.getTotalPostCount(user),
+      ),
+      perfLogger.wrap('render.fetchData.distributions', () =>
+        Promise.all([
+          dataManager.getStatusDistribution(user, firstUploadDate),
+          dataManager.getRatingDistribution(user, firstUploadDate), // Optimized with date range
+          dataManager.getCharacterDistribution(user),
+          dataManager.getCopyrightDistribution(user),
+          dataManager.getFavCopyrightDistribution(user),
+          dataManager.getBreastsDistribution(user),
+          dataManager.getHairLengthDistribution(user),
+          dataManager.getHairColorDistribution(user),
+          dataManager.getGenderDistribution(user),
+          dataManager.getCommentaryDistribution(user),
+          dataManager.getTranslationDistribution(user),
+        ]).then(
+          ([
+            status,
+            rating,
+            char,
+            copy,
+            favCopy,
+            breasts,
+            hairL,
+            hairC,
+            gender,
+            commentary,
+            translation,
+          ]) => ({
+            status,
+            rating,
+            character: char,
+            copyright: copy,
+            fav_copyright: favCopy,
+            breasts,
+            hair_length: hairL,
+            hair_color: hairC,
+            gender,
+            commentary,
+            translation,
+          }),
+        ),
+      ),
+      perfLogger.wrap('render.fetchData.topPosts', () =>
+        dataManager.getTopPostsByType(user),
+      ),
+      perfLogger.wrap('render.fetchData.recentPopular', () =>
+        dataManager.getRecentPopularPosts(user),
+      ),
+      perfLogger.wrap('render.fetchData.randomPosts', () =>
+        dataManager.getRandomPosts(user),
+      ),
+      perfLogger.wrap('render.fetchData.milestones1k', () =>
+        dataManager.getMilestones(user, isNsfwEnabled, 1000),
+      ),
+      perfLogger.wrap('render.fetchData.scatterData', () =>
+        dataManager.getScatterData(user),
+      ),
+      perfLogger.wrap('render.fetchData.levelChanges', () =>
+        dataManager.getLevelChangeHistory(user),
+      ),
+      perfLogger.wrap('render.fetchData.timelineMilestones', () =>
+        dataManager.getTimelineMilestones(user),
+      ),
+      perfLogger.wrap('render.fetchData.tagCloudGeneral', () =>
+        dataManager.getTagCloudData(user, 0),
+      ),
+      perfLogger.wrap('render.fetchData.userStats', () =>
+        dataManager.getUserStats(user),
+      ),
+      perfLogger.wrap('render.fetchData.needsBackfill', () =>
+        dataManager.needsPostMetadataBackfill(user),
+      ),
     ]);
 
     return {
