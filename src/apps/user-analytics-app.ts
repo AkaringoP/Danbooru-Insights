@@ -839,7 +839,7 @@ export class UserAnalyticsApp {
         distributions,
         topPosts,
         recentPopularPosts,
-        randomPosts,
+        randomPostsPromise,
         milestones1k,
         scatterData,
         levelChanges,
@@ -1484,12 +1484,15 @@ export class UserAnalyticsApp {
       perfLogger.end('render.widget.pie');
 
       // --- TOP POSTS WIDGET ---
+      // Random posts are passed as a Promise so the widget renders now with
+      // a placeholder and swaps in the real post when the fetch resolves —
+      // keeps Random (the only uncached source) off the blocking path.
       perfLogger.start('render.widget.topPosts');
       const topPostsResult = renderTopPostsWidget(
         topPostContainer,
         topPosts,
         recentPopularPosts,
-        randomPosts,
+        randomPostsPromise,
         isNsfwEnabled,
         this.db,
         this.context,

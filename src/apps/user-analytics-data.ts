@@ -59,13 +59,21 @@ export class UserAnalyticsDataService {
     );
     const {firstUploadDate} = summaryStats;
 
+    // Kick randomPosts off in parallel but don't await it — the dashboard
+    // shows a placeholder in the Random tab until this resolves. Random is
+    // intentionally uncached (every open should produce a new pick), so it
+    // would otherwise dominate the fetchData tail (~1.3s).
+    const randomPostsPromise = perfLogger.wrap(
+      'render.fetchData.randomPosts',
+      () => dataManager.getRandomPosts(user),
+    );
+
     const [
       stats,
       total,
       distributions,
       topPosts,
       recentPopularPosts,
-      randomPosts,
       milestones1k,
       scatterData,
       levelChanges,
@@ -131,9 +139,6 @@ export class UserAnalyticsDataService {
       perfLogger.wrap('render.fetchData.recentPopular', () =>
         dataManager.getRecentPopularPosts(user),
       ),
-      perfLogger.wrap('render.fetchData.randomPosts', () =>
-        dataManager.getRandomPosts(user),
-      ),
       perfLogger.wrap('render.fetchData.milestones1k', () =>
         dataManager.getMilestones(user, isNsfwEnabled, 1000),
       ),
@@ -164,7 +169,7 @@ export class UserAnalyticsDataService {
       distributions,
       topPosts,
       recentPopularPosts,
-      randomPosts,
+      randomPostsPromise,
       milestones1k,
       scatterData,
       levelChanges,
