@@ -1628,16 +1628,37 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Fetches top posts per rating (G/S/Q/E) in parallel using API.
+   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
+   * @param {boolean} forceRefresh Bypass cache and re-fetch.
    * @return {!Promise<{g: ?Object, s: ?Object, q: ?Object, e: ?Object}>} Top post per rating.
    */
-  async getTopPostsByType(userInfo: TargetUser): Promise<{
+  async getTopPostsByType(
+    userInfo: TargetUser,
+    forceRefresh: boolean = false,
+  ): Promise<{
     g: DanbooruPost | null;
     s: DanbooruPost | null;
     q: DanbooruPost | null;
     e: DanbooruPost | null;
   }> {
     if (!userInfo.name) return {g: null, s: null, q: null, e: null};
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'top_posts_by_type';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {
+          g: DanbooruPost | null;
+          s: DanbooruPost | null;
+          q: DanbooruPost | null;
+          e: DanbooruPost | null;
+        };
+      }
+    }
 
     // Helper for fetching 1 top post
     const fetchTop = async (
@@ -1669,18 +1690,34 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('e'),
     ]);
 
-    return {g, s, q, e};
+    const result = {g, s, q, e};
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
    * Fetches Recent Popular (age < 1w) posts for SFW and NSFW in parallel.
+   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
+   * @param {boolean} forceRefresh Bypass cache and re-fetch.
    * @return {!Promise<{sfw: ?Object, nsfw: ?Object}>} Recent popular post per SFW/NSFW.
    */
   async getRecentPopularPosts(
     userInfo: TargetUser,
+    forceRefresh: boolean = false,
   ): Promise<{sfw: DanbooruPost | null; nsfw: DanbooruPost | null}> {
     if (!userInfo.name) return {sfw: null, nsfw: null};
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'recent_popular_posts';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {sfw: DanbooruPost | null; nsfw: DanbooruPost | null};
+      }
+    }
 
     const fetchTop = async (
       ratingTag: string,
@@ -1707,7 +1744,9 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('is:nsfw'),
     ]);
 
-    return {sfw, nsfw};
+    const result = {sfw, nsfw};
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
@@ -2195,9 +2234,23 @@ export class AnalyticsDataManager extends DataManager {
    */
   async getLevelChangeHistory(
     userInfo: TargetUser,
+    forceRefresh: boolean = false,
   ): Promise<LevelChangeEvent[]> {
     if (!userInfo.name) return [];
     const normalizedName = userInfo.name.replace(/ /g, '_');
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'level_change_history';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        // Dates were JSON-stringified to strings when cached — revive them.
+        return (
+          cached as Array<Omit<LevelChangeEvent, 'date'> & {date: string}>
+        ).map(e => ({...e, date: new Date(e.date)}));
+      }
+    }
 
     // Known Danbooru levels ordered by rank (lowest → highest)
     const LEVEL_HIERARCHY = [
@@ -2286,12 +2339,15 @@ export class AnalyticsDataManager extends DataManager {
       // Sort oldest first, deduplicate by date+fromLevel+toLevel
       events.sort((a, b) => a.date.getTime() - b.date.getTime());
       const seen = new Set<string>();
-      return events.filter(e => {
+      const dedup = events.filter(e => {
         const key = `${e.date.getTime()}-${e.fromLevel}-${e.toLevel}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
+
+      if (uploaderId) await this.saveStats(cacheKey, uploaderId, dedup);
+      return dedup;
     } catch (e: unknown) {
       console.warn('[Danbooru Grass] Failed to fetch level change history', e);
       return [];
@@ -3637,14 +3693,20 @@ export class AnalyticsDataManager extends DataManager {
         perfLogger.wrap('sync.refreshStats.randomPosts', () =>
           this.getRandomPosts(userInfo),
         ),
+        // Warm the level-change-history cache on every sync — the dashboard
+        // always reads it, and the API is cheap compared to the distribution
+        // calls above (no per-user search combinatorics).
+        perfLogger.wrap('sync.refreshStats.levelChanges', () =>
+          this.getLevelChangeHistory(userInfo, true),
+        ),
         // Refresh Popular Posts only on Full Sync
         ...(isFullSync
           ? [
               perfLogger.wrap('sync.refreshStats.topPostsByType', () =>
-                this.getTopPostsByType(userInfo),
+                this.getTopPostsByType(userInfo, true),
               ),
               perfLogger.wrap('sync.refreshStats.recentPopular', () =>
-                this.getRecentPopularPosts(userInfo),
+                this.getRecentPopularPosts(userInfo, true),
               ),
               perfLogger.wrap('sync.refreshStats.topScoreSfw', () =>
                 this.getTopScorePost(userInfo, 'sfw'),
