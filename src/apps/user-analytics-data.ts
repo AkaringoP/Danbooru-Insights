@@ -3,6 +3,13 @@ import {perfLogger} from '../core/perf-logger';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
 
+/** Pre-fetched values from renderDashboard's pre-check phase. When provided,
+ *  fetchDashboardData reuses them instead of calling the same APIs again. */
+export interface PrefetchedDashboardData {
+  syncStats: {count: number; lastSync: string | null};
+  totalCount: number;
+}
+
 /** Processed pie chart slice used for D3 rendering. */
 export interface PieSlice {
   value: number;
@@ -26,9 +33,15 @@ export class UserAnalyticsDataService {
   /**
    * Fetches all dashboard data in parallel.
    * @param context The profile context.
+   * @param prefetched Optional results from renderDashboard's pre-check phase.
+   *   When provided, syncStats/totalCount are reused instead of re-fetched
+   *   (saves one DB scan + one API call, ~400-900ms depending on user size).
    * @return All data needed for the dashboard.
    */
-  async fetchDashboardData(context: ProfileContext) {
+  async fetchDashboardData(
+    context: ProfileContext,
+    prefetched?: PrefetchedDashboardData,
+  ) {
     const dataManager = new AnalyticsDataManager(this.db);
     // context.targetUser is guaranteed non-null when called from UserAnalyticsApp
     // (main.ts validates via isValidProfile() before instantiation).
@@ -61,12 +74,16 @@ export class UserAnalyticsDataService {
       userStats,
       needsBackfill,
     ] = await Promise.all([
-      perfLogger.wrap('render.fetchData.syncStats', () =>
-        dataManager.getSyncStats(user),
-      ),
-      perfLogger.wrap('render.fetchData.totalCount', () =>
-        dataManager.getTotalPostCount(user),
-      ),
+      prefetched
+        ? Promise.resolve(prefetched.syncStats)
+        : perfLogger.wrap('render.fetchData.syncStats', () =>
+            dataManager.getSyncStats(user),
+          ),
+      prefetched
+        ? Promise.resolve(prefetched.totalCount)
+        : perfLogger.wrap('render.fetchData.totalCount', () =>
+            dataManager.getTotalPostCount(user),
+          ),
       perfLogger.wrap('render.fetchData.distributions', () =>
         Promise.all([
           dataManager.getStatusDistribution(user, firstUploadDate),

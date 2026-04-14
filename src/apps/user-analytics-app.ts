@@ -753,71 +753,77 @@ export class UserAnalyticsApp {
       // Quick Sync Pre-Check: If total posts ≤ MAX_QUICK_SYNC_POSTS and DB is incomplete,
       // fetch all posts inline (no sync UI required) before rendering the dashboard.
       const MAX_QUICK_SYNC_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
-      {
-        perfLogger.start('render.precheck');
-        const [preStats, preTotal] = await Promise.all([
-          this.dataManager.getSyncStats(this.context.targetUser),
-          this.dataManager.getTotalPostCount(this.context.targetUser),
-        ]);
-        perfLogger.end('render.precheck', {
-          total: preTotal,
-          synced: preStats.count,
-        });
-        perfMeta.preTotal = preTotal;
+      perfLogger.start('render.precheck');
+      const [preStats, preTotal] = await Promise.all([
+        this.dataManager.getSyncStats(this.context.targetUser),
+        this.dataManager.getTotalPostCount(this.context.targetUser),
+      ]);
+      perfLogger.end('render.precheck', {
+        total: preTotal,
+        synced: preStats.count,
+      });
+      perfMeta.preTotal = preTotal;
 
-        if (
-          preTotal > 0 &&
-          preTotal <= MAX_QUICK_SYNC_POSTS &&
-          preStats.count < preTotal
-        ) {
-          perfMeta.path = 'quickSync';
-          content.innerHTML = `
-            <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
-              <div class="di-spinner"></div>
-              <div style="font-size:1.2em; font-weight:600; margin-top:20px;">Syncing Data...</div>
-              <div id="analytics-quick-sync-msg" style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Fetching posts...</div>
-              <div style="width:300px; height:8px; background:var(--di-border-light, #eee); border-radius:4px; overflow:hidden; margin-top:15px;">
-                <div id="analytics-quick-sync-bar" style="width:0%; height:100%; background:#2da44e; transition:width 0.2s;"></div>
-              </div>
+      let didQuickSync = false;
+      if (
+        preTotal > 0 &&
+        preTotal <= MAX_QUICK_SYNC_POSTS &&
+        preStats.count < preTotal
+      ) {
+        perfMeta.path = 'quickSync';
+        didQuickSync = true;
+        content.innerHTML = `
+          <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
+            <div class="di-spinner"></div>
+            <div style="font-size:1.2em; font-weight:600; margin-top:20px;">Syncing Data...</div>
+            <div id="analytics-quick-sync-msg" style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Fetching posts...</div>
+            <div style="width:300px; height:8px; background:var(--di-border-light, #eee); border-radius:4px; overflow:hidden; margin-top:15px;">
+              <div id="analytics-quick-sync-bar" style="width:0%; height:100%; background:#2da44e; transition:width 0.2s;"></div>
             </div>
-          `;
+          </div>
+        `;
 
-          const qBar = content.querySelector(
-            '#analytics-quick-sync-bar',
-          ) as HTMLElement;
-          const qMsg = content.querySelector(
-            '#analytics-quick-sync-msg',
-          ) as HTMLElement;
+        const qBar = content.querySelector(
+          '#analytics-quick-sync-bar',
+        ) as HTMLElement;
+        const qMsg = content.querySelector(
+          '#analytics-quick-sync-msg',
+        ) as HTMLElement;
 
-          await this.dataManager.quickSyncAllPosts(
-            this.context.targetUser,
-            (c: number, t: number, msg?: string) => {
-              if (qBar && t > 0)
-                qBar.style.width = `${Math.round((c / t) * 100)}%`;
-              if (qMsg && msg && msg !== 'PREPARING') qMsg.textContent = msg;
-            },
-          );
+        await this.dataManager.quickSyncAllPosts(
+          this.context.targetUser,
+          (c: number, t: number, msg?: string) => {
+            if (qBar && t > 0)
+              qBar.style.width = `${Math.round((c / t) * 100)}%`;
+            if (qMsg && msg && msg !== 'PREPARING') qMsg.textContent = msg;
+          },
+        );
 
-          this.isFullySynced = true;
-          void this.updateHeaderStatus();
+        this.isFullySynced = true;
+        void this.updateHeaderStatus();
 
-          // Restore loading spinner before heavy data fetch
-          content.innerHTML = `
-            <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
-               <div class="di-spinner"></div>
-               <div style="font-size:1.2em; font-weight:600; margin-top: 20px;">Generating Report...</div>
-               <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
-            </div>
-          `;
-        } else {
-          perfMeta.path = 'syncSkipped';
-        }
+        // Restore loading spinner before heavy data fetch
+        content.innerHTML = `
+          <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
+             <div class="di-spinner"></div>
+             <div style="font-size:1.2em; font-weight:600; margin-top: 20px;">Generating Report...</div>
+             <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
+          </div>
+        `;
+      } else {
+        perfMeta.path = 'syncSkipped';
       }
 
-      // Pre-fetch all data!
+      // Pre-fetch all data! If we did a Quick Sync the syncStats/totalCount
+      // values have changed since the pre-check, so we skip the shortcut and
+      // let fetchDashboardData re-query them. On the no-sync path the values
+      // are still fresh and we hand them through.
+      const prefetched = didQuickSync
+        ? undefined
+        : {syncStats: preStats, totalCount: preTotal};
       const dashboardData = await perfLogger.wrap(
         'render.fetchData.total',
-        () => this.dataService.fetchDashboardData(this.context),
+        () => this.dataService.fetchDashboardData(this.context, prefetched),
       );
       const {
         stats,
