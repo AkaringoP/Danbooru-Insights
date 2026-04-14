@@ -565,9 +565,19 @@ export class AnalyticsDataManager extends DataManager {
     userInfo: TargetUser,
     isNsfwEnabled: boolean = false,
     customStep: 'auto' | 'repdigit' | number = 'auto',
+    forceRefresh: boolean = false,
   ): Promise<MilestoneEntry[]> {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return [];
+
+    // Cache key includes step and nsfw flag — thumbnails for NSFW posts are
+    // only fetched when the flag is on, so results differ per combination.
+    // Invalidated via piestats wipe on Full Sync (same pattern as distributions).
+    const cacheKey = `milestones_${customStep}_${isNsfwEnabled ? '1' : '0'}`;
+    if (!forceRefresh) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) return cached as MilestoneEntry[];
+    }
 
     const total = await this.db.posts
       .where('uploader_id')
@@ -665,6 +675,7 @@ export class AnalyticsDataManager extends DataManager {
     // Let's sort strictly by milestone ASC.
     results.sort((a, b) => a.milestone - b.milestone);
 
+    await this.saveStats(cacheKey, uploaderId, results);
     return results;
   }
 
@@ -3698,6 +3709,14 @@ export class AnalyticsDataManager extends DataManager {
         // calls above (no per-user search combinatorics).
         perfLogger.wrap('sync.refreshStats.levelChanges', () =>
           this.getLevelChangeHistory(userInfo, true),
+        ),
+        // Warm the milestones cache for the step=1000 view that renderDashboard
+        // always requests. Both NSFW values so toggling is a cache hit too.
+        perfLogger.wrap('sync.refreshStats.milestonesSfw', () =>
+          this.getMilestones(userInfo, false, 1000, true),
+        ),
+        perfLogger.wrap('sync.refreshStats.milestonesNsfw', () =>
+          this.getMilestones(userInfo, true, 1000, true),
         ),
         // Refresh Popular Posts only on Full Sync
         ...(isFullSync
