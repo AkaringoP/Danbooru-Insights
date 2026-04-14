@@ -2,6 +2,7 @@ import {DataManager} from './data-manager';
 import type {ApiItem} from './data-manager';
 import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
+import {perfLogger} from './perf-logger';
 import {CONFIG} from '../config';
 import {isTopLevelTag, getBestThumbnailUrl} from '../utils';
 import type {
@@ -3322,12 +3323,18 @@ export class AnalyticsDataManager extends DataManager {
       if (onProgress) onProgress(c, t, msg);
     };
 
+    const perfStats = {totalPosts: 0, pages: 0, writtenPosts: 0};
+    perfLogger.start('sync.quick.total');
+
     try {
       const uploaderId = parseInt(userInfo.id ?? '0');
       const normalizedName = userInfo.name.replace(/ /g, '_');
 
       // 1. Get total count
-      const total = await this.getTotalPostCount(userInfo);
+      const total = await perfLogger.wrap('sync.quick.countQuery', () =>
+        this.getTotalPostCount(userInfo),
+      );
+      perfStats.totalPosts = total;
       reportProgress(0, total, 'Fetching posts...');
 
       // 2. Clear existing posts for a clean re-fetch
@@ -3340,6 +3347,9 @@ export class AnalyticsDataManager extends DataManager {
       let no = 0;
 
       while (hasMore) {
+        perfLogger.start('sync.quick.page');
+        const pageIndex = perfStats.pages;
+
         const params = new URLSearchParams({
           tags: `user:${normalizedName}`,
           limit: String(limit),
@@ -3355,6 +3365,12 @@ export class AnalyticsDataManager extends DataManager {
           .then((r: Response) => r.json());
 
         if (!Array.isArray(batch) || batch.length === 0) {
+          perfLogger.end('sync.quick.page', {
+            page: pageIndex,
+            cursor: page,
+            fetched: 0,
+            empty: true,
+          });
           hasMore = false;
           break;
         }
@@ -3385,8 +3401,19 @@ export class AnalyticsDataManager extends DataManager {
           };
         });
 
+        perfLogger.start('sync.quick.bulkPut');
         await this.db.posts.bulkPut(bulkData);
+        perfLogger.end('sync.quick.bulkPut', {count: bulkData.length});
+
         reportProgress(no, total);
+
+        perfStats.pages++;
+        perfStats.writtenPosts += bulkData.length;
+        perfLogger.end('sync.quick.page', {
+          page: pageIndex,
+          cursor: page,
+          fetched: batch.length,
+        });
 
         if (batch.length < limit) {
           hasMore = false;
@@ -3413,6 +3440,7 @@ export class AnalyticsDataManager extends DataManager {
       // 7. Refresh all stats (full sync)
       await this.refreshAllStats(userInfo, true);
     } finally {
+      perfLogger.end('sync.quick.total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
     }
