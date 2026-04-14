@@ -154,5 +154,15 @@ export class Database extends Dexie {
     this.version(10).stores({
       user_stats: 'userId',
     });
+
+    // [v11] Add [uploader_id+created_at] compound index to posts.
+    // getSyncStats previously did `orderBy('created_at').last()` on the
+    // whole posts table, which scans every user's records and could also
+    // return another user's latest date. The compound index lets us pick
+    // the newest post for a specific uploader directly.
+    this.version(11).stores({
+      posts:
+        'id, uploader_id, no, created_at, score, rating, tag_count_general, [uploader_id+no], [uploader_id+score], [uploader_id+created_at]',
+    });
   }
 }

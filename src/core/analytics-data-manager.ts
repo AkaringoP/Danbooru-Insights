@@ -290,15 +290,22 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return {count: 0, lastSync: null};
 
-    const count = await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .count();
-    const lastEntry = await this.db.posts.orderBy('created_at').last();
+    // Walks the [uploader_id+created_at] compound index (DB v11) from the
+    // newest post backwards and stops at the first hit — so the latest entry
+    // for this specific user is resolved in O(log n) instead of scanning the
+    // full posts table (which also previously risked returning another
+    // user's latest created_at).
+    const [count, lastEntry] = await Promise.all([
+      this.db.posts.where('uploader_id').equals(uploaderId).count(),
+      this.db.posts
+        .where('[uploader_id+created_at]')
+        .between([uploaderId, ''], [uploaderId, '\uffff'])
+        .last(),
+    ]);
 
     return {
       count,
-      lastSync: lastEntry ? lastEntry.created_at : null, // Approximate
+      lastSync: lastEntry ? lastEntry.created_at : null,
     };
   }
 
