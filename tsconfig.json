@@ -28,6 +28,7 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "vite.config.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "build-flags.ts"
   ]
 }
