@@ -838,17 +838,40 @@ export class UserAnalyticsApp {
         summaryStats,
         distributions,
         topPosts,
+        topPostsRevalidate,
         recentPopularPosts,
+        recentPopularRevalidate,
         randomPostsPromise,
         milestones1k,
+        milestones1kRevalidate,
         scatterData,
         levelChanges,
+        levelChangesRevalidate,
         timelineMilestones,
         tagCloudGeneral,
         userStats,
         needsBackfill,
         dataManager,
       } = dashboardData;
+
+      // "Weak SWR": the data fetch layer already wrote fresh values back to
+      // piestats before these promises resolved, so the next dashboard open
+      // reads the updated cache. We don't hot-swap the current view — that
+      // would mean threading setters through every widget and risks
+      // flickering. We only keep the promises alive so errors surface in
+      // logs instead of becoming silent unhandled rejections.
+      const revalidations: Array<[string, Promise<unknown> | undefined]> = [
+        ['topPosts', topPostsRevalidate],
+        ['recentPopular', recentPopularRevalidate],
+        ['milestones1k', milestones1kRevalidate],
+        ['levelChanges', levelChangesRevalidate],
+      ];
+      for (const [name, promise] of revalidations) {
+        if (!promise) continue;
+        void promise.catch((e: unknown) => {
+          console.warn(`[DI] SWR revalidate failed for ${name}`, e);
+        });
+      }
       const {maxUploads, maxDate, firstUploadDate, lastUploadDate} =
         summaryStats;
       const today = new Date();

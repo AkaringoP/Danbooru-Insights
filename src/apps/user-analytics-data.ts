@@ -10,6 +10,57 @@ export interface PrefetchedDashboardData {
   totalCount: number;
 }
 
+/**
+ * Stale-while-revalidate pair: the cached value for immediate render, plus
+ * an optional promise that fetches fresh data in the background. When the
+ * cache was a miss, `data` is already fresh and `revalidate` is undefined.
+ */
+export interface SwrResult<T> {
+  data: T;
+  /** Resolves with fresh data if it differs from `data`, otherwise null. */
+  revalidate?: Promise<T | null>;
+}
+
+/**
+ * Reads cached data from piestats, triggers a background fetch if found,
+ * and blocks only on cache miss. Returned `revalidate` promise resolves
+ * with the fresh value iff it differs from the cached one (shallow JSON
+ * compare), so callers can skip re-render on no-op refreshes.
+ */
+async function swrStats<T>(
+  dataManager: AnalyticsDataManager,
+  cacheKey: string,
+  uploaderId: number,
+  freshFetch: () => Promise<T>,
+  label: string,
+): Promise<SwrResult<T>> {
+  // No uploader id → skip cache entirely, same behaviour as before.
+  if (!uploaderId) {
+    const data = await perfLogger.wrap(label, freshFetch);
+    return {data};
+  }
+
+  const cached = (await dataManager.getStats(cacheKey, uploaderId)) as T | null;
+
+  if (cached !== null) {
+    const revalidate = perfLogger
+      .wrap(`${label}.revalidate`, freshFetch)
+      .then(fresh => {
+        // JSON compare is good enough: data here is serialisable (posts,
+        // milestones, level events) and the DB round-trip inside freshFetch
+        // already went through saveStats.
+        const same = JSON.stringify(fresh) === JSON.stringify(cached);
+        return same ? null : fresh;
+      });
+    return {data: cached, revalidate};
+  }
+
+  // Cache miss: block on the fetch and surface it under the main label so
+  // the blocking cost is still visible in perf logs.
+  const data = await perfLogger.wrap(label, freshFetch);
+  return {data};
+}
+
 /** Processed pie chart slice used for D3 rendering. */
 export interface PieSlice {
   value: number;
@@ -68,15 +119,17 @@ export class UserAnalyticsDataService {
       () => dataManager.getRandomPosts(user),
     );
 
+    const uploaderId = parseInt(user.id ?? '0');
+
     const [
       stats,
       total,
       distributions,
-      topPosts,
-      recentPopularPosts,
-      milestones1k,
+      topPostsSwr,
+      recentPopularSwr,
+      milestones1kSwr,
       scatterData,
-      levelChanges,
+      levelChangesSwr,
       timelineMilestones,
       tagCloudGeneral,
       userStats,
@@ -133,20 +186,39 @@ export class UserAnalyticsDataService {
           }),
         ),
       ),
-      perfLogger.wrap('render.fetchData.topPosts', () =>
-        dataManager.getTopPostsByType(user),
+      // SWR: return cached value now, revalidate in background. fresh fetch
+      // uses forceRefresh=true so it bypasses the in-method cache and
+      // overwrites piestats via saveStats.
+      swrStats(
+        dataManager,
+        'top_posts_by_type',
+        uploaderId,
+        () => dataManager.getTopPostsByType(user, true),
+        'render.fetchData.topPosts',
       ),
-      perfLogger.wrap('render.fetchData.recentPopular', () =>
-        dataManager.getRecentPopularPosts(user),
+      swrStats(
+        dataManager,
+        'recent_popular_posts',
+        uploaderId,
+        () => dataManager.getRecentPopularPosts(user, true),
+        'render.fetchData.recentPopular',
       ),
-      perfLogger.wrap('render.fetchData.milestones1k', () =>
-        dataManager.getMilestones(user, isNsfwEnabled, 1000),
+      swrStats(
+        dataManager,
+        `milestones_1000_${isNsfwEnabled ? '1' : '0'}`,
+        uploaderId,
+        () => dataManager.getMilestones(user, isNsfwEnabled, 1000, true),
+        'render.fetchData.milestones1k',
       ),
       perfLogger.wrap('render.fetchData.scatterData', () =>
         dataManager.getScatterData(user),
       ),
-      perfLogger.wrap('render.fetchData.levelChanges', () =>
-        dataManager.getLevelChangeHistory(user),
+      swrStats(
+        dataManager,
+        'level_change_history',
+        uploaderId,
+        () => dataManager.getLevelChangeHistory(user, true),
+        'render.fetchData.levelChanges',
       ),
       perfLogger.wrap('render.fetchData.timelineMilestones', () =>
         dataManager.getTimelineMilestones(user),
@@ -167,12 +239,16 @@ export class UserAnalyticsDataService {
       total,
       summaryStats,
       distributions,
-      topPosts,
-      recentPopularPosts,
+      topPosts: topPostsSwr.data,
+      topPostsRevalidate: topPostsSwr.revalidate,
+      recentPopularPosts: recentPopularSwr.data,
+      recentPopularRevalidate: recentPopularSwr.revalidate,
       randomPostsPromise,
-      milestones1k,
+      milestones1k: milestones1kSwr.data,
+      milestones1kRevalidate: milestones1kSwr.revalidate,
       scatterData,
-      levelChanges,
+      levelChanges: levelChangesSwr.data,
+      levelChangesRevalidate: levelChangesSwr.revalidate,
       timelineMilestones,
       tagCloudGeneral,
       userStats,
