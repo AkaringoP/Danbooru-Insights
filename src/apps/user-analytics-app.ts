@@ -754,9 +754,16 @@ export class UserAnalyticsApp {
       // fetch all posts inline (no sync UI required) before rendering the dashboard.
       const MAX_QUICK_SYNC_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
       perfLogger.start('render.precheck');
+      // Split the two calls into their own labels: syncStats is a local DB
+      // lookup, totalCount hits the Danbooru API. Combining them hides which
+      // one dominates — useful when evaluating DB-side optimizations.
       const [preStats, preTotal] = await Promise.all([
-        this.dataManager.getSyncStats(this.context.targetUser),
-        this.dataManager.getTotalPostCount(this.context.targetUser),
+        perfLogger.wrap('render.precheck.syncStats', () =>
+          this.dataManager.getSyncStats(this.context.targetUser),
+        ),
+        perfLogger.wrap('render.precheck.totalCount', () =>
+          this.dataManager.getTotalPostCount(this.context.targetUser),
+        ),
       ]);
       perfLogger.end('render.precheck', {
         total: preTotal,
