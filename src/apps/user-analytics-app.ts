@@ -3,6 +3,7 @@ import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {SettingsManager} from '../core/settings';
+import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
 import {getLevelClass} from '../utils';
 import {
@@ -730,6 +731,12 @@ export class UserAnalyticsApp {
     if (this.isRendering) return;
     this.isRendering = true;
 
+    const perfMeta = {
+      path: 'unknown' as 'quickSync' | 'syncSkipped' | 'unknown',
+      preTotal: 0,
+    };
+    perfLogger.start('render.total');
+
     try {
       const content = document.getElementById(`${this.modalId}-content`);
       if (!content) return;
@@ -747,16 +754,23 @@ export class UserAnalyticsApp {
       // fetch all posts inline (no sync UI required) before rendering the dashboard.
       const MAX_QUICK_SYNC_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
       {
+        perfLogger.start('render.precheck');
         const [preStats, preTotal] = await Promise.all([
           this.dataManager.getSyncStats(this.context.targetUser),
           this.dataManager.getTotalPostCount(this.context.targetUser),
         ]);
+        perfLogger.end('render.precheck', {
+          total: preTotal,
+          synced: preStats.count,
+        });
+        perfMeta.preTotal = preTotal;
 
         if (
           preTotal > 0 &&
           preTotal <= MAX_QUICK_SYNC_POSTS &&
           preStats.count < preTotal
         ) {
+          perfMeta.path = 'quickSync';
           content.innerHTML = `
             <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
               <div class="di-spinner"></div>
@@ -795,12 +809,15 @@ export class UserAnalyticsApp {
                <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
             </div>
           `;
+        } else {
+          perfMeta.path = 'syncSkipped';
         }
       }
 
       // Pre-fetch all data!
-      const dashboardData = await this.dataService.fetchDashboardData(
-        this.context,
+      const dashboardData = await perfLogger.wrap(
+        'render.fetchData.total',
+        () => this.dataService.fetchDashboardData(this.context),
       );
       const {
         stats,
@@ -1554,6 +1571,7 @@ export class UserAnalyticsApp {
       // Update header status (ensure it's green if ready)
       void this.updateHeaderStatus();
     } finally {
+      perfLogger.end('render.total', perfMeta);
       this.isRendering = false;
     }
   }
