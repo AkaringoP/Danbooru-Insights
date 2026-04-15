@@ -762,8 +762,19 @@ export class AnalyticsDataManager extends DataManager {
   async getStatusDistribution(
     userInfo: TargetUser,
     startDate: string | Date | null = null,
+    forceRefresh: boolean = false,
   ): Promise<{name: string; count: number; label: string}[]> {
     if (!userInfo.name) return [];
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'status_dist';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {name: string; count: number; label: string}[];
+      }
+    }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const statuses = [
@@ -816,7 +827,9 @@ export class AnalyticsDataManager extends DataManager {
       }
     });
 
-    return Promise.all(tasks);
+    const result = await Promise.all(tasks);
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
@@ -829,8 +842,19 @@ export class AnalyticsDataManager extends DataManager {
   async getRatingDistribution(
     userInfo: TargetUser,
     startDate: string | Date | null = null,
+    forceRefresh: boolean = false,
   ): Promise<{rating: string; count: number; label: string}[]> {
     if (!userInfo.name) return [];
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'rating_dist';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {rating: string; count: number; label: string}[];
+      }
+    }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const ratings = ['g', 's', 'q', 'e'];
@@ -881,6 +905,7 @@ export class AnalyticsDataManager extends DataManager {
 
     try {
       const results = await Promise.all(tasks);
+      if (uploaderId) await this.saveStats(cacheKey, uploaderId, results);
       return results;
     } catch (e: unknown) {
       console.error('[Danbooru Grass] Failed to fetch rating distribution', e);
@@ -3663,8 +3688,11 @@ export class AnalyticsDataManager extends DataManager {
     perfLogger.start('sync.refreshStats.total');
     try {
       await Promise.all([
+        perfLogger.wrap('sync.refreshStats.status', () =>
+          this.getStatusDistribution(userInfo, null, true),
+        ),
         perfLogger.wrap('sync.refreshStats.rating', () =>
-          this.getRatingDistribution(userInfo),
+          this.getRatingDistribution(userInfo, null, true),
         ),
         perfLogger.wrap('sync.refreshStats.character', () =>
           this.getCharacterDistribution(

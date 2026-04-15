@@ -129,7 +129,9 @@ export class UserAnalyticsDataService {
     const [
       stats,
       total,
-      distributions,
+      otherDistributions,
+      statusSwr,
+      ratingSwr,
       topPostsSwr,
       recentPopularSwr,
       milestones1kSwr,
@@ -150,10 +152,11 @@ export class UserAnalyticsDataService {
         : perfLogger.wrap('render.fetchData.totalCount', () =>
             dataManager.getTotalPostCount(user),
           ),
+      // Distributions that were already cache-first before this work:
+      // they hit piestats immediately and need no SWR (their cache is
+      // only warmed on explicit sync, which is the existing behaviour).
       perfLogger.wrap('render.fetchData.distributions', () =>
         Promise.all([
-          dataManager.getStatusDistribution(user, firstUploadDate),
-          dataManager.getRatingDistribution(user, firstUploadDate), // Optimized with date range
           dataManager.getCharacterDistribution(user),
           dataManager.getCopyrightDistribution(user),
           dataManager.getFavCopyrightDistribution(user),
@@ -165,8 +168,6 @@ export class UserAnalyticsDataService {
           dataManager.getTranslationDistribution(user),
         ]).then(
           ([
-            status,
-            rating,
             char,
             copy,
             favCopy,
@@ -177,8 +178,6 @@ export class UserAnalyticsDataService {
             commentary,
             translation,
           ]) => ({
-            status,
-            rating,
             character: char,
             copyright: copy,
             fav_copyright: favCopy,
@@ -190,6 +189,23 @@ export class UserAnalyticsDataService {
             translation,
           }),
         ),
+      ),
+      // Status + Rating previously fired 10 API calls on every open
+      // (6 status + 4 rating). Now cached with SWR — still fresh on the
+      // next open after any state change.
+      swrStats(
+        dataManager,
+        'status_dist',
+        uploaderId,
+        () => dataManager.getStatusDistribution(user, firstUploadDate, true),
+        'render.fetchData.status',
+      ),
+      swrStats(
+        dataManager,
+        'rating_dist',
+        uploaderId,
+        () => dataManager.getRatingDistribution(user, firstUploadDate, true),
+        'render.fetchData.rating',
       ),
       // SWR: return cached value now, revalidate in background. fresh fetch
       // uses forceRefresh=true so it bypasses the in-method cache and
@@ -239,11 +255,20 @@ export class UserAnalyticsDataService {
       ),
     ]);
 
+    // Recombine status + rating (SWR'd) with the other nine (cache-first).
+    const distributions = {
+      status: statusSwr.data,
+      rating: ratingSwr.data,
+      ...otherDistributions,
+    };
+
     return {
       stats,
       total,
       summaryStats,
       distributions,
+      statusStartRevalidate: statusSwr.startRevalidate,
+      ratingStartRevalidate: ratingSwr.startRevalidate,
       topPosts: topPostsSwr.data,
       topPostsStartRevalidate: topPostsSwr.startRevalidate,
       recentPopularPosts: recentPopularSwr.data,

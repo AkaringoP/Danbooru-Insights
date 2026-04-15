@@ -859,6 +859,8 @@ export class UserAnalyticsApp {
         total,
         summaryStats,
         distributions,
+        statusStartRevalidate,
+        ratingStartRevalidate,
         topPosts,
         topPostsStartRevalidate,
         recentPopularPosts,
@@ -1651,6 +1653,8 @@ export class UserAnalyticsApp {
 
       // Fire SWR revalidations only now that the dashboard is painted. Any
       // network traffic these start no longer blocks render.total.
+      scheduleRevalidate('status', statusStartRevalidate);
+      scheduleRevalidate('rating', ratingStartRevalidate);
       scheduleRevalidate('topPosts', topPostsStartRevalidate);
       scheduleRevalidate('recentPopular', recentPopularStartRevalidate);
       scheduleRevalidate('milestones1k', milestones1kStartRevalidate);
