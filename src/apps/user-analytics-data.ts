@@ -12,20 +12,25 @@ export interface PrefetchedDashboardData {
 
 /**
  * Stale-while-revalidate pair: the cached value for immediate render, plus
- * an optional promise that fetches fresh data in the background. When the
- * cache was a miss, `data` is already fresh and `revalidate` is undefined.
+ * an optional starter that the caller runs after the dashboard is visible.
+ * When the cache was a miss, `data` is already fresh and `startRevalidate`
+ * is undefined.
+ *
+ * The revalidate *must not* fire during fetchDashboardData — it would land
+ * in the Promise.all's microtask queue and compete with the rate limiter
+ * against the (cheap, cached) distribution fetches, inflating render.total.
+ * Deferring to post-render keeps the blocking path lean.
  */
 export interface SwrResult<T> {
   data: T;
-  /** Resolves with fresh data if it differs from `data`, otherwise null. */
-  revalidate?: Promise<T | null>;
+  /** Kicks off the background fetch. Returns the original Promise for error
+   *  handling; resolves with fresh data iff it differs from `data`. */
+  startRevalidate?: () => Promise<T | null>;
 }
 
 /**
- * Reads cached data from piestats, triggers a background fetch if found,
- * and blocks only on cache miss. Returned `revalidate` promise resolves
- * with the fresh value iff it differs from the cached one (shallow JSON
- * compare), so callers can skip re-render on no-op refreshes.
+ * Reads cached data from piestats, prepares (but does not start) a
+ * background fetch if found, and blocks only on cache miss.
  */
 async function swrStats<T>(
   dataManager: AnalyticsDataManager,
@@ -43,16 +48,16 @@ async function swrStats<T>(
   const cached = (await dataManager.getStats(cacheKey, uploaderId)) as T | null;
 
   if (cached !== null) {
-    const revalidate = perfLogger
-      .wrap(`${label}.revalidate`, freshFetch)
-      .then(fresh => {
+    // Deferred: caller must invoke startRevalidate() after render is visible.
+    const startRevalidate = () =>
+      perfLogger.wrap(`${label}.revalidate`, freshFetch).then(fresh => {
         // JSON compare is good enough: data here is serialisable (posts,
         // milestones, level events) and the DB round-trip inside freshFetch
         // already went through saveStats.
         const same = JSON.stringify(fresh) === JSON.stringify(cached);
         return same ? null : fresh;
       });
-    return {data: cached, revalidate};
+    return {data: cached, startRevalidate};
   }
 
   // Cache miss: block on the fetch and surface it under the main label so
@@ -240,15 +245,15 @@ export class UserAnalyticsDataService {
       summaryStats,
       distributions,
       topPosts: topPostsSwr.data,
-      topPostsRevalidate: topPostsSwr.revalidate,
+      topPostsStartRevalidate: topPostsSwr.startRevalidate,
       recentPopularPosts: recentPopularSwr.data,
-      recentPopularRevalidate: recentPopularSwr.revalidate,
+      recentPopularStartRevalidate: recentPopularSwr.startRevalidate,
       randomPostsPromise,
       milestones1k: milestones1kSwr.data,
-      milestones1kRevalidate: milestones1kSwr.revalidate,
+      milestones1kStartRevalidate: milestones1kSwr.startRevalidate,
       scatterData,
       levelChanges: levelChangesSwr.data,
-      levelChangesRevalidate: levelChangesSwr.revalidate,
+      levelChangesStartRevalidate: levelChangesSwr.startRevalidate,
       timelineMilestones,
       tagCloudGeneral,
       userStats,

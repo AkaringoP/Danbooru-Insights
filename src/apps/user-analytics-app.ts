@@ -838,15 +838,15 @@ export class UserAnalyticsApp {
         summaryStats,
         distributions,
         topPosts,
-        topPostsRevalidate,
+        topPostsStartRevalidate,
         recentPopularPosts,
-        recentPopularRevalidate,
+        recentPopularStartRevalidate,
         randomPostsPromise,
         milestones1k,
-        milestones1kRevalidate,
+        milestones1kStartRevalidate,
         scatterData,
         levelChanges,
-        levelChangesRevalidate,
+        levelChangesStartRevalidate,
         timelineMilestones,
         tagCloudGeneral,
         userStats,
@@ -854,24 +854,25 @@ export class UserAnalyticsApp {
         dataManager,
       } = dashboardData;
 
-      // "Weak SWR": the data fetch layer already wrote fresh values back to
-      // piestats before these promises resolved, so the next dashboard open
-      // reads the updated cache. We don't hot-swap the current view — that
-      // would mean threading setters through every widget and risks
-      // flickering. We only keep the promises alive so errors surface in
-      // logs instead of becoming silent unhandled rejections.
-      const revalidations: Array<[string, Promise<unknown> | undefined]> = [
-        ['topPosts', topPostsRevalidate],
-        ['recentPopular', recentPopularRevalidate],
-        ['milestones1k', milestones1kRevalidate],
-        ['levelChanges', levelChangesRevalidate],
-      ];
-      for (const [name, promise] of revalidations) {
-        if (!promise) continue;
-        void promise.catch((e: unknown) => {
-          console.warn(`[DI] SWR revalidate failed for ${name}`, e);
-        });
-      }
+      // "Weak SWR": cached values rendered above; the starters below will
+      // fire *after* render.total so revalidate traffic doesn't compete
+      // with the blocking path's distribution fetches at the rate limiter.
+      // Fresh values are written back to piestats inside each freshFetch,
+      // so the next dashboard open reads the updated cache.
+      const scheduleRevalidate = (
+        name: string,
+        starter: (() => Promise<unknown>) | undefined,
+      ) => {
+        if (!starter) return;
+        // Queue a microtask that runs after the current render sync chain.
+        // setTimeout(0) is enough: it yields to the browser so the painted
+        // dashboard is visible before the API calls go out.
+        setTimeout(() => {
+          starter().catch((e: unknown) => {
+            console.warn(`[DI] SWR revalidate failed for ${name}`, e);
+          });
+        }, 0);
+      };
       const {maxUploads, maxDate, firstUploadDate, lastUploadDate} =
         summaryStats;
       const today = new Date();
@@ -1625,6 +1626,13 @@ export class UserAnalyticsApp {
 
       // Update header status (ensure it's green if ready)
       void this.updateHeaderStatus();
+
+      // Fire SWR revalidations only now that the dashboard is painted. Any
+      // network traffic these start no longer blocks render.total.
+      scheduleRevalidate('topPosts', topPostsStartRevalidate);
+      scheduleRevalidate('recentPopular', recentPopularStartRevalidate);
+      scheduleRevalidate('milestones1k', milestones1kStartRevalidate);
+      scheduleRevalidate('levelChanges', levelChangesStartRevalidate);
     } finally {
       perfLogger.end('render.total', perfMeta);
       this.isRendering = false;
