@@ -35,6 +35,10 @@ export class UserAnalyticsApp {
   btnId: string;
   isFullySynced: boolean;
   isRendering: boolean;
+  /** Promise for the first updateHeaderStatus() call. Button click handlers
+   *  await this before reading isFullySynced to avoid racing against the
+   *  initial sync-status check (which runs fire-and-forget on mount). */
+  private initialStatusCheck: Promise<void> | null = null;
 
   /**
    * Initializes the UserAnalyticsApp.
@@ -180,6 +184,19 @@ export class UserAnalyticsApp {
         e.preventDefault();
         e.stopPropagation();
 
+        // Wait for the initial sync-status check to complete before reading
+        // this.isFullySynced. Otherwise a click placed during the first
+        // check-in-progress window (typical after a page refresh) sees the
+        // constructor's placeholder value and triggers an unnecessary sync.
+        if (this.initialStatusCheck) {
+          try {
+            await this.initialStatusCheck;
+          } catch {
+            // Ignored — status check errors are already logged in
+            // updateHeaderStatus; we still let the click proceed.
+          }
+        }
+
         // Auto-Sync Check: If not synced, wait for sync THEN open
         if (this.isFullySynced === false) {
           try {
@@ -206,8 +223,13 @@ export class UserAnalyticsApp {
 
       targetElement.appendChild(container);
 
-      // Initial Status Check (fire-and-forget UI refresh)
-      void this.updateHeaderStatus();
+      // Initial Status Check — kick off but also expose the promise so the
+      // button click handler can await it before deciding whether to trigger
+      // an auto-sync. Without this, a click placed before the check resolves
+      // sees the constructor's placeholder (isFullySynced = false) and fires
+      // performPartialSync even on already-synced users.
+      this.initialStatusCheck = this.updateHeaderStatus();
+      void this.initialStatusCheck;
     } else {
       console.warn('[AnalyticsApp] Could not find H1 to inject button');
     }
