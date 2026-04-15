@@ -23,6 +23,10 @@ export class GraphRenderer {
   settingsManager: SettingsManager;
   db: Database;
   dataManager: DataManager | null;
+  /** Re-runs the width/offset constraints and Hourly panel sync. Set by
+   *  injectSkeleton() so renderGraph() can trigger a reflow once the
+   *  CalHeatmap SVG has painted (its natural width is measurable then). */
+  reapplyGraphConstraints: (() => void) | null = null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -33,6 +37,7 @@ export class GraphRenderer {
     this.settingsManager = settingsManager;
     this.db = db;
     this.dataManager = null;
+    this.reapplyGraphConstraints = null;
   }
 
   /**
@@ -101,6 +106,32 @@ export class GraphRenderer {
     const savedWidth = grassSettings ? grassSettings.width : null;
     const savedX = grassSettings ? grassSettings.xOffset : 0;
 
+    // Panel's CSS min-width — fallback when the panel element isn't in the
+    // DOM yet (very first frame on a fresh page load).
+    const HOURLY_PANEL_MIN_WIDTH = 310;
+
+    // Width of the fully rendered CalHeatmap — 12 months × ~4.3 weeks × 13 px
+    // per cell comes out near 700 px. `scrollWidth` is used so horizontal
+    // overflow doesn't mask the natural content size.
+    const measureNaturalWidth = (): number | null => {
+      const heatmap = container.querySelector(
+        '#cal-heatmap',
+      ) as HTMLElement | null;
+      if (!heatmap) return null;
+      const w = heatmap.scrollWidth;
+      return w > 0 ? Math.ceil(w) : null;
+    };
+
+    // Hourly Distribution panel uses `width: fit-content; min-width: 310px`
+    // so its offsetWidth is the real floor we want to enforce — if the
+    // heatmap narrows below the panel, the card stack looks asymmetric.
+    const measureHourlyMinWidth = (): number => {
+      const panel = document.getElementById('danbooru-grass-panel');
+      if (!panel) return HOURLY_PANEL_MIN_WIDTH;
+      const w = panel.offsetWidth;
+      return w > 0 ? w : HOURLY_PANEL_MIN_WIDTH;
+    };
+
     // Constraints logic
     const applyConstraints = () => {
       const wrapperWidth = wrapper.offsetWidth;
@@ -118,10 +149,16 @@ export class GraphRenderer {
         maxAvailableWidth = Math.max(300, wrapperWidth - statsWidth - gap);
       }
 
+      // Floor: the Hourly panel's width, unless the viewport is narrower than
+      // the panel itself (mobile / small window) — then we yield to the
+      // viewport so the heatmap doesn't blow past what's available.
+      const hourlyMin = measureHourlyMinWidth();
+      const minWidth = Math.min(hourlyMin, maxAvailableWidth);
+
       if (savedWidth) {
         const numericWidth = parseFloat(String(savedWidth));
         const clampedWidth = Math.max(
-          300,
+          minWidth,
           Math.min(numericWidth, maxAvailableWidth),
         );
         container.style.flex = '0 0 auto';
@@ -134,7 +171,21 @@ export class GraphRenderer {
         );
         container.style.transform = `translateX(${clampedX}px)`;
       } else {
-        container.style.flex = '1';
+        // No saved width — fit to the heatmap's natural size (12 months).
+        // Before the CalHeatmap SVG exists we can't measure it, so fall back
+        // to the pre-existing `flex: 1` behaviour; the ResizeObserver /
+        // post-paint hook below will re-run once measurement succeeds.
+        const natural = measureNaturalWidth();
+        if (natural !== null) {
+          const target = Math.max(
+            minWidth,
+            Math.min(natural, maxAvailableWidth),
+          );
+          container.style.flex = '0 0 auto';
+          container.style.width = `${target}px`;
+        } else {
+          container.style.flex = '1';
+        }
         container.style.transform = 'translateX(0px)';
       }
     };
@@ -148,6 +199,13 @@ export class GraphRenderer {
           container.style.transform?.replace(/translateX\(|px\)/g, '') || '0',
         ) || 0;
       panel.style.marginLeft = xOffset > 0 ? `${xOffset}px` : '0';
+    };
+
+    // Expose applyConstraints to the CalHeatmap paint callback below so it
+    // can re-run once the SVG is in the DOM and measureNaturalWidth() works.
+    this.reapplyGraphConstraints = () => {
+      applyConstraints();
+      syncPanelPosition();
     };
 
     // Initial apply (might be 0 if not 100% rendered, so we use a small delay or observer)
@@ -194,6 +252,11 @@ export class GraphRenderer {
     ): HTMLDivElement => {
       const handle = document.createElement('div');
       if (type === 'resize') {
+        // Background is faint by default — enough to hint at an interactive
+        // zone without distracting from the heatmap — and darkens on hover
+        // so the user can tell exactly where the drag target is. Rounded on
+        // the inside corners only (outside edge lives on the container edge).
+        const insideRadius = side === 'left' ? '0 8px 8px 0' : '8px 0 0 8px';
         handle.style.cssText = `
             position: absolute;
             top: 0;
@@ -202,7 +265,16 @@ export class GraphRenderer {
             height: 100%;
             cursor: col-resize;
             z-index: 101;
+            background: rgba(136, 136, 136, 0.08);
+            border-radius: ${insideRadius};
+            transition: background 0.15s ease;
           `;
+        handle.addEventListener('mouseenter', () => {
+          handle.style.background = 'rgba(136, 136, 136, 0.25)';
+        });
+        handle.addEventListener('mouseleave', () => {
+          handle.style.background = 'rgba(136, 136, 136, 0.08)';
+        });
       } else if (type === 'move') {
         handle.style.cssText = `
             position: absolute;
@@ -247,6 +319,12 @@ export class GraphRenderer {
             maxAvailableWidth = Math.max(300, wrapperWidth - statsWidth - gap);
           }
 
+          // Drag floor: the Hourly panel's rendered width (width below that
+          // would leave the card stack asymmetric with the panel jutting
+          // out). If the viewport is narrower than the panel we yield to
+          // the viewport instead so the drag doesn't stick.
+          const minWidth = Math.min(measureHourlyMinWidth(), maxAvailableWidth);
+
           if (type === 'move') {
             let newX = startXOffset + delta;
             // Don't go left into stats, don't go right out of wrapper
@@ -256,7 +334,7 @@ export class GraphRenderer {
             if (side === 'right') {
               const maxWidth = maxAvailableWidth - startXOffset;
               const newWidth = Math.max(
-                300,
+                minWidth,
                 Math.min(startWidth + delta, maxWidth),
               );
               container.style.flex = '0 0 auto';
@@ -265,9 +343,9 @@ export class GraphRenderer {
               // Expansion left is limited by XOffset reaching 0
               const minDelta = -startXOffset;
               const clampedDelta = Math.max(delta, minDelta);
-              const newWidth = Math.max(300, startWidth - clampedDelta);
+              const newWidth = Math.max(minWidth, startWidth - clampedDelta);
 
-              // If width hits 300, stop moving X
+              // If width hits minWidth, stop moving X
               const finalDelta = startWidth - newWidth;
               const newX = startXOffset + finalDelta;
 
@@ -1350,6 +1428,12 @@ export class GraphRenderer {
     win.cal
       .paint(buildPaintConfig())
       .then(() => {
+        // Heatmap SVG now exists — re-run applyConstraints so the
+        // "fit to natural width" branch can actually measure it. On the
+        // very first render the initial setTimeout-based apply saw no SVG
+        // and fell through to `flex: 1`.
+        this.reapplyGraphConstraints?.();
+
         // Listen for theme/grass changes — destroy + re-paint CalHeatmap
         const onThemeChange = () => {
           try {
@@ -1361,6 +1445,9 @@ export class GraphRenderer {
             win.cal.paint(buildPaintConfig()).then(() => {
               // Restore scroll position after paint
               if (sw) sw.scrollLeft = savedScroll;
+              // Natural width may have shifted (cell size tweaks via theme)
+              // so re-apply once the repaint settles.
+              this.reapplyGraphConstraints?.();
             });
           } catch (e) {
             console.debug('[DI] CalHeatmap re-paint failed', e);
