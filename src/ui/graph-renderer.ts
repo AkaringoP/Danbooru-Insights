@@ -298,11 +298,22 @@ export class GraphRenderer {
       handle.onmousedown = e => {
         e.preventDefault();
         const startX = e.clientX;
+        const startY = e.clientY;
         const startWidth = container.offsetWidth;
         const startXOffset =
           parseFloat(
             container.style.transform.replace(/translateX\(|px\)/g, ''),
           ) || 0;
+
+        // Vertical drag-to-reorder state (move handle only). A drop zone
+        // hint appears — and mode switches on mouseup — only if the user
+        // crosses ACTIVATION_THRESHOLD in the direction opposite the
+        // current layout mode. Pure horizontal drags are untouched.
+        const ACTIVATION_THRESHOLD = 30;
+        const currentMode: 'inline' | 'below' =
+          this.savedLayoutMode === 'below' ? 'below' : 'inline';
+        let verticalIntent = false;
+        let candidateMode: 'inline' | 'below' = currentMode;
 
         const onMouseMove = (mE: MouseEvent): void => {
           const delta = mE.clientX - startX;
@@ -335,6 +346,20 @@ export class GraphRenderer {
             // Don't go left into stats, don't go right out of wrapper
             newX = Math.max(0, Math.min(newX, maxAvailableWidth - startWidth));
             container.style.transform = `translateX(${newX}px)`;
+
+            // Vertical intent: only active past the threshold AND only if
+            // the direction would actually change the mode. Same-mode
+            // gesture (e.g. dragging further below while already below)
+            // stays inactive so no hint flashes and no redundant save
+            // happens.
+            const deltaY = mE.clientY - startY;
+            if (Math.abs(deltaY) >= ACTIVATION_THRESHOLD) {
+              candidateMode = deltaY > 0 ? 'below' : 'inline';
+              verticalIntent = candidateMode !== currentMode;
+            } else {
+              verticalIntent = false;
+              candidateMode = currentMode;
+            }
           } else if (type === 'resize') {
             if (side === 'right') {
               const maxWidth = maxAvailableWidth - startXOffset;
@@ -365,15 +390,40 @@ export class GraphRenderer {
         const onMouseUp = () => {
           document.removeEventListener('mousemove', onMouseMove);
           document.removeEventListener('mouseup', onMouseUp);
+
+          // Commit mode change first so the persisted record below
+          // reflects the new layout. Re-running applyConstraints here
+          // also picks up the new isWrapped state after flex-basis flips.
+          const modeChanged =
+            type === 'move' && verticalIntent && candidateMode !== currentMode;
+          if (modeChanged) {
+            const columnWrapper = document.getElementById(
+              'danbooru-grass-column',
+            );
+            if (columnWrapper) {
+              columnWrapper.style.flexBasis =
+                candidateMode === 'below' ? '100%' : '';
+            }
+            this.savedLayoutMode = candidateMode;
+            applyConstraints();
+          }
+
           const finalX =
             parseFloat(
               container.style.transform.replace(/translateX\(|px\)/g, ''),
             ) || 0;
-          // Fire-and-forget: persistence of layout settings on drag-end.
-          void dataManager.saveGrassSettings(userId, {
+          // Always include layoutMode in the put — saveGrassSettings is a
+          // Dexie `put` (full-record replace), so omitting the field would
+          // wipe the saved mode on every resize/move drag.
+          const settingsToSave: Record<string, unknown> = {
             width: container.style.width,
             xOffset: finalX,
-          });
+          };
+          if (this.savedLayoutMode) {
+            settingsToSave.layoutMode = this.savedLayoutMode;
+          }
+          // Fire-and-forget: persistence of layout settings on drag-end.
+          void dataManager.saveGrassSettings(userId, settingsToSave);
           syncPanelPosition();
         };
 
