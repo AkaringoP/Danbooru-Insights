@@ -290,15 +290,22 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return {count: 0, lastSync: null};
 
-    const count = await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .count();
-    const lastEntry = await this.db.posts.orderBy('created_at').last();
+    // Walks the [uploader_id+created_at] compound index (DB v11) from the
+    // newest post backwards and stops at the first hit — so the latest entry
+    // for this specific user is resolved in O(log n) instead of scanning the
+    // full posts table (which also previously risked returning another
+    // user's latest created_at).
+    const [count, lastEntry] = await Promise.all([
+      this.db.posts.where('uploader_id').equals(uploaderId).count(),
+      this.db.posts
+        .where('[uploader_id+created_at]')
+        .between([uploaderId, ''], [uploaderId, '\uffff'])
+        .last(),
+    ]);
 
     return {
       count,
-      lastSync: lastEntry ? lastEntry.created_at : null, // Approximate
+      lastSync: lastEntry ? lastEntry.created_at : null,
     };
   }
 
@@ -558,9 +565,19 @@ export class AnalyticsDataManager extends DataManager {
     userInfo: TargetUser,
     isNsfwEnabled: boolean = false,
     customStep: 'auto' | 'repdigit' | number = 'auto',
+    forceRefresh: boolean = false,
   ): Promise<MilestoneEntry[]> {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return [];
+
+    // Cache key includes step and nsfw flag — thumbnails for NSFW posts are
+    // only fetched when the flag is on, so results differ per combination.
+    // Invalidated via piestats wipe on Full Sync (same pattern as distributions).
+    const cacheKey = `milestones_${customStep}_${isNsfwEnabled ? '1' : '0'}`;
+    if (!forceRefresh) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) return cached as MilestoneEntry[];
+    }
 
     const total = await this.db.posts
       .where('uploader_id')
@@ -658,6 +675,7 @@ export class AnalyticsDataManager extends DataManager {
     // Let's sort strictly by milestone ASC.
     results.sort((a, b) => a.milestone - b.milestone);
 
+    await this.saveStats(cacheKey, uploaderId, results);
     return results;
   }
 
@@ -744,8 +762,19 @@ export class AnalyticsDataManager extends DataManager {
   async getStatusDistribution(
     userInfo: TargetUser,
     startDate: string | Date | null = null,
+    forceRefresh: boolean = false,
   ): Promise<{name: string; count: number; label: string}[]> {
     if (!userInfo.name) return [];
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'status_dist';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {name: string; count: number; label: string}[];
+      }
+    }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const statuses = [
@@ -798,7 +827,9 @@ export class AnalyticsDataManager extends DataManager {
       }
     });
 
-    return Promise.all(tasks);
+    const result = await Promise.all(tasks);
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
@@ -811,8 +842,19 @@ export class AnalyticsDataManager extends DataManager {
   async getRatingDistribution(
     userInfo: TargetUser,
     startDate: string | Date | null = null,
+    forceRefresh: boolean = false,
   ): Promise<{rating: string; count: number; label: string}[]> {
     if (!userInfo.name) return [];
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'rating_dist';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {rating: string; count: number; label: string}[];
+      }
+    }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const ratings = ['g', 's', 'q', 'e'];
@@ -863,6 +905,7 @@ export class AnalyticsDataManager extends DataManager {
 
     try {
       const results = await Promise.all(tasks);
+      if (uploaderId) await this.saveStats(cacheKey, uploaderId, results);
       return results;
     } catch (e: unknown) {
       console.error('[Danbooru Grass] Failed to fetch rating distribution', e);
@@ -1621,16 +1664,37 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Fetches top posts per rating (G/S/Q/E) in parallel using API.
+   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
+   * @param {boolean} forceRefresh Bypass cache and re-fetch.
    * @return {!Promise<{g: ?Object, s: ?Object, q: ?Object, e: ?Object}>} Top post per rating.
    */
-  async getTopPostsByType(userInfo: TargetUser): Promise<{
+  async getTopPostsByType(
+    userInfo: TargetUser,
+    forceRefresh: boolean = false,
+  ): Promise<{
     g: DanbooruPost | null;
     s: DanbooruPost | null;
     q: DanbooruPost | null;
     e: DanbooruPost | null;
   }> {
     if (!userInfo.name) return {g: null, s: null, q: null, e: null};
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'top_posts_by_type';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {
+          g: DanbooruPost | null;
+          s: DanbooruPost | null;
+          q: DanbooruPost | null;
+          e: DanbooruPost | null;
+        };
+      }
+    }
 
     // Helper for fetching 1 top post
     const fetchTop = async (
@@ -1662,18 +1726,34 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('e'),
     ]);
 
-    return {g, s, q, e};
+    const result = {g, s, q, e};
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
    * Fetches Recent Popular (age < 1w) posts for SFW and NSFW in parallel.
+   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
+   * @param {boolean} forceRefresh Bypass cache and re-fetch.
    * @return {!Promise<{sfw: ?Object, nsfw: ?Object}>} Recent popular post per SFW/NSFW.
    */
   async getRecentPopularPosts(
     userInfo: TargetUser,
+    forceRefresh: boolean = false,
   ): Promise<{sfw: DanbooruPost | null; nsfw: DanbooruPost | null}> {
     if (!userInfo.name) return {sfw: null, nsfw: null};
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'recent_popular_posts';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {sfw: DanbooruPost | null; nsfw: DanbooruPost | null};
+      }
+    }
 
     const fetchTop = async (
       ratingTag: string,
@@ -1700,7 +1780,9 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('is:nsfw'),
     ]);
 
-    return {sfw, nsfw};
+    const result = {sfw, nsfw};
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
@@ -2188,9 +2270,23 @@ export class AnalyticsDataManager extends DataManager {
    */
   async getLevelChangeHistory(
     userInfo: TargetUser,
+    forceRefresh: boolean = false,
   ): Promise<LevelChangeEvent[]> {
     if (!userInfo.name) return [];
     const normalizedName = userInfo.name.replace(/ /g, '_');
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'level_change_history';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        // Dates were JSON-stringified to strings when cached — revive them.
+        return (
+          cached as Array<Omit<LevelChangeEvent, 'date'> & {date: string}>
+        ).map(e => ({...e, date: new Date(e.date)}));
+      }
+    }
 
     // Known Danbooru levels ordered by rank (lowest → highest)
     const LEVEL_HIERARCHY = [
@@ -2279,12 +2375,15 @@ export class AnalyticsDataManager extends DataManager {
       // Sort oldest first, deduplicate by date+fromLevel+toLevel
       events.sort((a, b) => a.date.getTime() - b.date.getTime());
       const seen = new Set<string>();
-      return events.filter(e => {
+      const dedup = events.filter(e => {
         const key = `${e.date.getTime()}-${e.fromLevel}-${e.toLevel}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
+
+      if (uploaderId) await this.saveStats(cacheKey, uploaderId, dedup);
+      return dedup;
     } catch (e: unknown) {
       console.warn('[Danbooru Grass] Failed to fetch level change history', e);
       return [];
@@ -3589,8 +3688,11 @@ export class AnalyticsDataManager extends DataManager {
     perfLogger.start('sync.refreshStats.total');
     try {
       await Promise.all([
+        perfLogger.wrap('sync.refreshStats.status', () =>
+          this.getStatusDistribution(userInfo, null, true),
+        ),
         perfLogger.wrap('sync.refreshStats.rating', () =>
-          this.getRatingDistribution(userInfo),
+          this.getRatingDistribution(userInfo, null, true),
         ),
         perfLogger.wrap('sync.refreshStats.character', () =>
           this.getCharacterDistribution(
@@ -3630,14 +3732,28 @@ export class AnalyticsDataManager extends DataManager {
         perfLogger.wrap('sync.refreshStats.randomPosts', () =>
           this.getRandomPosts(userInfo),
         ),
+        // Warm the level-change-history cache on every sync — the dashboard
+        // always reads it, and the API is cheap compared to the distribution
+        // calls above (no per-user search combinatorics).
+        perfLogger.wrap('sync.refreshStats.levelChanges', () =>
+          this.getLevelChangeHistory(userInfo, true),
+        ),
+        // Warm the milestones cache for the step=1000 view that renderDashboard
+        // always requests. Both NSFW values so toggling is a cache hit too.
+        perfLogger.wrap('sync.refreshStats.milestonesSfw', () =>
+          this.getMilestones(userInfo, false, 1000, true),
+        ),
+        perfLogger.wrap('sync.refreshStats.milestonesNsfw', () =>
+          this.getMilestones(userInfo, true, 1000, true),
+        ),
         // Refresh Popular Posts only on Full Sync
         ...(isFullSync
           ? [
               perfLogger.wrap('sync.refreshStats.topPostsByType', () =>
-                this.getTopPostsByType(userInfo),
+                this.getTopPostsByType(userInfo, true),
               ),
               perfLogger.wrap('sync.refreshStats.recentPopular', () =>
-                this.getRecentPopularPosts(userInfo),
+                this.getRecentPopularPosts(userInfo, true),
               ),
               perfLogger.wrap('sync.refreshStats.topScoreSfw', () =>
                 this.getTopScorePost(userInfo, 'sfw'),
