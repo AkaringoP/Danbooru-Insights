@@ -315,6 +315,54 @@ export class GraphRenderer {
         let verticalIntent = false;
         let candidateMode: 'inline' | 'below' = currentMode;
 
+        // Drop-zone hint: small directional label anchored near the handle
+        // so the user sees feedback without scanning the full viewport.
+        // Created lazily on first show, torn down on mouseup.
+        let dropHint: HTMLDivElement | null = null;
+        const showDropHint = (mode: 'inline' | 'below'): void => {
+          if (!dropHint) {
+            dropHint = document.createElement('div');
+            dropHint.id = 'danbooru-grass-drop-hint';
+            dropHint.style.cssText = `
+                position: fixed;
+                width: 160px;
+                height: 40px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: rgba(66, 153, 225, 0.15);
+                border: 2px dashed rgba(66, 153, 225, 0.75);
+                border-radius: 6px;
+                font-size: 0.85em;
+                font-weight: 600;
+                color: var(--text-color, #333);
+                pointer-events: none;
+                z-index: 10000;
+                box-sizing: border-box;
+              `;
+            document.body.appendChild(dropHint);
+          }
+          dropHint.textContent =
+            mode === 'below' ? 'Move below ↓' : 'Move back up ↑';
+          dropHint.style.display = 'flex';
+          const rect = handle.getBoundingClientRect();
+          const gap = 12;
+          const hintHeight = 40;
+          const hintHalfWidth = 80;
+          const centerX = rect.left + rect.width / 2;
+          const top =
+            mode === 'below' ? rect.bottom + gap : rect.top - gap - hintHeight;
+          dropHint.style.left = `${centerX - hintHalfWidth}px`;
+          dropHint.style.top = `${top}px`;
+        };
+        const hideDropHint = (): void => {
+          if (dropHint) dropHint.style.display = 'none';
+        };
+        const destroyDropHint = (): void => {
+          dropHint?.remove();
+          dropHint = null;
+        };
+
         const onMouseMove = (mE: MouseEvent): void => {
           const delta = mE.clientX - startX;
 
@@ -360,6 +408,8 @@ export class GraphRenderer {
               verticalIntent = false;
               candidateMode = currentMode;
             }
+            if (verticalIntent) showDropHint(candidateMode);
+            else hideDropHint();
           } else if (type === 'resize') {
             if (side === 'right') {
               const maxWidth = maxAvailableWidth - startXOffset;
@@ -390,6 +440,7 @@ export class GraphRenderer {
         const onMouseUp = () => {
           document.removeEventListener('mousemove', onMouseMove);
           document.removeEventListener('mouseup', onMouseUp);
+          destroyDropHint();
 
           // Commit mode change first so the persisted record below
           // reflects the new layout. Re-running applyConstraints here
