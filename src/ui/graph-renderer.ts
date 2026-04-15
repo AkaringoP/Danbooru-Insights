@@ -105,10 +105,15 @@ export class GraphRenderer {
     container.id = this.containerId;
     container.style.position = 'relative';
 
-    // Fetch Per-User Settings from IndexedDB
+    // Fetch Per-User Settings from IndexedDB. `savedWidth`/`savedX` are
+    // mutable so the move-handle's vertical drop handler can clear them on
+    // a mode switch — applyConstraints then falls through to the
+    // natural-width branch (fit to 12 months, translateX = 0).
     const grassSettings = await dataManager.getGrassSettings(userId);
-    const savedWidth = grassSettings ? grassSettings.width : null;
-    const savedX = grassSettings ? grassSettings.xOffset : 0;
+    let savedWidth: number | string | null | undefined = grassSettings
+      ? grassSettings.width
+      : null;
+    let savedX: number | undefined = grassSettings ? grassSettings.xOffset : 0;
     this.savedLayoutMode = grassSettings?.layoutMode ?? null;
 
     // Panel's CSS min-width — fallback when the panel element isn't in the
@@ -456,6 +461,19 @@ export class GraphRenderer {
                 candidateMode === 'below' ? '100%' : '';
             }
             this.savedLayoutMode = candidateMode;
+
+            // Normalize position + width for the new mode: park the
+            // container at xOffset=0 and fit to the heatmap's natural
+            // width (capped at whatever the new row affords). We clear
+            // the closed-over savedWidth/savedX and the inline styles so
+            // applyConstraints takes the "no saved width" branch, which
+            // already does exactly this (`Math.min(natural, maxAvail)` +
+            // `translateX(0px)`).
+            savedWidth = null;
+            savedX = 0;
+            container.style.width = '';
+            container.style.flex = '1';
+            container.style.transform = 'translateX(0px)';
             applyConstraints();
           }
 
