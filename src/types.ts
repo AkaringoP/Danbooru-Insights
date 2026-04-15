@@ -113,6 +113,7 @@ export interface GrassSettings {
   userId: string;
   width?: number;
   xOffset?: number;
+  layoutMode?: 'inline' | 'below';
   updated_at: string;
 }
 

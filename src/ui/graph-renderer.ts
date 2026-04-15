@@ -27,6 +27,10 @@ export class GraphRenderer {
    *  injectSkeleton() so renderGraph() can trigger a reflow once the
    *  CalHeatmap SVG has painted (its natural width is measurable then). */
   reapplyGraphConstraints: (() => void) | null = null;
+  /** Saved vertical layout. `'below'` forces column wrapper onto its own
+   *  flex row via `flex-basis: 100%`. `null` / `'inline'` keeps the default
+   *  side-by-side layout. Loaded from `grass_settings` in injectSkeleton. */
+  savedLayoutMode: 'inline' | 'below' | null = null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -105,6 +109,7 @@ export class GraphRenderer {
     const grassSettings = await dataManager.getGrassSettings(userId);
     const savedWidth = grassSettings ? grassSettings.width : null;
     const savedX = grassSettings ? grassSettings.xOffset : 0;
+    this.savedLayoutMode = grassSettings?.layoutMode ?? null;
 
     // Panel's CSS min-width — fallback when the panel element isn't in the
     // DOM yet (very first frame on a fresh page load).
@@ -1259,6 +1264,13 @@ export class GraphRenderer {
           // and would clobber the px value the user picked via the resize
           // handle.
         }
+      }
+      // Apply persisted vertical layout: 'below' forces the column to wrap
+      // onto its own flex row (stats above, grass below). No-op for
+      // 'inline'/undefined.
+      if (columnWrapper) {
+        columnWrapper.style.flexBasis =
+          this.savedLayoutMode === 'below' ? '100%' : '';
       }
 
       let panel = document.getElementById('danbooru-grass-panel');
