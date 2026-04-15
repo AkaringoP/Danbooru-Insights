@@ -194,6 +194,11 @@ export class GraphRenderer {
     ): HTMLDivElement => {
       const handle = document.createElement('div');
       if (type === 'resize') {
+        // Background is faint by default — enough to hint at an interactive
+        // zone without distracting from the heatmap — and darkens on hover
+        // so the user can tell exactly where the drag target is. Rounded on
+        // the inside corners only (outside edge lives on the container edge).
+        const insideRadius = side === 'left' ? '0 8px 8px 0' : '8px 0 0 8px';
         handle.style.cssText = `
             position: absolute;
             top: 0;
@@ -202,7 +207,16 @@ export class GraphRenderer {
             height: 100%;
             cursor: col-resize;
             z-index: 101;
+            background: rgba(136, 136, 136, 0.08);
+            border-radius: ${insideRadius};
+            transition: background 0.15s ease;
           `;
+        handle.addEventListener('mouseenter', () => {
+          handle.style.background = 'rgba(136, 136, 136, 0.25)';
+        });
+        handle.addEventListener('mouseleave', () => {
+          handle.style.background = 'rgba(136, 136, 136, 0.08)';
+        });
       } else if (type === 'move') {
         handle.style.cssText = `
             position: absolute;
