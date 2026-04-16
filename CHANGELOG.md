@@ -4,6 +4,13 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.2.3 — Fix Delta Fetch Page Skip
+
+### Bug Fix
+- **Fix pages skipped during adaptive batch scale-up**: When delta fetch scaled batch size from 1 to 3 after a full first page, `page += batchSize` used the *new* batch size (3) instead of the *fetched* batch size (1), skipping pages 2–3 entirely. This caused partial data overwrites — e.g. a day with 1030 approvals could be written as 509. Fixed by tracking the actual fetched batch size separately.
+
+---
+
 ## v9.2.2 — Increase Page Limit for Approvals & Notes
 
 ### Improvement
