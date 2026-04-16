@@ -111,8 +111,19 @@ export interface PostVariant {
 /** GrassApp layout settings persisted per user. */
 export interface GrassSettings {
   userId: string;
+  /** Legacy single-layout width (pre-vertical-drag). Still read as a
+   *  fallback for inline values when per-mode fields are absent; new
+   *  writes populate inlineWidth/belowWidth instead. */
   width?: number;
+  /** Legacy single-layout xOffset. Same fallback role as `width`. */
   xOffset?: number;
+  /** Per-layout-mode persistence so horizontal resize/offset is
+   *  preserved across inline↔below switches. `null` means "not yet set
+   *  for this mode" — applyConstraints falls through to natural width. */
+  inlineWidth?: number | null;
+  inlineXOffset?: number | null;
+  belowWidth?: number | null;
+  belowXOffset?: number | null;
   layoutMode?: 'inline' | 'below';
   updated_at: string;
 }
