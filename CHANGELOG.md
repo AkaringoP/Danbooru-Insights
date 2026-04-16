@@ -4,6 +4,41 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.2.0 — GrassApp Vertical Drag, Performance & Theme Refresh
+
+### GrassApp Vertical Drag-to-Below
+- **Inline ↔ Below layout switching**: Drag the move handle vertically (30px+ threshold) to toggle GrassApp between stats-beside (inline) and stats-below (below) mode. Hysteresis (30px activate / 10px deactivate) prevents accidental switches.
+- **Per-mode width & offset persistence**: Each layout mode independently remembers its width and horizontal offset — switching modes restores the previously set dimensions instead of resetting.
+- **Destination-bar visual hint**: A glowing pulse bar appears at the container edge in the drag direction with a directional label ("Move to below ↓" / "Move to side ↑").
+- **Natural width ceiling**: Container width is capped at the CalHeatmap 12-month intrinsic span (measured via `.ch-domain` SVG bounding rects, cached after paint with rAF deferral). Resize handles and initial layout both respect this cap — no empty space beyond December.
+- **Resize-time scroll anchoring**: During resize drag, `scrollToCurrentMonth()` runs every frame so the current month stays in view as the container narrows.
+- **Long Previous Names support**: Stats section gains `max-width: 60%` + `overflow-wrap: break-word` so users with many previous names still get GrassApp beside stats.
+- **Visual mode detection**: Naturally-wrapped users (viewport too narrow for inline) are correctly detected via `offsetTop` fallback even without a saved `layoutMode`.
+
+### GrassApp Width & Handle Improvements
+- **Natural width fit**: Container auto-sizes to CalHeatmap's 12-month width instead of stretching to fill the row. Eliminates the "empty space right of December" problem.
+- **Hourly panel as drag floor**: Minimum width clamped to the Hourly Distribution panel's rendered width instead of a hardcoded 300px.
+- **Resize handle visibility**: Left/right resize handles now have a faint background (`rgba(136,136,136,0.08)`) with hover darkening and rounded inside corners for discoverability.
+
+### Dashboard Render Performance
+- **Stale-While-Revalidate (SWR) caching**: 4 cached `fetchData` children (Milestones, TopPosts, RecentPopular, LevelChange) return stale piestats instantly and revalidate in the background. Revalidation thunks are deferred via `setTimeout(0)` until after `render.total` completes to avoid rate-limiter contention.
+- **Random posts off critical path**: `getRandomPosts` moved from the blocking `Promise.all` to a post-render microtask.
+- **Status/Rating SWR**: Distribution stats also use the SWR pattern with deferred revalidation.
+- **Auto-sync race fix**: `isFullySynced` initialization awaited before the sync button handler reads it, preventing spurious partial syncs on fast page loads.
+
+### Theme Changes
+- **Dracula replaces Newspaper**: Newspaper (`bg: #f0f0f0`) was a light theme misplaced in the dark section. Replaced with Dracula (`bg: #282a36`) with Green, Pink, Purple, and Cyan grass options. Existing Newspaper users auto-fallback to Light.
+- **Theme preview link**: "Preview all" link next to "Color Themes" in the settings popover opens the GitHub Pages-hosted preview page with all 12 themes and 48 grass palettes.
+- **Performance instrumentation**: Build-gated `PerfLogger` with two-stage gating (build-time dead-code elimination on main + runtime localStorage opt-in). 20+ labeled measurement points across sync and render paths.
+
+### Internal
+- `GrassSettings` extended with `inlineWidth`, `inlineXOffset`, `belowWidth`, `belowXOffset`, `layoutMode` fields (Dexie schemaless — no version bump).
+- `scrollToCurrentMonth()` extracted as a `GraphRenderer` class method for reuse across paint, mode-switch, and resize contexts.
+- `measureNaturalWidth()` uses `.ch-domain` `getBoundingClientRect` with labels/padding accounting, cached with rAF-deferred invalidation.
+- `theme-preview.html` added as a GitHub Pages-hosted visual reference for all themes.
+
+---
+
 ## v9.1.0 — Dark Mode, Code Quality Overhaul & Perf Fix
 
 ### Dashboard Dark Mode (UserAnalyticsApp, TagAnalyticsApp)
