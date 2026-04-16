@@ -4,6 +4,16 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.2.1 — Adaptive Batch Size for Approvals
+
+### Bug Fix
+- **Approvals full fetch no longer throttled to batch size 1**: Approvals previously forced `BATCH_SIZE=1` regardless of context, making large fetches (e.g. 29,000+ items) ~5× slower than necessary. Now uses the same parallel batching (size 5) as uploads and notes.
+
+### Improvement
+- **Adaptive batch size for delta fetches**: Delta fetches start with batch size 1 (optimal for the common case of ≤200 items in the 3-day safety buffer). If the first page returns full (200 items), batch size scales up to 5 for the remaining pages.
+
+---
+
 ## v9.2.0 — GrassApp Vertical Drag, Performance & Theme Refresh
 
 ### GrassApp Vertical Drag-to-Below

@@ -691,20 +691,20 @@ export class DataManager {
     let allItems: ApiItem[] = [];
     let page = 1;
 
-    // [Modified] Dynamic Batch Size
-    // - Approvals: always 1 (per-request cooldown)
-    // - Delta fetches (narrow date range, usually <1 page): 1 to avoid
-    //   firing 4 empty pages in parallel
-    // - Full initial fetches: 5 to parallelize a large backlog
+    // Adaptive Batch Size
+    // - Full initial fetches start at 5 to parallelize a large backlog
+    // - Delta fetches start at 1 (narrow range, usually <1 page), then
+    //   scale up to 5 if the first page comes back full (200 items)
+    const FULL_BATCH = 5;
+    let batchSize = isDelta ? 1 : FULL_BATCH;
     const isApprovals = endpoint.includes('/post_approvals.json');
-    const BATCH_SIZE = isApprovals || isDelta ? 1 : 5;
     const DELAY_BETWEEN_BATCHES = 150;
 
     while (true) {
       const promises: Array<Promise<{page: number; data: ApiItem[]}>> = [];
 
       // 1. Prepare Batch Requests
-      for (let i = 0; i < BATCH_SIZE; i++) {
+      for (let i = 0; i < batchSize; i++) {
         const currentPage = page + i;
         // URLSearchParams requires string values; params contains mixed types at runtime
 
@@ -821,7 +821,18 @@ export class DataManager {
 
       if (finished) break;
 
-      page += BATCH_SIZE;
+      // Adaptive scale-up: if delta started with batchSize=1 and the
+      // first page was full, there's more data than expected — switch
+      // to full parallel batching for the remaining pages.
+      if (batchSize < FULL_BATCH && page === 1) {
+        const limit = params['limit'] as number;
+        const firstPageFull = batchResults[0]?.data?.length === limit;
+        if (firstPageFull) {
+          batchSize = FULL_BATCH;
+        }
+      }
+
+      page += batchSize;
       if (page > 1000) {
         console.warn('[Danbooru Grass] Hit safety page limit.');
         break;
