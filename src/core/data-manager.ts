@@ -823,6 +823,10 @@ export class DataManager {
 
       if (finished) break;
 
+      // Advance page by the batch size used for THIS iteration's fetches,
+      // not the potentially updated one.
+      const fetchedBatch = batchSize;
+
       // Adaptive scale-up: if delta started with batchSize=1 and the
       // first page was full, there's more data than expected — switch
       // to moderate parallel batching for the remaining pages.
@@ -834,7 +838,7 @@ export class DataManager {
         }
       }
 
-      page += batchSize;
+      page += fetchedBatch;
       if (page > 1000) {
         console.warn('[Danbooru Grass] Hit safety page limit.');
         break;
