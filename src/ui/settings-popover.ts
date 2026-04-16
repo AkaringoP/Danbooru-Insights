@@ -160,7 +160,7 @@ export function createSettingsPopover(
   // --- 1. Color Themes Section ---
   const themeHeaderRow = document.createElement('div');
   themeHeaderRow.style.cssText =
-    'display:flex;align-items:center;justify-content:space-between;';
+    'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;';
   const themeHeader = document.createElement('div');
   themeHeader.className = 'popover-header';
   themeHeader.style.margin = '0';
