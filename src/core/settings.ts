@@ -93,7 +93,8 @@ export class SettingsManager {
    * @return {string} The theme key.
    */
   getTheme(): string {
-    const t = this.settings.theme === 'newspaper' ? 'dracula' : this.settings.theme;
+    const t =
+      this.settings.theme === 'newspaper' ? 'dracula' : this.settings.theme;
     return CONFIG.THEMES[t] ? t : 'light';
   }
 
