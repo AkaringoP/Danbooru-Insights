@@ -158,10 +158,30 @@ export function createSettingsPopover(
   );
 
   // --- 1. Color Themes Section ---
+  const themeHeaderRow = document.createElement('div');
+  themeHeaderRow.style.cssText =
+    'display:flex;align-items:center;justify-content:space-between;';
   const themeHeader = document.createElement('div');
   themeHeader.className = 'popover-header';
+  themeHeader.style.margin = '0';
   themeHeader.textContent = 'Color Themes';
-  popover.appendChild(themeHeader);
+  const previewLink = document.createElement('a');
+  previewLink.href =
+    'https://akaringop.github.io/Danbooru-Insights/theme-preview.html';
+  previewLink.target = '_blank';
+  previewLink.rel = 'noopener';
+  previewLink.textContent = 'Preview all';
+  previewLink.style.cssText =
+    'font-size:11px;color:var(--di-link,#007bff);text-decoration:none;opacity:0.7;';
+  previewLink.onmouseenter = () => {
+    previewLink.style.opacity = '1';
+  };
+  previewLink.onmouseleave = () => {
+    previewLink.style.opacity = '0.7';
+  };
+  themeHeaderRow.appendChild(themeHeader);
+  themeHeaderRow.appendChild(previewLink);
+  popover.appendChild(themeHeaderRow);
 
   const grid = document.createElement('div');
   grid.className = 'theme-grid';
