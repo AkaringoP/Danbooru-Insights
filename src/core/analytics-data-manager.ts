@@ -2,6 +2,7 @@ import {DataManager} from './data-manager';
 import type {ApiItem} from './data-manager';
 import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
+import {perfLogger} from './perf-logger';
 import {CONFIG} from '../config';
 import {isTopLevelTag, getBestThumbnailUrl} from '../utils';
 import type {
@@ -289,15 +290,22 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return {count: 0, lastSync: null};
 
-    const count = await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .count();
-    const lastEntry = await this.db.posts.orderBy('created_at').last();
+    // Walks the [uploader_id+created_at] compound index (DB v11) from the
+    // newest post backwards and stops at the first hit — so the latest entry
+    // for this specific user is resolved in O(log n) instead of scanning the
+    // full posts table (which also previously risked returning another
+    // user's latest created_at).
+    const [count, lastEntry] = await Promise.all([
+      this.db.posts.where('uploader_id').equals(uploaderId).count(),
+      this.db.posts
+        .where('[uploader_id+created_at]')
+        .between([uploaderId, ''], [uploaderId, '\uffff'])
+        .last(),
+    ]);
 
     return {
       count,
-      lastSync: lastEntry ? lastEntry.created_at : null, // Approximate
+      lastSync: lastEntry ? lastEntry.created_at : null,
     };
   }
 
@@ -557,9 +565,19 @@ export class AnalyticsDataManager extends DataManager {
     userInfo: TargetUser,
     isNsfwEnabled: boolean = false,
     customStep: 'auto' | 'repdigit' | number = 'auto',
+    forceRefresh: boolean = false,
   ): Promise<MilestoneEntry[]> {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return [];
+
+    // Cache key includes step and nsfw flag — thumbnails for NSFW posts are
+    // only fetched when the flag is on, so results differ per combination.
+    // Invalidated via piestats wipe on Full Sync (same pattern as distributions).
+    const cacheKey = `milestones_${customStep}_${isNsfwEnabled ? '1' : '0'}`;
+    if (!forceRefresh) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) return cached as MilestoneEntry[];
+    }
 
     const total = await this.db.posts
       .where('uploader_id')
@@ -657,6 +675,7 @@ export class AnalyticsDataManager extends DataManager {
     // Let's sort strictly by milestone ASC.
     results.sort((a, b) => a.milestone - b.milestone);
 
+    await this.saveStats(cacheKey, uploaderId, results);
     return results;
   }
 
@@ -743,8 +762,19 @@ export class AnalyticsDataManager extends DataManager {
   async getStatusDistribution(
     userInfo: TargetUser,
     startDate: string | Date | null = null,
+    forceRefresh: boolean = false,
   ): Promise<{name: string; count: number; label: string}[]> {
     if (!userInfo.name) return [];
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'status_dist';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {name: string; count: number; label: string}[];
+      }
+    }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const statuses = [
@@ -797,7 +827,9 @@ export class AnalyticsDataManager extends DataManager {
       }
     });
 
-    return Promise.all(tasks);
+    const result = await Promise.all(tasks);
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
@@ -810,8 +842,19 @@ export class AnalyticsDataManager extends DataManager {
   async getRatingDistribution(
     userInfo: TargetUser,
     startDate: string | Date | null = null,
+    forceRefresh: boolean = false,
   ): Promise<{rating: string; count: number; label: string}[]> {
     if (!userInfo.name) return [];
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'rating_dist';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {rating: string; count: number; label: string}[];
+      }
+    }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const ratings = ['g', 's', 'q', 'e'];
@@ -862,6 +905,7 @@ export class AnalyticsDataManager extends DataManager {
 
     try {
       const results = await Promise.all(tasks);
+      if (uploaderId) await this.saveStats(cacheKey, uploaderId, results);
       return results;
     } catch (e: unknown) {
       console.error('[Danbooru Grass] Failed to fetch rating distribution', e);
@@ -1232,24 +1276,29 @@ export class AnalyticsDataManager extends DataManager {
         }));
 
       // Fetch Counts Concurrent
-      await this.mapConcurrent(top10, 3, async obj => {
-        const tagName = obj.tagName;
-        if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
-        try {
-          const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
-          const countResp: DanbooruCountResponse = await this.rateLimiter
-            .fetch(countUrl)
-            .then(r => r.json());
-          const c =
-            countResp.counts && countResp.counts.posts
-              ? countResp.counts.posts
-              : 0;
-          obj.count = c || obj._item?.tag.post_count || 0;
-        } catch (_e: unknown) {
-          console.debug('[DI] Failed to fetch user tag count', _e);
-        }
-        delete obj._item;
-      });
+      await perfLogger.wrap(
+        'sync.refreshStats.mapConcurrent',
+        () =>
+          this.mapConcurrent(top10, 3, async obj => {
+            const tagName = obj.tagName;
+            if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
+            try {
+              const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
+              const countResp: DanbooruCountResponse = await this.rateLimiter
+                .fetch(countUrl)
+                .then(r => r.json());
+              const c =
+                countResp.counts && countResp.counts.posts
+                  ? countResp.counts.posts
+                  : 0;
+              obj.count = c || obj._item?.tag.post_count || 0;
+            } catch (_e: unknown) {
+              console.debug('[DI] Failed to fetch user tag count', _e);
+            }
+            delete obj._item;
+          }),
+        {distribution: 'character', n: top10.length, concurrency: 3},
+      );
 
       const sumFreq = top10.reduce(
         (acc: number, curr: {frequency: number}) => acc + curr.frequency,
@@ -1350,24 +1399,29 @@ export class AnalyticsDataManager extends DataManager {
           _item: item,
         }));
 
-      await this.mapConcurrent(top10, 3, async obj => {
-        const tagName = obj.tagName;
-        if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
-        try {
-          const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
-          const countResp: DanbooruCountResponse = await this.rateLimiter
-            .fetch(countUrl)
-            .then(r => r.json());
-          const c =
-            countResp.counts && countResp.counts.posts
-              ? countResp.counts.posts
-              : 0;
-          obj.count = c || obj._item?.tag.post_count || 0;
-        } catch (_e: unknown) {
-          console.debug('[DI] Failed to fetch user tag count', _e);
-        }
-        delete obj._item;
-      });
+      await perfLogger.wrap(
+        'sync.refreshStats.mapConcurrent',
+        () =>
+          this.mapConcurrent(top10, 3, async obj => {
+            const tagName = obj.tagName;
+            if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
+            try {
+              const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
+              const countResp: DanbooruCountResponse = await this.rateLimiter
+                .fetch(countUrl)
+                .then(r => r.json());
+              const c =
+                countResp.counts && countResp.counts.posts
+                  ? countResp.counts.posts
+                  : 0;
+              obj.count = c || obj._item?.tag.post_count || 0;
+            } catch (_e: unknown) {
+              console.debug('[DI] Failed to fetch user tag count', _e);
+            }
+            delete obj._item;
+          }),
+        {distribution: 'copyright', n: top10.length, concurrency: 3},
+      );
 
       const sumFreq = top10.reduce(
         (acc: number, curr: {frequency: number}) => acc + curr.frequency,
@@ -1610,16 +1664,37 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Fetches top posts per rating (G/S/Q/E) in parallel using API.
+   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
+   * @param {boolean} forceRefresh Bypass cache and re-fetch.
    * @return {!Promise<{g: ?Object, s: ?Object, q: ?Object, e: ?Object}>} Top post per rating.
    */
-  async getTopPostsByType(userInfo: TargetUser): Promise<{
+  async getTopPostsByType(
+    userInfo: TargetUser,
+    forceRefresh: boolean = false,
+  ): Promise<{
     g: DanbooruPost | null;
     s: DanbooruPost | null;
     q: DanbooruPost | null;
     e: DanbooruPost | null;
   }> {
     if (!userInfo.name) return {g: null, s: null, q: null, e: null};
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'top_posts_by_type';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {
+          g: DanbooruPost | null;
+          s: DanbooruPost | null;
+          q: DanbooruPost | null;
+          e: DanbooruPost | null;
+        };
+      }
+    }
 
     // Helper for fetching 1 top post
     const fetchTop = async (
@@ -1651,18 +1726,34 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('e'),
     ]);
 
-    return {g, s, q, e};
+    const result = {g, s, q, e};
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
    * Fetches Recent Popular (age < 1w) posts for SFW and NSFW in parallel.
+   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
+   * @param {boolean} forceRefresh Bypass cache and re-fetch.
    * @return {!Promise<{sfw: ?Object, nsfw: ?Object}>} Recent popular post per SFW/NSFW.
    */
   async getRecentPopularPosts(
     userInfo: TargetUser,
+    forceRefresh: boolean = false,
   ): Promise<{sfw: DanbooruPost | null; nsfw: DanbooruPost | null}> {
     if (!userInfo.name) return {sfw: null, nsfw: null};
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'recent_popular_posts';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        return cached as {sfw: DanbooruPost | null; nsfw: DanbooruPost | null};
+      }
+    }
 
     const fetchTop = async (
       ratingTag: string,
@@ -1689,7 +1780,9 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('is:nsfw'),
     ]);
 
-    return {sfw, nsfw};
+    const result = {sfw, nsfw};
+    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
+    return result;
   }
 
   /**
@@ -2177,9 +2270,23 @@ export class AnalyticsDataManager extends DataManager {
    */
   async getLevelChangeHistory(
     userInfo: TargetUser,
+    forceRefresh: boolean = false,
   ): Promise<LevelChangeEvent[]> {
     if (!userInfo.name) return [];
     const normalizedName = userInfo.name.replace(/ /g, '_');
+
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'level_change_history';
+
+    if (!forceRefresh && uploaderId) {
+      const cached = await this.getStats(cacheKey, uploaderId);
+      if (cached) {
+        // Dates were JSON-stringified to strings when cached — revive them.
+        return (
+          cached as Array<Omit<LevelChangeEvent, 'date'> & {date: string}>
+        ).map(e => ({...e, date: new Date(e.date)}));
+      }
+    }
 
     // Known Danbooru levels ordered by rank (lowest → highest)
     const LEVEL_HIERARCHY = [
@@ -2268,12 +2375,15 @@ export class AnalyticsDataManager extends DataManager {
       // Sort oldest first, deduplicate by date+fromLevel+toLevel
       events.sort((a, b) => a.date.getTime() - b.date.getTime());
       const seen = new Set<string>();
-      return events.filter(e => {
+      const dedup = events.filter(e => {
         const key = `${e.date.getTime()}-${e.fromLevel}-${e.toLevel}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       });
+
+      if (uploaderId) await this.saveStats(cacheKey, uploaderId, dedup);
+      return dedup;
     } catch (e: unknown) {
       console.warn('[Danbooru Grass] Failed to fetch level change history', e);
       return [];
@@ -3056,12 +3166,25 @@ export class AnalyticsDataManager extends DataManager {
       if (onProgress) onProgress(c, t, msg);
     };
 
+    const perfStats = {
+      totalPosts: 0,
+      startId: 0,
+      initialCurrentNo: 0,
+      pagesCommitted: 0,
+      finalCurrentNo: 0,
+    };
+    perfLogger.start('sync.full.total');
+
     try {
       // 1. Get total count
-      const total = await this.getTotalPostCount(userInfo);
+      const total = await perfLogger.wrap('sync.full.countQuery', () =>
+        this.getTotalPostCount(userInfo),
+      );
+      perfStats.totalPosts = total;
 
       // 2. Resume Check
       // Strategy: overlapping sync (1 month back) to catch updates (score/tags)
+      perfLogger.start('sync.full.resumeCheck');
       const newestArr = await this.db.posts
         .where('uploader_id')
         .equals(uploaderId)
@@ -3107,6 +3230,13 @@ export class AnalyticsDataManager extends DataManager {
           .filter((p: ApiItem) => p['id'] <= startId)
           .count();
       }
+      perfStats.startId = startId;
+      perfStats.initialCurrentNo = currentNo;
+      perfLogger.end('sync.full.resumeCheck', {
+        startId,
+        initialCurrentNo: currentNo,
+        hasHistory: newestArr.length > 0,
+      });
 
       // FIX: If total is 0 (Failed to fetch), we CANNOT assume "Already Synced".
       // We must assume "Unknown" and proceed to try and fetch new posts.
@@ -3140,122 +3270,163 @@ export class AnalyticsDataManager extends DataManager {
       let nextExpectedPage = 1;
 
       const worker = async (workerId: number) => {
+        const workerLabel = `sync.full.worker.${workerId}`;
+        const pageLabel = `sync.full.page.w${workerId}`;
+        const bulkPutLabel = `sync.full.bulkPut.w${workerId}`;
+        let pagesFetched = 0;
+        let pagesCommittedByWorker = 0;
+        perfLogger.start(workerLabel);
+
         // Staggered Start: Prevent initial burst
         if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 200));
 
-        while (hasMore) {
-          // 1. Claim a page
-          const currentPage = pageOffset++;
+        try {
+          while (hasMore) {
+            // 1. Claim a page
+            const currentPage = pageOffset++;
+            perfLogger.start(pageLabel);
+            let pageFetchedCount = 0;
+            let pageAttempts = 0;
 
-          try {
-            const params: Record<string, string> = {
-              limit: String(limit),
-              page: String(currentPage),
-              tags: `user:${userInfo.name.replace(/ /g, '_')} order:id id:>${startId}`,
-              only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
-            };
-            const q = new URLSearchParams(params);
-            const url = `/posts.json?${q.toString()}`;
+            try {
+              const params: Record<string, string> = {
+                limit: String(limit),
+                page: String(currentPage),
+                tags: `user:${userInfo.name.replace(/ /g, '_')} order:id id:>${startId}`,
+                only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
+              };
+              const q = new URLSearchParams(params);
+              const url = `/posts.json?${q.toString()}`;
 
-            const pending = buffer.size;
-            reportProgress(
-              currentNo,
-              total,
-              `Fetching Page ${currentPage} (Pending: ${pending})...`,
-            );
+              const pending = buffer.size;
+              reportProgress(
+                currentNo,
+                total,
+                `Fetching Page ${currentPage} (Pending: ${pending})...`,
+              );
 
-            // Retry Logic
-            let items: DanbooruPost[] | null = null;
-            let attempts = 0;
-            while (attempts < 3) {
-              try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
+              // Retry Logic
+              let items: DanbooruPost[] | null = null;
+              let attempts = 0;
+              while (attempts < 3) {
+                try {
+                  const controller = new AbortController();
+                  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
 
-                const fetchResp = await this.rateLimiter.fetch(url, {
-                  signal: controller.signal,
-                });
-                clearTimeout(timeoutId);
-                if (!fetchResp.ok) throw new Error(`HTTP ${fetchResp.status}`);
-                items = await fetchResp.json();
-                break; // Success
-              } catch (err: unknown) {
-                attempts++;
-                const errMsg = err instanceof Error ? err.message : String(err);
-                const isServerErr =
-                  errMsg.includes('500') ||
-                  errMsg.includes('502') ||
-                  errMsg.includes('503') ||
-                  errMsg.includes('504');
-                console.warn(
-                  `[Worker ${workerId}] Page ${currentPage} attempt ${attempts} failed: ${errMsg}`,
-                );
+                  const fetchResp = await this.rateLimiter.fetch(url, {
+                    signal: controller.signal,
+                  });
+                  clearTimeout(timeoutId);
+                  if (!fetchResp.ok)
+                    throw new Error(`HTTP ${fetchResp.status}`);
+                  items = await fetchResp.json();
+                  break; // Success
+                } catch (err: unknown) {
+                  attempts++;
+                  const errMsg =
+                    err instanceof Error ? err.message : String(err);
+                  const isServerErr =
+                    errMsg.includes('500') ||
+                    errMsg.includes('502') ||
+                    errMsg.includes('503') ||
+                    errMsg.includes('504');
+                  console.warn(
+                    `[Worker ${workerId}] Page ${currentPage} attempt ${attempts} failed: ${errMsg}`,
+                  );
 
-                if (attempts >= 3 || !isServerErr) throw err; // Give up or fatal error
+                  if (attempts >= 3 || !isServerErr) throw err; // Give up or fatal error
 
-                // Backoff: 1s, 2s, 4s...
-                await new Promise(r =>
-                  setTimeout(r, 1000 * Math.pow(2, attempts - 1)),
-                );
+                  // Backoff: 1s, 2s, 4s...
+                  await new Promise(r =>
+                    setTimeout(r, 1000 * Math.pow(2, attempts - 1)),
+                  );
+                }
               }
-            }
+              pageAttempts = attempts + 1;
 
-            if (!items || items.length === 0) {
-              hasMore = false; // Signal end
-              return;
-            }
-
-            // 2. Buffer the result
-            buffer.set(currentPage, items);
-
-            // 3. Ordered Commit Loop (Check if we can save)
-            while (buffer.has(nextExpectedPage)) {
-              const batchItems = buffer.get(nextExpectedPage);
-              buffer.delete(nextExpectedPage); // Remove from buffer
-
-              if (batchItems && batchItems.length > 0) {
-                // Assign Sequential Numbers
-                const bulkData = batchItems.map((p: DanbooruPost) => {
-                  const ds = p.down_score ?? 0;
-                  const us = p.up_score ?? 0;
-                  return {
-                    id: p.id,
-                    uploader_id: p.uploader_id,
-                    created_at: p.created_at,
-                    score: us + ds,
-                    up_score: us,
-                    down_score: ds,
-                    is_deleted: p.is_deleted ?? false,
-                    is_banned: p.is_banned ?? false,
-                    rating: p.rating,
-                    tag_count_general: p.tag_count_general ?? 0,
-                    variants: p.variants,
-                    preview_file_url: p.preview_file_url,
-                    no: ++currentNo,
-                  };
-                });
-
-                await this.db.posts.bulkPut(bulkData);
-
-                // Update Progress
-                // currentNo is now accurate (reset based on startId)
-                reportProgress(
-                  currentNo,
-                  total > currentNo ? total : currentNo,
-                );
+              if (!items || items.length === 0) {
+                hasMore = false; // Signal end
+                return;
               }
+              pageFetchedCount = items.length;
+              pagesFetched++;
 
-              nextExpectedPage++;
+              // 2. Buffer the result
+              buffer.set(currentPage, items);
+
+              // 3. Ordered Commit Loop (Check if we can save)
+              while (buffer.has(nextExpectedPage)) {
+                const batchItems = buffer.get(nextExpectedPage);
+                buffer.delete(nextExpectedPage); // Remove from buffer
+
+                if (batchItems && batchItems.length > 0) {
+                  // Assign Sequential Numbers
+                  const bulkData = batchItems.map((p: DanbooruPost) => {
+                    const ds = p.down_score ?? 0;
+                    const us = p.up_score ?? 0;
+                    return {
+                      id: p.id,
+                      uploader_id: p.uploader_id,
+                      created_at: p.created_at,
+                      score: us + ds,
+                      up_score: us,
+                      down_score: ds,
+                      is_deleted: p.is_deleted ?? false,
+                      is_banned: p.is_banned ?? false,
+                      rating: p.rating,
+                      tag_count_general: p.tag_count_general ?? 0,
+                      variants: p.variants,
+                      preview_file_url: p.preview_file_url,
+                      no: ++currentNo,
+                    };
+                  });
+
+                  perfLogger.start(bulkPutLabel);
+                  await this.db.posts.bulkPut(bulkData);
+                  perfLogger.end(bulkPutLabel, {
+                    workerId,
+                    page: nextExpectedPage,
+                    count: bulkData.length,
+                  });
+                  pagesCommittedByWorker++;
+                  perfStats.pagesCommitted++;
+
+                  // Update Progress
+                  // currentNo is now accurate (reset based on startId)
+                  reportProgress(
+                    currentNo,
+                    total > currentNo ? total : currentNo,
+                  );
+                }
+
+                nextExpectedPage++;
+              }
+            } catch (e: unknown) {
+              console.error(
+                `[Worker ${workerId}] Page ${currentPage} failed`,
+                e,
+              );
+              hasMore = false;
+            } finally {
+              perfLogger.end(pageLabel, {
+                workerId,
+                page: currentPage,
+                fetched: pageFetchedCount,
+                attempts: pageAttempts,
+              });
             }
-          } catch (e: unknown) {
-            console.error(`[Worker ${workerId}] Page ${currentPage} failed`, e);
-            hasMore = false;
-          }
 
-          // Rate Limit Sleep
-          if (hasMore) {
-            await new Promise(r => setTimeout(r, WORKER_DELAY));
+            // Rate Limit Sleep
+            if (hasMore) {
+              await new Promise(r => setTimeout(r, WORKER_DELAY));
+            }
           }
+        } finally {
+          perfLogger.end(workerLabel, {
+            workerId,
+            pagesFetched,
+            pagesCommittedByWorker,
+          });
         }
       };
 
@@ -3287,7 +3458,9 @@ export class AnalyticsDataManager extends DataManager {
       // Refresh all stats after sync
       // If startId was 0, it was a Full Sync; otherwise it's a Partial Sync
       await this.refreshAllStats(userInfo, startId === 0);
+      perfStats.finalCurrentNo = currentNo;
     } finally {
+      perfLogger.end('sync.full.total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
     }
@@ -3322,12 +3495,18 @@ export class AnalyticsDataManager extends DataManager {
       if (onProgress) onProgress(c, t, msg);
     };
 
+    const perfStats = {totalPosts: 0, pages: 0, writtenPosts: 0};
+    perfLogger.start('sync.quick.total');
+
     try {
       const uploaderId = parseInt(userInfo.id ?? '0');
       const normalizedName = userInfo.name.replace(/ /g, '_');
 
       // 1. Get total count
-      const total = await this.getTotalPostCount(userInfo);
+      const total = await perfLogger.wrap('sync.quick.countQuery', () =>
+        this.getTotalPostCount(userInfo),
+      );
+      perfStats.totalPosts = total;
       reportProgress(0, total, 'Fetching posts...');
 
       // 2. Clear existing posts for a clean re-fetch
@@ -3340,6 +3519,9 @@ export class AnalyticsDataManager extends DataManager {
       let no = 0;
 
       while (hasMore) {
+        perfLogger.start('sync.quick.page');
+        const pageIndex = perfStats.pages;
+
         const params = new URLSearchParams({
           tags: `user:${normalizedName}`,
           limit: String(limit),
@@ -3355,6 +3537,12 @@ export class AnalyticsDataManager extends DataManager {
           .then((r: Response) => r.json());
 
         if (!Array.isArray(batch) || batch.length === 0) {
+          perfLogger.end('sync.quick.page', {
+            page: pageIndex,
+            cursor: page,
+            fetched: 0,
+            empty: true,
+          });
           hasMore = false;
           break;
         }
@@ -3385,8 +3573,19 @@ export class AnalyticsDataManager extends DataManager {
           };
         });
 
+        perfLogger.start('sync.quick.bulkPut');
         await this.db.posts.bulkPut(bulkData);
+        perfLogger.end('sync.quick.bulkPut', {count: bulkData.length});
+
         reportProgress(no, total);
+
+        perfStats.pages++;
+        perfStats.writtenPosts += bulkData.length;
+        perfLogger.end('sync.quick.page', {
+          page: pageIndex,
+          cursor: page,
+          fetched: batch.length,
+        });
 
         if (batch.length < limit) {
           hasMore = false;
@@ -3413,6 +3612,7 @@ export class AnalyticsDataManager extends DataManager {
       // 7. Refresh all stats (full sync)
       await this.refreshAllStats(userInfo, true);
     } finally {
+      perfLogger.end('sync.quick.total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
     }
@@ -3479,54 +3679,95 @@ export class AnalyticsDataManager extends DataManager {
     isFullSync: boolean = false,
   ): Promise<void> {
     const forceRefresh = true;
+    const progressReporter = (msg: string) => {
+      const {current, total} = AnalyticsDataManager.syncProgress;
+      if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
+        AnalyticsDataManager.onProgressCallback(current, total, msg);
+      }
+    };
+    perfLogger.start('sync.refreshStats.total');
     try {
       await Promise.all([
-        this.getRatingDistribution(userInfo),
-        this.getCharacterDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
-        this.getCopyrightDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
-        this.getFavCopyrightDistribution(userInfo, forceRefresh),
-        this.getBreastsDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
-        this.getHairLengthDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
-        this.getHairColorDistribution(userInfo, forceRefresh, msg => {
-          const {current, total} = AnalyticsDataManager.syncProgress;
-          if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-            AnalyticsDataManager.onProgressCallback(current, total, msg);
-          }
-        }),
+        perfLogger.wrap('sync.refreshStats.status', () =>
+          this.getStatusDistribution(userInfo, null, true),
+        ),
+        perfLogger.wrap('sync.refreshStats.rating', () =>
+          this.getRatingDistribution(userInfo, null, true),
+        ),
+        perfLogger.wrap('sync.refreshStats.character', () =>
+          this.getCharacterDistribution(
+            userInfo,
+            forceRefresh,
+            progressReporter,
+          ),
+        ),
+        perfLogger.wrap('sync.refreshStats.copyright', () =>
+          this.getCopyrightDistribution(
+            userInfo,
+            forceRefresh,
+            progressReporter,
+          ),
+        ),
+        perfLogger.wrap('sync.refreshStats.favCopyright', () =>
+          this.getFavCopyrightDistribution(userInfo, forceRefresh),
+        ),
+        perfLogger.wrap('sync.refreshStats.breasts', () =>
+          this.getBreastsDistribution(userInfo, forceRefresh, progressReporter),
+        ),
+        perfLogger.wrap('sync.refreshStats.hairLength', () =>
+          this.getHairLengthDistribution(
+            userInfo,
+            forceRefresh,
+            progressReporter,
+          ),
+        ),
+        perfLogger.wrap('sync.refreshStats.hairColor', () =>
+          this.getHairColorDistribution(
+            userInfo,
+            forceRefresh,
+            progressReporter,
+          ),
+        ),
         // Always refresh Random Posts
-        this.getRandomPosts(userInfo),
+        perfLogger.wrap('sync.refreshStats.randomPosts', () =>
+          this.getRandomPosts(userInfo),
+        ),
+        // Warm the level-change-history cache on every sync — the dashboard
+        // always reads it, and the API is cheap compared to the distribution
+        // calls above (no per-user search combinatorics).
+        perfLogger.wrap('sync.refreshStats.levelChanges', () =>
+          this.getLevelChangeHistory(userInfo, true),
+        ),
+        // Warm the milestones cache for the step=1000 view that renderDashboard
+        // always requests. Both NSFW values so toggling is a cache hit too.
+        perfLogger.wrap('sync.refreshStats.milestonesSfw', () =>
+          this.getMilestones(userInfo, false, 1000, true),
+        ),
+        perfLogger.wrap('sync.refreshStats.milestonesNsfw', () =>
+          this.getMilestones(userInfo, true, 1000, true),
+        ),
         // Refresh Popular Posts only on Full Sync
         ...(isFullSync
           ? [
-              this.getTopPostsByType(userInfo),
-              this.getRecentPopularPosts(userInfo),
-              this.getTopScorePost(userInfo, 'sfw'),
-              this.getTopScorePost(userInfo, 'nsfw'),
+              perfLogger.wrap('sync.refreshStats.topPostsByType', () =>
+                this.getTopPostsByType(userInfo, true),
+              ),
+              perfLogger.wrap('sync.refreshStats.recentPopular', () =>
+                this.getRecentPopularPosts(userInfo, true),
+              ),
+              perfLogger.wrap('sync.refreshStats.topScoreSfw', () =>
+                this.getTopScorePost(userInfo, 'sfw'),
+              ),
+              perfLogger.wrap('sync.refreshStats.topScoreNsfw', () =>
+                this.getTopScorePost(userInfo, 'nsfw'),
+              ),
             ]
           : []),
       ]);
     } catch (e: unknown) {
       console.warn('[Analytics] Failed to refresh stats', e);
+    } finally {
+      perfLogger.end('sync.refreshStats.total', {isFullSync});
     }
   }
 

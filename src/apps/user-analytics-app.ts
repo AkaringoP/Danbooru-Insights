@@ -3,6 +3,7 @@ import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {SettingsManager} from '../core/settings';
+import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
 import {getLevelClass} from '../utils';
 import {
@@ -34,6 +35,10 @@ export class UserAnalyticsApp {
   btnId: string;
   isFullySynced: boolean;
   isRendering: boolean;
+  /** Promise for the first updateHeaderStatus() call. Button click handlers
+   *  await this before reading isFullySynced to avoid racing against the
+   *  initial sync-status check (which runs fire-and-forget on mount). */
+  private initialStatusCheck: Promise<void> | null = null;
 
   /**
    * Initializes the UserAnalyticsApp.
@@ -179,6 +184,19 @@ export class UserAnalyticsApp {
         e.preventDefault();
         e.stopPropagation();
 
+        // Wait for the initial sync-status check to complete before reading
+        // this.isFullySynced. Otherwise a click placed during the first
+        // check-in-progress window (typical after a page refresh) sees the
+        // constructor's placeholder value and triggers an unnecessary sync.
+        if (this.initialStatusCheck) {
+          try {
+            await this.initialStatusCheck;
+          } catch {
+            // Ignored — status check errors are already logged in
+            // updateHeaderStatus; we still let the click proceed.
+          }
+        }
+
         // Auto-Sync Check: If not synced, wait for sync THEN open
         if (this.isFullySynced === false) {
           try {
@@ -205,8 +223,13 @@ export class UserAnalyticsApp {
 
       targetElement.appendChild(container);
 
-      // Initial Status Check (fire-and-forget UI refresh)
-      void this.updateHeaderStatus();
+      // Initial Status Check — kick off but also expose the promise so the
+      // button click handler can await it before deciding whether to trigger
+      // an auto-sync. Without this, a click placed before the check resolves
+      // sees the constructor's placeholder (isFullySynced = false) and fires
+      // performPartialSync even on already-synced users.
+      this.initialStatusCheck = this.updateHeaderStatus();
+      void this.initialStatusCheck;
     } else {
       console.warn('[AnalyticsApp] Could not find H1 to inject button');
     }
@@ -730,6 +753,12 @@ export class UserAnalyticsApp {
     if (this.isRendering) return;
     this.isRendering = true;
 
+    const perfMeta = {
+      path: 'unknown' as 'quickSync' | 'syncSkipped' | 'unknown',
+      preTotal: 0,
+    };
+    perfLogger.start('render.total');
+
     try {
       const content = document.getElementById(`${this.modalId}-content`);
       if (!content) return;
@@ -746,79 +775,128 @@ export class UserAnalyticsApp {
       // Quick Sync Pre-Check: If total posts ≤ MAX_QUICK_SYNC_POSTS and DB is incomplete,
       // fetch all posts inline (no sync UI required) before rendering the dashboard.
       const MAX_QUICK_SYNC_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
-      {
-        const [preStats, preTotal] = await Promise.all([
+      perfLogger.start('render.precheck');
+      // Split the two calls into their own labels: syncStats is a local DB
+      // lookup, totalCount hits the Danbooru API. Combining them hides which
+      // one dominates — useful when evaluating DB-side optimizations.
+      const [preStats, preTotal] = await Promise.all([
+        perfLogger.wrap('render.precheck.syncStats', () =>
           this.dataManager.getSyncStats(this.context.targetUser),
+        ),
+        perfLogger.wrap('render.precheck.totalCount', () =>
           this.dataManager.getTotalPostCount(this.context.targetUser),
-        ]);
+        ),
+      ]);
+      perfLogger.end('render.precheck', {
+        total: preTotal,
+        synced: preStats.count,
+      });
+      perfMeta.preTotal = preTotal;
 
-        if (
-          preTotal > 0 &&
-          preTotal <= MAX_QUICK_SYNC_POSTS &&
-          preStats.count < preTotal
-        ) {
-          content.innerHTML = `
-            <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
-              <div class="di-spinner"></div>
-              <div style="font-size:1.2em; font-weight:600; margin-top:20px;">Syncing Data...</div>
-              <div id="analytics-quick-sync-msg" style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Fetching posts...</div>
-              <div style="width:300px; height:8px; background:var(--di-border-light, #eee); border-radius:4px; overflow:hidden; margin-top:15px;">
-                <div id="analytics-quick-sync-bar" style="width:0%; height:100%; background:#2da44e; transition:width 0.2s;"></div>
-              </div>
+      let didQuickSync = false;
+      if (
+        preTotal > 0 &&
+        preTotal <= MAX_QUICK_SYNC_POSTS &&
+        preStats.count < preTotal
+      ) {
+        perfMeta.path = 'quickSync';
+        didQuickSync = true;
+        content.innerHTML = `
+          <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
+            <div class="di-spinner"></div>
+            <div style="font-size:1.2em; font-weight:600; margin-top:20px;">Syncing Data...</div>
+            <div id="analytics-quick-sync-msg" style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Fetching posts...</div>
+            <div style="width:300px; height:8px; background:var(--di-border-light, #eee); border-radius:4px; overflow:hidden; margin-top:15px;">
+              <div id="analytics-quick-sync-bar" style="width:0%; height:100%; background:#2da44e; transition:width 0.2s;"></div>
             </div>
-          `;
+          </div>
+        `;
 
-          const qBar = content.querySelector(
-            '#analytics-quick-sync-bar',
-          ) as HTMLElement;
-          const qMsg = content.querySelector(
-            '#analytics-quick-sync-msg',
-          ) as HTMLElement;
+        const qBar = content.querySelector(
+          '#analytics-quick-sync-bar',
+        ) as HTMLElement;
+        const qMsg = content.querySelector(
+          '#analytics-quick-sync-msg',
+        ) as HTMLElement;
 
-          await this.dataManager.quickSyncAllPosts(
-            this.context.targetUser,
-            (c: number, t: number, msg?: string) => {
-              if (qBar && t > 0)
-                qBar.style.width = `${Math.round((c / t) * 100)}%`;
-              if (qMsg && msg && msg !== 'PREPARING') qMsg.textContent = msg;
-            },
-          );
+        await this.dataManager.quickSyncAllPosts(
+          this.context.targetUser,
+          (c: number, t: number, msg?: string) => {
+            if (qBar && t > 0)
+              qBar.style.width = `${Math.round((c / t) * 100)}%`;
+            if (qMsg && msg && msg !== 'PREPARING') qMsg.textContent = msg;
+          },
+        );
 
-          this.isFullySynced = true;
-          void this.updateHeaderStatus();
+        this.isFullySynced = true;
+        void this.updateHeaderStatus();
 
-          // Restore loading spinner before heavy data fetch
-          content.innerHTML = `
-            <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
-               <div class="di-spinner"></div>
-               <div style="font-size:1.2em; font-weight:600; margin-top: 20px;">Generating Report...</div>
-               <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
-            </div>
-          `;
-        }
+        // Restore loading spinner before heavy data fetch
+        content.innerHTML = `
+          <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
+             <div class="di-spinner"></div>
+             <div style="font-size:1.2em; font-weight:600; margin-top: 20px;">Generating Report...</div>
+             <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
+          </div>
+        `;
+      } else {
+        perfMeta.path = 'syncSkipped';
       }
 
-      // Pre-fetch all data!
-      const dashboardData = await this.dataService.fetchDashboardData(
-        this.context,
+      // Pre-fetch all data! If we did a Quick Sync the syncStats/totalCount
+      // values have changed since the pre-check, so we skip the shortcut and
+      // let fetchDashboardData re-query them. On the no-sync path the values
+      // are still fresh and we hand them through.
+      const prefetched = didQuickSync
+        ? undefined
+        : {syncStats: preStats, totalCount: preTotal};
+      const dashboardData = await perfLogger.wrap(
+        'render.fetchData.total',
+        () => this.dataService.fetchDashboardData(this.context, prefetched),
       );
       const {
         stats,
         total,
         summaryStats,
         distributions,
+        statusStartRevalidate,
+        ratingStartRevalidate,
         topPosts,
+        topPostsStartRevalidate,
         recentPopularPosts,
-        randomPosts,
+        recentPopularStartRevalidate,
+        randomPostsPromise,
         milestones1k,
+        milestones1kStartRevalidate,
         scatterData,
         levelChanges,
+        levelChangesStartRevalidate,
         timelineMilestones,
         tagCloudGeneral,
         userStats,
         needsBackfill,
         dataManager,
       } = dashboardData;
+
+      // "Weak SWR": cached values rendered above; the starters below will
+      // fire *after* render.total so revalidate traffic doesn't compete
+      // with the blocking path's distribution fetches at the rate limiter.
+      // Fresh values are written back to piestats inside each freshFetch,
+      // so the next dashboard open reads the updated cache.
+      const scheduleRevalidate = (
+        name: string,
+        starter: (() => Promise<unknown>) | undefined,
+      ) => {
+        if (!starter) return;
+        // Queue a microtask that runs after the current render sync chain.
+        // setTimeout(0) is enough: it yields to the browser so the painted
+        // dashboard is visible before the API calls go out.
+        setTimeout(() => {
+          starter().catch((e: unknown) => {
+            console.warn(`[DI] SWR revalidate failed for ${name}`, e);
+          });
+        }, 0);
+      };
       const {maxUploads, maxDate, firstUploadDate, lastUploadDate} =
         summaryStats;
       const today = new Date();
@@ -1442,6 +1520,7 @@ export class UserAnalyticsApp {
       topPostContainer.style.flexDirection = 'column';
 
       // --- PIE CHART WIDGET ---
+      perfLogger.start('render.widget.pie');
       const pieResult = renderPieWidget(
         pieContainer,
         distributions,
@@ -1450,17 +1529,23 @@ export class UserAnalyticsApp {
         this.context,
         firstUploadDate,
       );
+      perfLogger.end('render.widget.pie');
 
       // --- TOP POSTS WIDGET ---
+      // Random posts are passed as a Promise so the widget renders now with
+      // a placeholder and swaps in the real post when the fetch resolves —
+      // keeps Random (the only uncached source) off the blocking path.
+      perfLogger.start('render.widget.topPosts');
       const topPostsResult = renderTopPostsWidget(
         topPostContainer,
         topPosts,
         recentPopularPosts,
-        randomPosts,
+        randomPostsPromise,
         isNsfwEnabled,
         this.db,
         this.context,
       );
+      perfLogger.end('render.widget.topPosts');
 
       topStatsRow.appendChild(pieContainer);
       topStatsRow.appendChild(topPostContainer);
@@ -1472,11 +1557,15 @@ export class UserAnalyticsApp {
       milestonesDiv.style.marginTop = '20px';
       dashboardDiv.appendChild(milestonesDiv);
 
-      const milestonesResult = await renderMilestonesWidget(
-        milestonesDiv,
-        this.db,
-        this.context,
-        isNsfwEnabled,
+      const milestonesResult = await perfLogger.wrap(
+        'render.widget.milestones',
+        () =>
+          renderMilestonesWidget(
+            milestonesDiv,
+            this.db,
+            this.context,
+            isNsfwEnabled,
+          ),
       );
 
       // Wire up NSFW toggle to delegate to all widget callbacks
@@ -1487,28 +1576,33 @@ export class UserAnalyticsApp {
       };
 
       // 4. Monthly Activity Chart
-      await renderHistoryChart(
-        dashboardDiv,
-        this.db,
-        this.context,
-        milestones1k,
-        levelChanges,
+      await perfLogger.wrap('render.widget.history', () =>
+        renderHistoryChart(
+          dashboardDiv,
+          this.db,
+          this.context,
+          milestones1k,
+          levelChanges,
+        ),
       );
 
       // 5. Created Tags Widget (lazy load) — after Monthly Activity
       const createdTagsContainer = document.createElement('div');
       createdTagsContainer.style.marginTop = '35px';
       dashboardDiv.appendChild(createdTagsContainer);
+      perfLogger.start('render.widget.createdTags');
       renderCreatedTagsWidget(
         createdTagsContainer,
         this.dataManager,
         this.context.targetUser,
       );
+      perfLogger.end('render.widget.createdTags');
 
       // 6. Tag Cloud Widget
       const tagCloudContainer = document.createElement('div');
       tagCloudContainer.style.marginTop = '35px';
       dashboardDiv.appendChild(tagCloudContainer);
+      perfLogger.start('render.widget.tagCloud');
       renderTagCloudWidget(tagCloudContainer, {
         initialData: tagCloudGeneral,
         fetchData: (catId: number) =>
@@ -1521,9 +1615,11 @@ export class UserAnalyticsApp {
           {id: 4, label: 'Char', color: '#00ab2c'},
         ],
       });
+      perfLogger.end('render.widget.tagCloud');
 
       // 6. Scatter Plot Widget
       if (scatterData.length > 0) {
+        perfLogger.start('render.widget.scatter');
         renderScatterPlot(
           dashboardDiv,
           scatterData,
@@ -1546,6 +1642,7 @@ export class UserAnalyticsApp {
               dataManager.fetchPostDetails(postId),
           },
         );
+        perfLogger.end('render.widget.scatter', {points: scatterData.length});
       }
 
       // 7. Footer credit (always last)
@@ -1553,7 +1650,17 @@ export class UserAnalyticsApp {
 
       // Update header status (ensure it's green if ready)
       void this.updateHeaderStatus();
+
+      // Fire SWR revalidations only now that the dashboard is painted. Any
+      // network traffic these start no longer blocks render.total.
+      scheduleRevalidate('status', statusStartRevalidate);
+      scheduleRevalidate('rating', ratingStartRevalidate);
+      scheduleRevalidate('topPosts', topPostsStartRevalidate);
+      scheduleRevalidate('recentPopular', recentPopularStartRevalidate);
+      scheduleRevalidate('milestones1k', milestones1kStartRevalidate);
+      scheduleRevalidate('levelChanges', levelChangesStartRevalidate);
     } finally {
+      perfLogger.end('render.total', perfMeta);
       this.isRendering = false;
     }
   }

@@ -23,6 +23,18 @@ export class GraphRenderer {
   settingsManager: SettingsManager;
   db: Database;
   dataManager: DataManager | null;
+  /** Re-runs the width/offset constraints and Hourly panel sync. Set by
+   *  injectSkeleton() so renderGraph() can trigger a reflow once the
+   *  CalHeatmap SVG has painted (its natural width is measurable then). */
+  reapplyGraphConstraints: (() => void) | null = null;
+  /** Saved vertical layout. `'below'` forces column wrapper onto its own
+   *  flex row via `flex-basis: 100%`. `null` / `'inline'` keeps the default
+   *  side-by-side layout. Loaded from `grass_settings` in injectSkeleton. */
+  savedLayoutMode: 'inline' | 'below' | null = null;
+  /** Currently displayed year in the heatmap — used by scrollToCurrentMonth
+   *  so callers outside renderGraph (e.g. the move-handle drag) can align
+   *  the horizontal scroll after a layout change. */
+  private currentYear: number | null = null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -33,6 +45,32 @@ export class GraphRenderer {
     this.settingsManager = settingsManager;
     this.db = db;
     this.dataManager = null;
+    this.reapplyGraphConstraints = null;
+  }
+
+  /**
+   * Align the heatmap's horizontal scroll so the current month is in view
+   * when the displayed year matches the real-world year. For any other
+   * year, reset to the start. Safe to call any time after paint.
+   */
+  scrollToCurrentMonth(): void {
+    const scrollContainer = document.getElementById('cal-heatmap-scroll');
+    if (!scrollContainer) return;
+    if (this.currentYear !== new Date().getFullYear()) {
+      scrollContainer.scrollLeft = 0;
+      return;
+    }
+    const currentMonth = new Date().getMonth() + 1;
+    const targetMonth = scrollContainer.querySelector(
+      `.ch-domain:nth-of-type(${currentMonth})`,
+    );
+    if (targetMonth) {
+      const containerRect = scrollContainer.getBoundingClientRect();
+      const elementRect = targetMonth.getBoundingClientRect();
+      scrollContainer.scrollLeft += elementRect.left - containerRect.left - 10;
+    } else {
+      scrollContainer.scrollLeft = scrollContainer.scrollWidth;
+    }
   }
 
   /**
@@ -92,14 +130,109 @@ export class GraphRenderer {
       }
     }
 
+    // Constrain the stats section so that long content (e.g. Previous
+    // Names with many entries) doesn't push its width past ~60% of the
+    // wrapper, which would leave no room for GrassApp beside it and
+    // force a wrap. The table content itself is fine at this width;
+    // only the long text rows (Previous Names, etc.) get word-wrapped.
+    const statsEl = stats as HTMLElement;
+    statsEl.style.minWidth = '0';
+    statsEl.style.maxWidth = '60%';
+    statsEl.style.overflowWrap = 'break-word';
+    statsEl.style.overflow = 'hidden';
+
     const container = document.createElement('div');
     container.id = this.containerId;
     container.style.position = 'relative';
 
-    // Fetch Per-User Settings from IndexedDB
+    // Fetch Per-User Settings from IndexedDB. Width/xOffset are tracked
+    // per layout mode so a horizontal resize in one mode doesn't get
+    // clobbered when the user switches to the other. Legacy `width` and
+    // `xOffset` fields (pre-vertical-drag schema) act as a one-shot
+    // fallback for the inline mode values on first load.
     const grassSettings = await dataManager.getGrassSettings(userId);
-    const savedWidth = grassSettings ? grassSettings.width : null;
-    const savedX = grassSettings ? grassSettings.xOffset : 0;
+    this.savedLayoutMode = grassSettings?.layoutMode ?? null;
+    let inlineWidth: number | null =
+      grassSettings?.inlineWidth ??
+      (typeof grassSettings?.width === 'number' ? grassSettings.width : null);
+    let inlineX: number =
+      grassSettings?.inlineXOffset ?? grassSettings?.xOffset ?? 0;
+    let belowWidth: number | null = grassSettings?.belowWidth ?? null;
+    let belowX: number = grassSettings?.belowXOffset ?? 0;
+    // Mutable view of the currently-active mode's pair. applyConstraints
+    // reads these; the drag handler updates both the per-mode storage
+    // and this view on a horizontal drag, or swaps this view to the
+    // target mode's pair on a vertical (mode-change) drag.
+    let savedWidth: number | null =
+      this.savedLayoutMode === 'below' ? belowWidth : inlineWidth;
+    let savedX: number = this.savedLayoutMode === 'below' ? belowX : inlineX;
+    // Persist the full record (always include all four per-mode fields —
+    // saveGrassSettings is a Dexie `put`, so any omission is a delete).
+    const persistSettings = (): void => {
+      void dataManager.saveGrassSettings(userId, {
+        layoutMode: this.savedLayoutMode,
+        inlineWidth,
+        inlineXOffset: inlineX,
+        belowWidth,
+        belowXOffset: belowX,
+      });
+    };
+
+    // Panel's CSS min-width — fallback when the panel element isn't in the
+    // DOM yet (very first frame on a fresh page load).
+    const HOURLY_PANEL_MIN_WIDTH = 310;
+
+    // The *container* width needed to display the full 12-month heatmap
+    // without any horizontal scroll. This is the heatmap SVG's intrinsic
+    // width plus the day-labels column and horizontal padding that the
+    // container carries. Measured once after paint and cached so that
+    // resize/constraint logic never reads a stale scrollWidth from a
+    // container that's already been shrunk below the SVG's intrinsic size.
+    let cachedNaturalWidth: number | null = null;
+    const measureNaturalWidth = (): number | null => {
+      if (cachedNaturalWidth !== null) return cachedNaturalWidth;
+      const heatmapEl = container.querySelector(
+        '#cal-heatmap',
+      ) as HTMLElement | null;
+      if (!heatmapEl) return null;
+      // Measure the intrinsic 12-month span by reading the bounding
+      // boxes of CalHeatmap's `.ch-domain` groups — these are the
+      // per-month SVG containers. Using getBoundingClientRect on the
+      // first and last domain gives us the real rendered span
+      // regardless of CSS constraints on ancestor elements.
+      const domains = heatmapEl.querySelectorAll('.ch-domain');
+      if (domains.length === 0) return null;
+      const firstRect = domains[0].getBoundingClientRect();
+      const lastRect = domains[domains.length - 1].getBoundingClientRect();
+      const svgWidth = Math.ceil(lastRect.right - firstRect.left);
+      if (svgWidth <= 0) return null;
+      const labelsEl = container.querySelector(
+        '#gh-day-labels',
+      ) as HTMLElement | null;
+      let labelsWidth = 0;
+      if (labelsEl) {
+        const labelCS = getComputedStyle(labelsEl);
+        labelsWidth =
+          labelsEl.offsetWidth +
+          parseFloat(labelCS.marginLeft || '0') +
+          parseFloat(labelCS.marginRight || '0');
+      }
+      const cs = getComputedStyle(container);
+      const padH =
+        parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
+      cachedNaturalWidth = Math.ceil(svgWidth + labelsWidth + padH);
+      return cachedNaturalWidth;
+    };
+
+    // Hourly Distribution panel uses `width: fit-content; min-width: 310px`
+    // so its offsetWidth is the real floor we want to enforce — if the
+    // heatmap narrows below the panel, the card stack looks asymmetric.
+    const measureHourlyMinWidth = (): number => {
+      const panel = document.getElementById('danbooru-grass-panel');
+      if (!panel) return HOURLY_PANEL_MIN_WIDTH;
+      const w = panel.offsetWidth;
+      return w > 0 ? w : HOURLY_PANEL_MIN_WIDTH;
+    };
 
     // Constraints logic
     const applyConstraints = () => {
@@ -107,9 +240,19 @@ export class GraphRenderer {
       const statsWidth = (stats as HTMLElement).offsetWidth;
       const gap = 20;
 
-      // Check if wrapped (Graph is below Stats)
-      const isWrapped =
-        container.offsetTop > (stats as HTMLElement).offsetTop + 10;
+      // When savedLayoutMode is explicitly set, trust it — during a
+      // mode switch the browser may not have reflowed yet (the old
+      // container width keeps it physically wrapped), so the
+      // offsetTop check would report stale position and prevent the
+      // width from shrinking to fit beside stats. Only fall back to
+      // offsetTop detection when no explicit mode has been persisted
+      // (null = first visit or legacy user).
+      let isWrapped: boolean;
+      if (this.savedLayoutMode !== null) {
+        isWrapped = this.savedLayoutMode === 'below';
+      } else {
+        isWrapped = container.offsetTop > (stats as HTMLElement).offsetTop + 10;
+      }
 
       let maxAvailableWidth;
       if (isWrapped) {
@@ -118,11 +261,23 @@ export class GraphRenderer {
         maxAvailableWidth = Math.max(300, wrapperWidth - statsWidth - gap);
       }
 
+      // Floor: the Hourly panel's width, unless the viewport is narrower than
+      // the panel itself (mobile / small window) — then we yield to the
+      // viewport so the heatmap doesn't blow past what's available.
+      const hourlyMin = measureHourlyMinWidth();
+      const minWidth = Math.min(hourlyMin, maxAvailableWidth);
+
+      // Natural SVG width is the absolute ceiling — the container should
+      // never be wider than the 12-month heatmap regardless of what was
+      // saved (avoids empty space on the right).
+      const natural = measureNaturalWidth();
+      const naturalCap = natural ?? maxAvailableWidth;
+
       if (savedWidth) {
         const numericWidth = parseFloat(String(savedWidth));
         const clampedWidth = Math.max(
-          300,
-          Math.min(numericWidth, maxAvailableWidth),
+          minWidth,
+          Math.min(numericWidth, naturalCap, maxAvailableWidth),
         );
         container.style.flex = '0 0 auto';
         container.style.width = `${clampedWidth}px`;
@@ -134,7 +289,19 @@ export class GraphRenderer {
         );
         container.style.transform = `translateX(${clampedX}px)`;
       } else {
-        container.style.flex = '1';
+        // No saved width — fit to the heatmap's natural size (12 months),
+        // capped at maxAvailableWidth. In inline mode that's the space
+        // beside stats; in below mode (isWrapped) it's the full wrapper.
+        if (natural !== null) {
+          const target = Math.max(
+            minWidth,
+            Math.min(natural, maxAvailableWidth),
+          );
+          container.style.flex = '0 0 auto';
+          container.style.width = `${target}px`;
+        } else {
+          container.style.flex = '1';
+        }
         container.style.transform = 'translateX(0px)';
       }
     };
@@ -148,6 +315,14 @@ export class GraphRenderer {
           container.style.transform?.replace(/translateX\(|px\)/g, '') || '0',
         ) || 0;
       panel.style.marginLeft = xOffset > 0 ? `${xOffset}px` : '0';
+    };
+
+    // Expose applyConstraints to the CalHeatmap paint callback below so it
+    // can re-run once the SVG is in the DOM and measureNaturalWidth() works.
+    this.reapplyGraphConstraints = () => {
+      cachedNaturalWidth = null;
+      applyConstraints();
+      syncPanelPosition();
     };
 
     // Initial apply (might be 0 if not 100% rendered, so we use a small delay or observer)
@@ -194,6 +369,11 @@ export class GraphRenderer {
     ): HTMLDivElement => {
       const handle = document.createElement('div');
       if (type === 'resize') {
+        // Background is faint by default — enough to hint at an interactive
+        // zone without distracting from the heatmap — and darkens on hover
+        // so the user can tell exactly where the drag target is. Rounded on
+        // the inside corners only (outside edge lives on the container edge).
+        const insideRadius = side === 'left' ? '0 8px 8px 0' : '8px 0 0 8px';
         handle.style.cssText = `
             position: absolute;
             top: 0;
@@ -202,7 +382,16 @@ export class GraphRenderer {
             height: 100%;
             cursor: col-resize;
             z-index: 101;
+            background: rgba(136, 136, 136, 0.08);
+            border-radius: ${insideRadius};
+            transition: background 0.15s ease;
           `;
+        handle.addEventListener('mouseenter', () => {
+          handle.style.background = 'rgba(136, 136, 136, 0.25)';
+        });
+        handle.addEventListener('mouseleave', () => {
+          handle.style.background = 'rgba(136, 136, 136, 0.08)';
+        });
       } else if (type === 'move') {
         handle.style.cssText = `
             position: absolute;
@@ -221,11 +410,124 @@ export class GraphRenderer {
       handle.onmousedown = e => {
         e.preventDefault();
         const startX = e.clientX;
+        const startY = e.clientY;
         const startWidth = container.offsetWidth;
         const startXOffset =
           parseFloat(
             container.style.transform.replace(/translateX\(|px\)/g, ''),
           ) || 0;
+
+        // Vertical drag-to-reorder state (move handle only). A drop zone
+        // hint appears — and mode switches on mouseup — only if the user
+        // crosses ACTIVATION_THRESHOLD in the direction opposite the
+        // current layout mode. Pure horizontal drags are untouched.
+        //
+        // Hysteresis: activation requires 30px, but once committed the
+        // gesture stays active until the user pulls back within 10px of
+        // the origin (or reverses direction). Without hysteresis the
+        // user could drift back toward the handle — or release on the
+        // near edge of the hint itself (~27px above startY) — and
+        // deltaY would drop below threshold right at mouseup, silently
+        // cancelling the switch.
+        const ACTIVATION_THRESHOLD = 30;
+        const DEACTIVATION_THRESHOLD = 10;
+        // Determine the *visual* mode — not just savedLayoutMode —
+        // because the container may be naturally wrapped (flex-wrap)
+        // due to insufficient horizontal space (e.g. long Previous
+        // Names) even though savedLayoutMode is null/'inline'.
+        const visuallyBelow =
+          container.offsetTop > (stats as HTMLElement).offsetTop + 10;
+        const currentMode: 'inline' | 'below' =
+          this.savedLayoutMode === 'below' || visuallyBelow
+            ? 'below'
+            : 'inline';
+        let verticalIntent = false;
+        let candidateMode: 'inline' | 'below' = currentMode;
+
+        // Destination-bar hint: a glowing bar on the container edge
+        // in the drag direction. Positioned on the container itself
+        // so it's always visible near the move handle.
+        // Below → horizontal bar at container bottom edge
+        // Inline → horizontal bar at container top edge
+        let dropHint: HTMLDivElement | null = null;
+        let hintStyleEl: HTMLStyleElement | null = null;
+        const showDropHint = (mode: 'inline' | 'below'): void => {
+          if (!hintStyleEl) {
+            hintStyleEl = document.createElement('style');
+            hintStyleEl.id = 'di-drop-hint-keyframes';
+            hintStyleEl.textContent = `
+              @keyframes di-glow-pulse {
+                0%, 100% { opacity: 0.7; box-shadow: 0 0 6px 2px rgba(66,153,225,0.5); }
+                50%      { opacity: 1;   box-shadow: 0 0 14px 4px rgba(66,153,225,0.8); }
+              }
+            `;
+            document.head.appendChild(hintStyleEl);
+          }
+          if (!dropHint) {
+            dropHint = document.createElement('div');
+            dropHint.id = 'danbooru-grass-drop-hint';
+            dropHint.style.cssText = `
+                position: absolute;
+                left: 0;
+                width: 100%;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                pointer-events: none;
+                z-index: 10000;
+                transition: opacity 0.15s ease;
+              `;
+            const bar = document.createElement('div');
+            bar.style.cssText = `
+                width: 100%;
+                height: 3px;
+                background: rgba(66, 153, 225, 0.9);
+                border-radius: 2px;
+                animation: di-glow-pulse 1s ease-in-out infinite;
+              `;
+            bar.className = 'di-drop-bar';
+            const label = document.createElement('span');
+            label.className = 'di-drop-label';
+            label.style.cssText = `
+                font-size: 0.75em;
+                font-weight: 600;
+                color: rgba(66, 153, 225, 0.9);
+                margin: 2px 0;
+                white-space: nowrap;
+              `;
+            dropHint.appendChild(bar);
+            dropHint.appendChild(label);
+            container.appendChild(dropHint);
+          }
+          const label = dropHint.querySelector('.di-drop-label') as HTMLElement;
+          if (mode === 'below') {
+            // bar + label sit just below the container bottom edge
+            dropHint.style.flexDirection = 'column';
+            dropHint.style.bottom = '';
+            dropHint.style.top = `${container.offsetHeight + 4}px`;
+            label.textContent = 'Move to below ↓';
+          } else {
+            // label + bar sit just above the container top edge
+            dropHint.style.flexDirection = 'column-reverse';
+            dropHint.style.top = '';
+            dropHint.style.bottom = `${container.offsetHeight + 4}px`;
+            label.textContent = 'Move to side ↑';
+          }
+          dropHint.style.display = 'flex';
+          dropHint.style.opacity = '1';
+        };
+        const hideDropHint = (): void => {
+          if (dropHint) {
+            dropHint.style.opacity = '0';
+            dropHint.style.display = 'none';
+          }
+        };
+        const destroyDropHint = (): void => {
+          dropHint?.remove();
+          dropHint = null;
+          hintStyleEl?.remove();
+          hintStyleEl = null;
+        };
 
         const onMouseMove = (mE: MouseEvent): void => {
           const delta = mE.clientX - startX;
@@ -247,16 +549,52 @@ export class GraphRenderer {
             maxAvailableWidth = Math.max(300, wrapperWidth - statsWidth - gap);
           }
 
+          // Drag floor: the Hourly panel's rendered width (width below that
+          // would leave the card stack asymmetric with the panel jutting
+          // out). If the viewport is narrower than the panel we yield to
+          // the viewport instead so the drag doesn't stick.
+          const minWidth = Math.min(measureHourlyMinWidth(), maxAvailableWidth);
+
           if (type === 'move') {
             let newX = startXOffset + delta;
             // Don't go left into stats, don't go right out of wrapper
             newX = Math.max(0, Math.min(newX, maxAvailableWidth - startWidth));
             container.style.transform = `translateX(${newX}px)`;
+
+            // Vertical intent: activated past ACTIVATION_THRESHOLD in the
+            // direction opposite the current layout. Once committed, the
+            // gesture stays active through small backoffs (hysteresis) —
+            // only the user clearly returning toward the origin
+            // (|deltaY| < DEACTIVATION_THRESHOLD) or reversing direction
+            // cancels it. Same-mode direction never activates so no hint
+            // flashes and no redundant save happens.
+            const deltaY = mE.clientY - startY;
+            if (!verticalIntent) {
+              if (Math.abs(deltaY) >= ACTIVATION_THRESHOLD) {
+                candidateMode = deltaY > 0 ? 'below' : 'inline';
+                verticalIntent = candidateMode !== currentMode;
+              }
+            } else {
+              const committedSign = candidateMode === 'below' ? 1 : -1;
+              const sameDirection = deltaY * committedSign > 0;
+              if (Math.abs(deltaY) < DEACTIVATION_THRESHOLD || !sameDirection) {
+                verticalIntent = false;
+                candidateMode = currentMode;
+              }
+            }
+            if (verticalIntent) showDropHint(candidateMode);
+            else hideDropHint();
           } else if (type === 'resize') {
+            // Natural SVG width caps resize — no point making the
+            // container wider than the heatmap it holds.
+            const natCap = measureNaturalWidth() ?? maxAvailableWidth;
             if (side === 'right') {
-              const maxWidth = maxAvailableWidth - startXOffset;
+              const maxWidth = Math.min(
+                natCap,
+                maxAvailableWidth - startXOffset,
+              );
               const newWidth = Math.max(
-                300,
+                minWidth,
                 Math.min(startWidth + delta, maxWidth),
               );
               container.style.flex = '0 0 auto';
@@ -265,9 +603,10 @@ export class GraphRenderer {
               // Expansion left is limited by XOffset reaching 0
               const minDelta = -startXOffset;
               const clampedDelta = Math.max(delta, minDelta);
-              const newWidth = Math.max(300, startWidth - clampedDelta);
+              const rawWidth = Math.max(minWidth, startWidth - clampedDelta);
+              const newWidth = Math.min(rawWidth, natCap);
 
-              // If width hits 300, stop moving X
+              // If width hits minWidth, stop moving X
               const finalDelta = startWidth - newWidth;
               const newX = startXOffset + finalDelta;
 
@@ -275,6 +614,7 @@ export class GraphRenderer {
               container.style.width = `${newWidth}px`;
               container.style.transform = `translateX(${newX}px)`;
             }
+            this.scrollToCurrentMonth();
           }
           syncPanelPosition();
         };
@@ -282,15 +622,88 @@ export class GraphRenderer {
         const onMouseUp = () => {
           document.removeEventListener('mousemove', onMouseMove);
           document.removeEventListener('mouseup', onMouseUp);
-          const finalX =
-            parseFloat(
-              container.style.transform.replace(/translateX\(|px\)/g, ''),
-            ) || 0;
+          destroyDropHint();
+
+          // Commit mode change first so the persisted record below
+          // reflects the new layout. Re-running applyConstraints here
+          // also picks up the new isWrapped state after flex-basis flips.
+          const modeChanged =
+            type === 'move' && verticalIntent && candidateMode !== currentMode;
+          if (modeChanged) {
+            const columnWrapper = document.getElementById(
+              'danbooru-grass-column',
+            );
+            if (columnWrapper) {
+              // Set each longhand explicitly instead of relying on the
+              // shorthand + flex-basis override dance. Some CSSOM
+              // behaviour around `style.flexBasis = ''` after a prior
+              // `style.flex = '1'` can leave the basis in an undefined
+              // intermediate state that doesn't actually unwrap the row.
+              columnWrapper.style.setProperty('flex-grow', '1');
+              columnWrapper.style.setProperty('flex-shrink', '1');
+              columnWrapper.style.setProperty(
+                'flex-basis',
+                candidateMode === 'below' ? '100%' : '0%',
+              );
+            }
+            this.savedLayoutMode = candidateMode;
+
+            // Restore the target mode's persisted width/xOffset (or
+            // null/0 if the user hasn't customised this mode yet — then
+            // applyConstraints falls through to natural width). Any
+            // horizontal translateX accrued during this vertical drag
+            // is discarded intentionally, per the spec.
+            savedWidth = candidateMode === 'below' ? belowWidth : inlineWidth;
+            savedX = candidateMode === 'below' ? belowX : inlineX;
+
+            // Reset inline container styles so applyConstraints picks up
+            // the new savedWidth/savedX and writes a fresh layout. The
+            // alignSelf:flex-start trick is only needed when we're going
+            // to measure natural width (savedWidth === null); otherwise
+            // applyConstraints writes the saved width directly.
+            const needsNaturalMeasure = !savedWidth;
+            if (needsNaturalMeasure) {
+              container.style.alignSelf = 'flex-start';
+            }
+            container.style.width = '';
+            container.style.flex = '';
+            container.style.transform = '';
+            // Force a synchronous reflow before applyConstraints measures.
+            void container.offsetWidth;
+            applyConstraints();
+            if (needsNaturalMeasure) {
+              container.style.alignSelf = '';
+            }
+            // The restored per-mode width may be narrower than the
+            // heatmap's 12-month span (user previously shrunk via the
+            // resize handle), so re-align the horizontal scroll to the
+            // current month the same way a fresh paint does.
+            this.scrollToCurrentMonth();
+          } else {
+            // Non-mode-change drag (horizontal move or resize). Persist
+            // the new width + xOffset under the *current* mode so the
+            // other mode's saved values are untouched.
+            const finalX =
+              parseFloat(
+                container.style.transform.replace(/translateX\(|px\)/g, ''),
+              ) || 0;
+            const newWidthPx = parseFloat(container.style.width);
+            const nextWidth = Number.isFinite(newWidthPx) ? newWidthPx : null;
+            if (this.savedLayoutMode === 'below') {
+              belowWidth = nextWidth;
+              belowX = finalX;
+            } else {
+              inlineWidth = nextWidth;
+              inlineX = finalX;
+            }
+            savedWidth = nextWidth;
+            savedX = finalX;
+          }
           // Fire-and-forget: persistence of layout settings on drag-end.
-          void dataManager.saveGrassSettings(userId, {
-            width: container.style.width,
-            xOffset: finalX,
-          });
+          // Both branches (mode change and horizontal) need the full
+          // record written — saveGrassSettings is a Dexie `put` and any
+          // missing field is an effective delete.
+          persistSettings();
           syncPanelPosition();
         };
 
@@ -656,6 +1069,8 @@ export class GraphRenderer {
       dailyData = (dataMap as MetricData).daily;
       hourlyData = (dataMap as MetricData).hourly;
     }
+
+    this.currentYear = year;
 
     // Update Header with Total Count and Embedded Year Selector
     const total = Object.values(dailyData || {}).reduce(
@@ -1165,7 +1580,11 @@ export class GraphRenderer {
           columnWrapper.id = 'danbooru-grass-column';
           columnWrapper.style.display = 'flex';
           columnWrapper.style.flexDirection = 'column';
-          columnWrapper.style.flex = '1';
+          // Set flex longhands explicitly so the below↔inline toggle can
+          // override `flex-basis` without fighting a shorthand declaration.
+          columnWrapper.style.flexGrow = '1';
+          columnWrapper.style.flexShrink = '1';
+          columnWrapper.style.flexBasis = '0%';
           columnWrapper.style.minWidth = '300px';
 
           // Insert wrapper where mainContainer is
@@ -1181,6 +1600,14 @@ export class GraphRenderer {
           // and would clobber the px value the user picked via the resize
           // handle.
         }
+      }
+      // Apply persisted vertical layout: 'below' forces the column to wrap
+      // onto its own flex row (stats above, grass below). Reverting to
+      // 0% basis restores the default "take remaining row space beside
+      // stats" behaviour.
+      if (columnWrapper) {
+        columnWrapper.style.flexBasis =
+          this.savedLayoutMode === 'below' ? '100%' : '0%';
       }
 
       let panel = document.getElementById('danbooru-grass-panel');
@@ -1350,6 +1777,23 @@ export class GraphRenderer {
     win.cal
       .paint(buildPaintConfig())
       .then(() => {
+        // Heatmap SVG now exists — re-run applyConstraints so the
+        // "fit to natural width" branch can actually measure it. On the
+        // very first render the initial setTimeout-based apply saw no SVG
+        // and fell through to `flex: 1`.
+        //
+        // Defer by one animation frame: CalHeatmap's .paint() resolves
+        // once the DOM nodes are inserted, but the browser hasn't
+        // necessarily completed layout yet. Measuring .ch-domain rects
+        // in this tick returns intermediate/zero values that get cached
+        // as the "natural" width. One rAF is enough for layout to
+        // settle before we measure.
+        // reapplyGraphConstraints clears cachedNaturalWidth internally
+        // so the fresh measurement picks up correct .ch-domain rects.
+        requestAnimationFrame(() => {
+          this.reapplyGraphConstraints?.();
+        });
+
         // Listen for theme/grass changes — destroy + re-paint CalHeatmap
         const onThemeChange = () => {
           try {
@@ -1361,6 +1805,9 @@ export class GraphRenderer {
             win.cal.paint(buildPaintConfig()).then(() => {
               // Restore scroll position after paint
               if (sw) sw.scrollLeft = savedScroll;
+              // Natural width may have shifted (cell size tweaks via theme)
+              // so re-apply once the repaint settles.
+              this.reapplyGraphConstraints?.();
             });
           } catch (e) {
             console.debug('[DI] CalHeatmap re-paint failed', e);
@@ -1435,26 +1882,7 @@ export class GraphRenderer {
           const isTouch = isTouchDevice();
 
           // --- Auto-Scroll to Current Date (Refined) ---
-          const scrollContainer = document.getElementById('cal-heatmap-scroll');
-          if (scrollContainer && !skipScroll) {
-            if (year === new Date().getFullYear()) {
-              const currentMonth = new Date().getMonth() + 1; // 1-12
-              const targetMonth = scrollContainer.querySelector(
-                `.ch-domain:nth-of-type(${currentMonth})`,
-              );
-
-              if (targetMonth) {
-                const containerRect = scrollContainer.getBoundingClientRect();
-                const elementRect = targetMonth.getBoundingClientRect();
-                scrollContainer.scrollLeft +=
-                  elementRect.left - containerRect.left - 10;
-              } else {
-                scrollContainer.scrollLeft = scrollContainer.scrollWidth;
-              }
-            } else {
-              scrollContainer.scrollLeft = 0;
-            }
-          }
+          if (!skipScroll) this.scrollToCurrentMonth();
 
           // 1. Tooltips for Graph Cells
           if (isTouch) {

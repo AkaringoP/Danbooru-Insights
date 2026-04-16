@@ -978,19 +978,33 @@ export function renderTopPostsWidget(
   container: HTMLElement,
   topPosts: TopPostsByRating | null,
   recentPopularPosts: TopPostsBySfw | null,
-  randomPosts: TopPostsBySfw | null,
+  randomPosts: TopPostsBySfw | Promise<TopPostsBySfw | null> | null,
   initialNsfwEnabled: boolean,
   db: Database,
   context: ChartContext,
 ): {onNsfwChange: (enabled: boolean) => void} {
   let isNsfwEnabled = initialNsfwEnabled;
 
+  // randomPosts is accepted as either a resolved value or a pending Promise.
+  // When a Promise is passed, the widget renders without blocking on it; the
+  // Random tab shows a "loading..." placeholder until it resolves, then
+  // swaps in the real content. This keeps the dashboard's first paint from
+  // being dominated by the random-post fetch (~1.3s per measurement).
   const topPostGroups: Record<string, TopPostsByRating | TopPostsBySfw | null> =
     {
       most: topPosts,
       recent: recentPopularPosts,
-      random: randomPosts,
+      random:
+        randomPosts && !(randomPosts instanceof Promise) ? randomPosts : null,
     };
+
+  if (randomPosts instanceof Promise) {
+    void randomPosts.then(resolved => {
+      topPostGroups.random = resolved;
+      // Re-render only if the user is currently viewing the Random tab.
+      if (currentWidgetMode === 'random') renderTopPostContent();
+    });
+  }
 
   let currentWidgetMode = 'recent';
   let currentMostTab = 'g';

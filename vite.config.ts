@@ -1,9 +1,16 @@
 import {defineConfig} from 'vite';
 import monkey from 'vite-plugin-monkey';
 import {APP_VERSION} from './src/version';
+import {detectPerfLoggingEnabled} from './build-flags';
+
+const perfEnabled = detectPerfLoggingEnabled();
+console.log(`[build-flags] __PERF_ENABLED__ = ${perfEnabled}`);
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  define: {
+    __PERF_ENABLED__: JSON.stringify(perfEnabled),
+  },
   plugins: [
     monkey({
       entry: 'src/main.ts',

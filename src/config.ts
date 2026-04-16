@@ -245,28 +245,28 @@ export const CONFIG: {
         },
       ],
     },
-    newspaper: {
-      name: 'Newspaper',
-      bg: '#f0f0f0',
-      empty: '#dbdbdb',
-      text: '#24292f',
-      scrollbar: '#d0d7de',
+    dracula: {
+      name: 'Dracula',
+      bg: '#282a36',
+      empty: '#44475a',
+      text: '#f8f8f2',
+      scrollbar: '#6272a4',
       grassOptions: [
         {
           name: 'Green',
-          levels: ['#dbdbdb', '#9be9a8', '#40c463', '#30a14e', '#216e39'],
+          levels: ['#44475a', '#0e4429', '#006d32', '#26a641', '#39d353'],
         },
         {
-          name: 'Blues',
-          levels: ['#dbdbdb', '#bdd7e7', '#6baed6', '#3182bd', '#08519c'],
+          name: 'Pink',
+          levels: ['#44475a', '#8b3a62', '#bd4f8e', '#ff79c6', '#ffb3e0'],
         },
         {
-          name: 'Purples',
-          levels: ['#dbdbdb', '#cbc9e2', '#9e9ac8', '#756bb1', '#54278f'],
+          name: 'Purple',
+          levels: ['#44475a', '#5b3e8a', '#7c5cbf', '#bd93f9', '#dcc5ff'],
         },
         {
-          name: 'Oranges',
-          levels: ['#dbdbdb', '#fdbe85', '#fd8d3c', '#e6550d', '#a63603'],
+          name: 'Cyan',
+          levels: ['#44475a', '#1a6b5a', '#2e9e85', '#8be9fd', '#c3f5ee'],
         },
       ],
     },
