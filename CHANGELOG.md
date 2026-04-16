@@ -4,6 +4,13 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.2.2 — Increase Page Limit for Approvals & Notes
+
+### Improvement
+- **Approvals and Notes now fetch 1000 items per page** (up from 200). The Danbooru API allows up to 1000 for all endpoints except `/posts.json` (capped at 200). Combined with the adaptive batch size from v9.2.1, this reduces approvals/notes sync to ~1/25th of the original request count.
+
+---
+
 ## v9.2.1 — Adaptive Batch Size for Approvals
 
 ### Bug Fix

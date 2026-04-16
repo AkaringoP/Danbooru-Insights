@@ -237,8 +237,9 @@ export class DataManager {
       const endDate = `${year + 1}-01-01`;
 
       // Params common to all; typed as Record for dynamic key assignment
+      // /posts.json caps at 200/page; other endpoints allow up to 1000.
       const params: Record<string, unknown> = {
-        limit: 200,
+        limit: metric === 'uploads' ? 200 : 1000,
       };
 
       const normalizedName = (userInfo.name || '').replace(/ /g, '_');
@@ -692,10 +693,11 @@ export class DataManager {
     let page = 1;
 
     // Adaptive Batch Size
-    // - Full initial fetches start at 5 to parallelize a large backlog
-    // - Delta fetches start at 1 (narrow range, usually <1 page), then
-    //   scale up to 5 if the first page comes back full (200 items)
+    // - Full initial fetches: 5 pages in parallel
+    // - Delta fetches: start at 1 (narrow range, usually <1 page), then
+    //   scale up to 3 if the first page comes back full
     const FULL_BATCH = 5;
+    const DELTA_SCALE_UP = 3;
     let batchSize = isDelta ? 1 : FULL_BATCH;
     const isApprovals = endpoint.includes('/post_approvals.json');
     const DELAY_BETWEEN_BATCHES = 150;
@@ -823,12 +825,12 @@ export class DataManager {
 
       // Adaptive scale-up: if delta started with batchSize=1 and the
       // first page was full, there's more data than expected — switch
-      // to full parallel batching for the remaining pages.
-      if (batchSize < FULL_BATCH && page === 1) {
+      // to moderate parallel batching for the remaining pages.
+      if (batchSize < DELTA_SCALE_UP && page === 1) {
         const limit = params['limit'] as number;
         const firstPageFull = batchResults[0]?.data?.length === limit;
         if (firstPageFull) {
-          batchSize = FULL_BATCH;
+          batchSize = DELTA_SCALE_UP;
         }
       }
 
