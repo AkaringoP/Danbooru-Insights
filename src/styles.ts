@@ -993,6 +993,72 @@ export const GLOBAL_CSS = `
         font-size: 12px;
       }
     }
+
+    /* ── Toast Notifications ── */
+    .di-toast-container {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      z-index: 2147483646;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 8px;
+      pointer-events: none;
+      max-width: 380px;
+    }
+    .di-toast {
+      pointer-events: auto;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.4;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #fff;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+      opacity: 0;
+      transform: translateX(40px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    .di-toast.di-toast-visible {
+      opacity: 1;
+      transform: translateX(0);
+    }
+    .di-toast.di-toast-exit {
+      opacity: 0;
+      transform: translateX(40px);
+    }
+    .di-toast-success { background: #2d8a4e; }
+    .di-toast-error   { background: #c93c37; }
+    .di-toast-warn    { background: #bf6a1f; }
+    .di-toast-info    { background: #2563a8; }
+    .di-toast-message {
+      flex: 1;
+      word-break: break-word;
+    }
+    .di-toast-close {
+      flex-shrink: 0;
+      background: none;
+      border: none;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 16px;
+      cursor: pointer;
+      padding: 0 2px;
+      line-height: 1;
+    }
+    .di-toast-close:hover {
+      color: #fff;
+    }
+    @media (max-width: 480px) {
+      .di-toast-container {
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        max-width: none;
+      }
+    }
   `;
 
 /**

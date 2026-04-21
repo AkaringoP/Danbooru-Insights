@@ -1,5 +1,6 @@
 import {CONFIG} from '../config';
 import {DataManager} from '../core/data-manager';
+import {showToast} from './toast';
 import type {SettingsManager} from '../core/settings';
 import type {Metric, GrassOption} from '../types';
 import type {Database} from '../core/database';
@@ -108,7 +109,7 @@ export function createSettingsPopover(
   const handleClose = (): void => {
     const check = validateThresholds();
     if (!check.valid) {
-      alert(check.msg);
+      showToast({type: 'warn', message: check.msg ?? 'Invalid settings.'});
       return;
     }
     popover.style.display = 'none';
