@@ -858,6 +858,11 @@ export const GLOBAL_CSS = `
         width: fit-content !important;
         margin: 5px 0 5px auto !important;
       }
+      .di-scatter-downvote {
+        position: static !important;
+        width: fit-content !important;
+        margin: 0 0 5px auto !important;
+      }
 
       /* Phase 3: Rankings horizontal swipe */
       #ranking-container {
@@ -936,6 +941,20 @@ export const GLOBAL_CSS = `
       /* Fix 2: TagAnalytics milestones grid - 2 columns on mobile */
       .milestones-grid {
         grid-template-columns: repeat(2, 1fr) !important;
+      }
+
+      /* UserAnalytics milestones: 2 columns on mobile */
+      #analytics-milestone-container {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 6px !important;
+      }
+      #analytics-milestone-container > a,
+      #analytics-milestone-container > .di-next-milestone-card {
+        padding: 8px !important;
+      }
+      #analytics-milestone-container > a > div:last-child {
+        width: 45px !important;
+        height: 45px !important;
       }
 
       /* Fix 10: Created Tags pagination wrap */
