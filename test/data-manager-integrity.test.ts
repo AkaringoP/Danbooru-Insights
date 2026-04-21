@@ -542,6 +542,66 @@ describe('getMetricData — 3-day safety buffer', () => {
     expect(postsFetch).toBeDefined();
     expect(postsFetch).toContain(`${currentYear}-05-12`);
   });
+
+  it('caps delta fetch end at today+2 days so TZ-ahead uploads are included', async () => {
+    // Regression for the timezone bug where the upper bound was computed
+    // as tomorrow-in-UTC. Danbooru's `date:A...B` is upper-bound-exclusive
+    // and evaluated in the user's configured timezone, so when that TZ is
+    // ahead of UTC (e.g. KST = UTC+9) today's uploads fell outside the
+    // fetch range and never made it into the local cache.
+    const now = new Date();
+    const currentYear = now.getFullYear();
+
+    // Cached data: a recent day so the delta path is taken
+    const lastDate = new Date(now);
+    lastDate.setDate(lastDate.getDate() - 1);
+    const lastDateStr = lastDate.toISOString().slice(0, 10);
+
+    const localRows = [
+      {
+        id: `42_${lastDateStr}`,
+        userId: '42',
+        date: lastDateStr,
+        count: 1,
+      },
+    ];
+    const uploadsTable = makeTable(localRows);
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    const fetchedUrls: string[] = [];
+    const rl = makeRateLimiter(async (url: string) => {
+      fetchedUrls.push(url);
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('uploads', makeUser(), currentYear);
+
+    const postsFetch = fetchedUrls.find(u => u.includes('/posts.json'));
+    expect(postsFetch).toBeDefined();
+
+    // Extract the `date:...END` upper bound from the tags query.
+    const decoded = decodeURIComponent(postsFetch!);
+    const m = decoded.match(/date:[^ &]*\.\.\.(\d{4}-\d{2}-\d{2})/);
+    expect(m).not.toBeNull();
+    const endDate = m![1];
+
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+
+    // Must be STRICTLY after tomorrow-in-UTC so that "today" in any
+    // reasonable Danbooru TZ (up to UTC+14) is still captured despite
+    // the exclusive upper bound.
+    expect(endDate > tomorrowStr).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

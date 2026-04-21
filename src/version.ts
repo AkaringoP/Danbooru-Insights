@@ -5,7 +5,7 @@
  *
  * Bump this when releasing a new version — nothing else needs to change.
  */
-export const APP_VERSION = '9.3.0';
+export const APP_VERSION = '9.3.1';
 
 /** GitHub repository URL shown next to the version in the dashboard footer. */
 export const APP_REPO_URL = 'https://github.com/AkaringoP/Danbooru-Insights';
