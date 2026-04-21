@@ -877,6 +877,18 @@ export const GLOBAL_CSS = `
         overflow-x: auto !important;
       }
 
+      /* Grass wrapper: stack vertically on mobile so stats reclaims full width */
+      #danbooru-grass-wrapper {
+        flex-direction: column !important;
+      }
+      #danbooru-grass-wrapper > :first-child {
+        max-width: 100% !important;
+        overflow: visible !important;
+      }
+      #danbooru-grass-column {
+        flex-basis: 100% !important;
+      }
+
       /* Phase 4: Grass handles hide on mobile */
       .di-grass-handle {
         display: none !important;
