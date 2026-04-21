@@ -1951,31 +1951,52 @@ export class GraphRenderer {
             });
 
           if (calTap) {
-            const handleCellTouch = (event: TouchEvent) => {
-              const touch = event.touches[0];
-              const target = document.elementFromPoint(
-                touch.clientX,
-                touch.clientY,
-              );
-              if (!target) return;
-              const datum = d3.select(target).datum() as CalHeatmapDatum;
-              if (!datum || !datum.t) return;
-
-              calTap.tap(datum);
-              const count = datum.v ?? 0;
-              const dateStr = new Date(datum.t).toISOString().split('T')[0];
-              updateTooltipTouch(
-                touch,
-                `<strong>${dateStr}</strong>, ${count} ${metric}`,
-              );
-            };
+            // Tap-only tooltip: record touch start position, fire tap only
+            // when the finger hasn't moved (≤10px). Drags scroll normally.
+            const TAP_THRESHOLD = 10;
+            let touchStartX = 0;
+            let touchStartY = 0;
+            let wasDrag = false;
 
             d3.selectAll('#cal-heatmap-scroll rect')
               .on('touchstart', (event: TouchEvent) => {
-                handleCellTouch(event);
+                const touch = event.touches[0];
+                touchStartX = touch.clientX;
+                touchStartY = touch.clientY;
+                wasDrag = false;
               })
-              .on('touchmove', (event: TouchEvent) => {
-                handleCellTouch(event);
+              .on('touchmove', () => {
+                wasDrag = true;
+              })
+              .on('touchend', (event: TouchEvent) => {
+                if (wasDrag) {
+                  const touch = event.changedTouches[0];
+                  const dx = touch.clientX - touchStartX;
+                  const dy = touch.clientY - touchStartY;
+                  if (dx * dx + dy * dy > TAP_THRESHOLD * TAP_THRESHOLD) return;
+                }
+                // Tap detected — resolve target from start position
+                const target = document.elementFromPoint(
+                  touchStartX,
+                  touchStartY,
+                );
+                if (!target) return;
+                const datum = d3.select(target).datum() as CalHeatmapDatum;
+                if (!datum || !datum.t) return;
+
+                calTap.tap(datum);
+                const count = datum.v ?? 0;
+                const dateStr = new Date(datum.t).toISOString().split('T')[0];
+                // Use a synthetic touch-like object at the start position
+                updateTooltipTouch(
+                  {
+                    pageX: touchStartX + window.scrollX,
+                    pageY: touchStartY + window.scrollY,
+                    clientX: touchStartX,
+                    clientY: touchStartY,
+                  } as Touch,
+                  `<strong>${dateStr}</strong>, ${count} ${metric}`,
+                );
               });
 
             // Tooltip tap → navigate via controller
