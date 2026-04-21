@@ -1,5 +1,8 @@
 import {CONFIG} from '../config';
 import type {DarkModePreference, Metric, SettingsData, Theme} from '../types';
+import {createLogger} from './logger';
+
+const log = createLogger('Settings');
 
 /**
  * Manages user settings and persistence using localStorage.
@@ -68,10 +71,7 @@ export class SettingsManager {
         },
       };
     } catch (e) {
-      console.error(
-        '[Danbooru Grass] Error loading settings, using defaults:',
-        e,
-      );
+      log.error('Error loading settings, using defaults', {error: e});
       return this.defaults;
     }
   }

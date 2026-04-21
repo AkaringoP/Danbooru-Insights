@@ -1,5 +1,6 @@
 import * as d3 from 'd3';
 import {CONFIG} from '../config';
+import {createLogger} from '../core/logger';
 import type {DataManager} from '../core/data-manager';
 import type {
   TargetUser,
@@ -12,6 +13,8 @@ import {SettingsManager} from '../core/settings';
 import {createSettingsPopover, applyPopoverPalette} from './settings-popover';
 import {showApprovalsDetail} from './approval-detail-popover';
 import {isTouchDevice, createTwoStepTap} from './two-step-tap';
+
+const log = createLogger('GraphRenderer');
 
 /**
  * GraphRenderer: Handles rendering of the contribution heatmap graph.
@@ -108,7 +111,7 @@ export class GraphRenderer {
     }
 
     if (!stats) {
-      console.error('[Danbooru Grass] Injection point not found.');
+      log.error('Injection point not found');
       return false;
     }
 
@@ -1126,10 +1129,7 @@ export class GraphRenderer {
       try {
         win.cal.destroy();
       } catch (e) {
-        console.warn(
-          '[Danbooru Grass] Failed to destroy previous instance:',
-          e,
-        );
+        log.warn('Failed to destroy previous CalHeatmap instance', {error: e});
       }
     }
     win.cal = new win.CalHeatmap();
@@ -1810,7 +1810,7 @@ export class GraphRenderer {
               this.reapplyGraphConstraints?.();
             });
           } catch (e) {
-            console.debug('[DI] CalHeatmap re-paint failed', e);
+            log.debug('CalHeatmap re-paint failed', {error: e});
           }
           this.updateSummaryGrid(hourlyData, metric);
         };
@@ -2033,7 +2033,7 @@ export class GraphRenderer {
         }, 300); // Increased timeout significantly to ensure render is done
       })
       .catch((err: unknown) => {
-        console.error('[Danbooru Grass] Render failed:', err);
+        log.error('CalHeatmap render failed', {error: err});
         // Still update summary grid on failure
         this.updateSummaryGrid(hourlyData, metric);
       });

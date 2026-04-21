@@ -110,9 +110,13 @@ describe('Architecture constraints', () => {
 
   it('should not use raw fetch() — use RateLimitedFetch instead', () => {
     const violations: string[] = [];
-    // Only check non-core files (core/rate-limiter.ts itself uses fetch internally)
+    // Exclude: rate-limiter.ts uses fetch internally, dev/ uses raw IDB+fetch
+    // intentionally (diagnostic module must be app-independent)
     const filesToCheck = allFiles.filter(
-      f => !f.path.includes('rate-limiter.ts') && !f.path.includes('.test.'),
+      f =>
+        !f.path.includes('rate-limiter.ts') &&
+        !f.path.includes('.test.') &&
+        !f.path.includes('/dev/'),
     );
 
     for (const file of filesToCheck) {
@@ -135,6 +139,68 @@ describe('Architecture constraints', () => {
     expect(
       violations,
       'Use this.rateLimiter.fetch() instead of raw fetch() to respect API rate limits.',
+    ).toEqual([]);
+  });
+
+  it('should not use raw console.* — use createLogger instead', () => {
+    const violations: string[] = [];
+    // Allowed: logger.ts (defines the abstraction), perf-logger.ts (separate perf system),
+    // dev/ (diagnostic module uses console-free panel, but may need console internally)
+    const filesToCheck = allFiles.filter(
+      f =>
+        !f.path.includes('logger.ts') &&
+        !f.path.includes('perf-logger.ts') &&
+        !f.path.includes('/dev/') &&
+        !f.path.includes('.test.'),
+    );
+
+    for (const file of filesToCheck) {
+      const lines = file.content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (
+          /\bconsole\.(log|error|warn|debug|info)\s*\(/.test(line) &&
+          !line.trim().startsWith('//') &&
+          !line.trim().startsWith('*')
+        ) {
+          violations.push(
+            `${path.relative(SRC_DIR, file.path)}:${i + 1}: ${line.trim()}`,
+          );
+        }
+      }
+    }
+
+    expect(
+      violations,
+      'Use createLogger() from core/logger.ts instead of raw console.*.',
+    ).toEqual([]);
+  });
+
+  it('dev/ should not import from core/, ui/, or apps/', () => {
+    const devFiles = allFiles.filter(f => f.path.includes('/dev/'));
+    const violations: string[] = [];
+
+    for (const file of devFiles) {
+      const imports = extractImports(file.content);
+      for (const imp of imports) {
+        if (
+          imp.includes('/core/') ||
+          imp.includes('../core/') ||
+          imp.includes('/ui/') ||
+          imp.includes('../ui/') ||
+          imp.includes('/apps/') ||
+          imp.includes('../apps/')
+        ) {
+          violations.push(
+            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
+          );
+        }
+      }
+    }
+
+    expect(
+      violations,
+      'dev/ must be app-independent. Use raw browser APIs (indexedDB, fetch) instead of app modules.',
     ).toEqual([]);
   });
 });

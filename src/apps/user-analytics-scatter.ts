@@ -4,6 +4,9 @@ import type {LevelChangeEvent} from '../core/analytics-data-manager';
 import {attachPostHoverCard, hidePostHoverCard} from '../ui/post-hover-card';
 import {isTouchDevice} from '../ui/two-step-tap';
 import {getPalette} from '../ui/theme-palette';
+import {createLogger} from '../core/logger';
+
+const log = createLogger('Scatter');
 
 // ============================================================
 // SCATTER PLOT WIDGET
@@ -1159,12 +1162,12 @@ function wireBackfillUi(
           scatterData.push(...fresh);
           rerender();
         } catch (e) {
-          console.warn('[Scatter] refresh after backfill failed:', e);
+          log.warn('Refresh after backfill failed', {error: e});
         }
       }
     })
     .catch(e => {
-      console.warn('[Scatter] backfill failed:', e);
+      log.warn('Backfill failed', {error: e});
       state.backfillInProgress = false;
       state.backfillFailed = true;
       progressLabel.textContent = 'failed';

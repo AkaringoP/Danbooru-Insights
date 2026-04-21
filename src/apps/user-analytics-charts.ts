@@ -1,5 +1,8 @@
 import * as d3 from 'd3';
+import {createLogger} from '../core/logger';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
+
+const log = createLogger('UserAnalyticsCharts');
 import type {
   LevelChangeEvent,
   MonthlyStatEntry,
@@ -921,7 +924,7 @@ export function renderPieWidget(
         updatePieTabs();
       }
     } catch (e) {
-      console.error(e);
+      log.error('Failed to load pie chart data', {error: e});
       const pieContent = container.querySelector('.pie-content');
       if (pieContent) pieContent.innerHTML = 'Error loading data.';
     }
@@ -1220,7 +1223,7 @@ export function renderTopPostsWidget(
         topPostGroups['random'] = newRandoms;
         renderTopPostContent();
       } catch (err) {
-        console.error('Failed to refresh random post:', err);
+        log.error('Failed to refresh random post', {error: err});
       } finally {
         contentDiv.style.opacity = '1';
       }

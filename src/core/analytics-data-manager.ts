@@ -3,7 +3,11 @@ import type {ApiItem} from './data-manager';
 import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
 import {perfLogger} from './perf-logger';
+import {createLogger} from './logger';
 import {CONFIG} from '../config';
+
+const log = createLogger('Analytics');
+const workerLog = createLogger('Analytics:Worker');
 import {isTopLevelTag, getBestThumbnailUrl} from '../utils';
 import type {
   TargetUser,
@@ -267,10 +271,10 @@ export class AnalyticsDataManager extends DataManager {
         return '';
       } catch (e: unknown) {
         if (i === retries - 1) {
-          console.warn(
-            `[Analytics] Failed thumb fetch after ${retries} tries: ${tags}`,
-            e,
-          );
+          log.warn(`Failed thumb fetch after ${retries} tries`, {
+            tags,
+            error: e,
+          });
           return '';
         }
         await new Promise(r => setTimeout(r, delay));
@@ -635,17 +639,17 @@ export class AnalyticsDataManager extends DataManager {
                     rating: item.rating,
                   })
                   .catch((e: unknown) =>
-                    console.error('Failed to update post', local['id'], e),
+                    log.error('Failed to update post in DB', {
+                      postId: local['id'],
+                      error: e,
+                    }),
                   );
               }
             });
           }
         }
       } catch (e: unknown) {
-        console.warn(
-          '[Danbooru Grass] Failed to fetch missing milestone thumbnails',
-          e,
-        );
+        log.warn('Failed to fetch missing milestone thumbnails', {error: e});
       }
     }
 
@@ -815,10 +819,7 @@ export class AnalyticsDataManager extends DataManager {
           label: status.charAt(0).toUpperCase() + status.slice(1),
         };
       } catch (e: unknown) {
-        console.warn(
-          `[Danbooru Grass] Failed to fetch count for status:${status}`,
-          e,
-        );
+        log.warn('Failed to fetch count for status', {status, error: e});
         return {
           name: status,
           count: 0,
@@ -895,10 +896,7 @@ export class AnalyticsDataManager extends DataManager {
           label: labelMap[rating],
         };
       } catch (e: unknown) {
-        console.warn(
-          `[Danbooru Grass] Failed to fetch count for rating:${rating}`,
-          e,
-        );
+        log.warn('Failed to fetch count for rating', {rating, error: e});
         return {rating, count: 0, label: labelMap[rating]};
       }
     });
@@ -908,7 +906,7 @@ export class AnalyticsDataManager extends DataManager {
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, results);
       return results;
     } catch (e: unknown) {
-      console.error('[Danbooru Grass] Failed to fetch rating distribution', e);
+      log.error('Failed to fetch rating distribution', {error: e});
       return [];
     }
   }
@@ -972,7 +970,7 @@ export class AnalyticsDataManager extends DataManager {
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, items);
       return items;
     } catch (e: unknown) {
-      console.debug('[DI] Failed to fetch tag cloud data', e);
+      log.debug('Failed to fetch tag cloud data', {error: e});
       return [];
     }
   }
@@ -1220,7 +1218,7 @@ export class AnalyticsDataManager extends DataManager {
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, items);
       return items;
     } catch (e: unknown) {
-      console.debug('[DI] Failed to fetch created tags', e);
+      log.debug('Failed to fetch created tags', {error: e});
       return [];
     }
   }
@@ -1293,7 +1291,7 @@ export class AnalyticsDataManager extends DataManager {
                   : 0;
               obj.count = c || obj._item?.tag.post_count || 0;
             } catch (_e: unknown) {
-              console.debug('[DI] Failed to fetch user tag count', _e);
+              log.debug('Failed to fetch user tag count', {error: _e});
             }
             delete obj._item;
           }),
@@ -1330,10 +1328,7 @@ export class AnalyticsDataManager extends DataManager {
 
       return top10;
     } catch (e: unknown) {
-      console.warn(
-        '[Danbooru Grass] Failed to fetch character distribution',
-        e,
-      );
+      log.warn('Failed to fetch character distribution', {error: e});
       return [];
     }
   }
@@ -1416,7 +1411,7 @@ export class AnalyticsDataManager extends DataManager {
                   : 0;
               obj.count = c || obj._item?.tag.post_count || 0;
             } catch (_e: unknown) {
-              console.debug('[DI] Failed to fetch user tag count', _e);
+              log.debug('Failed to fetch user tag count', {error: _e});
             }
             delete obj._item;
           }),
@@ -1453,10 +1448,7 @@ export class AnalyticsDataManager extends DataManager {
 
       return top10;
     } catch (e: unknown) {
-      console.warn(
-        '[Danbooru Grass] Failed to fetch copyright distribution',
-        e,
-      );
+      log.warn('Failed to fetch copyright distribution', {error: e});
       return [];
     }
   }
@@ -1594,10 +1586,12 @@ export class AnalyticsDataManager extends DataManager {
             countResp.counts && countResp.counts.posts
               ? countResp.counts.posts
               : 0;
-          // console.log(`[Danbooru Grass] Fav Count for ${tagName}: ${c} (URL: ${countUrl})`); // Debug
           obj.count = c;
         } catch (e: unknown) {
-          console.warn('[Danbooru Grass] Count fetch failed', e);
+          log.warn('Count fetch failed for fav copyright tag', {
+            tagName: obj.tagName,
+            error: e,
+          });
         }
         delete obj._item;
       });
@@ -1654,10 +1648,7 @@ export class AnalyticsDataManager extends DataManager {
 
       return top10;
     } catch (e: unknown) {
-      console.warn(
-        '[Danbooru Grass] Failed to fetch fav copyright distribution',
-        e,
-      );
+      log.warn('Failed to fetch fav copyright distribution', {error: e});
       return [];
     }
   }
@@ -1711,10 +1702,7 @@ export class AnalyticsDataManager extends DataManager {
           return resp[0];
         }
       } catch (e: unknown) {
-        console.warn(
-          `[Danbooru Grass] Failed to fetch top post for rating:${ratingTag}`,
-          e,
-        );
+        log.warn('Failed to fetch top post for rating', {ratingTag, error: e});
       }
       return null;
     };
@@ -1767,10 +1755,7 @@ export class AnalyticsDataManager extends DataManager {
           return resp[0];
         }
       } catch (e: unknown) {
-        console.warn(
-          `[Danbooru Grass] Failed to fetch recent top post for ${ratingTag}`,
-          e,
-        );
+        log.warn('Failed to fetch recent top post', {ratingTag, error: e});
       }
       return null;
     };
@@ -1807,10 +1792,7 @@ export class AnalyticsDataManager extends DataManager {
           return resp;
         }
       } catch (e: unknown) {
-        console.warn(
-          `[Danbooru Grass] Failed to fetch random post for ${ratingTag}`,
-          e,
-        );
+        log.warn('Failed to fetch random post', {ratingTag, error: e});
       }
       return null;
     };
@@ -1862,7 +1844,10 @@ export class AnalyticsDataManager extends DataManager {
         return details; // Return full API object
       }
     } catch (e: unknown) {
-      console.warn('[Danbooru Grass] Failed to fetch top post details', e);
+      log.warn('Failed to fetch top post details', {
+        postId: topLocal.id,
+        error: e,
+      });
     }
 
     return topLocal; // Fallback to local data (might miss thumb/favs)
@@ -1941,9 +1926,11 @@ export class AnalyticsDataManager extends DataManager {
   private recordBackfillFailure(uploaderId: number): void {
     const next = recordFailure(this.getBackfillFailureState(uploaderId));
     this.setBackfillFailureState(uploaderId, next);
-    console.warn(
-      `[Backfill] Failure recorded for user ${uploaderId} (count=${next.failureCount}/${BACKFILL_FAILURE_THRESHOLD})`,
-    );
+    log.warn('Backfill failure recorded', {
+      uploaderId,
+      failureCount: next.failureCount,
+      threshold: BACKFILL_FAILURE_THRESHOLD,
+    });
   }
 
   /**
@@ -2071,14 +2058,16 @@ export class AnalyticsDataManager extends DataManager {
         const resp = await this.rateLimiter.fetch(url);
         if (!resp.ok) {
           if (shouldCountHttpAsFailure(resp.status)) {
-            console.warn(`[Backfill] HTTP ${resp.status} — pausing backfill`);
+            log.warn('Backfill HTTP error — pausing backfill', {
+              status: resp.status,
+            });
             this.recordBackfillFailure(uploaderId);
           } else {
             // 429: rate-limiter already triggered global backoff. Pause this
             // batch but do NOT increment our failure counter — the
             // rate-limiter cooldown is the right place to throttle.
-            console.warn(
-              '[Backfill] HTTP 429 — pausing batch (rate-limiter cooldown active)',
+            log.warn(
+              'Backfill HTTP 429 — pausing batch (rate-limiter cooldown active)',
             );
           }
           return;
@@ -2089,7 +2078,7 @@ export class AnalyticsDataManager extends DataManager {
         // transient at the page-load granularity (a real wifi blip would
         // affect the whole dashboard load), and the cooldown gives the
         // user 24h to recover before we try again.
-        console.warn('[Backfill] Fetch failed:', e);
+        log.warn('Backfill fetch failed', {error: e});
         this.recordBackfillFailure(uploaderId);
         return;
       }
@@ -2174,7 +2163,7 @@ export class AnalyticsDataManager extends DataManager {
           (data && data.counts ? data.counts.posts : data ? data.posts : 0) || 0
         );
       } catch (e) {
-        console.warn(`[UserStats] count query failed for "${tagQuery}":`, e);
+        log.warn('Count query failed for user stats', {tagQuery, error: e});
         return 0;
       }
     };
@@ -2257,7 +2246,7 @@ export class AnalyticsDataManager extends DataManager {
             a.date.getTime() - b.date.getTime(),
         );
     } catch (e: unknown) {
-      console.error('[Danbooru Grass] Failed to fetch promotions', e);
+      log.error('Failed to fetch promotion history', {error: e});
       return [];
     }
   }
@@ -2385,7 +2374,7 @@ export class AnalyticsDataManager extends DataManager {
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, dedup);
       return dedup;
     } catch (e: unknown) {
-      console.warn('[Danbooru Grass] Failed to fetch level change history', e);
+      log.warn('Failed to fetch level change history', {error: e});
       return [];
     }
   }
@@ -2495,7 +2484,7 @@ export class AnalyticsDataManager extends DataManager {
           const resp = await this.rateLimiter.fetch(url).then(r => r.json());
           if (resp?.counts?.posts) results[item.idx].count = resp.counts.posts;
         } catch (e: unknown) {
-          console.debug('[DI] Failed to fetch commentary count', e);
+          log.debug('Failed to fetch commentary count', {error: e});
         }
       },
     );
@@ -2607,9 +2596,14 @@ export class AnalyticsDataManager extends DataManager {
               .then(bc => {
                 const ratio = bc / Math.max(1, t);
                 if (ratio > 0.005) {
-                  console.warn(
-                    `[DI] Assumption-1 violation for user:${normalizedName}: ` +
-                      `|R∩TR|/|T| = ${(ratio * 100).toFixed(2)}% (threshold 0.5%, bc=${bc}, t=${t})`,
+                  log.warn(
+                    'Assumption-1 violation: R∩TR / T exceeds 0.5% threshold',
+                    {
+                      user: normalizedName,
+                      ratio: `${(ratio * 100).toFixed(2)}%`,
+                      bc,
+                      t,
+                    },
                   );
                 }
               })
@@ -2621,7 +2615,7 @@ export class AnalyticsDataManager extends DataManager {
             if (count > 0) results[item.idx].count = count;
           }
         } catch (e: unknown) {
-          console.debug('[DI] Failed to fetch translation count', e);
+          log.debug('Failed to fetch translation count', {error: e});
         }
       },
     );
@@ -2752,7 +2746,7 @@ export class AnalyticsDataManager extends DataManager {
             }
           }
         } catch (e: unknown) {
-          console.debug('[DI] Failed to fetch gender count', e);
+          log.debug('Failed to fetch gender count', {error: e});
         }
       },
     );
@@ -2821,7 +2815,7 @@ export class AnalyticsDataManager extends DataManager {
         }
         obj.count = count;
       } catch (e: unknown) {
-        console.debug('[DI] Failed to fetch breasts count', e);
+        log.debug('Failed to fetch breasts count', {error: e});
       }
     });
 
@@ -2905,7 +2899,7 @@ export class AnalyticsDataManager extends DataManager {
           obj.count = resp.counts.posts;
         }
       } catch (e: unknown) {
-        console.debug('[DI] Failed to fetch count', e);
+        log.debug('Failed to fetch count', {error: e});
       }
     });
 
@@ -2985,7 +2979,7 @@ export class AnalyticsDataManager extends DataManager {
           obj.count = resp.counts.posts;
         }
       } catch (e: unknown) {
-        console.debug('[DI] Failed to fetch count', e);
+        log.debug('Failed to fetch count', {error: e});
       }
     });
 
@@ -3100,7 +3094,7 @@ export class AnalyticsDataManager extends DataManager {
         return countData.counts.posts;
       }
     } catch (e: unknown) {
-      console.warn('[Danbooru Grass] Counts API failed:', e);
+      log.warn('Counts API failed', {error: e});
     }
 
     // Method B: Profile API Fallback
@@ -3113,7 +3107,7 @@ export class AnalyticsDataManager extends DataManager {
         return profile.post_upload_count;
       }
     } catch (_e2: unknown) {
-      console.debug('[DI] Failed to fetch user profile', _e2);
+      log.debug('Failed to fetch user profile', {error: _e2});
     }
 
     // Method C: DOM Fallback
@@ -3125,7 +3119,7 @@ export class AnalyticsDataManager extends DataManager {
         return parseInt((statsLink.textContent ?? '').replace(/,/g, ''), 10);
       }
     } catch (_e3: unknown) {
-      console.debug('[DI] Failed to parse DOM stats', _e3);
+      log.debug('Failed to parse DOM stats', {error: _e3});
     }
 
     return 0; // Failed
@@ -3142,7 +3136,7 @@ export class AnalyticsDataManager extends DataManager {
     onProgress: (current: number, total: number, message?: string) => void,
   ): Promise<void> {
     if (!userInfo.id) {
-      console.error('User ID required for sync');
+      log.error('User ID required for sync');
       return;
     }
 
@@ -3150,7 +3144,7 @@ export class AnalyticsDataManager extends DataManager {
 
     // Global Sync Lock
     if (AnalyticsDataManager.isGlobalSyncing) {
-      console.warn('[Danbooru Grass] Sync already in progress.');
+      log.warn('Sync already in progress');
       return;
     }
     AnalyticsDataManager.isGlobalSyncing = true;
@@ -3330,9 +3324,12 @@ export class AnalyticsDataManager extends DataManager {
                     errMsg.includes('502') ||
                     errMsg.includes('503') ||
                     errMsg.includes('504');
-                  console.warn(
-                    `[Worker ${workerId}] Page ${currentPage} attempt ${attempts} failed: ${errMsg}`,
-                  );
+                  workerLog.warn('Page fetch attempt failed', {
+                    workerId,
+                    page: currentPage,
+                    attempt: attempts,
+                    error: errMsg,
+                  });
 
                   if (attempts >= 3 || !isServerErr) throw err; // Give up or fatal error
 
@@ -3402,10 +3399,11 @@ export class AnalyticsDataManager extends DataManager {
                 nextExpectedPage++;
               }
             } catch (e: unknown) {
-              console.error(
-                `[Worker ${workerId}] Page ${currentPage} failed`,
-                e,
-              );
+              workerLog.error('Page failed, stopping sync', {
+                workerId,
+                page: currentPage,
+                error: e,
+              });
               hasMore = false;
             } finally {
               perfLogger.end(pageLabel, {
@@ -3480,7 +3478,7 @@ export class AnalyticsDataManager extends DataManager {
     if (!userInfo.id || !userInfo.name) return;
 
     if (AnalyticsDataManager.isGlobalSyncing) {
-      console.warn('[Danbooru Grass] Sync already in progress.');
+      log.warn('Sync already in progress');
       return;
     }
     AnalyticsDataManager.isGlobalSyncing = true;
@@ -3665,7 +3663,7 @@ export class AnalyticsDataManager extends DataManager {
 
       // Server bubble data cleanup removed
     } catch (e: unknown) {
-      console.warn('[Danbooru Grass] Cleanup failed', e);
+      log.warn('Stale data cleanup failed', {error: e});
     }
   }
 
@@ -3765,7 +3763,7 @@ export class AnalyticsDataManager extends DataManager {
           : []),
       ]);
     } catch (e: unknown) {
-      console.warn('[Analytics] Failed to refresh stats', e);
+      log.warn('Failed to refresh stats', {error: e});
     } finally {
       perfLogger.end('sync.refreshStats.total', {isFullSync});
     }

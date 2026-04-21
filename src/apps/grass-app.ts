@@ -1,10 +1,13 @@
 import {DataManager} from '../core/data-manager';
 import {GraphRenderer} from '../ui/graph-renderer';
+import {createLogger} from '../core/logger';
 import type {RateLimitedFetch} from '../core/rate-limiter';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
 import type {ProfileContext} from '../core/profile-context';
 import type {Metric} from '../types';
+
+const log = createLogger('GrassApp');
 
 /**
  * GrassApp: Encapsulates the contribution graph visualization logic.
@@ -54,6 +57,15 @@ export class GrassApp {
     if (!injected) {
       return;
     }
+
+    // One-time cache revalidation (v9.2.4): check current-year data against
+    // remote counts to clear stale rows left by the pre-v9.2.3 page-skip bug.
+    const normalizedName = (targetUser.name || '').replace(/ /g, '_');
+    await dataManager
+      .revalidateCurrentYearCache(userId, normalizedName)
+      .catch((e: unknown) => {
+        log.warn('Cache revalidation failed, continuing normally', {error: e});
+      });
 
     let currentYear = new Date().getFullYear();
     let currentMetric: Metric = (this.settings.getLastMode(userId) ||
@@ -147,7 +159,7 @@ export class GrassApp {
           },
         );
       } catch (e: unknown) {
-        console.error(e);
+        log.error('Failed to render grass graph', {error: e});
         const message =
           e instanceof Error ? e.message : 'Unknown error occurred';
         renderer.renderError(message, () => updateView());

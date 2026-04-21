@@ -1,4 +1,7 @@
 import {CONFIG} from '../config';
+import {createLogger} from './logger';
+
+const log = createLogger('RateLimiter');
 
 /* --- Helper: Rate Limited Fetch --- */
 
@@ -130,7 +133,7 @@ export class RateLimitedFetch {
       if (response.status === 429) this.triggerBackoff();
       task.resolve(response);
     } catch (e: unknown) {
-      console.error(`[RateLimitedFetch] Report Failed: ${task.url}`, e);
+      log.error('Report fetch failed', {url: task.url, error: e});
       task.reject(e);
     } finally {
       // Strict 3s cooldown for reports

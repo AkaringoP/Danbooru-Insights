@@ -1,15 +1,22 @@
 import {defineConfig} from 'vite';
 import monkey from 'vite-plugin-monkey';
 import {APP_VERSION} from './src/version';
-import {detectPerfLoggingEnabled} from './build-flags';
+import {
+  detectPerfLoggingEnabled,
+  detectDebugLoggingEnabled,
+} from './build-flags';
 
 const perfEnabled = detectPerfLoggingEnabled();
-console.log(`[build-flags] __PERF_ENABLED__ = ${perfEnabled}`);
+const debugEnabled = detectDebugLoggingEnabled();
+console.log(
+  `[build-flags] __PERF_ENABLED__ = ${perfEnabled}, __DEBUG_ENABLED__ = ${debugEnabled}`,
+);
 
 // https://vitejs.dev/config/
 export default defineConfig({
   define: {
     __PERF_ENABLED__: JSON.stringify(perfEnabled),
+    __DEBUG_ENABLED__: JSON.stringify(debugEnabled),
   },
   plugins: [
     monkey({
