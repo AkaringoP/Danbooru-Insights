@@ -265,4 +265,14 @@ export class SettingsManager {
   setDarkMode(pref: DarkModePreference): void {
     this.save({darkMode: pref});
   }
+
+  /** Gets snap-to-edge preference (default: true). */
+  getSnapToEdge(): boolean {
+    return this.settings.snapToEdge !== false;
+  }
+
+  /** Sets snap-to-edge preference and persists it. */
+  setSnapToEdge(enabled: boolean): void {
+    this.save({snapToEdge: enabled});
+  }
 }

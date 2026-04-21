@@ -5,10 +5,13 @@
  *
  * Bump this when releasing a new version — nothing else needs to change.
  */
-export const APP_VERSION = '9.2.3';
+export const APP_VERSION = '9.3.0';
 
 /** GitHub repository URL shown next to the version in the dashboard footer. */
 export const APP_REPO_URL = 'https://github.com/AkaringoP/Danbooru-Insights';
 
 /** Author credit shown in the dashboard footer. */
 export const APP_AUTHOR = 'AkaringoP';
+
+/** Author's Danbooru profile URL. */
+export const APP_AUTHOR_URL = 'https://danbooru.donmai.us/users/701499';
