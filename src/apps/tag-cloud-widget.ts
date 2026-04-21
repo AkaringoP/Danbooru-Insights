@@ -1,10 +1,13 @@
 import * as d3 from 'd3';
+import {createLogger} from '../core/logger';
 import type {D3Any, TagCloudItem} from '../types';
 import {
   isTouchDevice,
   createTwoStepTap,
   type TwoStepTapController,
 } from '../ui/two-step-tap';
+
+const log = createLogger('TagCloud');
 
 /** Category configuration for a tag cloud tab. */
 export interface TagCloudCategory {
@@ -392,7 +395,7 @@ export function renderTagCloudWidget(
         computeAndRender(data, true);
       }
     } catch (e) {
-      console.debug('[DI] Tag cloud tab load failed', e);
+      log.debug('Tag cloud tab load failed', {error: e});
       if (currentTab === categoryId) {
         cloudContainer.innerHTML =
           '<div style="color:#c00;font-size:0.9em;">Failed to load data</div>';

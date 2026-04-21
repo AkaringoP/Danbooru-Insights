@@ -16,8 +16,12 @@ import {renderScatterPlot} from './user-analytics-scatter';
 import {renderTagCloudWidget} from './tag-cloud-widget';
 import {renderCreatedTagsWidget} from './created-tags-widget';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
+import {createLogger} from '../core/logger';
+import {showToast} from '../ui/toast';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
+
+const log = createLogger('UserAnalytics');
 
 /** ProfileContext with a guaranteed non-null targetUser (post-validation). */
 type ValidatedProfileContext = ProfileContext & {
@@ -202,7 +206,7 @@ export class UserAnalyticsApp {
           try {
             await this.performPartialSync(btn, false);
           } catch (err) {
-            console.error('[Danbooru Grass] Auto-sync failed:', err);
+            log.error('Auto-sync failed', {error: err});
           }
         }
 
@@ -231,7 +235,7 @@ export class UserAnalyticsApp {
       this.initialStatusCheck = this.updateHeaderStatus();
       void this.initialStatusCheck;
     } else {
-      console.warn('[AnalyticsApp] Could not find H1 to inject button');
+      log.warn('Could not find H1 to inject analytics button');
     }
   }
 
@@ -346,7 +350,7 @@ export class UserAnalyticsApp {
       }
     } catch (e) {
       if (animInterval) clearInterval(animInterval);
-      console.error(e);
+      log.error('Sync failed', {error: e});
       if (btn) {
         btn.innerHTML = 'ERR';
         (btn as HTMLButtonElement).disabled = false;
@@ -536,7 +540,7 @@ export class UserAnalyticsApp {
         // Refresh Header Status immediately to reflect new threshold state
         void this.updateHeaderStatus();
       } else {
-        alert('Please enter a valid number.');
+        showToast({type: 'warn', message: 'Please enter a valid number.'});
       }
     };
   }
@@ -893,7 +897,7 @@ export class UserAnalyticsApp {
         // dashboard is visible before the API calls go out.
         setTimeout(() => {
           starter().catch((e: unknown) => {
-            console.warn(`[DI] SWR revalidate failed for ${name}`, e);
+            log.warn(`SWR revalidate failed for ${name}`, {error: e});
           });
         }, 0);
       };
@@ -963,7 +967,7 @@ export class UserAnalyticsApp {
             ) {
               dBtn.innerHTML = '⌛';
               await this.dataManager.clearUserData(this.context.targetUser);
-              alert('Data cleared.');
+              showToast({type: 'success', message: 'Data cleared.'});
               this.toggleModal(false);
             }
           };

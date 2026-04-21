@@ -1,5 +1,8 @@
 import * as d3 from 'd3';
+import {createLogger} from '../core/logger';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
+
+const log = createLogger('TagAnalyticsCharts');
 import type {
   D3Any,
   TagAnalyticsMeta,
@@ -544,7 +547,7 @@ export class TagAnalyticsChartRenderer {
     milestones?: MilestoneEntry[],
   ): void {
     if (!(window as D3Any).d3) {
-      console.error('D3.js not loaded');
+      log.error('D3.js not loaded');
       return;
     }
 
@@ -940,9 +943,7 @@ export class TagAnalyticsChartRenderer {
     const margin = {top: 30, right: 30, bottom: 40, left: 50};
 
     if (width <= margin.left + margin.right) {
-      console.warn(
-        '[TagAnalyticsApp] Container too narrow for chart, skipping render.',
-      );
+      log.warn('Container too narrow for chart, skipping render');
       return;
     }
 
@@ -1201,10 +1202,7 @@ export class TagAnalyticsChartRenderer {
     if (!container || !tagData.rankings || !tagData.rankings[rankRole]) return;
 
     const rData = tagData.rankings[rankRole];
-    console.log(
-      '[TagAnalytics] updateRankingTabs - hundredthPost:',
-      tagData.hundredthPost,
-    );
+    log.debug('updateRankingTabs', {hundredthPost: tagData.hundredthPost});
     const limitId = tagData.hundredthPost ? tagData.hundredthPost.id : null;
 
     container.innerHTML = `

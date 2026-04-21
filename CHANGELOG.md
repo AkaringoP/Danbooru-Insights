@@ -4,6 +4,32 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.3.0 — Magnet Snap, Structured Logging, Mobile Fixes & Test Coverage
+
+### GrassApp Magnet Snap-to-Edge Resize
+- **Magnet snap effect**: When resizing the grass container, width snaps to the current-month-to-December edge with a ±15 px hysteresis band. Togglable via "Snap to edge when resizing" checkbox in the settings popover.
+
+### Structured Logging & Observability
+- **Structured logger**: Replaced all 123 raw `console.*` calls with a dual-gated structured logger (build-time dead-code elimination + runtime `localStorage` opt-in). Supports `debug`, `info`, `warn`, `error` levels with per-module namespaces.
+- **Toast notifications**: Replaced 6 `alert()` calls with non-blocking, auto-dismissing toast notifications for a smoother UX.
+- **Mobile diagnostic overlay**: All three apps (GrassApp, UserAnalyticsApp, TagAnalyticsApp) gain a floating diagnostic overlay on mobile for debugging sync status and cache state.
+- **v9.2.4 cache revalidation**: One-time migration that compares current-year local row sums against remote counts (uploads + approvals) and clears stale data left by the pre-v9.2.3 page-skip bug. Idempotent — stores a per-user flag in `localStorage` and skips on subsequent loads; retries automatically if the network check fails.
+
+### Mobile Fixes
+- **Stats max-width reset**: The inline `maxWidth: 60%` (for GrassApp inline layout) was clipping profile stats on mobile. Reset via media query so stats reclaims full width on narrow viewports.
+- **Scatter downvote filter layout**: Converted `.di-scatter-downvote` to static positioning on mobile so it flows below the rating filter row instead of overlapping the chart.
+- **Milestones 2-column grid**: UserAnalytics milestones forced to a 2-column grid on mobile with compact padding and thumbnail sizing.
+- **Grass tooltip tap-only trigger**: Replaced `touchstart`+`touchmove` tooltip handlers with tap detection (≤10 px movement threshold). Drag gestures now only scroll — no accidental tooltip activations.
+
+### Author Profile Link
+- **Dashboard footer**: AkaringoP author label in the dashboard footer now links to the Danbooru profile page.
+
+### Internal
+- **DataManager data integrity tests**: 30 new test cases covering remote/local count comparison, safe deletion boundaries, year completion cache, 3-day safety buffer, user ID validation, hourly stats delta merge, `revalidateCurrentYearCache`, `clearCache`, `fetchRemoteCount`, and `fetchAllPages` pagination. Previously 0% test coverage for these critical data paths.
+- **185 tests pass** across 13 test files (up from 155).
+
+---
+
 ## v9.2.3 — Fix Delta Fetch Page Skip
 
 ### Bug Fix

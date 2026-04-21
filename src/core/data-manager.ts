@@ -1,4 +1,5 @@
 import {CONFIG} from '../config';
+import {createLogger} from './logger';
 import {RateLimitedFetch} from './rate-limiter';
 import type {
   Metric,
@@ -7,6 +8,8 @@ import type {
   GrassSettings,
   DanbooruPost,
 } from '../types';
+
+const log = createLogger('DataManager');
 
 /** A daily count entry stored in IndexedDB. */
 interface DailyEntry {
@@ -76,7 +79,7 @@ export class DataManager {
       const data = await resp.json();
       if (data && data.id) return data;
     } catch (e) {
-      console.warn(`[fetchPostDetails] failed for post ${postId}:`, e);
+      log.warn(`Failed to fetch post details for post ${postId}`, {error: e});
     }
     return null;
   }
@@ -97,7 +100,7 @@ export class DataManager {
       }
       return null;
     } catch (e: unknown) {
-      console.warn('Failed to load stats cache', e);
+      log.warn('Failed to load stats cache', {error: e});
       return null;
     }
   }
@@ -122,7 +125,7 @@ export class DataManager {
         updated_at: new Date().toISOString(),
       });
     } catch (e: unknown) {
-      console.warn('Failed to save stats cache', e);
+      log.warn('Failed to save stats cache', {error: e});
     }
   }
 
@@ -138,7 +141,7 @@ export class DataManager {
     try {
       return await this.db.grass_settings.get(userId.toString());
     } catch (e: unknown) {
-      console.warn('Failed to load grass settings', e);
+      log.warn('Failed to load grass settings', {error: e});
       return null;
     }
   }
@@ -161,7 +164,7 @@ export class DataManager {
         updated_at: new Date().toISOString(),
       });
     } catch (e: unknown) {
-      console.warn('Failed to save grass settings', e);
+      log.warn('Failed to save grass settings', {error: e});
     }
   }
 
@@ -182,7 +185,7 @@ export class DataManager {
       const record = await this.db.completed_years.get(id);
       return !!record;
     } catch (e: unknown) {
-      console.warn('Failed to check completion status', e);
+      log.warn('Failed to check year completion status', {error: e});
       return false;
     }
   }
@@ -207,7 +210,7 @@ export class DataManager {
         timestamp: Date.now(),
       });
     } catch (e: unknown) {
-      console.warn('Failed to mark year complete', e);
+      log.warn('Failed to mark year complete', {error: e});
     }
   }
 
@@ -325,9 +328,10 @@ export class DataManager {
 
           // C. Compare (Strict)
           if (remoteCount !== localCount) {
-            console.warn(
-              `[Danbooru Grass] Data mismatch detected for ${year} (Remote: ${remoteCount}, Local: ${localCount}). Forcing full sync.`,
-            );
+            log.warn(`Data mismatch detected for ${year}, forcing full sync`, {
+              remoteCount,
+              localCount,
+            });
 
             // Safe Deletion: Strictly perform deletion up to Dec 31st of the current year.
             // Previously, using endDate (Jan 1st next year) + \uffff caused "2025-01-01" to be deleted
@@ -350,9 +354,9 @@ export class DataManager {
             // Data is good using 'lastEntry' Logic below
           }
         } catch (e: unknown) {
-          console.warn(
-            '[Danbooru Grass] Integrity check failed (Network/API), proceeding with cache.',
-            e,
+          log.warn(
+            'Integrity check failed (Network/API), proceeding with cache',
+            {error: e},
           );
         }
       }
@@ -495,9 +499,11 @@ export class DataManager {
               item[idKey] &&
               String(item[idKey]) !== String(userInfo.id)
             ) {
-              console.warn(
-                `[Danbooru Grass] ID Mismatch! Expected: ${userInfo.id}, Got: ${item[idKey]}. Item Date: ${rawDate}`,
-              );
+              log.warn('ID mismatch, skipping item', {
+                expected: userInfo.id,
+                got: item[idKey],
+                itemDate: rawDate,
+              });
               return;
             }
 
@@ -627,7 +633,7 @@ export class DataManager {
 
       return {daily: resultMap, hourly: hourlyCounts};
     } catch (e: unknown) {
-      console.error('[Danbooru Grass] Data fetch failed:', e);
+      log.error('Metric data fetch failed', {error: e});
       throw e; // Propagate error to UI
     }
   }
@@ -664,7 +670,7 @@ export class DataManager {
 
       return true;
     } catch (e: unknown) {
-      console.error('[Danbooru Grass] Clear cache failed:', e);
+      log.error('Clear cache failed', {error: e});
       return false;
     }
   }
@@ -737,8 +743,9 @@ export class DataManager {
             if (resp.status === 429 || resp.status >= 500) {
               if (attempt < backoff.length) {
                 const waitMs = backoff[attempt];
-                console.warn(
-                  `[Danbooru Grass] ${resp.status} on Page ${currentPage}. Retrying in ${waitMs}ms...`,
+                log.warn(
+                  `HTTP ${resp.status} on page ${currentPage}, retrying`,
+                  {status: resp.status, page: currentPage, waitMs},
                 );
                 await new Promise(r => setTimeout(r, waitMs));
                 attempt++;
@@ -760,10 +767,10 @@ export class DataManager {
 
         promises.push(
           fetchTask().catch((e: unknown) => {
-            console.error(
-              `[Danbooru Grass] Critical Error on Page ${currentPage}:`,
-              e,
-            );
+            log.error(`Critical fetch error on page ${currentPage}`, {
+              page: currentPage,
+              error: e,
+            });
             throw e; // Fail fast to prevent data corruption
           }),
         );
@@ -840,7 +847,7 @@ export class DataManager {
 
       page += fetchedBatch;
       if (page > 1000) {
-        console.warn('[Danbooru Grass] Hit safety page limit.');
+        log.warn('Hit safety page limit of 1000, stopping fetch');
         break;
       }
       await new Promise(r => setTimeout(r, DELAY_BETWEEN_BATCHES));
@@ -871,7 +878,7 @@ export class DataManager {
       }
       return null; // Not found (maybe invited differently or too old)
     } catch (e: unknown) {
-      console.warn('Failed to fetch promotion date', e);
+      log.warn('Failed to fetch promotion date', {error: e});
       return null;
     }
   }
@@ -915,7 +922,7 @@ export class DataManager {
         }
       }
     } catch (e: unknown) {
-      console.warn('Failed to get IDB stats', e);
+      log.warn('Failed to get IndexedDB stats', {error: e});
     }
 
     // 2. LocalStorage Stats
@@ -948,5 +955,112 @@ export class DataManager {
     return json['counts'] && typeof json['counts']['posts'] === 'number'
       ? json['counts']['posts']
       : 0;
+  }
+
+  /**
+   * One-time cache revalidation for the current year.
+   *
+   * Mitigates stale data left by the v9.2.3 page-skip bug: compares the
+   * local row sum for the current year against the remote count and, on
+   * mismatch, deletes the affected rows so the next getMetricData() call
+   * performs a full refetch.
+   *
+   * Idempotent: stores a per-user flag in localStorage and skips on
+   * subsequent calls. If the remote fetch fails, the flag is NOT set so
+   * the check retries on the next page load.
+   */
+  async revalidateCurrentYearCache(
+    userId: string | number,
+    normalizedName: string,
+  ): Promise<void> {
+    const flagKey = `di_cache_v924_migrated_${userId}`;
+    try {
+      if (localStorage.getItem(flagKey) === '1') return;
+    } catch {
+      return; // localStorage unavailable — skip silently
+    }
+
+    const year = new Date().getFullYear();
+    const startDate = `${year}-01-01`;
+    const endDate = `${year}-12-31`;
+    let anyMismatch = false;
+
+    for (const metric of ['uploads', 'approvals', 'notes'] as const) {
+      try {
+        // Build the remote query tag
+        let queryTags: string;
+        if (metric === 'uploads') {
+          queryTags = `user:${normalizedName} date:${startDate}...${year + 1}-01-01`;
+        } else if (metric === 'approvals') {
+          queryTags = `approver:${normalizedName} date:${startDate}...${year + 1}-01-01`;
+        } else {
+          // Notes use user_id search; remote count isn't straightforward.
+          // Skip remote check for notes — uploads and approvals cover the
+          // most impactful page-skip scenarios.
+          continue;
+        }
+
+        const remoteCount = await this.fetchRemoteCount(queryTags);
+
+        // Local count
+        const table = this.db[metric];
+        let localCount = 0;
+        await table
+          .where('id')
+          .between(
+            `${userId}_${startDate}`,
+            `${userId}_${endDate}\uffff`,
+            true,
+            true,
+          )
+          .each((cur: ApiItem) => {
+            localCount += cur['count'] || 0;
+          });
+
+        if (remoteCount !== localCount) {
+          log.warn(
+            `v924 revalidation: ${metric} mismatch for ${year}, clearing`,
+            {remoteCount, localCount},
+          );
+
+          await table
+            .where('id')
+            .between(
+              `${userId}_${startDate}`,
+              `${userId}_${endDate}\uffff`,
+              true,
+              true,
+            )
+            .delete();
+
+          // Remove completed_years flag so full fetch is triggered
+          try {
+            await this.db.completed_years.delete(`${userId}_${metric}_${year}`);
+          } catch {
+            // Table or key may not exist — safe to ignore
+          }
+
+          anyMismatch = true;
+        }
+      } catch (e: unknown) {
+        // Remote fetch or IDB access failed — do NOT set the flag
+        // so the check retries on the next page load.
+        log.warn(`v924 revalidation: ${metric} check failed, will retry`, {
+          error: e,
+        });
+        return;
+      }
+    }
+
+    if (anyMismatch) {
+      log.info('v924 revalidation: cleared stale data, will refetch');
+    }
+
+    // Mark as done (even if no mismatch — the check itself succeeded)
+    try {
+      localStorage.setItem(flagKey, '1');
+    } catch {
+      // localStorage write failed — check will repeat, which is fine
+    }
   }
 }

@@ -1,4 +1,7 @@
 import type {TargetUser} from '../types';
+import {createLogger} from './logger';
+
+const log = createLogger('ProfileContext');
 
 /**
  * Manages the context of the current profile page.
@@ -14,7 +17,7 @@ export class ProfileContext {
     try {
       this.targetUser = this.getTargetUserInfo();
     } catch (e: unknown) {
-      console.error('[Danbooru Grass] Context Init Failed:', e);
+      log.error('Context init failed', {error: e});
       this.targetUser = null;
     }
   }
@@ -120,9 +123,7 @@ export class ProfileContext {
 
       if (!name) return null;
       if (!id) {
-        console.warn(
-          '[Danbooru Grass] User ID not found. Functionality may be limited (Notes).',
-        );
+        log.warn('User ID not found, functionality may be limited (Notes)');
       }
 
       return {
@@ -134,7 +135,7 @@ export class ProfileContext {
         level_string,
       };
     } catch (e: unknown) {
-      console.warn('[Danbooru Grass] Extraction error:', e);
+      log.warn('User info extraction error', {error: e});
       return null;
     }
   }

@@ -1,6 +1,9 @@
 import {attachPostHoverCard, hidePostHoverCard} from './post-hover-card';
+import {createLogger} from '../core/logger';
 import type {Database} from '../core/database';
 import type {DanbooruPost} from '../types';
+
+const log = createLogger('ApprovalPopover');
 
 /**
  * Shows a paginated popover listing approval post IDs for a given date.
@@ -29,16 +32,11 @@ export async function showApprovalsDetail(
   const detail = await db.approvals_detail.get(detailId);
 
   if (!detail) {
-    console.warn(
-      `[Danbooru Grass] No entry found in approvals_detail for ID: ${detailId}. Did you clear cache?`,
-    );
+    log.warn(`No entry found in approvals_detail for ID: ${detailId}`);
     return;
   }
   if (!detail.post_list || detail.post_list.length === 0) {
-    console.warn(
-      '[Danbooru Grass] Entry found but post_list is empty:',
-      detail,
-    );
+    log.warn('Entry found but post_list is empty', {detailId});
     return;
   }
 

@@ -76,6 +76,8 @@ export interface SettingsData {
   grassIndexByTheme?: Record<string, number>;
   /** Dark mode preference (default: 'auto'). */
   darkMode?: DarkModePreference;
+  /** Enable magnet-snap when resizing grass to full width (default: true). */
+  snapToEdge?: boolean;
 }
 
 /** Contribution metric identifier. */
