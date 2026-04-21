@@ -2,7 +2,7 @@ name: Build and Test
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, 'claude/**', 'fix/**', 'feature/**']
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -34,6 +34,8 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          DI_BUILD_VARIANT: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
@@ -41,7 +43,7 @@ jobs:
           name: danbooruinsights-dist
           path: dist/
 
-  deploy:
+  deploy-main:
     runs-on: ubuntu-latest
     needs: [ build ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -59,4 +61,24 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: deploy
           publish_branch: build
+          force_orphan: true
+
+  deploy-testbuild:
+    runs-on: ubuntu-latest
+    needs: [ build ]
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: danbooruinsights-dist
+          path: deploy/
+
+      - name: Deploy to TestBuild Branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: deploy
+          publish_branch: testbuild
           force_orphan: true
