@@ -447,12 +447,25 @@ export class DataManager {
         const rangeStart = fetchFromDate || startDate;
         // Narrow endDate when we have cached data for the current year:
         // fetching to Jan 1 of NEXT year forces the API to scan months of
-        // empty range. Limit to tomorrow to keep the scan short.
+        // empty range. Cap the scan around today.
+        //
+        // Symmetric ±3-day window around today:
+        //   - Backward: the existing `lastEntry - 3 days` rollback (see
+        //     above) catches mis-aligned rows near the cache boundary.
+        //   - Forward: +3 days catches (1) any future-dated posts (rare
+        //     but possible — backend queueing / clock skew / rating
+        //     review) and (2) any browser↔Danbooru timezone offset.
+        //     Danbooru's `date:A...B` is upper-bound-exclusive AND
+        //     evaluated in the user's configured TZ, while
+        //     `toISOString()` serializes in UTC — so when the Danbooru
+        //     TZ is ahead of UTC (e.g. KST = UTC+9), a +1 UTC cutoff
+        //     falls on the very day the user is uploading and silently
+        //     excludes today's posts. +3 days absorbs both concerns.
         let effectiveEndDate = endDate;
         if (lastEntry && year === new Date().getFullYear()) {
-          const tomorrow = new Date();
-          tomorrow.setDate(tomorrow.getDate() + 1);
-          effectiveEndDate = tomorrow.toISOString().slice(0, 10);
+          const cutoff = new Date();
+          cutoff.setDate(cutoff.getDate() + 3);
+          effectiveEndDate = cutoff.toISOString().slice(0, 10);
         }
         const fetchRange = `${rangeStart}...${effectiveEndDate}`;
 

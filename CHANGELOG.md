@@ -4,6 +4,17 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.3.1 — Fix Missing Today's Uploads Across Timezones
+
+### Bug Fix
+- **Today's uploads silently missing from the contribution graph**: The delta fetch upper bound was computed as `today + 1 day` in UTC, but Danbooru's `date:A...B` filter is upper-bound-exclusive AND evaluated in the user's configured timezone. For users whose Danbooru TZ is ahead of UTC (e.g. KST = UTC+9), the cutoff landed on the very day they were uploading — those posts were filtered out by the server and never cached, even though they showed up in a direct Danbooru search. Fix: expand the delta fetch window to a symmetric ±3 days around today, absorbing any browser↔Danbooru timezone offset and any future-dated posts (backend queueing, clock skew, rating review).
+
+### Internal
+- **Per-branch dev builds via CI**: Pushes to `claude/**`, `fix/**`, `feature/**` branches now auto-publish a `(dev)` variant of the userscript to the `testbuild` branch, installable separately from prod in Tampermonkey for iterative real-environment testing.
+- **Diagnostic panel no longer races initial sync**: Previously, `#di_diag` opened in parallel with GrassApp's first sync, so its DB reads could reflect a stale pre-sync snapshot (showing `Today: not cached` / `MISMATCH` even when the grass calendar itself rendered correctly). GrassApp now dispatches a `di:sync-complete` event after the final render, and `main.ts` defers `showDiagnostic()` until that event fires, with a 6 s timeout fallback for tag pages and unusually slow syncs.
+
+---
+
 ## v9.3.0 — Magnet Snap, Structured Logging, Mobile Fixes & Test Coverage
 
 ### GrassApp Magnet Snap-to-Edge Resize
