@@ -168,6 +168,108 @@ export function isImplicationCacheValid(
   return age >= 0 && age < IMPLICATIONS_CACHE_TTL_MS;
 }
 
+// ---------------------------------------------------------------------------
+// Related-tag distribution: approximation + SWR helpers
+// ---------------------------------------------------------------------------
+
+/** Minimum total frequency to emit an "Others" slice (0.5%). */
+export const DISTRIBUTION_OTHERS_MIN_FREQ = 0.005;
+
+/** Cumulative frequency cutoff where we stop emitting individual slices. */
+export const DISTRIBUTION_CUTOFF_FREQ = 0.95;
+
+/** Top-N candidates kept after top-level filtering, capped to what the UI needs. */
+export const DISTRIBUTION_TOP_N = 10;
+
+/** Shape of a single slice returned by `buildDistributionApprox`. */
+export interface DistributionSlice {
+  /** Display name (underscores replaced with spaces). */
+  name: string;
+  /** Raw tag name (underscored); `"others"` for the residual slice. */
+  key: string;
+  /** 0..1 frequency from `/related_tag.json`. */
+  frequency: number;
+  /** Approximate post count (`frequency × totalCount`, rounded down). */
+  count: number;
+  /** Present + true only for the residual aggregate slice. */
+  isOther?: boolean;
+}
+
+/**
+ * Builds the sorted top-10 distribution with approximate counts + "Others"
+ * cutoff. Pure / exported for testing.
+ *
+ * Counts are derived as `frequency × totalCount`; the exact per-combination
+ * `/counts/posts.json` query is deferred to `revalidateRelatedTagCounts`
+ * (SWR pattern) so initial render never blocks on 10 serial-rate-limited
+ * requests.
+ */
+export function buildDistributionApprox(
+  filteredCandidates: DanbooruRelatedTag[],
+  totalCount: number,
+): DistributionSlice[] {
+  // Sort defensively before slicing to top-N — the production caller
+  // receives already-sorted input from /related_tag.json, but we don't
+  // want correctness to rely on that assumption.
+  const getFreq = (c: DanbooruRelatedTag): number =>
+    c.related_tag ? c.related_tag.frequency : c.frequency || 0;
+  const sorted = [...filteredCandidates].sort(
+    (a, b) => getFreq(b) - getFreq(a),
+  );
+
+  const topTags: DistributionSlice[] = sorted
+    .slice(0, DISTRIBUTION_TOP_N)
+    .map(item => {
+      const freq = getFreq(item);
+      return {
+        name: item.tag.name.replace(/_/g, ' '),
+        key: item.tag.name,
+        frequency: freq,
+        count: Math.max(0, Math.floor(freq * Math.max(0, totalCount))),
+      };
+    });
+
+  const finalTags: DistributionSlice[] = [];
+  let currentSumFreq = 0;
+  for (const t of topTags) {
+    finalTags.push(t);
+    currentSumFreq += t.frequency;
+    if (currentSumFreq > DISTRIBUTION_CUTOFF_FREQ) break;
+  }
+
+  // Only emit "Others" when there's at least one real slice to be "other"
+  // relative to — a zero-candidate input should yield an empty list, not
+  // a single all-encompassing Others slice.
+  if (finalTags.length > 0) {
+    const remainFreq = Math.max(0, 1 - currentSumFreq);
+    if (remainFreq > DISTRIBUTION_OTHERS_MIN_FREQ) {
+      const othersCount = Math.floor(Math.max(0, totalCount) * remainFreq);
+      if (othersCount > 0) {
+        finalTags.push({
+          name: 'Others',
+          key: 'others',
+          frequency: remainFreq,
+          count: othersCount,
+          isOther: true,
+        });
+      }
+    }
+  }
+
+  return finalTags;
+}
+
+/** Collapses distribution slices into the `{tag: count}` shape the pie chart expects. */
+export function distributionToCountMap(
+  slices: DistributionSlice[],
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const s of slices) {
+    result[s.key] = s.count;
+  }
+  return result;
+}
+
 /**
  * Data service for TagAnalyticsApp.
  * Handles all API fetching, caching, and data computation.
@@ -849,6 +951,15 @@ export class TagAnalyticsDataService {
     tagName: string,
     categoryId: number,
     totalTagCount: number,
+    opts: {
+      /**
+       * Optional SWR hook. When provided, initial approximate counts are
+       * returned immediately and exact `/counts/posts.json` lookups run
+       * in the background, invoking `onExactCounts` once complete. Omit
+       * to disable SWR (returns approximations only, no background fetch).
+       */
+      onExactCounts?: (counts: Record<string, number>) => void;
+    } = {},
   ): Promise<Record<string, number> | null> {
     const catName = categoryId === 3 ? 'Copyright' : 'Character';
 
@@ -862,7 +973,7 @@ export class TagAnalyticsDataService {
       if (!resp || !resp.related_tags || !Array.isArray(resp.related_tags))
         return null;
 
-      const tags: DanbooruRelatedTag[] = resp.related_tags; // [{ "tag": {...}, "frequency": 0.5, "related_tag": {...} }]
+      const tags: DanbooruRelatedTag[] = resp.related_tags;
 
       // Limit to top 20 candidates for performance
       const candidates: DanbooruRelatedTag[] = tags.slice(0, 20);
@@ -877,81 +988,80 @@ export class TagAnalyticsDataService {
         item => flags.get(item.tag.name) === true,
       );
 
-      // 3. Take Top 10 by Frequency
-      // Note: related_tag.json response item has `related_tag` property with `frequency`.
-      // UserAnalyticsApp used `item.frequency` on the item itself?
-      // Let's assume the root item has frequency or handle both.
-      // Actually, let's map carefully.
-      const topTags = filtered.slice(0, 10).map(item => ({
-        name: item.tag.name.replace(/_/g, ' '),
-        key: item.tag.name,
-        frequency: item.related_tag
-          ? item.related_tag.frequency
-          : item.frequency || 0,
-        count: 0,
-      }));
+      // 3. Build approximate distribution from frequency × totalCount.
+      //    No per-combination /counts/posts.json queries here — the SWR
+      //    background fetch below supplies exact values without blocking
+      //    the initial render.
+      const slices = buildDistributionApprox(filtered, totalTagCount);
+      const approxResult = distributionToCountMap(slices);
 
-      // 4. Fetch Counts
+      // 4. SWR: kick off exact per-combination count fetches in the
+      //    background. Fire-and-forget; callers that opted in via
+      //    `opts.onExactCounts` receive the refined map when ready.
+      if (opts.onExactCounts && slices.length > 0) {
+        void this.revalidateRelatedTagCounts(
+          tagName,
+          slices,
+          opts.onExactCounts,
+        );
+      }
+
+      return approxResult;
+    } catch (e) {
+      log.warn(`Failed to fetch ${catName} distribution`, {error: e});
+      return null;
+    }
+  }
+
+  /**
+   * Background refetch of exact per-combination counts (SWR swap-in).
+   *
+   * Runs 10 parallel `/counts/posts.json` queries through the rate-limited
+   * queue; per-slice failures keep the approximate count instead. Errors
+   * are logged at debug level so a noisy network doesn't spam the console.
+   */
+  private async revalidateRelatedTagCounts(
+    tagName: string,
+    slices: DistributionSlice[],
+    onExactCounts: (counts: Record<string, number>) => void,
+  ): Promise<void> {
+    try {
+      const fetchable = slices.filter(s => !s.isOther);
+      const resolved: Record<string, number> = {};
+
       await Promise.all(
-        topTags.map(async obj => {
+        fetchable.map(async slice => {
           try {
-            const query = `${tagName} ${obj.key}`;
+            const query = `${tagName} ${slice.key}`;
             const cUrl = `/counts/posts.json?tags=${encodeURIComponent(query)}`;
             const cResp = await this.rateLimiter
               .fetch(cUrl)
               .then((r: Response) => r.json());
-            const c =
+            const exact =
               (cResp && cResp.counts
                 ? cResp.counts.posts
                 : cResp
                   ? cResp.posts
                   : 0) || 0;
-            obj.count = c;
+            resolved[slice.key] = exact;
           } catch (e) {
-            log.debug('Failed to fetch combined tag count', {error: e});
+            log.debug('SWR exact count fetch failed, keeping approx', {
+              tag: slice.key,
+              error: e,
+            });
+            resolved[slice.key] = slice.count;
           }
         }),
       );
 
-      // 5. Accumulate Frequency for Cutoff
-      const finalTags = [];
-      let currentSumFreq = 0.0;
-      const threshold = 0.95;
+      // Pass-through the "Others" slice — it's already an aggregate
+      // estimate from (1 - cumulative frequency) × totalCount.
+      const others = slices.find(s => s.isOther);
+      if (others) resolved[others.key] = others.count;
 
-      // Ensure sorted descending by frequency
-      topTags.sort((a, b) => b.frequency - a.frequency);
-
-      for (const t of topTags) {
-        finalTags.push(t);
-        currentSumFreq += t.frequency;
-        if (currentSumFreq > threshold) break;
-      }
-
-      // Calculate Others
-      const remainFreq = Math.max(0, 1.0 - currentSumFreq);
-      if (remainFreq > 0.005) {
-        // Show if > 0.5%
-        const othersCount = Math.floor(totalTagCount * remainFreq);
-        if (othersCount > 0) {
-          finalTags.push({
-            name: 'Others',
-            key: 'others',
-            count: othersCount,
-            isOther: true,
-          });
-        }
-      }
-
-      // Return Object for Pie Chart
-      const result: Record<string, number> = {};
-      finalTags.forEach(t => {
-        result[t.key] = t.count;
-      });
-
-      return result;
+      onExactCounts(resolved);
     } catch (e) {
-      log.warn(`Failed to fetch ${catName} distribution`, {error: e});
-      return null;
+      log.debug('SWR revalidation aborted', {error: e});
     }
   }
 

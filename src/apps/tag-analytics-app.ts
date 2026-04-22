@@ -516,6 +516,23 @@ export class TagAnalyticsApp {
   }
 
   /**
+   * Re-renders the pie chart if its currently-active tab matches `type`.
+   * Used by the related-tag SWR swap to replace approximate counts with
+   * the exact values once the background `/counts/posts.json` batch
+   * completes. No-ops when the user has navigated to a different tab —
+   * the updated `meta` will be consumed on their next tab switch.
+   */
+  private _rerenderPieIfActive(
+    meta: TagAnalyticsMeta,
+    type: 'copyright' | 'character',
+  ): void {
+    const activeTab = document.querySelector('.di-pie-tab.active');
+    if (activeTab?.getAttribute('data-type') === type) {
+      this.chartRenderer.renderPieChart(type, meta);
+    }
+  }
+
+  /**
    * Large tag path: multi-phase parallel fetch (quick stats → heavy stats → deferred counts).
    */
   private async _fetchLargeTag(
@@ -782,19 +799,38 @@ export class TagAnalyticsApp {
     let characterPromise: Promise<Record<string, number> | null> =
       Promise.resolve(null);
 
+    // SWR swap: when the background exact-count fetch completes, replace
+    // the approximate counts on `meta` and re-render the pie chart if the
+    // user is currently viewing that category. Otherwise the update is
+    // invisible until the next tab switch reads fresh `meta` values.
+    const onExactCopyright = (exact: Record<string, number>) => {
+      meta.copyrightCounts = exact;
+      this._rerenderPieIfActive(meta, 'copyright');
+    };
+    const onExactCharacter = (exact: Record<string, number>) => {
+      meta.characterCounts = exact;
+      this._rerenderPieIfActive(meta, 'character');
+    };
+
     if (meta.category === 1) {
       copyrightPromise = measure(
         'Related Copyrights',
-        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount),
+        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount, {
+          onExactCounts: onExactCopyright,
+        }),
       );
       characterPromise = measure(
         'Related Characters',
-        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount, {
+          onExactCounts: onExactCharacter,
+        }),
       );
     } else if (meta.category === 3) {
       characterPromise = measure(
         'Related Characters',
-        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount, {
+          onExactCounts: onExactCharacter,
+        }),
       );
     }
 
