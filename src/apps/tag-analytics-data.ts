@@ -1,7 +1,6 @@
 import {CONFIG, DAY_MS} from '../config';
 import {createLogger} from '../core/logger';
 import {RateLimitedFetch} from '../core/rate-limiter';
-import {isTopLevelTag} from '../utils';
 import type {Database} from '../core/database';
 import type {
   DanbooruPost,
@@ -10,11 +9,13 @@ import type {
   DanbooruRelatedTag,
   DanbooruRelatedTagResponse,
   DanbooruCountResponse,
+  DanbooruTagImplication,
   HistoryEntry,
   MilestoneEntry,
   UserRanking,
   TagAnalyticsMeta,
   MonthlyCountRecord,
+  TagImplicationCacheRecord,
 } from '../types';
 
 type MonthlyCountsData = HistoryEntry[] & {historyCutoff?: string};
@@ -106,6 +107,65 @@ export function isMonthlyCountValid(
   if (distance <= 12) return age < 7 * CACHE_DAY_MS;
   if (distance <= 36) return age < 30 * CACHE_DAY_MS;
   return age < 180 * CACHE_DAY_MS;
+}
+
+// ---------------------------------------------------------------------------
+// Tag implications cache (top-level tag detection)
+// ---------------------------------------------------------------------------
+
+/** TTL for persisted implication lookups. tag_implications is near-immutable. */
+export const IMPLICATIONS_CACHE_TTL_MS = 180 * CACHE_DAY_MS;
+
+/** Max tag names per batched /tag_implications.json call (URL-length budget). */
+export const IMPLICATIONS_BATCH_CHUNK_SIZE = 50;
+
+/**
+ * Module-level in-memory cache for top-level flags. Populated from the
+ * persistent table on first read and by every successful batch fetch, so
+ * repeat lookups within a session cost zero I/O.
+ */
+const topLevelSessionCache = new Map<string, boolean>();
+
+/** Resets the session cache — exported for tests. */
+export function resetTopLevelSessionCache(): void {
+  topLevelSessionCache.clear();
+}
+
+/**
+ * Parses a /tag_implications.json batch response into a `name → isTopLevel`
+ * map for a given input chunk. Tags present in the chunk but not in the
+ * response are top-level (no implications); tags appearing as
+ * `antecedent_name` in any implication are NOT top-level.
+ *
+ * Pure / exported for testing.
+ */
+export function parseImplicationsResponse(
+  chunk: string[],
+  imps: unknown,
+): Map<string, boolean> {
+  const result = new Map<string, boolean>();
+  chunk.forEach(name => result.set(name, true));
+  if (Array.isArray(imps)) {
+    for (const imp of imps as Array<Partial<DanbooruTagImplication>>) {
+      const name = imp?.antecedent_name;
+      if (name && result.has(name)) {
+        result.set(name, false);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Checks whether a persistent implication cache record is still fresh.
+ * Exported for tests.
+ */
+export function isImplicationCacheValid(
+  fetchedAt: number,
+  now: number,
+): boolean {
+  const age = now - fetchedAt;
+  return age >= 0 && age < IMPLICATIONS_CACHE_TTL_MS;
 }
 
 /**
@@ -232,6 +292,145 @@ export class TagAnalyticsDataService {
     } catch (e) {
       log.warn('Failed to write monthly counts cache', {error: e});
     }
+  }
+
+  /**
+   * Batched `/tag_implications.json` lookup for top-level detection.
+   *
+   * Only entries from successfully-fetched chunks are included in the
+   * returned map. A chunk failure leaves its tags absent (safe fallback:
+   * callers treat absent as "unknown → default true" without caching).
+   *
+   * Batch size caps URL length; Danbooru's `antecedent_name_comma` supports
+   * multi-name lookups so 20-tag candidate sets collapse to one request.
+   */
+  private async fetchTopLevelTagsBatch(
+    tagNames: string[],
+  ): Promise<Map<string, boolean>> {
+    const result = new Map<string, boolean>();
+    if (tagNames.length === 0) return result;
+
+    for (let i = 0; i < tagNames.length; i += IMPLICATIONS_BATCH_CHUNK_SIZE) {
+      const chunk = tagNames.slice(i, i + IMPLICATIONS_BATCH_CHUNK_SIZE);
+      const url = `/tag_implications.json?search[antecedent_name_comma]=${encodeURIComponent(chunk.join(','))}&limit=1000`;
+      try {
+        const imps = await this.rateLimiter
+          .fetch(url)
+          .then((r: Response) => r.json());
+        const parsed = parseImplicationsResponse(chunk, imps);
+        parsed.forEach((v, k) => result.set(k, v));
+      } catch (e) {
+        log.warn('Batch tag_implications fetch failed', {
+          error: e,
+          chunkSize: chunk.length,
+        });
+        // Leave this chunk's tags unset in result — caller falls back to
+        // safe default (true) without caching the unreliable answer.
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Reads persisted top-level flags for the requested tags, honoring the
+   * 180-day TTL and populating the session cache along the way. Returns a
+   * map only for cache-hit entries; missing/expired entries are absent.
+   */
+  private async readImplicationCache(
+    tagNames: string[],
+  ): Promise<Map<string, boolean>> {
+    const result = new Map<string, boolean>();
+    if (tagNames.length === 0) return result;
+
+    // 1) Session cache fast path.
+    const missing: string[] = [];
+    for (const name of tagNames) {
+      const hit = topLevelSessionCache.get(name);
+      if (hit !== undefined) {
+        result.set(name, hit);
+      } else {
+        missing.push(name);
+      }
+    }
+
+    if (missing.length === 0 || !this.db?.tag_implications_cache) {
+      return result;
+    }
+
+    // 2) Persistent store lookup, filtered by 180d TTL.
+    try {
+      const now = Date.now();
+      const records = await this.db.tag_implications_cache.bulkGet(missing);
+      records.forEach((r, i) => {
+        if (r && isImplicationCacheValid(r.fetchedAt, now)) {
+          result.set(missing[i], r.isTopLevel);
+          topLevelSessionCache.set(missing[i], r.isTopLevel);
+        }
+      });
+    } catch (e) {
+      log.warn('Failed to read tag_implications cache', {error: e});
+    }
+
+    return result;
+  }
+
+  /**
+   * Persists successfully-fetched top-level flags. Session cache is updated
+   * atomically; persistent write is best-effort (failures log a warning).
+   */
+  private async writeImplicationCache(
+    entries: Map<string, boolean>,
+  ): Promise<void> {
+    if (entries.size === 0) return;
+
+    // Update session cache unconditionally — fast, synchronous, always safe.
+    entries.forEach((isTopLevel, tagName) => {
+      topLevelSessionCache.set(tagName, isTopLevel);
+    });
+
+    if (!this.db?.tag_implications_cache) return;
+    try {
+      const now = Date.now();
+      const records: TagImplicationCacheRecord[] = [];
+      entries.forEach((isTopLevel, tagName) => {
+        records.push({tagName, isTopLevel, fetchedAt: now});
+      });
+      await this.db.tag_implications_cache.bulkPut(records);
+    } catch (e) {
+      log.warn('Failed to write tag_implications cache', {error: e});
+    }
+  }
+
+  /**
+   * Resolves top-level flags for a list of tags using cache-first strategy.
+   * Cache hits are served immediately; misses are batch-fetched and
+   * persisted. Tags still unresolved after a failed batch fall back to
+   * `true` (treat-as-top-level) so filtering stays permissive.
+   *
+   * Public so `TagAnalyticsApp._fetchPostTags` can share the same cache +
+   * batch pipeline for its copyright-candidate filter.
+   */
+  async getTopLevelFlags(tagNames: string[]): Promise<Map<string, boolean>> {
+    const cached = await this.readImplicationCache(tagNames);
+    const missing = tagNames.filter(n => !cached.has(n));
+    if (missing.length === 0) return cached;
+
+    const fetched = await this.fetchTopLevelTagsBatch(missing);
+    if (fetched.size > 0) {
+      await this.writeImplicationCache(fetched);
+    }
+
+    // Merge: fetched → cached, and fill remaining gaps with the safe
+    // default (true) without persisting them.
+    for (const name of missing) {
+      if (fetched.has(name)) {
+        cached.set(name, fetched.get(name) as boolean);
+      } else {
+        cached.set(name, true);
+      }
+    }
+    return cached;
   }
 
   /** Drops every cached monthly count for this tag (drift invalidation). */
@@ -668,15 +867,14 @@ export class TagAnalyticsDataService {
       // Limit to top 20 candidates for performance
       const candidates: DanbooruRelatedTag[] = tags.slice(0, 20);
 
-      // 2. Filter Top-Level (Check Implications)
-      const checks = await Promise.all(
-        candidates.map(async (item: DanbooruRelatedTag) =>
-          (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
-        ),
+      // 2. Filter Top-Level via a SINGLE batched implications lookup
+      //    (previously 20 serial-rate-limited calls). Session + 180d
+      //    persistent cache make this ~free after warmup.
+      const flags = await this.getTopLevelFlags(
+        candidates.map(c => c.tag.name),
       );
-
-      const filtered = checks.filter(
-        (item): item is DanbooruRelatedTag => item !== null,
+      const filtered = candidates.filter(
+        item => flags.get(item.tag.name) === true,
       );
 
       // 3. Take Top 10 by Frequency

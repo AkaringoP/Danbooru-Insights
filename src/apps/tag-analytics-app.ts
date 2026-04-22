@@ -3,7 +3,7 @@ import {CONFIG} from '../config';
 import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {createLogger} from '../core/logger';
-import {isTopLevelTag, escapeHtml, getBestThumbnailUrl} from '../utils';
+import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
@@ -489,22 +489,19 @@ export class TagAnalyticsApp {
         .sort((a, b) => (b[1] as number) - (a[1] as number))
         .slice(0, 20);
 
-      const filteredCopyright = (
-        await Promise.all(
-          copyrightCandidates.map(async ([tag, count]) =>
-            (await isTopLevelTag(this.dataService.rateLimiter, tag))
-              ? [tag, count]
-              : null,
-          ),
-        )
-      ).filter(e => e !== null);
+      // Batched tag_implications lookup via dataService — shares the
+      // session + 180d persistent cache with fetchRelatedTagDistribution.
+      const flags = await this.dataService.getTopLevelFlags(
+        copyrightCandidates.map(([tag]) => tag),
+      );
+      const filteredCopyright = copyrightCandidates.filter(
+        ([tag]) => flags.get(tag) === true,
+      );
 
       const copyrightMap2: Record<string, number> = {};
-      (filteredCopyright as [string, number][])
-        .slice(0, 10)
-        .forEach(([name, count]) => {
-          copyrightMap2[name] = count;
-        });
+      filteredCopyright.slice(0, 10).forEach(([name, count]) => {
+        copyrightMap2[name] = count;
+      });
       meta.copyrightCounts = copyrightMap2;
     }
 
