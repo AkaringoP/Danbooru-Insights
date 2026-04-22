@@ -2,6 +2,7 @@ import * as d3 from 'd3';
 import {CONFIG} from '../config';
 import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {RateLimitedFetch} from '../core/rate-limiter';
+import {createLogger} from '../core/logger';
 import {isTopLevelTag, escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
@@ -9,6 +10,7 @@ import {TagAnalyticsDataService} from './tag-analytics-data';
 import type {InitialStats, LocalStats} from './tag-analytics-data';
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
+import {showToast} from '../ui/toast';
 import type {
   TagAnalyticsMeta,
   DanbooruPost,
@@ -16,6 +18,8 @@ import type {
   HistoryEntry,
   MilestoneEntry,
 } from '../types';
+
+const log = createLogger('TagAnalytics');
 
 /** fetchMonthlyCounts attaches historyCutoff to the returned array object. */
 type MonthlyHistoryData = HistoryEntry[] & {historyCutoff?: string};
@@ -202,9 +206,7 @@ export class TagAnalyticsApp {
         baseData,
       );
       if (!initialStats || initialStats.totalCount === 0) {
-        console.warn(
-          `[TagAnalyticsApp] Could not fetch initial stats for tag: "${tagName}"`,
-        );
+        log.warn(`Could not fetch initial stats for tag: "${tagName}"`);
         return;
       }
 
@@ -270,15 +272,15 @@ export class TagAnalyticsApp {
         );
       }
     } catch (e) {
-      console.warn('Failed to check post count diff', e);
+      log.warn('Failed to check post count diff', {error: e});
     }
 
     const threshold = this.dataService.getSyncThreshold();
     const isCountThresholdMet = postCountDiff >= threshold;
 
     if (isTimeExpired || isCountThresholdMet) {
-      console.log(
-        `[TagAnalyticsApp] Partial Sync Triggered. TimeExpired=${isTimeExpired} (${(age / 3600000).toFixed(1)}h), CountThreshold=${isCountThresholdMet} (${postCountDiff} >= ${threshold})`,
+      log.debug(
+        `Partial Sync Triggered. TimeExpired=${isTimeExpired} (${(age / 3600000).toFixed(1)}h), CountThreshold=${isCountThresholdMet} (${postCountDiff} >= ${threshold})`,
       );
       return {runDelta: true, baseData: cachedData};
     }
@@ -298,10 +300,7 @@ export class TagAnalyticsApp {
       cachedData.newPostCount = newPostCount24h;
       await this.dataService.saveToCache(cachedData);
     } catch (e) {
-      console.warn(
-        '[TagAnalyticsApp] Failed to update volatile data for cache:',
-        e,
-      );
+      log.warn('Failed to update volatile data for cache:', {error: e});
     }
 
     this.injectAnalyticsButton(cachedData);
@@ -451,8 +450,8 @@ export class TagAnalyticsApp {
     this._showUpdatedStatus(meta.updatedAt);
     await this.dataService.saveToCache(meta);
 
-    console.log(
-      `[TagAnalytics] [Small Tag Optimization] Finished analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount}) in ${(performance.now() - t0).toFixed(2)}ms`,
+    log.debug(
+      `[Small Tag Optimization] Finished analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount}) in ${(performance.now() - t0).toFixed(2)}ms`,
     );
 
     this.toggleModal(true);
@@ -547,8 +546,8 @@ export class TagAnalyticsApp {
     const measure = <T>(label: string, promise: Promise<T>): Promise<T> => {
       const start = performance.now();
       return promise.then((res: T) => {
-        console.log(
-          `[TagAnalytics] [Task] Finished: ${label} (${(performance.now() - start).toFixed(2)}ms)`,
+        log.debug(
+          `[Task] Finished: ${label} (${(performance.now() - start).toFixed(2)}ms)`,
         );
         return res;
       });
@@ -573,9 +572,9 @@ export class TagAnalyticsApp {
     };
 
     // --- Phase 1: Quick Stats ---
-    console.time('TagAnalytics:Total');
-    console.log(
-      `[TagAnalytics] Starting analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount})`,
+    const tTotal = performance.now();
+    log.debug(
+      `Starting analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount})`,
     );
 
     const tGroup1Start = performance.now();
@@ -587,12 +586,12 @@ export class TagAnalyticsApp {
       trackProgress,
     );
 
-    console.log(
-      `[TagAnalytics] [Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
+    log.debug(
+      `[Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
     );
 
     // --- Phase 2: Heavy Stats (Rankings, History, Milestones) ---
-    console.log('[TagAnalytics] [Phase 2] Starting Rankings & History...');
+    log.debug('[Phase 2] Starting Rankings & History...');
 
     const rankingPromise = this.dataService.fetchRankingsAndResolve(
       tagName,
@@ -640,7 +639,7 @@ export class TagAnalyticsApp {
       },
     ];
 
-    console.log('[TagAnalytics] [Phase 2] Awaiting Heavy Stats...');
+    log.debug('[Phase 2] Awaiting Heavy Stats...');
     const heavyResults = await Promise.all(
       (
         heavyTasks as Array<{
@@ -670,9 +669,7 @@ export class TagAnalyticsApp {
     // Apply backward-scan first-100 override if available
     let first100Stats = first100StatsRaw;
     if (first100Override.value) {
-      console.log(
-        '[TagAnalytics] Applying updated First 100 Rankings from backward scan.',
-      );
+      log.debug('Applying updated First 100 Rankings from backward scan.');
       first100Stats = first100Override.value;
     }
     // Update firstPost/hundredthPost if backward scan found earlier data
@@ -681,10 +678,10 @@ export class TagAnalyticsApp {
       hundredthPost = initialStats.hundredthPost;
     }
 
-    console.log(
-      `[TagAnalytics] [Group 1] Finished Quick Stats (approx) in ${(performance.now() - tGroup1Start).toFixed(2)}ms (Note: includes wait for longest item)`,
+    log.debug(
+      `[Group 1] Finished Quick Stats (approx) in ${(performance.now() - tGroup1Start).toFixed(2)}ms (Note: includes wait for longest item)`,
     );
-    console.log('[TagAnalytics] All parallel tasks completed.');
+    log.debug('All parallel tasks completed.');
 
     const {uploaderAll, approverAll, uploaderYear, approverYear} =
       resolvedRankings;
@@ -696,15 +693,17 @@ export class TagAnalyticsApp {
         : new Date('2005-01-01');
     const minDateStr = minDate.toISOString().split('T')[0];
 
-    console.log(
-      `[TagAnalytics] [Phase 3] Starting Deferred Counts (Rating) with startDate: ${minDateStr}`,
+    log.debug(
+      `[Phase 3] Starting Deferred Counts (Rating) with startDate: ${minDateStr}`,
     );
     const ratingCounts = await measure(
       'Rating Counts',
       this.dataService.fetchRatingCounts(tagName, minDateStr),
     );
 
-    console.timeEnd('TagAnalytics:Total');
+    log.debug(
+      `Total analysis time: ${(performance.now() - tTotal).toFixed(2)}ms`,
+    );
 
     // --- Assembly ---
     meta.statusCounts = quickStats.statusCounts;
@@ -755,8 +754,8 @@ export class TagAnalyticsApp {
       promise: Promise<T>;
     }) => Promise<T>,
   ): Promise<QuickStatsResult> {
-    console.log(
-      '[TagAnalytics] [Group 1] Queueing Quick Stats (Status, Rating, Latest, Trending, Related)...',
+    log.debug(
+      '[Group 1] Queueing Quick Stats (Status, Rating, Latest, Trending, Related)...',
     );
 
     const statusPromise = measure(
@@ -840,7 +839,7 @@ export class TagAnalyticsApp {
       },
     ];
 
-    console.log('[TagAnalytics] [Phase 1] Executing Quick Stats...');
+    log.debug('[Phase 1] Executing Quick Stats...');
     const quickResults = await Promise.all(
       (
         quickTasks as Array<{
@@ -980,15 +979,15 @@ export class TagAnalyticsApp {
             referenceTotal =
               (r && r.counts ? r.counts.posts : r ? r.posts : 0) || 0;
           } catch (e) {
-            console.warn(
+            log.warn(
               'Failed to fetch cutoff total, falling back to meta.post_count',
-              e,
+              {error: e},
             );
           }
         }
 
-        console.log(
-          `[TagAnalyticsApp] Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
+        log.debug(
+          `Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
         );
 
         if (forwardTotal < referenceTotal && !runDelta) {
@@ -1030,8 +1029,8 @@ export class TagAnalyticsApp {
                 realInitialStats.initialPosts &&
                 realInitialStats.initialPosts.length > 0
               ) {
-                console.log(
-                  '[TagAnalytics] Recalculating First 100 Rankings for older posts...',
+                log.debug(
+                  'Recalculating First 100 Rankings for older posts...',
                 );
                 const newStats = this.dataService.calculateLocalStats(
                   realInitialStats.initialPosts,
@@ -1039,10 +1038,9 @@ export class TagAnalyticsApp {
                 first100Override.value = await this.dataService
                   .resolveFirst100Names(newStats)
                   .catch(e => {
-                    console.warn(
-                      '[TagAnalytics] Failed to resolve names for older posts',
-                      e,
-                    );
+                    log.warn('Failed to resolve names for older posts', {
+                      error: e,
+                    });
                     return newStats;
                   });
               }
@@ -1122,15 +1120,18 @@ export class TagAnalyticsApp {
         if (this.db && this.db.tag_analytics) {
           try {
             await this.db.tag_analytics.delete(this.tagName);
-            console.log(`[TagAnalyticsApp] Deleted cache for ${this.tagName}`);
+            log.debug(`Deleted cache for ${this.tagName}`);
             // Close existing modal to prevent conflicts or stale state
             this.toggleModal(false);
             // Re-fetch immediately since user explicitly requested reset
             // Fire-and-forget: triggered by reset button; errors surface in console.
             void this._fetchAndRender();
           } catch (err) {
-            console.error('[TagAnalyticsApp] Failed to delete cache:', err);
-            alert('Failed to reset data. Check console for details.');
+            log.error('Failed to delete cache:', {error: err});
+            showToast({
+              type: 'error',
+              message: 'Failed to reset data. Check console for details.',
+            });
           }
         }
       }
@@ -1250,12 +1251,16 @@ export class TagAnalyticsApp {
 
         popover.remove();
         document.removeEventListener('click', closeHandler);
-        alert(
-          `Settings Saved:\n- Retention: ${days} days\n- Sync Threshold: ${threshold} posts\n\nCleaning up old data now...`,
-        );
+        showToast({
+          type: 'success',
+          message: `Settings Saved: Retention ${days} days, Sync Threshold ${threshold} posts. Cleaning up old data now...`,
+        });
         void this.dataService.cleanupOldCache(); // Run cleanup immediately (fire-and-forget)
       } else {
-        alert('Please enter valid positive numbers.');
+        showToast({
+          type: 'warn',
+          message: 'Please enter valid positive numbers.',
+        });
       }
     };
   }
@@ -1287,9 +1292,7 @@ export class TagAnalyticsApp {
     }
 
     if (!title) {
-      console.warn(
-        '[TagAnalyticsApp] Could not find a suitable title element for button injection.',
-      );
+      log.warn('Could not find a suitable title element for button injection.');
       return;
     }
 
@@ -1379,9 +1382,10 @@ export class TagAnalyticsApp {
         (iconContainer as HTMLElement).style.filter = 'grayscale(1)';
       }
       btn.onclick = () => {
-        alert(
-          `Report data is still being calculated (${progress ?? 0}%). It will be ready in a few seconds.`,
-        );
+        showToast({
+          type: 'warn',
+          message: `Report data is still being calculated (${progress ?? 0}%). It will be ready in a few seconds.`,
+        });
       };
     } else {
       // Idle: not yet fetched, click to start
@@ -1692,10 +1696,9 @@ export class TagAnalyticsApp {
    */
   private buildRankingsSection(tagData: TagAnalyticsMeta): string {
     if (!tagData.rankings) return '';
-    console.log(
-      '[TagAnalytics] renderDashboard - Initial Render - hundredthPost:',
-      tagData.hundredthPost,
-    );
+    log.debug('renderDashboard - Initial Render - hundredthPost:', {
+      hundredthPost: tagData.hundredthPost,
+    });
     const hundredthPostId = tagData.hundredthPost
       ? tagData.hundredthPost.id
       : null;
@@ -1851,10 +1854,7 @@ export class TagAnalyticsApp {
               );
             })
             .catch((err: unknown) => {
-              console.error(
-                '[TagAnalyticsApp] Failed to fetch milestones:',
-                err,
-              );
+              log.error('Failed to fetch milestones:', {error: err});
             });
         }
       }

@@ -9,6 +9,7 @@ import {ProfileContext} from './core/profile-context';
 import {GrassApp} from './apps/grass-app';
 import {UserAnalyticsApp} from './apps/user-analytics-app';
 import {TagAnalyticsApp} from './apps/tag-analytics-app';
+import {shouldRunDiagnostic, showDiagnostic} from './dev/diagnostic';
 
 // Reserved path segments that are not tag show pages
 const WIKI_RESERVED = new Set(['search', 'show_or_new', 'new']);
@@ -135,6 +136,23 @@ function observeCrossTabSettings(settings: SettingsManager): void {
  * Initializes context, database, settings, and applications.
  */
 async function main(): Promise<void> {
+  // Diagnostic panel — defer opening until the first app sync + render
+  // completes, so the panel's DB reads reflect post-sync state rather
+  // than a stale pre-sync snapshot. GrassApp dispatches
+  // `di:sync-complete` on successful initial render; a timeout fallback
+  // covers pages where GrassApp doesn't run (tag pages, error pages)
+  // and unusually slow syncs.
+  if (shouldRunDiagnostic()) {
+    let fired = false;
+    const openDiag = () => {
+      if (fired) return;
+      fired = true;
+      void showDiagnostic();
+    };
+    window.addEventListener('di:sync-complete', openDiag, {once: true});
+    setTimeout(openDiag, 6000);
+  }
+
   // Guard: skip non-Danbooru pages (nginx/CDN error pages like 429, 502, etc.)
   // Real Danbooru pages always have body classes (e.g., "c-users a-show").
   // Error pages served by nginx have a bare <body> with no classes.

@@ -858,6 +858,11 @@ export const GLOBAL_CSS = `
         width: fit-content !important;
         margin: 5px 0 5px auto !important;
       }
+      .di-scatter-downvote {
+        position: static !important;
+        width: fit-content !important;
+        margin: 0 0 5px auto !important;
+      }
 
       /* Phase 3: Rankings horizontal swipe */
       #ranking-container {
@@ -875,6 +880,18 @@ export const GLOBAL_CSS = `
       /* Phase 4: Created tags table scroll */
       .di-created-tags-wrap {
         overflow-x: auto !important;
+      }
+
+      /* Grass wrapper: stack vertically on mobile so stats reclaims full width */
+      #danbooru-grass-wrapper {
+        flex-direction: column !important;
+      }
+      #danbooru-grass-wrapper > :first-child {
+        max-width: 100% !important;
+        overflow: visible !important;
+      }
+      #danbooru-grass-column {
+        flex-basis: 100% !important;
       }
 
       /* Phase 4: Grass handles hide on mobile */
@@ -926,6 +943,20 @@ export const GLOBAL_CSS = `
         grid-template-columns: repeat(2, 1fr) !important;
       }
 
+      /* UserAnalytics milestones: 2 columns on mobile */
+      #analytics-milestone-container {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 6px !important;
+      }
+      #analytics-milestone-container > a,
+      #analytics-milestone-container > .di-next-milestone-card {
+        padding: 8px !important;
+      }
+      #analytics-milestone-container > a > div:last-child {
+        width: 45px !important;
+        height: 45px !important;
+      }
+
       /* Fix 10: Created Tags pagination wrap */
       .di-created-tags-wrap > div:last-child {
         flex-wrap: wrap !important;
@@ -960,6 +991,72 @@ export const GLOBAL_CSS = `
       .top-post-tab {
         padding: 4px 10px;
         font-size: 12px;
+      }
+    }
+
+    /* ── Toast Notifications ── */
+    .di-toast-container {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      z-index: 2147483646;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 8px;
+      pointer-events: none;
+      max-width: 380px;
+    }
+    .di-toast {
+      pointer-events: auto;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.4;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #fff;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+      opacity: 0;
+      transform: translateX(40px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    .di-toast.di-toast-visible {
+      opacity: 1;
+      transform: translateX(0);
+    }
+    .di-toast.di-toast-exit {
+      opacity: 0;
+      transform: translateX(40px);
+    }
+    .di-toast-success { background: #2d8a4e; }
+    .di-toast-error   { background: #c93c37; }
+    .di-toast-warn    { background: #bf6a1f; }
+    .di-toast-info    { background: #2563a8; }
+    .di-toast-message {
+      flex: 1;
+      word-break: break-word;
+    }
+    .di-toast-close {
+      flex-shrink: 0;
+      background: none;
+      border: none;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 16px;
+      cursor: pointer;
+      padding: 0 2px;
+      line-height: 1;
+    }
+    .di-toast-close:hover {
+      color: #fff;
+    }
+    @media (max-width: 480px) {
+      .di-toast-container {
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        max-width: none;
       }
     }
   `;

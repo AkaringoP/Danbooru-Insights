@@ -1,6 +1,9 @@
 import type {CreatedTagItem} from '../types';
 import type {AnalyticsDataManager} from '../core/analytics-data-manager';
 import type {TargetUser} from '../types';
+import {createLogger} from '../core/logger';
+
+const log = createLogger('CreatedTags');
 
 /** Sort mode for the created tags table. */
 type SortMode = 'posts' | 'name' | 'date';
@@ -212,7 +215,7 @@ export function renderCreatedTagsWidget(
       sortItems();
       renderTable();
     } catch (e) {
-      console.debug('[DI] Created tags load failed', e);
+      log.debug('Created tags load failed', {error: e});
       contentDiv.innerHTML =
         '<div style="color:#c00;text-align:center;padding:20px;font-size:0.9em;">Failed to load created tags.</div>';
     }

@@ -1,5 +1,6 @@
 import {CONFIG} from '../config';
 import {DataManager} from '../core/data-manager';
+import {showToast} from './toast';
 import type {SettingsManager} from '../core/settings';
 import type {Metric, GrassOption} from '../types';
 import type {Database} from '../core/database';
@@ -108,7 +109,7 @@ export function createSettingsPopover(
   const handleClose = (): void => {
     const check = validateThresholds();
     if (!check.valid) {
-      alert(check.msg);
+      showToast({type: 'warn', message: check.msg ?? 'Invalid settings.'});
       return;
     }
     popover.style.display = 'none';
@@ -387,6 +388,27 @@ export function createSettingsPopover(
 
   modeSelect.addEventListener('change', () => renderEditor(modeSelect.value));
   renderEditor(modeSelect.value); // Initial Render
+
+  // --- 2b. Snap-to-Edge Toggle ---
+  const snapRow = document.createElement('div');
+  snapRow.style.cssText =
+    'display:flex;align-items:center;gap:6px;margin-top:12px;';
+  const snapCheckbox = document.createElement('input');
+  snapCheckbox.type = 'checkbox';
+  snapCheckbox.id = 'di-snap-to-edge';
+  snapCheckbox.checked = settingsManager.getSnapToEdge();
+  snapCheckbox.style.cssText = 'margin:0;cursor:pointer;';
+  const snapLabel = document.createElement('label');
+  snapLabel.htmlFor = 'di-snap-to-edge';
+  snapLabel.textContent = 'Snap to edge when resizing';
+  snapLabel.style.cssText =
+    'font-size:11px;color:var(--di-text, #333);cursor:pointer;user-select:none;';
+  snapCheckbox.onchange = () => {
+    settingsManager.setSnapToEdge(snapCheckbox.checked);
+  };
+  snapRow.appendChild(snapCheckbox);
+  snapRow.appendChild(snapLabel);
+  popover.appendChild(snapRow);
 
   // --- 3. Cache Info Section ---
   const cacheSection = document.createElement('div');

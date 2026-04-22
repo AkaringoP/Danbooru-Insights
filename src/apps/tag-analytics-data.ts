@@ -1,4 +1,5 @@
 import {CONFIG, DAY_MS} from '../config';
+import {createLogger} from '../core/logger';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {isTopLevelTag} from '../utils';
 import type {Database} from '../core/database';
@@ -57,6 +58,8 @@ type RankingResult = {
 type UserEntry = {name: string; level: string};
 type UserEntryWithId = {id: number; name: string; level: string};
 
+const log = createLogger('TagAnalyticsData');
+
 /**
  * Data service for TagAnalyticsApp.
  * Handles all API fetching, caching, and data computation.
@@ -97,7 +100,7 @@ export class TagAnalyticsDataService {
         }
       }
     } catch (e) {
-      console.warn('[TagAnalyticsApp] Cache load failed', e);
+      log.warn('Cache load failed', {error: e});
     }
     return null;
   }
@@ -116,7 +119,7 @@ export class TagAnalyticsDataService {
         data: data,
       });
     } catch (e) {
-      console.warn('[TagAnalyticsApp] Cache save failed', e);
+      log.warn('Cache save failed', {error: e});
     }
   }
 
@@ -181,7 +184,7 @@ export class TagAnalyticsDataService {
     try {
       await this.db.tag_analytics.where('updatedAt').below(cutoff).delete();
     } catch (e) {
-      console.warn('[TagAnalyticsApp] Cleanup failed', e);
+      log.warn('Cleanup failed', {error: e});
     }
   }
 
@@ -319,10 +322,7 @@ export class TagAnalyticsDataService {
         }
       }
     } catch (e) {
-      console.warn(
-        '[TagAnalyticsApp] Fetch failed for initial stats gather',
-        e,
-      );
+      log.warn('Fetch failed for initial stats gather', {error: e});
     }
 
     if (!posts || posts.length === 0) {
@@ -365,13 +365,10 @@ export class TagAnalyticsDataService {
       try {
         const resp = await this.rateLimiter.fetch(url);
         if (!resp.ok) {
-          // console.warn(`[TagAnalyticsApp] HTTP Error ${resp.status} for ${url}`);
           throw new Error(`HTTP ${resp.status}`);
         }
 
         const data = await resp.json();
-        // Log raw data for debugging
-        // console.log(`[TagAnalyticsApp] Raw data for ${url}:`, data);
 
         const count =
           data && data.counts && typeof data.counts === 'object'
@@ -388,10 +385,10 @@ export class TagAnalyticsDataService {
         throw new Error('Invalid count data');
       } catch (e) {
         if (i === retries) {
-          console.warn(
-            `[TagAnalyticsApp] Failed to fetch count after ${retries + 1} attempts: ${url}`,
-            e,
-          );
+          log.warn(`Failed to fetch count after ${retries + 1} attempts`, {
+            url,
+            error: e,
+          });
           return 0; // Default to 0 after all retries
         }
         // Wait a bit before retry (e.g., 500ms)
@@ -429,9 +426,7 @@ export class TagAnalyticsDataService {
     // [Integrity Check] Ensure all keys exist and are valid numbers
     keys.forEach(key => {
       if (results[key] === undefined) {
-        console.warn(
-          `[TagAnalyticsApp] Missing commentary key: ${key}. Defaulting to 0.`,
-        );
+        log.warn(`Missing commentary key: ${key}. Defaulting to 0.`);
         results[key] = 0;
       }
     });
@@ -464,9 +459,7 @@ export class TagAnalyticsDataService {
     // [Integrity Check] Ensure all keys exist and are valid numbers
     statuses.forEach(status => {
       if (results[status] === undefined) {
-        console.warn(
-          `[TagAnalyticsApp] Missing status key: ${status}. Defaulting to 0.`,
-        );
+        log.warn(`Missing status key: ${status}. Defaulting to 0.`);
         results[status] = 0;
       }
     });
@@ -501,9 +494,7 @@ export class TagAnalyticsDataService {
     // [Integrity Check] Ensure all keys exist and are valid numbers
     ratings.forEach(rating => {
       if (results[rating] === undefined) {
-        console.warn(
-          `[TagAnalyticsApp] Missing rating key: ${rating}. Defaulting to 0.`,
-        );
+        log.warn(`Missing rating key: ${rating}. Defaulting to 0.`);
         results[rating] = 0;
       }
     });
@@ -575,7 +566,7 @@ export class TagAnalyticsDataService {
                   : 0) || 0;
             obj.count = c;
           } catch (e) {
-            console.debug('[DI] Failed to fetch combined tag count', e);
+            log.debug('Failed to fetch combined tag count', {error: e});
           }
         }),
       );
@@ -617,10 +608,7 @@ export class TagAnalyticsDataService {
 
       return result;
     } catch (e) {
-      console.warn(
-        `[TagAnalyticsApp] Failed to fetch ${catName} distribution`,
-        e,
-      );
+      log.warn(`Failed to fetch ${catName} distribution`, {error: e});
       return null;
     }
   }
@@ -631,9 +619,12 @@ export class TagAnalyticsDataService {
     targetTotal: number,
     currentForwardTotal: number,
   ): Promise<HistoryEntry[]> {
-    console.log(
-      `[TagAnalyticsApp] Starting Reverse Scan. Tag: ${tagName}, Start: ${forwardStartDate}, Target: ${targetTotal}, Current: ${currentForwardTotal}`,
-    );
+    log.debug('Starting Reverse Scan', {
+      tag: tagName,
+      start: forwardStartDate,
+      target: targetTotal,
+      current: currentForwardTotal,
+    });
     const history: HistoryEntry[] = [];
     let totalSum = currentForwardTotal;
     const currentMonth = new Date(forwardStartDate);
@@ -674,22 +665,23 @@ export class TagAnalyticsDataService {
             cumulative: 0, // Will fix in post-process
           });
           totalSum += count;
-          console.log(
-            `[TagAnalyticsApp] Reverse Scan Hit: ${year}-${month} => ${count} posts. Total: ${totalSum}/${targetTotal}`,
-          );
+          log.debug(`Reverse Scan Hit: ${year}-${month}`, {
+            count,
+            total: totalSum,
+            target: targetTotal,
+          });
         }
       } catch (e) {
-        console.warn(
-          `[TagAnalyticsApp] Backward fetch failed for ${year}-${month}`,
-          e,
-        );
+        log.warn(`Backward fetch failed for ${year}-${month}`, {error: e});
       }
 
       currentMonth.setMonth(currentMonth.getMonth() - 1);
     }
-    console.log(
-      `[TagAnalyticsApp] Reverse Scan Completed. Total: ${totalSum}/${targetTotal}, Months Checked: ${history.length} (hits)`,
-    );
+    log.debug('Reverse Scan Completed', {
+      total: totalSum,
+      target: targetTotal,
+      hitsCount: history.length,
+    });
 
     // Calculate cumulative counts for backward data
     let runningSum = 0;
@@ -798,7 +790,7 @@ export class TagAnalyticsDataService {
         .then((r: Response) => r.json());
       return posts && posts.length > 0 ? posts[0] : null;
     } catch (e) {
-      console.warn('[TagAnalyticsApp] Failed to fetch latest post:', e);
+      log.warn('Failed to fetch latest post', {error: e});
       return null;
     }
   }
@@ -814,7 +806,7 @@ export class TagAnalyticsDataService {
         (resp && resp.counts ? resp.counts.posts : resp ? resp.posts : 0) || 0
       );
     } catch (e) {
-      console.warn('[TagAnalyticsApp] Failed to fetch new post count:', e);
+      log.warn('Failed to fetch new post count', {error: e});
       return 0;
     }
   }
@@ -833,7 +825,7 @@ export class TagAnalyticsDataService {
         .then((r: Response) => r.json());
       return posts && posts.length > 0 ? posts[0] : null;
     } catch (e) {
-      console.warn('[TagAnalyticsApp] Failed to fetch trending post:', e);
+      log.warn('Failed to fetch trending post', {error: e});
       return null;
     }
   }
@@ -911,7 +903,7 @@ export class TagAnalyticsDataService {
       // Based on Danbooru API, reports usually return a string or specific structure.
       // For 'uploader', it returns list of objects.
     } catch (e) {
-      console.warn(`[TagAnalyticsApp] Ranking fetch failed (${group}):`, e);
+      log.warn(`Ranking fetch failed (${group})`, {error: e});
       return [];
     }
   }
@@ -1004,7 +996,7 @@ export class TagAnalyticsDataService {
           };
         })
         .catch((e: unknown) => {
-          console.warn(`[TagAnalyticsApp] Failed month ${task.dateStr}`, e);
+          log.warn(`Failed month ${task.dateStr}`, {error: e});
           return {date: task.dateStr, count: 0, cumulative: 0};
         });
     });
@@ -1113,12 +1105,14 @@ export class TagAnalyticsDataService {
               post: posts[indexInPage],
             } as MilestoneEntry);
           } else {
-            console.warn(
-              `[TagAnalyticsApp] Milestone ${target} post not found at index ${indexInPage} (Page ${page}). Posts len: ${posts ? posts.length : 0}`,
-            );
+            log.warn(`Milestone ${target} post not found`, {
+              index: indexInPage,
+              page,
+              postsLen: posts ? posts.length : 0,
+            });
           }
         } catch (e) {
-          console.warn(`[TagAnalyticsApp] Failed milestone ${target}`, e);
+          log.warn(`Failed milestone ${target}`, {error: e});
         }
       }
     }
@@ -1211,7 +1205,7 @@ export class TagAnalyticsDataService {
           }
         })
         .catch((e: unknown) =>
-          console.warn('[TagAnalyticsApp] Failed to fetch user batch', e),
+          log.warn('Failed to fetch user batch', {error: e}),
         );
     });
 
@@ -1264,11 +1258,11 @@ export class TagAnalyticsDataService {
               });
             }
           } else {
-            console.warn(`[TagAnalyticsApp] User not found by name: "${name}"`);
+            log.warn(`User not found by name: "${name}"`);
           }
         })
         .catch((e: unknown) =>
-          console.warn(`[TagAnalyticsApp] Failed to fetch user: "${name}"`, e),
+          log.warn(`Failed to fetch user: "${name}"`, {error: e}),
         );
     });
 
@@ -1564,7 +1558,7 @@ export class TagAnalyticsDataService {
       }
       return null;
     } catch (e) {
-      console.error('[TagAnalyticsApp] Tag fetch error:', e);
+      log.error('Tag fetch error', {error: e});
       return null;
     }
   }

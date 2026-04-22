@@ -1,5 +1,8 @@
 import {CONFIG} from '../config';
 import type {DarkModePreference, Metric, SettingsData, Theme} from '../types';
+import {createLogger} from './logger';
+
+const log = createLogger('Settings');
 
 /**
  * Manages user settings and persistence using localStorage.
@@ -68,10 +71,7 @@ export class SettingsManager {
         },
       };
     } catch (e) {
-      console.error(
-        '[Danbooru Grass] Error loading settings, using defaults:',
-        e,
-      );
+      log.error('Error loading settings, using defaults', {error: e});
       return this.defaults;
     }
   }
@@ -264,5 +264,15 @@ export class SettingsManager {
   /** Sets dark mode preference and persists it. */
   setDarkMode(pref: DarkModePreference): void {
     this.save({darkMode: pref});
+  }
+
+  /** Gets snap-to-edge preference (default: true). */
+  getSnapToEdge(): boolean {
+    return this.settings.snapToEdge !== false;
+  }
+
+  /** Sets snap-to-edge preference and persists it. */
+  setSnapToEdge(enabled: boolean): void {
+    this.save({snapToEdge: enabled});
   }
 }

@@ -1,5 +1,6 @@
 import * as d3 from 'd3';
 import {CONFIG} from '../config';
+import {createLogger} from '../core/logger';
 import type {DataManager} from '../core/data-manager';
 import type {
   TargetUser,
@@ -12,6 +13,8 @@ import {SettingsManager} from '../core/settings';
 import {createSettingsPopover, applyPopoverPalette} from './settings-popover';
 import {showApprovalsDetail} from './approval-detail-popover';
 import {isTouchDevice, createTwoStepTap} from './two-step-tap';
+
+const log = createLogger('GraphRenderer');
 
 /**
  * GraphRenderer: Handles rendering of the contribution heatmap graph.
@@ -108,7 +111,7 @@ export class GraphRenderer {
     }
 
     if (!stats) {
-      console.error('[Danbooru Grass] Injection point not found.');
+      log.error('Injection point not found');
       return false;
     }
 
@@ -224,6 +227,55 @@ export class GraphRenderer {
       return cachedNaturalWidth;
     };
 
+    // The container width needed to display from the current month to
+    // December without horizontal scroll. Used as the magnet-snap target
+    // so the graph "sticks" at the width where Dec's right edge is flush
+    // with the container edge. Falls back to naturalWidth when viewing a
+    // past year (scroll starts at Jan).
+    let cachedCurrentToDecWidth: number | null = null;
+    const measureCurrentToDecWidth = (): number | null => {
+      if (cachedCurrentToDecWidth !== null) return cachedCurrentToDecWidth;
+      const heatmapEl = container.querySelector(
+        '#cal-heatmap',
+      ) as HTMLElement | null;
+      if (!heatmapEl) return null;
+      const domains = heatmapEl.querySelectorAll('.ch-domain');
+      if (domains.length === 0) return null;
+
+      // For past years, scrollToCurrentMonth scrolls to Jan (index 0),
+      // so the snap target is the full natural width.
+      const isCurrentYear = this.currentYear === new Date().getFullYear();
+      const startIdx = isCurrentYear ? new Date().getMonth() : 0;
+      if (startIdx >= domains.length) return null;
+
+      const startRect = domains[startIdx].getBoundingClientRect();
+      const lastRect = domains[domains.length - 1].getBoundingClientRect();
+      const svgSpan = Math.ceil(lastRect.right - startRect.left);
+      if (svgSpan <= 0) return null;
+
+      // scrollToCurrentMonth offsets by 10px from the left edge
+      const scrollOffset = isCurrentYear ? 10 : 0;
+
+      const labelsEl = container.querySelector(
+        '#gh-day-labels',
+      ) as HTMLElement | null;
+      let labelsWidth = 0;
+      if (labelsEl) {
+        const labelCS = getComputedStyle(labelsEl);
+        labelsWidth =
+          labelsEl.offsetWidth +
+          parseFloat(labelCS.marginLeft || '0') +
+          parseFloat(labelCS.marginRight || '0');
+      }
+      const cs = getComputedStyle(container);
+      const padH =
+        parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
+      cachedCurrentToDecWidth = Math.ceil(
+        svgSpan + scrollOffset + labelsWidth + padH,
+      );
+      return cachedCurrentToDecWidth;
+    };
+
     // Hourly Distribution panel uses `width: fit-content; min-width: 310px`
     // so its offsetWidth is the real floor we want to enforce — if the
     // heatmap narrows below the panel, the card stack looks asymmetric.
@@ -321,6 +373,7 @@ export class GraphRenderer {
     // can re-run once the SVG is in the DOM and measureNaturalWidth() works.
     this.reapplyGraphConstraints = () => {
       cachedNaturalWidth = null;
+      cachedCurrentToDecWidth = null;
       applyConstraints();
       syncPanelPosition();
     };
@@ -529,6 +582,14 @@ export class GraphRenderer {
           hintStyleEl = null;
         };
 
+        // Magnet-snap state: when the container width approaches the
+        // natural (full 12-month) width, it snaps to it and resists
+        // small movements in either direction (hysteresis). The user
+        // must drag past the threshold to break free.
+        const SNAP_THRESHOLD = 15;
+        const snapEnabled = this.settingsManager.getSnapToEdge();
+        let snappedToNat = false;
+
         const onMouseMove = (mE: MouseEvent): void => {
           const delta = mE.clientX - startX;
 
@@ -588,23 +649,70 @@ export class GraphRenderer {
             // Natural SVG width caps resize — no point making the
             // container wider than the heatmap it holds.
             const natCap = measureNaturalWidth() ?? maxAvailableWidth;
+            // Snap target: width from current month to December end.
+            // Falls back to natCap for past years (scroll starts at Jan).
+            const snapEdge = measureCurrentToDecWidth() ?? natCap;
             if (side === 'right') {
-              const maxWidth = Math.min(
-                natCap,
-                maxAvailableWidth - startXOffset,
-              );
-              const newWidth = Math.max(
+              const spaceRight = maxAvailableWidth - startXOffset;
+              const maxWidth = Math.min(natCap, spaceRight);
+              // Unclamped: bounded by available space, not by snapEdge
+              const unclamped = Math.max(
                 minWidth,
                 Math.min(startWidth + delta, maxWidth),
               );
+
+              // Magnet snap: ±SNAP_THRESHOLD band around snapEdge.
+              // Enter when within band, exit when outside in either
+              // direction — so the user can expand past or shrink past.
+              if (snapEnabled && snapEdge <= maxWidth) {
+                if (
+                  !snappedToNat &&
+                  unclamped >= snapEdge - SNAP_THRESHOLD &&
+                  unclamped <= snapEdge + SNAP_THRESHOLD
+                ) {
+                  snappedToNat = true;
+                }
+                if (
+                  snappedToNat &&
+                  (unclamped < snapEdge - SNAP_THRESHOLD ||
+                    unclamped > snapEdge + SNAP_THRESHOLD)
+                ) {
+                  snappedToNat = false;
+                }
+              }
+              const newWidth = snappedToNat ? snapEdge : unclamped;
+
               container.style.flex = '0 0 auto';
               container.style.width = `${newWidth}px`;
             } else if (side === 'left') {
               // Expansion left is limited by XOffset reaching 0
               const minDelta = -startXOffset;
               const clampedDelta = Math.max(delta, minDelta);
-              const rawWidth = Math.max(minWidth, startWidth - clampedDelta);
-              const newWidth = Math.min(rawWidth, natCap);
+              const maxWidth = Math.min(natCap, maxAvailableWidth);
+              // Unclamped: bounded by natCap/available, not by snapEdge
+              const unclamped = Math.max(
+                minWidth,
+                Math.min(startWidth - clampedDelta, maxWidth),
+              );
+
+              // Magnet snap (same ±band as right handle)
+              if (snapEnabled && snapEdge <= maxWidth) {
+                if (
+                  !snappedToNat &&
+                  unclamped >= snapEdge - SNAP_THRESHOLD &&
+                  unclamped <= snapEdge + SNAP_THRESHOLD
+                ) {
+                  snappedToNat = true;
+                }
+                if (
+                  snappedToNat &&
+                  (unclamped < snapEdge - SNAP_THRESHOLD ||
+                    unclamped > snapEdge + SNAP_THRESHOLD)
+                ) {
+                  snappedToNat = false;
+                }
+              }
+              const newWidth = snappedToNat ? snapEdge : unclamped;
 
               // If width hits minWidth, stop moving X
               const finalDelta = startWidth - newWidth;
@@ -1126,10 +1234,7 @@ export class GraphRenderer {
       try {
         win.cal.destroy();
       } catch (e) {
-        console.warn(
-          '[Danbooru Grass] Failed to destroy previous instance:',
-          e,
-        );
+        log.warn('Failed to destroy previous CalHeatmap instance', {error: e});
       }
     }
     win.cal = new win.CalHeatmap();
@@ -1810,7 +1915,7 @@ export class GraphRenderer {
               this.reapplyGraphConstraints?.();
             });
           } catch (e) {
-            console.debug('[DI] CalHeatmap re-paint failed', e);
+            log.debug('CalHeatmap re-paint failed', {error: e});
           }
           this.updateSummaryGrid(hourlyData, metric);
         };
@@ -1951,31 +2056,52 @@ export class GraphRenderer {
             });
 
           if (calTap) {
-            const handleCellTouch = (event: TouchEvent) => {
-              const touch = event.touches[0];
-              const target = document.elementFromPoint(
-                touch.clientX,
-                touch.clientY,
-              );
-              if (!target) return;
-              const datum = d3.select(target).datum() as CalHeatmapDatum;
-              if (!datum || !datum.t) return;
-
-              calTap.tap(datum);
-              const count = datum.v ?? 0;
-              const dateStr = new Date(datum.t).toISOString().split('T')[0];
-              updateTooltipTouch(
-                touch,
-                `<strong>${dateStr}</strong>, ${count} ${metric}`,
-              );
-            };
+            // Tap-only tooltip: record touch start position, fire tap only
+            // when the finger hasn't moved (≤10px). Drags scroll normally.
+            const TAP_THRESHOLD = 10;
+            let touchStartX = 0;
+            let touchStartY = 0;
+            let wasDrag = false;
 
             d3.selectAll('#cal-heatmap-scroll rect')
               .on('touchstart', (event: TouchEvent) => {
-                handleCellTouch(event);
+                const touch = event.touches[0];
+                touchStartX = touch.clientX;
+                touchStartY = touch.clientY;
+                wasDrag = false;
               })
-              .on('touchmove', (event: TouchEvent) => {
-                handleCellTouch(event);
+              .on('touchmove', () => {
+                wasDrag = true;
+              })
+              .on('touchend', (event: TouchEvent) => {
+                if (wasDrag) {
+                  const touch = event.changedTouches[0];
+                  const dx = touch.clientX - touchStartX;
+                  const dy = touch.clientY - touchStartY;
+                  if (dx * dx + dy * dy > TAP_THRESHOLD * TAP_THRESHOLD) return;
+                }
+                // Tap detected — resolve target from start position
+                const target = document.elementFromPoint(
+                  touchStartX,
+                  touchStartY,
+                );
+                if (!target) return;
+                const datum = d3.select(target).datum() as CalHeatmapDatum;
+                if (!datum || !datum.t) return;
+
+                calTap.tap(datum);
+                const count = datum.v ?? 0;
+                const dateStr = new Date(datum.t).toISOString().split('T')[0];
+                // Use a synthetic touch-like object at the start position
+                updateTooltipTouch(
+                  {
+                    pageX: touchStartX + window.scrollX,
+                    pageY: touchStartY + window.scrollY,
+                    clientX: touchStartX,
+                    clientY: touchStartY,
+                  } as Touch,
+                  `<strong>${dateStr}</strong>, ${count} ${metric}`,
+                );
               });
 
             // Tooltip tap → navigate via controller
@@ -2012,7 +2138,7 @@ export class GraphRenderer {
         }, 300); // Increased timeout significantly to ensure render is done
       })
       .catch((err: unknown) => {
-        console.error('[Danbooru Grass] Render failed:', err);
+        log.error('CalHeatmap render failed', {error: err});
         // Still update summary grid on failure
         this.updateSummaryGrid(hourlyData, metric);
       });

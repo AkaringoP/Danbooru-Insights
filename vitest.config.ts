@@ -1,10 +1,14 @@
 /// <reference types="vitest" />
 import {defineConfig} from 'vitest/config';
-import {detectPerfLoggingEnabled} from './build-flags';
+import {
+  detectPerfLoggingEnabled,
+  detectDebugLoggingEnabled,
+} from './build-flags';
 
 export default defineConfig({
   define: {
     __PERF_ENABLED__: JSON.stringify(detectPerfLoggingEnabled()),
+    __DEBUG_ENABLED__: JSON.stringify(detectDebugLoggingEnabled()),
   },
   test: {
     environment: 'node',
