@@ -585,14 +585,19 @@ export class TagAnalyticsApp {
       });
     };
 
-    // --- Phase 1: Quick Stats ---
+    // --- Kick off Phase 1 + Phase 2 in parallel ---
+    // Both phases depend only on `initialStats` / `meta` (already in scope),
+    // so Phase 2 promises start fetching the moment they are created, no
+    // longer blocked behind Phase 1's await. Phase 3 waits on Phase 2's
+    // historyData for its `minDate` anchor, so it stays sequential.
     const tTotal = performance.now();
     log.debug(
       `Starting analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount})`,
     );
 
+    // Phase 1 start
     const tGroup1Start = performance.now();
-    const quickStats = await this._runQuickStatsPhase(
+    const quickStatsPromise = this._runQuickStatsPhase(
       tagName,
       meta,
       totalCount,
@@ -600,20 +605,14 @@ export class TagAnalyticsApp {
       trackProgress,
     );
 
-    log.debug(
-      `[Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
-    );
-
-    // --- Phase 2: Heavy Stats (Rankings, History, Milestones) ---
-    log.debug('[Phase 2] Starting Rankings & History...');
-
+    // Phase 2 start (concurrent with Phase 1)
+    log.debug('[Phase 2] Starting Rankings & History in parallel...');
     const rankingPromise = this.dataService.fetchRankingsAndResolve(
       tagName,
       dateStr1Y,
       dateStrTomorrow,
       measure,
     );
-
     const first100Override: First100Override = {value: null};
     const heavyPromises = this._buildHeavyStatPromises(
       meta,
@@ -625,7 +624,6 @@ export class TagAnalyticsApp {
       first100Override,
       measure,
     );
-
     const heavyTasks = [
       {
         id: 'rankings_full',
@@ -652,9 +650,7 @@ export class TagAnalyticsApp {
         }),
       },
     ];
-
-    log.debug('[Phase 2] Awaiting Heavy Stats...');
-    const heavyResults = await Promise.all(
+    const heavyResultsPromise = Promise.all(
       (
         heavyTasks as Array<{
           id: string;
@@ -663,6 +659,33 @@ export class TagAnalyticsApp {
         }>
       ).map(trackProgress),
     );
+
+    // --- Phase 1 completes → partial render ---
+    const quickStats = await quickStatsPromise;
+    log.debug(
+      `[Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
+    );
+
+    // Assembly (Phase 1 fields)
+    meta.statusCounts = quickStats.statusCounts;
+    meta.latestPost = quickStats.latestPost ?? undefined;
+    meta.newPostCount = quickStats.newPostCount;
+    meta.trendingPost = quickStats.trendingPost ?? undefined;
+    meta.trendingPostNSFW = quickStats.trendingPostNSFW ?? undefined;
+    meta.copyrightCounts = quickStats.copyrightCounts ?? undefined;
+    meta.characterCounts = quickStats.characterCounts ?? undefined;
+    meta.commentaryCounts = quickStats.commentaryCounts;
+
+    // Show modal + render the skeleton with Phase 1 data. User sees pie
+    // chart + summary now; rankings / history / milestones show as
+    // placeholders until Phase 2 replaces them.
+    this._showUpdatedStatus(meta.updatedAt);
+    this.toggleModal(true);
+    this.renderDashboard(meta);
+
+    // --- Phase 2 completes → targeted update ---
+    log.debug('[Phase 2] Awaiting Heavy Stats...');
+    const heavyResults = await heavyResultsPromise;
 
     const [resolvedRankings, historyData, milestones, first100StatsRaw] =
       heavyResults as [
@@ -680,25 +703,37 @@ export class TagAnalyticsApp {
         ),
       ];
 
-    // Apply backward-scan first-100 override if available
+    // Apply backward-scan first-100 override if available.
     let first100Stats = first100StatsRaw;
     if (first100Override.value) {
       log.debug('Applying updated First 100 Rankings from backward scan.');
       first100Stats = first100Override.value;
-    }
-    // Update firstPost/hundredthPost if backward scan found earlier data
-    if (first100Override.value) {
       firstPost = initialStats.firstPost;
       hundredthPost = initialStats.hundredthPost;
     }
 
-    log.debug(
-      `[Group 1] Finished Quick Stats (approx) in ${(performance.now() - tGroup1Start).toFixed(2)}ms (Note: includes wait for longest item)`,
-    );
-    log.debug('All parallel tasks completed.');
-
     const {uploaderAll, approverAll, uploaderYear, approverYear} =
       resolvedRankings;
+
+    // Assembly (Phase 2 fields)
+    meta.historyData = historyData;
+    meta.precalculatedMilestones = milestones;
+    meta.firstPost = firstPost ?? undefined;
+    meta.hundredthPost = hundredthPost ?? undefined;
+    meta.rankings = {
+      uploader: {
+        allTime: uploaderAll,
+        year: uploaderYear,
+        first100: first100Stats?.uploaderRanking ?? [],
+      },
+      approver: {
+        allTime: approverAll,
+        year: approverYear,
+        first100: first100Stats?.approverRanking ?? [],
+      },
+    };
+
+    this._updateAfterPhase2(meta);
 
     // --- Phase 3: Deferred Counts (Rating) ---
     const minDate =
@@ -714,44 +749,16 @@ export class TagAnalyticsApp {
       'Rating Counts',
       this.dataService.fetchRatingCounts(tagName, minDateStr),
     );
+    meta.ratingCounts = ratingCounts;
+    this._updateAfterPhase3(meta);
 
     log.debug(
       `Total analysis time: ${(performance.now() - tTotal).toFixed(2)}ms`,
     );
 
-    // --- Assembly ---
-    meta.statusCounts = quickStats.statusCounts;
-    meta.ratingCounts = ratingCounts;
-    meta.latestPost = quickStats.latestPost ?? undefined;
-    meta.newPostCount = quickStats.newPostCount;
-    meta.trendingPost = quickStats.trendingPost ?? undefined;
-    meta.trendingPostNSFW = quickStats.trendingPostNSFW ?? undefined;
-    meta.copyrightCounts = quickStats.copyrightCounts ?? undefined;
-    meta.characterCounts = quickStats.characterCounts ?? undefined;
-    meta.commentaryCounts = quickStats.commentaryCounts;
-    meta.historyData = historyData;
-    meta.precalculatedMilestones = milestones;
-    meta.firstPost = firstPost ?? undefined;
-    meta.hundredthPost = hundredthPost ?? undefined;
-
-    meta.rankings = {
-      uploader: {
-        allTime: uploaderAll,
-        year: uploaderYear,
-        first100: first100Stats?.uploaderRanking ?? [],
-      },
-      approver: {
-        allTime: approverAll,
-        year: approverYear,
-        first100: first100Stats?.approverRanking ?? [],
-      },
-    };
-
+    // --- Finalize ---
     this.injectAnalyticsButton(meta, 100, '');
-    this._showUpdatedStatus(meta.updatedAt);
     await this.dataService.saveToCache(meta);
-    this.toggleModal(true);
-    this.renderDashboard(meta);
   }
 
   /**
@@ -1731,6 +1738,21 @@ export class TagAnalyticsApp {
    * Builds the user rankings section HTML: uploader/approver tab bar + ranking columns.
    */
   private buildRankingsSection(tagData: TagAnalyticsMeta): string {
+    // Always emit the wrapper so progressive rendering can inject the
+    // real content after Phase 2 (heavy stats) without needing to locate
+    // an insertion anchor in the surrounding HTML.
+    const inner = tagData.rankings
+      ? this.buildRankingsContent(tagData)
+      : '<div id="di-rankings-placeholder" class="di-rankings-loading">Analyzing user rankings…</div>';
+    return `<div id="di-rankings-slot">${inner}</div>`;
+  }
+
+  /**
+   * Inner HTML for the rankings section (header + three columns).
+   * Extracted so `_updateRankingsWidget` can drop it into the slot once
+   * Phase 2 data arrives without rebuilding the whole dashboard.
+   */
+  private buildRankingsContent(tagData: TagAnalyticsMeta): string {
     if (!tagData.rankings) return '';
     log.debug('renderDashboard - Initial Render - hundredthPost:', {
       hundredthPost: tagData.hundredthPost,
@@ -1844,26 +1866,51 @@ export class TagAnalyticsApp {
       this.updateNsfwVisibility();
     }
 
-    // Use Pre-fetched Data
+    // ----- Per-phase rendering (decoupled predicates) -----
+    // Progressive rendering calls `renderDashboard` once after Phase 1
+    // (Quick Stats) with partial data, then calls the `_updateAfterPhase*`
+    // helpers as heavier data arrives. Each of the blocks below handles
+    // exactly one data dependency so missing data → placeholder, present
+    // data → rendered, independent of the other blocks.
+
+    // Pie chart + pie tabs (requires statusCounts only — rating/copyright/
+    // character/commentary tabs each render their own slice when clicked).
+    if (tagData.statusCounts) {
+      this.chartRenderer.renderPieChart('status', tagData);
+      this._wirePieTabHandlers(tagData);
+    }
+
+    // History charts + milestones (Phase 2 data).
+    this._renderHistoryAndMilestones(tagData);
+
+    // Ranking tab handlers (Phase 2 data).
+    if (tagData.rankings) {
+      this._wireRankTabHandlers(tagData);
+    }
+  }
+
+  /**
+   * Renders history charts + milestones given the current tagData state.
+   * No-op if Phase 2 data isn't ready yet — the "Loading…" placeholders
+   * in `buildBottomSections` stay visible until a later call supplies it.
+   */
+  private _renderHistoryAndMilestones(tagData: TagAnalyticsMeta): void {
     const data = tagData.historyData || [];
     const loading = document.getElementById('chart-loading');
-    if (loading) loading.style.display = 'none';
 
-    if (data && data.length > 0) {
+    if (data.length > 0) {
+      if (loading) loading.style.display = 'none';
       this.chartRenderer.renderHistoryCharts(
         data,
         this.tagName,
         tagData.precalculatedMilestones,
       );
 
-      // Milestones Logic
       const milestonesContainer = document.getElementById(
         'tag-analytics-milestones',
       );
       if (milestonesContainer) {
         milestonesContainer.style.display = 'block';
-
-        // Use totalCount from meta (tagData)
         const targets = this.dataService.getMilestoneTargets(
           tagData.post_count,
         );
@@ -1879,7 +1926,6 @@ export class TagAnalyticsApp {
             nextInfo,
           );
         } else {
-          // Pass tagName, totalCount, targets
           this.dataService
             .fetchMilestones(tagData.name, [], targets)
             .then((milestonePosts: MilestoneEntry[]) => {
@@ -1894,53 +1940,101 @@ export class TagAnalyticsApp {
             });
         }
       }
-      // Pie Chart Initial Render & Tab Switching
-      if (tagData.statusCounts && tagData.ratingCounts) {
-        const type = 'status'; // Initial type
-        this.chartRenderer.renderPieChart(type, tagData);
+    }
+    // When historyData is missing, leave the "Loading History Data…"
+    // placeholder from buildBottomSections visible — Phase 2 update will
+    // either fill it or flip it to "No history data available." below.
+  }
 
-        const tabs = document.querySelectorAll('.di-pie-tab');
-        tabs.forEach(tab => {
-          (tab as HTMLElement).onclick = () => {
-            const newType = tab.getAttribute('data-type');
-            tabs.forEach(t => {
-              t.classList.remove('active');
-              (t as HTMLElement).style.background = ''; // Clear inline style to let CSS take over
-              (t as HTMLElement).style.color = ''; // Clear inline color
-            });
-            tab.classList.add('active');
-            // Don't set inline style for active, let CSS .active handle it
-            this.chartRenderer.renderPieChart(newType ?? 'status', tagData);
-          };
+  /** Binds click handlers to the pie-chart category tabs. */
+  private _wirePieTabHandlers(tagData: TagAnalyticsMeta): void {
+    const tabs = document.querySelectorAll('.di-pie-tab');
+    tabs.forEach(tab => {
+      (tab as HTMLElement).onclick = () => {
+        const newType = tab.getAttribute('data-type');
+        tabs.forEach(t => {
+          t.classList.remove('active');
+          (t as HTMLElement).style.background = '';
+          (t as HTMLElement).style.color = '';
         });
+        tab.classList.add('active');
+        this.chartRenderer.renderPieChart(newType ?? 'status', tagData);
+      };
+    });
+  }
 
-        // Ranking Tabs Logic
-        const rankTabs = document.querySelectorAll('.rank-tab');
-        rankTabs.forEach(tab => {
-          (tab as HTMLElement).onclick = () => {
-            const role = tab.getAttribute('data-role');
-            rankTabs.forEach(t => {
-              t.classList.remove('active');
-              (t as HTMLElement).style.fontWeight = 'normal';
-              (t as HTMLElement).style.color = 'var(--di-text-muted, #888)';
-            });
-            tab.classList.add('active');
-            (tab as HTMLElement).style.fontWeight = 'bold';
-            (tab as HTMLElement).style.color = 'var(--di-link, #007bff)';
-
-            this.chartRenderer.updateRankingTabs(
-              role ?? 'uploader',
-              tagData,
-              this.dataService.userNames,
-            );
-          };
+  /** Binds click handlers to the uploader/approver rank tabs. */
+  private _wireRankTabHandlers(tagData: TagAnalyticsMeta): void {
+    const rankTabs = document.querySelectorAll('.rank-tab');
+    rankTabs.forEach(tab => {
+      (tab as HTMLElement).onclick = () => {
+        const role = tab.getAttribute('data-role');
+        rankTabs.forEach(t => {
+          t.classList.remove('active');
+          (t as HTMLElement).style.fontWeight = 'normal';
+          (t as HTMLElement).style.color = 'var(--di-text-muted, #888)';
         });
-      }
-    } else {
+        tab.classList.add('active');
+        (tab as HTMLElement).style.fontWeight = 'bold';
+        (tab as HTMLElement).style.color = 'var(--di-link, #007bff)';
+
+        this.chartRenderer.updateRankingTabs(
+          role ?? 'uploader',
+          tagData,
+          this.dataService.userNames,
+        );
+      };
+    });
+  }
+
+  /**
+   * Phase 2 update — injects rankings content into the placeholder slot,
+   * renders history charts + milestones, and updates the "Total Uploads"
+   * counter. Runs after Phase 1's partial render, so the pie chart and
+   * summary thumbnails stay intact (no DOM thrashing).
+   */
+  private _updateAfterPhase2(tagData: TagAnalyticsMeta): void {
+    // 1) Rankings: replace placeholder slot with real content, re-wire tabs.
+    const slot = document.getElementById('di-rankings-slot');
+    if (slot && tagData.rankings) {
+      slot.innerHTML = this.buildRankingsContent(tagData);
+      this._wireRankTabHandlers(tagData);
+    }
+
+    // 2) History + milestones.
+    this._renderHistoryAndMilestones(tagData);
+
+    // 3) Total Uploads counter (derived from historyData).
+    const total =
+      tagData.historyData && tagData.historyData.length > 0
+        ? tagData.historyData.reduce((a, b) => a + b.count, 0).toLocaleString()
+        : null;
+    if (total !== null) {
+      const el = document.querySelector(
+        '.di-summary-card .di-summary-stat-value',
+      );
+      if (el) el.textContent = total;
+    }
+
+    // 4) If history is empty, surface the "no data" message.
+    if (!tagData.historyData || tagData.historyData.length === 0) {
+      const loading = document.getElementById('chart-loading');
       if (loading) {
         loading.textContent = 'No history data available.';
         loading.style.display = 'block';
       }
+    }
+  }
+
+  /**
+   * Phase 3 update — ratingCounts arrived. If the rating pie tab is
+   * currently active, re-render it with fresh data; otherwise leave it
+   * for the next tab click.
+   */
+  private _updateAfterPhase3(tagData: TagAnalyticsMeta): void {
+    const activeTab = document.querySelector('.di-pie-tab.active');
+    if (activeTab?.getAttribute('data-type') === 'rating') {
+      this.chartRenderer.renderPieChart('rating', tagData);
     }
   }
 }
