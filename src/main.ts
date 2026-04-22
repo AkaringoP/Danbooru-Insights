@@ -136,10 +136,21 @@ function observeCrossTabSettings(settings: SettingsManager): void {
  * Initializes context, database, settings, and applications.
  */
 async function main(): Promise<void> {
-  // Diagnostic panel — runs before everything else so it works even on
-  // error pages or when the app fails to initialize.
+  // Diagnostic panel — defer opening until the first app sync + render
+  // completes, so the panel's DB reads reflect post-sync state rather
+  // than a stale pre-sync snapshot. GrassApp dispatches
+  // `di:sync-complete` on successful initial render; a timeout fallback
+  // covers pages where GrassApp doesn't run (tag pages, error pages)
+  // and unusually slow syncs.
   if (shouldRunDiagnostic()) {
-    void showDiagnostic();
+    let fired = false;
+    const openDiag = () => {
+      if (fired) return;
+      fired = true;
+      void showDiagnostic();
+    };
+    window.addEventListener('di:sync-complete', openDiag, {once: true});
+    setTimeout(openDiag, 6000);
   }
 
   // Guard: skip non-Danbooru pages (nginx/CDN error pages like 429, 502, etc.)

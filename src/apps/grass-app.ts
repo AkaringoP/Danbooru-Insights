@@ -158,6 +158,12 @@ export class GrassApp {
             void updateView();
           },
         );
+
+        // Signal the diagnostic panel (if gated on) that the cache
+        // is now up to date so it can read post-sync DB state. The
+        // listener in main.ts uses `{once: true}`; subsequent
+        // year/metric changes re-dispatch harmlessly.
+        window.dispatchEvent(new CustomEvent('di:sync-complete'));
       } catch (e: unknown) {
         log.error('Failed to render grass graph', {error: e});
         const message =
