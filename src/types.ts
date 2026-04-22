@@ -512,6 +512,43 @@ export interface TagAnalyticsReport {
   tagName: string;
   updatedAt: number;
   data: TagAnalyticsMeta;
+  /**
+   * Timestamp (ms) of the last full monthly-count scan. Used by the 90-day
+   * forced rescan policy in `fetchMonthlyCounts` to recover from slow
+   * erosion that the 2% drift guard misses (rare individual post deletions
+   * accumulating over time). Absent on pre-v12 records.
+   */
+  lastFullScanAt?: number;
+}
+
+/**
+ * Monthly post count cache entry stored in the `tag_monthly_counts` table.
+ * Key: `[tag+yearMonth]`. Distance-based TTL applied at read time:
+ *   - current + last month: always stale (forced refetch, matches Delta sync)
+ *   - 2–12 months old: 7 days
+ *   - 13–36 months old: 30 days
+ *   - 37+ months old: 180 days
+ */
+export interface MonthlyCountRecord {
+  tag: string;
+  /** `YYYY-MM`. */
+  yearMonth: string;
+  count: number;
+  /** Fetch timestamp in ms since epoch. */
+  fetchedAt: number;
+}
+
+/**
+ * Cached result of `isTopLevelTag` (tag_implications lookup) stored in the
+ * `tag_implications_cache` table. Global cache — not tied to the current
+ * analytics target tag. `tag_implications` is effectively immutable, so a
+ * 180-day TTL is applied at read time.
+ */
+export interface TagImplicationCacheRecord {
+  tagName: string;
+  isTopLevel: boolean;
+  /** Fetch timestamp in ms since epoch. */
+  fetchedAt: number;
 }
 
 /** Complete tag analytics metadata. */
