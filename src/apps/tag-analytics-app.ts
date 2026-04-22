@@ -954,7 +954,10 @@ export class TagAnalyticsApp {
       // --- Full path ---
       historyPromise = measure(
         'Full History (Monthly)',
-        this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date()),
+        this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date(), {
+          isFullScan: true,
+          totalCount,
+        }),
       );
       first100StatsPromise = Promise.resolve(
         this.dataService.calculateLocalStats(initialPosts || []),

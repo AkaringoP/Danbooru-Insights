@@ -14,6 +14,7 @@ import type {
   MilestoneEntry,
   UserRanking,
   TagAnalyticsMeta,
+  MonthlyCountRecord,
 } from '../types';
 
 type MonthlyCountsData = HistoryEntry[] & {historyCutoff?: string};
@@ -60,6 +61,53 @@ type UserEntryWithId = {id: number; name: string; level: string};
 
 const log = createLogger('TagAnalyticsData');
 
+// ---------------------------------------------------------------------------
+// Monthly count cache TTL (pure, exported for testing)
+// ---------------------------------------------------------------------------
+
+/** Milliseconds per day — local copy so TTL logic stays self-contained. */
+const CACHE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Drift threshold above which cached monthly sums force a cache invalidation. */
+export const MONTHLY_CACHE_DRIFT_THRESHOLD = 0.02;
+
+/** Interval after which a full rescan is forced regardless of per-month TTL. */
+export const MONTHLY_CACHE_FULL_RESCAN_MS = 90 * CACHE_DAY_MS;
+
+/**
+ * Distance in whole months from `yearMonth` (`YYYY-MM`) to `now`.
+ * Returns 0 for the current month, 1 for last month, and so on. Negative
+ * values (future months) should not occur in practice but are handled.
+ */
+export function computeMonthsDistance(
+  yearMonth: string,
+  now: Date = new Date(),
+): number {
+  const [y, m] = yearMonth.split('-').map(Number);
+  return (now.getUTCFullYear() - y) * 12 + (now.getUTCMonth() + 1 - m);
+}
+
+/**
+ * Distance-based TTL for monthly count cache entries.
+ *   0–1 months old: always stale (Delta sync owns this window)
+ *   2–12 months: 7 days
+ *   13–36 months: 30 days
+ *   37+ months: 180 days
+ */
+export function isMonthlyCountValid(
+  yearMonth: string,
+  fetchedAt: number,
+  now: number,
+): boolean {
+  const distance = computeMonthsDistance(yearMonth, new Date(now));
+  if (distance <= 1) return false;
+  const age = now - fetchedAt;
+  if (age < 0) return false;
+  if (distance <= 12) return age < 7 * CACHE_DAY_MS;
+  if (distance <= 36) return age < 30 * CACHE_DAY_MS;
+  return age < 180 * CACHE_DAY_MS;
+}
+
 /**
  * Data service for TagAnalyticsApp.
  * Handles all API fetching, caching, and data computation.
@@ -72,6 +120,13 @@ export class TagAnalyticsDataService {
     string,
     {name: string; level: string; id?: number | string}
   >;
+
+  /**
+   * Stash for `lastFullScanAt` to be merged into the next `saveToCache`
+   * call. Set by `fetchMonthlyCounts` when a full rescan completes and
+   * the tag_analytics record does not yet exist (first visit).
+   */
+  private _pendingLastFullScanAt: number | null = null;
 
   constructor(db: Database, rateLimiter: RateLimitedFetch, tagName: string) {
     this.db = db;
@@ -113,13 +168,102 @@ export class TagAnalyticsDataService {
   async saveToCache(data: TagAnalyticsMeta): Promise<void> {
     if (!this.db || !this.db.tag_analytics) return;
     try {
+      // Preserve `lastFullScanAt` across saves: either the value stashed by
+      // `fetchMonthlyCounts` on first-visit full scan, or the existing
+      // value on the record (subsequent saves must not wipe it).
+      let lastFullScanAt: number | undefined;
+      if (this._pendingLastFullScanAt !== null) {
+        lastFullScanAt = this._pendingLastFullScanAt;
+      } else {
+        const existing = await this.db.tag_analytics.get(this.tagName);
+        lastFullScanAt = existing?.lastFullScanAt;
+      }
+
       await this.db.tag_analytics.put({
         tagName: this.tagName,
         updatedAt: Date.now(),
         data: data,
+        lastFullScanAt,
       });
+      this._pendingLastFullScanAt = null;
     } catch (e) {
       log.warn('Cache save failed', {error: e});
+    }
+  }
+
+  /**
+   * Bulk-reads monthly count cache entries for this tag.
+   * Returns a Map keyed by `yearMonth` (missing entries are simply absent).
+   */
+  private async readMonthlyCountsCache(
+    yearMonths: string[],
+  ): Promise<Map<string, MonthlyCountRecord>> {
+    const result = new Map<string, MonthlyCountRecord>();
+    if (!this.db?.tag_monthly_counts || yearMonths.length === 0) return result;
+    try {
+      const keys = yearMonths.map(ym => [this.tagName, ym] as [string, string]);
+      const records = await this.db.tag_monthly_counts.bulkGet(keys);
+      records.forEach((r, i) => {
+        if (r) result.set(yearMonths[i], r);
+      });
+    } catch (e) {
+      log.warn('Failed to read monthly counts cache', {error: e});
+    }
+    return result;
+  }
+
+  /**
+   * Bulk-writes fetched monthly counts into the cache.
+   * `fetchedAt` is stamped once for the whole batch.
+   */
+  private async writeMonthlyCountsCache(
+    entries: Array<{yearMonth: string; count: number}>,
+  ): Promise<void> {
+    if (!this.db?.tag_monthly_counts || entries.length === 0) return;
+    try {
+      const now = Date.now();
+      const records: MonthlyCountRecord[] = entries.map(e => ({
+        tag: this.tagName,
+        yearMonth: e.yearMonth,
+        count: e.count,
+        fetchedAt: now,
+      }));
+      await this.db.tag_monthly_counts.bulkPut(records);
+    } catch (e) {
+      log.warn('Failed to write monthly counts cache', {error: e});
+    }
+  }
+
+  /** Drops every cached monthly count for this tag (drift invalidation). */
+  private async invalidateMonthlyCountsCache(): Promise<void> {
+    if (!this.db?.tag_monthly_counts) return;
+    try {
+      await this.db.tag_monthly_counts
+        .where('tag')
+        .equals(this.tagName)
+        .delete();
+    } catch (e) {
+      log.warn('Failed to invalidate monthly counts cache', {error: e});
+    }
+  }
+
+  /**
+   * Persists the "last full scan" timestamp for this tag.
+   * Updates the existing tag_analytics record in place if present; otherwise
+   * stashes into `_pendingLastFullScanAt` for the next `saveToCache` call.
+   */
+  private async persistFullScanMarker(ts: number): Promise<void> {
+    if (!this.db?.tag_analytics) return;
+    try {
+      const existing = await this.db.tag_analytics.get(this.tagName);
+      if (existing) {
+        existing.lastFullScanAt = ts;
+        await this.db.tag_analytics.put(existing);
+      } else {
+        this._pendingLastFullScanAt = ts;
+      }
+    } catch (e) {
+      log.warn('Failed to persist full scan marker', {error: e});
     }
   }
 
@@ -698,7 +842,10 @@ export class TagAnalyticsDataService {
     lastDate: Date | string,
     startDate: Date | string,
   ): Promise<HistoryEntry[]> {
-    if (!lastDate) return this.fetchMonthlyCounts(tagName, startDate);
+    if (!lastDate) {
+      // Falling through to full scan — let the caching layer treat it as such.
+      return this.fetchMonthlyCounts(tagName, startDate, {isFullScan: true});
+    }
 
     // Delta Sync: Check last 2 months only
     const now = new Date();
@@ -711,6 +858,8 @@ export class TagAnalyticsDataService {
         ? twoMonthsAgo
         : lastDate || startDate;
 
+    // Delta path: isFullScan=false (default) so forced-rescan/drift guard
+    // stay idle; the two months in range are always TTL-stale and get fetched.
     return this.fetchMonthlyCounts(tagName, effectiveStart);
   }
 
@@ -912,14 +1061,29 @@ export class TagAnalyticsDataService {
 
   /**
    * Fetches monthly post counts for the tag since the start date.
-   * Iterates month by month to build a complete history.
-   * @param {string} tagName The tag name.
-   * @param {!Date} startDate The date to start fetching from.
-   * @return {Promise<!Array<{date: !Date, count: number, cumulative: number}>>} Array of monthly data.
+   *
+   * Cache-aware path: when the `tag_monthly_counts` table has entries for
+   * months outside the Delta sync window (current + previous month), those
+   * counts are reused subject to distance-based TTL. Freshly fetched months
+   * are written back to the cache. On a full-range call, a 2% drift guard
+   * compares cached sum to `opts.totalCount`; a 90-day forced rescan bypasses
+   * cache entirely to recover from slow erosion the drift guard misses.
+   *
+   * @param tagName The tag name.
+   * @param startDate The date to start fetching from.
+   * @param opts Optional caching hints. `isFullScan` should be true only when
+   *   the call covers the full historical range (enables forced-rescan and
+   *   drift guard). `totalCount` enables the drift guard. `skipCache` forces
+   *   a fresh network fetch for every month.
    */
   async fetchMonthlyCounts(
     tagName: string,
     startDate: Date | string,
+    opts: {
+      totalCount?: number;
+      isFullScan?: boolean;
+      skipCache?: boolean;
+    } = {},
   ): Promise<MonthlyCountsData> {
     const startDateObj =
       startDate instanceof Date ? startDate : new Date(startDate);
@@ -928,18 +1092,13 @@ export class TagAnalyticsDataService {
     const startMonth = startDateObj.getMonth(); // 0-based
 
     const now = new Date();
-    const monthlyData: MonthlyCountsData = [];
-    let cumulative = 0;
+    const nowMs = now.getTime();
 
     // Iterate Month by Month
-    // Note: This could be many requests.
-    // Example: 2005 to 2026 = 21 years * 12 = 252 requests.
-    // Rate Limit: 6 req/s => ~42 seconds total.
-    // Optimization: Parallelize by year?
-    // User said "Start from first upload month... iteratively".
-    // We will generate all promises and feed them to RateLimiter.
-
-    const tasks = [];
+    // Example full range: 2005 to 2026 = 21 years * 12 = 252 requests @ 6rps ≈ 42s.
+    // The cache layer below lets revisits reuse most of that work.
+    type Task = {dateStr: string; yearMonth: string; queryDate: string};
+    const tasks: Task[] = [];
     // Use UTC to avoid timezone shifts in labels (April appearing as March)
     const current = new Date(Date.UTC(startYear, startMonth, 1));
 
@@ -947,6 +1106,7 @@ export class TagAnalyticsDataService {
       const y = current.getUTCFullYear();
       const m = current.getUTCMonth() + 1; // 1-based for API
       const dateStr = `${y}-${String(m).padStart(2, '0')}-01`;
+      const yearMonth = `${y}-${String(m).padStart(2, '0')}`;
 
       // Next Month for Range
       const nextMonth = new Date(current);
@@ -957,66 +1117,198 @@ export class TagAnalyticsDataService {
       // Danbooru counts API needs the date filter INSIDE the tags parameter
       let rangeEnd = `${nextY}-${String(nextM).padStart(2, '0')}-01`;
 
-      // [OPTIMIZATION] If next month is in the future, cap the range at NOW to ensure consistency
-      // This prevents race conditions where new posts are added during the fetch.
+      // [OPTIMIZATION] Cap range at NOW when the month is the current one to
+      // avoid race conditions with posts added during the fetch.
       if (nextMonth > now) {
-        rangeEnd = now.toISOString(); // Use full timestamp
+        rangeEnd = now.toISOString();
       }
 
       const queryDate = `${y}-${String(m).padStart(2, '0')}-01...${rangeEnd}`;
 
-      tasks.push({
-        dateObj: new Date(current), // Clone
-        dateStr,
-        queryDate,
-      });
+      tasks.push({dateStr, yearMonth, queryDate});
 
       current.setUTCMonth(current.getUTCMonth() + 1);
     }
 
-    // Create Promises
-    const promises = tasks.map(task => {
-      const params = new URLSearchParams({
-        tags: `${tagName} status:any date:${task.queryDate}`, // Correct: date must be in tags
-      });
-      const url = `/counts/posts.json?${params.toString()}`;
+    // -------------------------------------------------------------------
+    // Cache layer
+    // -------------------------------------------------------------------
+    const cacheEnabled =
+      !opts.skipCache && this.db?.tag_monthly_counts !== undefined;
 
-      return this.rateLimiter
-        .fetch(url)
-        .then((r: Response) => r.json())
-        .then((data: DanbooruCountResponse) => {
-          // Handle different response formats: { "counts": { "posts": N } } or { "posts": N }
-          const count =
-            (data && data.counts ? data.counts.posts : data ? data.posts : 0) ||
-            0;
-          return {
-            date: task.dateStr,
-            count: count,
-            cumulative: 0,
-          };
-        })
-        .catch((e: unknown) => {
-          log.warn(`Failed month ${task.dateStr}`, {error: e});
-          return {date: task.dateStr, count: 0, cumulative: 0};
+    // 90-day forced rescan — only meaningful on a full-range call. First
+    // visits (lastScan === 0) also take this path so we always mark the
+    // scan timestamp after a successful first fetch.
+    let forcedFullScan = false;
+    if (cacheEnabled && opts.isFullScan) {
+      const lastScan = await this.getLastFullScanAt();
+      if (lastScan === 0 || nowMs - lastScan > MONTHLY_CACHE_FULL_RESCAN_MS) {
+        forcedFullScan = true;
+        log.debug('Monthly cache: forced full rescan', {
+          tag: tagName,
+          lastScan,
+          ageDays:
+            lastScan === 0
+              ? null
+              : Math.round((nowMs - lastScan) / CACHE_DAY_MS),
         });
-    });
+      }
+    }
 
-    // Execute all via Rate Limit
-    const results = await Promise.all(promises);
+    // Read cache (unless forced-rescan / cache disabled)
+    let cached = new Map<string, MonthlyCountRecord>();
+    if (cacheEnabled && !forcedFullScan) {
+      cached = await this.readMonthlyCountsCache(tasks.map(t => t.yearMonth));
 
-    // Sort and Accumulate
-    results.sort((a, b) => a.date.localeCompare(b.date));
+      // Drift guard — only runs on full-range call with near-complete cache.
+      // Compares cached sum to remote totalCount; > 2% drift invalidates.
+      if (
+        opts.isFullScan &&
+        opts.totalCount !== undefined &&
+        opts.totalCount > 0 &&
+        tasks.length > 0 &&
+        cached.size / tasks.length > 0.95
+      ) {
+        let cachedSum = 0;
+        cached.forEach(r => {
+          cachedSum += r.count;
+        });
+        const drift = Math.abs(cachedSum - opts.totalCount) / opts.totalCount;
+        if (drift > MONTHLY_CACHE_DRIFT_THRESHOLD) {
+          log.warn('Monthly cache drift detected, invalidating', {
+            tag: tagName,
+            cachedSum,
+            totalCount: opts.totalCount,
+            drift,
+          });
+          await this.invalidateMonthlyCountsCache();
+          cached = new Map();
+          forcedFullScan = true;
+        }
+      }
+    }
 
-    results.forEach(item => {
+    // Split tasks into cache-hit and needs-fetch
+    const cachedResults: HistoryEntry[] = [];
+    const fetchTasks: Task[] = [];
+    for (const task of tasks) {
+      const entry = forcedFullScan ? undefined : cached.get(task.yearMonth);
+      if (
+        entry &&
+        isMonthlyCountValid(task.yearMonth, entry.fetchedAt, nowMs)
+      ) {
+        cachedResults.push({
+          date: task.dateStr,
+          count: entry.count,
+          cumulative: 0,
+        });
+      } else {
+        fetchTasks.push(task);
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Network fetch for missing/expired months
+    // -------------------------------------------------------------------
+    const fetchedResults = await Promise.all(
+      fetchTasks.map(task => {
+        const params = new URLSearchParams({
+          tags: `${tagName} status:any date:${task.queryDate}`,
+        });
+        const url = `/counts/posts.json?${params.toString()}`;
+
+        return this.rateLimiter
+          .fetch(url)
+          .then((r: Response) => r.json())
+          .then((data: DanbooruCountResponse) => {
+            const count =
+              (data && data.counts
+                ? data.counts.posts
+                : data
+                  ? data.posts
+                  : 0) || 0;
+            return {
+              date: task.dateStr,
+              yearMonth: task.yearMonth,
+              count,
+              ok: true as const,
+            };
+          })
+          .catch((e: unknown) => {
+            log.warn(`Failed month ${task.dateStr}`, {error: e});
+            return {
+              date: task.dateStr,
+              yearMonth: task.yearMonth,
+              count: 0,
+              ok: false as const,
+            };
+          });
+      }),
+    );
+
+    // -------------------------------------------------------------------
+    // Write fetched results back to cache (only successful fetches)
+    // -------------------------------------------------------------------
+    if (cacheEnabled) {
+      const toWrite = fetchedResults
+        .filter(r => r.ok)
+        .map(r => ({yearMonth: r.yearMonth, count: r.count}));
+      if (toWrite.length > 0) {
+        await this.writeMonthlyCountsCache(toWrite);
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Persist last-full-scan marker when this was a forced full scan AND
+    // every task actually went to the network successfully. Partial failures
+    // mean we can't vouch for the cache's completeness, so we skip the mark.
+    // -------------------------------------------------------------------
+    if (
+      cacheEnabled &&
+      forcedFullScan &&
+      fetchTasks.length === tasks.length &&
+      fetchedResults.every(r => r.ok)
+    ) {
+      await this.persistFullScanMarker(nowMs);
+    }
+
+    // -------------------------------------------------------------------
+    // Combine cached + fetched, sort chronologically, compute cumulative
+    // -------------------------------------------------------------------
+    const combined: HistoryEntry[] = [
+      ...cachedResults,
+      ...fetchedResults.map(r => ({
+        date: r.date,
+        count: r.count,
+        cumulative: 0,
+      })),
+    ];
+    combined.sort((a, b) => a.date.localeCompare(b.date));
+
+    let cumulative = 0;
+    for (const item of combined) {
       cumulative += item.count;
       item.cumulative = cumulative;
-      monthlyData.push(item);
-    });
+    }
 
-    // Attach the cutoff time (now) to the array for consistency check
+    const monthlyData: MonthlyCountsData = combined;
     monthlyData.historyCutoff = now.toISOString();
-
     return monthlyData;
+  }
+
+  /**
+   * Reads the last full-scan timestamp from the tag_analytics record.
+   * Returns 0 if the record does not exist or the field is absent.
+   */
+  private async getLastFullScanAt(): Promise<number> {
+    if (!this.db?.tag_analytics) return 0;
+    try {
+      const record = await this.db.tag_analytics.get(this.tagName);
+      return record?.lastFullScanAt ?? 0;
+    } catch (e) {
+      log.warn('Failed to read lastFullScanAt', {error: e});
+      return 0;
+    }
   }
 
   /**
