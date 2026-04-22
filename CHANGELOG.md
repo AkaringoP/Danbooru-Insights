@@ -11,6 +11,7 @@ All notable changes to Danbooru Insights are documented here.
 
 ### Internal
 - **Per-branch dev builds via CI**: Pushes to `claude/**`, `fix/**`, `feature/**` branches now auto-publish a `(dev)` variant of the userscript to the `testbuild` branch, installable separately from prod in Tampermonkey for iterative real-environment testing.
+- **Diagnostic panel no longer races initial sync**: Previously, `#di_diag` opened in parallel with GrassApp's first sync, so its DB reads could reflect a stale pre-sync snapshot (showing `Today: not cached` / `MISMATCH` even when the grass calendar itself rendered correctly). GrassApp now dispatches a `di:sync-complete` event after the final render, and `main.ts` defers `showDiagnostic()` until that event fires, with a 6 s timeout fallback for tag pages and unusually slow syncs.
 
 ---
 
