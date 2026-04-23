@@ -1237,27 +1237,28 @@ export class TagAnalyticsApp {
       e.stopPropagation();
       e.preventDefault();
       if (
-        confirm(
-          `Are you sure you want to reset the analytics data for "${this.tagName}"?\nThis will clear the local cache and fetch fresh data.`,
+        !confirm(
+          `Reset analytics data for "${this.tagName}"?\nThis clears the local cache (analytics record + monthly count history). Click the analytics button again to trigger a fresh sync.`,
         )
       ) {
-        if (this.db && this.db.tag_analytics) {
-          try {
-            await this.db.tag_analytics.delete(this.tagName);
-            log.debug(`Deleted cache for ${this.tagName}`);
-            // Close existing modal to prevent conflicts or stale state
-            this.toggleModal(false);
-            // Re-fetch immediately since user explicitly requested reset
-            // Fire-and-forget: triggered by reset button; errors surface in console.
-            void this._fetchAndRender();
-          } catch (err) {
-            log.error('Failed to delete cache:', {error: err});
-            showToast({
-              type: 'error',
-              message: 'Failed to reset data. Check console for details.',
-            });
-          }
-        }
+        return;
+      }
+      try {
+        await this.dataService.resetTagCache();
+        log.debug(`Deleted cache for ${this.tagName}`);
+        showToast({
+          type: 'success',
+          message: `"${this.tagName}" analytics cleared. Click the analytics button to re-sync.`,
+        });
+        // Close the modal — next sync is deferred until the user explicitly
+        // reopens analytics (matches UserAnalyticsApp's reset UX).
+        this.toggleModal(false);
+      } catch (err) {
+        log.error('Failed to delete cache:', {error: err});
+        showToast({
+          type: 'error',
+          message: 'Failed to reset data. Check console for details.',
+        });
       }
     };
 

@@ -617,6 +617,29 @@ export class TagAnalyticsDataService {
   }
 
   /**
+   * Wipes every per-tag cache entry for the tag this service was constructed
+   * for — the tag_analytics record itself and all tag_monthly_counts rows.
+   * Leaves the global `tag_implications_cache` alone (it's TTL-managed and
+   * shared across tags; evicting it here would penalise unrelated lookups).
+   *
+   * Called by the "reset data" UI button. After this runs, the next
+   * analytics request for the tag performs a full fresh sync — no auto
+   * re-fetch inside this call (by design; matches UserAnalyticsApp's
+   * reset UX where the user explicitly re-triggers the sync).
+   */
+  async resetTagCache(): Promise<void> {
+    if (!this.db) return;
+    if (this.db.tag_analytics) {
+      await this.db.tag_analytics.delete(this.tagName);
+    }
+    await this.invalidateMonthlyCountsCache();
+    // Reset session state so a later re-open within the same page load
+    // doesn't carry stale scan markers or user name lookups.
+    this._pendingLastFullScanAt = null;
+    this.userNames = {};
+  }
+
+  /**
    * Deletes tag analytics cache entries older than the retention threshold.
    * @return {Promise<void>}
    */
