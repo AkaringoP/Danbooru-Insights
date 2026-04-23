@@ -7,7 +7,11 @@ import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
-import type {InitialStats, LocalStats} from './tag-analytics-data';
+import type {
+  InitialStats,
+  LocalStats,
+  RankingResult,
+} from './tag-analytics-data';
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {showToast} from '../ui/toast';
@@ -607,12 +611,43 @@ export class TagAnalyticsApp {
 
     // Phase 2 start (concurrent with Phase 1)
     log.debug('[Phase 2] Starting Rankings & History in parallel...');
-    const rankingPromise = this.dataService.fetchRankingsAndResolve(
-      tagName,
-      dateStr1Y,
-      dateStrTomorrow,
-      measure,
+
+    // Ranking SWR: on revisit with cached rankings (delta sync path), the
+    // 4× fetchReportRanking calls (12s under the report-queue 3s cooldown)
+    // are moved off the critical path. `rankingPromise` resolves
+    // immediately with the cached report; the real network fetch runs via
+    // `rankingRevalidatePromise` and its result is applied after the
+    // dashboard is painted.
+    const canSwrRankings = Boolean(
+      runDelta &&
+      baseData?.rankings?.uploader?.allTime &&
+      baseData?.rankings?.approver?.allTime,
     );
+    let rankingPromise: Promise<RankingResult>;
+    let rankingRevalidatePromise: Promise<RankingResult> | null = null;
+    if (canSwrRankings && baseData?.rankings) {
+      const cached = baseData.rankings;
+      rankingPromise = Promise.resolve({
+        uploaderAll: cached.uploader.allTime,
+        approverAll: cached.approver.allTime,
+        uploaderYear: cached.uploader.year,
+        approverYear: cached.approver.year,
+      });
+      rankingRevalidatePromise = this.dataService.fetchRankingsAndResolve(
+        tagName,
+        dateStr1Y,
+        dateStrTomorrow,
+        measure,
+      );
+    } else {
+      rankingPromise = this.dataService.fetchRankingsAndResolve(
+        tagName,
+        dateStr1Y,
+        dateStrTomorrow,
+        measure,
+      );
+    }
+
     const first100Override: First100Override = {value: null};
     const heavyPromises = this._buildHeavyStatPromises(
       meta,
@@ -751,6 +786,52 @@ export class TagAnalyticsApp {
     );
     meta.ratingCounts = ratingCounts;
     this._updateAfterPhase3(meta);
+
+    // --- Ranking SWR revalidation (if cached rankings were served) ---
+    // Wait for the background fetch to settle so `saveToCache` persists
+    // the fresh data, not the cached ones we rendered earlier. If the
+    // fresh report differs from what is currently on `meta.rankings`,
+    // swap it in place and re-render the rankings widget. If it matches,
+    // skip the DOM churn.
+    if (rankingRevalidatePromise) {
+      try {
+        const fresh = await rankingRevalidatePromise;
+        const currentSignature = JSON.stringify({
+          uA: meta.rankings?.uploader.allTime,
+          aA: meta.rankings?.approver.allTime,
+          uY: meta.rankings?.uploader.year,
+          aY: meta.rankings?.approver.year,
+        });
+        const freshSignature = JSON.stringify({
+          uA: fresh.uploaderAll,
+          aA: fresh.approverAll,
+          uY: fresh.uploaderYear,
+          aY: fresh.approverYear,
+        });
+        if (currentSignature !== freshSignature && meta.rankings) {
+          log.debug('Ranking SWR: applying fresh report');
+          meta.rankings = {
+            uploader: {
+              allTime: fresh.uploaderAll,
+              year: fresh.uploaderYear,
+              first100: meta.rankings.uploader.first100,
+            },
+            approver: {
+              allTime: fresh.approverAll,
+              year: fresh.approverYear,
+              first100: meta.rankings.approver.first100,
+            },
+          };
+          this._updateRankingsWidget(meta);
+        } else {
+          log.debug('Ranking SWR: cached report still fresh, no update');
+        }
+      } catch (e) {
+        log.warn('Ranking SWR revalidation failed, keeping cached', {
+          error: e,
+        });
+      }
+    }
 
     log.debug(
       `Total analysis time: ${(performance.now() - tTotal).toFixed(2)}ms`,
@@ -2035,6 +2116,31 @@ export class TagAnalyticsApp {
     const activeTab = document.querySelector('.di-pie-tab.active');
     if (activeTab?.getAttribute('data-type') === 'rating') {
       this.chartRenderer.renderPieChart('rating', tagData);
+    }
+  }
+
+  /**
+   * Replaces the rankings slot with fresh content. Preserves the
+   * currently-active rank tab (uploader/approver) across the rebuild by
+   * reading `.rank-tab.active` before tearing down and clicking the
+   * equivalent tab afterward.
+   */
+  private _updateRankingsWidget(tagData: TagAnalyticsMeta): void {
+    const slot = document.getElementById('di-rankings-slot');
+    if (!slot || !tagData.rankings) return;
+
+    const activeTab = slot.querySelector('.rank-tab.active');
+    const activeRole = activeTab?.getAttribute('data-role') ?? 'uploader';
+
+    slot.innerHTML = this.buildRankingsContent(tagData);
+    this._wireRankTabHandlers(tagData);
+
+    // buildRankingsContent always starts with 'uploader' active. If the
+    // user was on 'approver', click the corresponding tab to restore
+    // state (also triggers the chart update).
+    if (activeRole === 'approver') {
+      const tabEl = slot.querySelector('.rank-tab[data-role="approver"]');
+      if (tabEl instanceof HTMLElement) tabEl.click();
     }
   }
 }

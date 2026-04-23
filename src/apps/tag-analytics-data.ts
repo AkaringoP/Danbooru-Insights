@@ -50,7 +50,7 @@ type ReportEntry = {
   post_count?: number;
 };
 
-type RankingResult = {
+export type RankingResult = {
   uploaderAll: UserRanking[];
   approverAll: UserRanking[];
   uploaderYear: UserRanking[];
