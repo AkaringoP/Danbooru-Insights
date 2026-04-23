@@ -1252,6 +1252,16 @@ export class TagAnalyticsApp {
       try {
         await this.dataService.resetTagCache();
         log.debug(`Deleted cache for ${this.tagName}`);
+        // Flip the analytics button's status label back to the empty-cache
+        // state so the "Updated: <old-date>" indicator next to the tag
+        // name doesn't linger after a reset and make it look like the
+        // delete didn't take effect.
+        const statusLabel = document.getElementById('tag-analytics-status');
+        if (statusLabel) {
+          statusLabel.textContent = 'Sync needed';
+          statusLabel.style.color = '#d73a49';
+          statusLabel.style.display = 'inline';
+        }
         showToast({
           type: 'success',
           message: `"${this.tagName}" analytics cleared. Click the analytics button to re-sync.`,
