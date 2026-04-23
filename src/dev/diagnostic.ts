@@ -820,7 +820,10 @@ export async function showDiagnostic(): Promise<void> {
     return;
   }
 
-  panel.show();
+  // Start closed so the panel doesn't pop in mid-page-load and startle
+  // the user — `panel.hide()` also reveals the fixed "DI" reopen button
+  // in the corner, so the entry point stays discoverable.
+  panel.hide();
 
   // 2. Open DB
   let db: IDBDatabase | null = null;
