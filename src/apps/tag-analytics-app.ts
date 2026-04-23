@@ -1120,11 +1120,17 @@ export class TagAnalyticsApp {
             undefined,
             'Scanning history backwards...',
           );
-          const backwardResult = await this.dataService.fetchHistoryBackwards(
-            tagName,
-            (startDate ?? new Date()).toISOString().slice(0, 10),
-            referenceTotal,
-            forwardTotal,
+          // Phase 7 baseline instrumentation: isolates backward-scan duration
+          // in perf logs (namespace `sync.refreshStats.*`) so we can quantify
+          // the improvement before/after the planned parallelisation.
+          const backwardResult = await measure(
+            'Backward History Scan',
+            this.dataService.fetchHistoryBackwards(
+              tagName,
+              (startDate ?? new Date()).toISOString().slice(0, 10),
+              referenceTotal,
+              forwardTotal,
+            ),
           );
 
           if (backwardResult.length > 0) {
