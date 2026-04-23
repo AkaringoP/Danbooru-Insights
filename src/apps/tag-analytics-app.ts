@@ -695,13 +695,16 @@ export class TagAnalyticsApp {
       ).map(trackProgress),
     );
 
-    // --- Phase 1 completes → partial render ---
+    // --- Phase 1 completes ---
+    // Assemble Phase 1 fields onto meta, but do NOT render yet. We now wait
+    // for Phase 2 and Phase 3 as well so the dashboard appears once, fully
+    // populated (Phase 1/2 parallelism + ranking SWR still shrink the
+    // perceived wait vs. the pre-Phase-1/2-parallel flow).
     const quickStats = await quickStatsPromise;
     log.debug(
       `[Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
     );
 
-    // Assembly (Phase 1 fields)
     meta.statusCounts = quickStats.statusCounts;
     meta.latestPost = quickStats.latestPost ?? undefined;
     meta.newPostCount = quickStats.newPostCount;
@@ -711,14 +714,7 @@ export class TagAnalyticsApp {
     meta.characterCounts = quickStats.characterCounts ?? undefined;
     meta.commentaryCounts = quickStats.commentaryCounts;
 
-    // Show modal + render the skeleton with Phase 1 data. User sees pie
-    // chart + summary now; rankings / history / milestones show as
-    // placeholders until Phase 2 replaces them.
-    this._showUpdatedStatus(meta.updatedAt);
-    this.toggleModal(true);
-    this.renderDashboard(meta);
-
-    // --- Phase 2 completes → targeted update ---
+    // --- Phase 2 completes ---
     log.debug('[Phase 2] Awaiting Heavy Stats...');
     const heavyResults = await heavyResultsPromise;
 
@@ -768,8 +764,6 @@ export class TagAnalyticsApp {
       },
     };
 
-    this._updateAfterPhase2(meta);
-
     // --- Phase 3: Deferred Counts (Rating) ---
     const minDate =
       historyData && historyData.length > 0
@@ -785,7 +779,13 @@ export class TagAnalyticsApp {
       this.dataService.fetchRatingCounts(tagName, minDateStr),
     );
     meta.ratingCounts = ratingCounts;
-    this._updateAfterPhase3(meta);
+
+    // --- Single render: all phases complete, fully-populated dashboard ---
+    // (ranking SWR below may swap cached-for-fresh ranking entries later,
+    // but every other widget lands in its final state here.)
+    this._showUpdatedStatus(meta.updatedAt);
+    this.toggleModal(true);
+    this.renderDashboard(meta);
 
     // --- Ranking SWR revalidation (if cached rankings were served) ---
     // Wait for the background fetch to settle so `saveToCache` persists
@@ -2083,57 +2083,6 @@ export class TagAnalyticsApp {
         );
       };
     });
-  }
-
-  /**
-   * Phase 2 update — injects rankings content into the placeholder slot,
-   * renders history charts + milestones, and updates the "Total Uploads"
-   * counter. Runs after Phase 1's partial render, so the pie chart and
-   * summary thumbnails stay intact (no DOM thrashing).
-   */
-  private _updateAfterPhase2(tagData: TagAnalyticsMeta): void {
-    // 1) Rankings: replace placeholder slot with real content, re-wire tabs.
-    const slot = document.getElementById('di-rankings-slot');
-    if (slot && tagData.rankings) {
-      slot.innerHTML = this.buildRankingsContent(tagData);
-      this._wireRankTabHandlers(tagData);
-    }
-
-    // 2) History + milestones.
-    this._renderHistoryAndMilestones(tagData);
-
-    // 3) Total Uploads counter (derived from historyData).
-    const total =
-      tagData.historyData && tagData.historyData.length > 0
-        ? tagData.historyData.reduce((a, b) => a + b.count, 0).toLocaleString()
-        : null;
-    if (total !== null) {
-      const el = document.querySelector(
-        '.di-summary-card .di-summary-stat-value',
-      );
-      if (el) el.textContent = total;
-    }
-
-    // 4) If history is empty, surface the "no data" message.
-    if (!tagData.historyData || tagData.historyData.length === 0) {
-      const loading = document.getElementById('chart-loading');
-      if (loading) {
-        loading.textContent = 'No history data available.';
-        loading.style.display = 'block';
-      }
-    }
-  }
-
-  /**
-   * Phase 3 update — ratingCounts arrived. If the rating pie tab is
-   * currently active, re-render it with fresh data; otherwise leave it
-   * for the next tab click.
-   */
-  private _updateAfterPhase3(tagData: TagAnalyticsMeta): void {
-    const activeTab = document.querySelector('.di-pie-tab.active');
-    if (activeTab?.getAttribute('data-type') === 'rating') {
-      this.chartRenderer.renderPieChart('rating', tagData);
-    }
   }
 
   /**
