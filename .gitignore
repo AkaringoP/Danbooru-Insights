@@ -32,3 +32,7 @@ checklist.md
 
 # Task archive (local-only translated TASK.md snapshots)
 .archive/
+
+# Local build-comparison artifact (manually-saved alternate-branch userscript
+# for side-by-side perf measurement; not source, not produced by the build).
+danbooruinsights-main.user.js
