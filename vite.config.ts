@@ -4,11 +4,12 @@ import {APP_VERSION} from './src/version';
 import {
   detectPerfLoggingEnabled,
   detectDebugLoggingEnabled,
+  detectBuildVariant,
 } from './build-flags';
 
 const perfEnabled = detectPerfLoggingEnabled();
 const debugEnabled = detectDebugLoggingEnabled();
-const isDev = process.env.DI_BUILD_VARIANT === 'dev';
+const isDev = detectBuildVariant() === 'dev';
 console.log(
   `[build-flags] __PERF_ENABLED__ = ${perfEnabled}, __DEBUG_ENABLED__ = ${debugEnabled}, variant = ${isDev ? 'dev' : 'prod'}`,
 );
