@@ -678,11 +678,10 @@ export class TagAnalyticsApp {
       {
         id: 'resolve_names',
         label: 'Resolving usernames...',
-        promise: heavyPromises.first100StatsPromise.then(stats => {
-          if (runDelta && baseData?.rankings?.uploader?.first100) return stats;
-          if (!stats) return stats;
-          return this.dataService.resolveFirst100Names(stats);
-        }),
+        // first100StatsPromise is now self-contained: it returns either the
+        // backward-scan override (already name-resolved) or a fresh
+        // resolution of the initial first-100. No double-work.
+        promise: heavyPromises.first100StatsPromise,
       },
     ];
     const heavyResultsPromise = Promise.all(
@@ -718,7 +717,7 @@ export class TagAnalyticsApp {
     log.debug('[Phase 2] Awaiting Heavy Stats...');
     const heavyResults = await heavyResultsPromise;
 
-    const [resolvedRankings, historyData, milestones, first100StatsRaw] =
+    const [resolvedRankings, historyData, milestones, first100Stats] =
       heavyResults as [
         {
           uploaderAll: UserRanking[];
@@ -734,13 +733,14 @@ export class TagAnalyticsApp {
         ),
       ];
 
-    // Apply backward-scan first-100 override if available.
-    let first100Stats = first100StatsRaw;
+    // Backward-scan may have refined firstPost/hundredthPost on initialStats.
+    // Always re-read to pick up the latest (the correctness guard in the
+    // backward-scan block only mutates when fresh posts are available, so
+    // re-reading is safe even when no scan ran).
+    firstPost = initialStats.firstPost;
+    hundredthPost = initialStats.hundredthPost;
     if (first100Override.value) {
       log.debug('Applying updated First 100 Rankings from backward scan.');
-      first100Stats = first100Override.value;
-      firstPost = initialStats.firstPost;
-      hundredthPost = initialStats.hundredthPost;
     }
 
     const {uploaderAll, approverAll, uploaderYear, approverYear} =
@@ -1058,19 +1058,6 @@ export class TagAnalyticsApp {
             ),
           );
       });
-
-      if (baseData.rankings?.uploader?.first100) {
-        initialStats.first100Stats = {
-          uploaderRanking: baseData.rankings.uploader.first100,
-          approverRanking: baseData.rankings.approver.first100,
-          ratingCounts: {},
-        };
-        first100StatsPromise = Promise.resolve(initialStats.first100Stats);
-      } else {
-        first100StatsPromise = Promise.resolve(
-          this.dataService.calculateLocalStats(initialPosts || []),
-        );
-      }
     } else {
       // --- Full path ---
       historyPromise = measure(
@@ -1079,9 +1066,6 @@ export class TagAnalyticsApp {
           isFullScan: true,
           totalCount,
         }),
-      );
-      first100StatsPromise = Promise.resolve(
-        this.dataService.calculateLocalStats(initialPosts || []),
       );
     }
 
@@ -1149,31 +1133,49 @@ export class TagAnalyticsApp {
               true,
               earliestDateFound,
             );
-            if (realInitialStats) {
-              // Mutate initialStats so the caller picks up updated values
+            const hasFreshPosts = !!(
+              realInitialStats &&
+              realInitialStats.initialPosts &&
+              realInitialStats.initialPosts.length > 0
+            );
+            if (hasFreshPosts && realInitialStats) {
+              // Only overwrite when the retry fetch actually returned posts —
+              // the empty-fallback return shape of fetchInitialStats omits
+              // firstPost/hundredthPost, so mutating unconditionally would
+              // wipe the good initial values with undefined.
               initialStats.firstPost = realInitialStats.firstPost;
               initialStats.hundredthPost = realInitialStats.hundredthPost;
               initialStats.timeToHundred = realInitialStats.timeToHundred;
-
-              if (
-                realInitialStats.initialPosts &&
-                realInitialStats.initialPosts.length > 0
-              ) {
-                log.debug(
-                  'Recalculating First 100 Rankings for older posts...',
-                );
-                const newStats = this.dataService.calculateLocalStats(
-                  realInitialStats.initialPosts,
-                );
-                first100Override.value = await this.dataService
-                  .resolveFirst100Names(newStats)
-                  .catch(e => {
-                    log.warn('Failed to resolve names for older posts', {
-                      error: e,
-                    });
-                    return newStats;
+              log.debug('Recalculating First 100 Rankings for older posts...');
+              const newStats = this.dataService.calculateLocalStats(
+                realInitialStats.initialPosts!,
+              );
+              first100Override.value = await this.dataService
+                .resolveFirst100Names(newStats)
+                .catch(e => {
+                  log.warn('Failed to resolve names for older posts', {
+                    error: e,
                   });
-              }
+                  return newStats;
+                });
+            } else {
+              // Silent-wrong-result guard: backward scan found older months,
+              // but the retry /posts.json call came back empty (typically a
+              // 5xx). Without this warning the dashboard displays first-100
+              // rankings from the *initial* fetch window, which excludes the
+              // older posts that backward scan just surfaced.
+              log.warn(
+                'Backward scan surfaced older posts, but the follow-up fetchInitialStats ' +
+                  'call returned no posts — first-100 rankings will reflect the initial ' +
+                  'fetch, not the older posts. Likely a transient server error; re-run ' +
+                  'analysis to recover.',
+                {
+                  tagName,
+                  earliestDateFound,
+                  backwardMonthsFound: backwardResult.length,
+                  retryResult: realInitialStats ? 'empty' : 'null',
+                },
+              );
             }
             return fullHistory;
           }
@@ -1190,6 +1192,40 @@ export class TagAnalyticsApp {
           monthlyData || [],
           milestoneTargets,
         );
+      });
+    }
+
+    // First-100 rankings resolution is chained on historyPromise so that we
+    // resolve usernames exactly once with the correct source: the
+    // backward-scan override when one was set (rename case), otherwise the
+    // initial first-100 captured before analysis began. Previously the
+    // resolution kicked off in parallel on the initial first-100 and was
+    // discarded when backward-scan later produced an override — burning up
+    // to ~10 /users.json batches on data that would never be rendered.
+    // Dashboard renders atomically, so moving this off the parallel hot
+    // path costs no perceived latency (rankingPromise and historyPromise
+    // remain the long poles).
+    if (runDelta && baseData?.rankings?.uploader?.first100) {
+      initialStats.first100Stats = {
+        uploaderRanking: baseData.rankings.uploader.first100,
+        approverRanking: baseData.rankings.approver.first100,
+        ratingCounts: {},
+      };
+      first100StatsPromise = Promise.resolve(initialStats.first100Stats);
+    } else {
+      first100StatsPromise = historyPromise.then(async () => {
+        if (first100Override.value) return first100Override.value;
+        const initial = this.dataService.calculateLocalStats(
+          initialPosts || [],
+        );
+        try {
+          return await this.dataService.resolveFirst100Names(initial);
+        } catch (e) {
+          log.warn('Failed to resolve names for initial first-100', {
+            error: e,
+          });
+          return initial;
+        }
       });
     }
 
@@ -1252,16 +1288,13 @@ export class TagAnalyticsApp {
       try {
         await this.dataService.resetTagCache();
         log.debug(`Deleted cache for ${this.tagName}`);
-        // Flip the analytics button's status label back to the empty-cache
-        // state so the "Updated: <old-date>" indicator next to the tag
-        // name doesn't linger after a reset and make it look like the
-        // delete didn't take effect.
+        // Rewire the analytics button back to the idle state. The previous
+        // injection captured the pre-reset `tagData` in its onclick closure,
+        // so without this the next click would re-render the stale dashboard
+        // instead of triggering a fresh sync.
+        this.injectAnalyticsButton(null, undefined, 'Sync needed');
         const statusLabel = document.getElementById('tag-analytics-status');
-        if (statusLabel) {
-          statusLabel.textContent = 'Sync needed';
-          statusLabel.style.color = '#d73a49';
-          statusLabel.style.display = 'inline';
-        }
+        if (statusLabel) statusLabel.style.color = '#d73a49';
         showToast({
           type: 'success',
           message: `"${this.tagName}" analytics cleared. Click the analytics button to re-sync.`,
