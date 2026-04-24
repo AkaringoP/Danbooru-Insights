@@ -3,11 +3,15 @@ import {CONFIG} from '../config';
 import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {createLogger} from '../core/logger';
-import {isTopLevelTag, escapeHtml, getBestThumbnailUrl} from '../utils';
+import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
-import type {InitialStats, LocalStats} from './tag-analytics-data';
+import type {
+  InitialStats,
+  LocalStats,
+  RankingResult,
+} from './tag-analytics-data';
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {showToast} from '../ui/toast';
@@ -489,22 +493,19 @@ export class TagAnalyticsApp {
         .sort((a, b) => (b[1] as number) - (a[1] as number))
         .slice(0, 20);
 
-      const filteredCopyright = (
-        await Promise.all(
-          copyrightCandidates.map(async ([tag, count]) =>
-            (await isTopLevelTag(this.dataService.rateLimiter, tag))
-              ? [tag, count]
-              : null,
-          ),
-        )
-      ).filter(e => e !== null);
+      // Batched tag_implications lookup via dataService — shares the
+      // session + 180d persistent cache with fetchRelatedTagDistribution.
+      const flags = await this.dataService.getTopLevelFlags(
+        copyrightCandidates.map(([tag]) => tag),
+      );
+      const filteredCopyright = copyrightCandidates.filter(
+        ([tag]) => flags.get(tag) === true,
+      );
 
       const copyrightMap2: Record<string, number> = {};
-      (filteredCopyright as [string, number][])
-        .slice(0, 10)
-        .forEach(([name, count]) => {
-          copyrightMap2[name] = count;
-        });
+      filteredCopyright.slice(0, 10).forEach(([name, count]) => {
+        copyrightMap2[name] = count;
+      });
       meta.copyrightCounts = copyrightMap2;
     }
 
@@ -516,6 +517,23 @@ export class TagAnalyticsApp {
         characterMap2[name] = count;
       });
     meta.characterCounts = characterMap2;
+  }
+
+  /**
+   * Re-renders the pie chart if its currently-active tab matches `type`.
+   * Used by the related-tag SWR swap to replace approximate counts with
+   * the exact values once the background `/counts/posts.json` batch
+   * completes. No-ops when the user has navigated to a different tab —
+   * the updated `meta` will be consumed on their next tab switch.
+   */
+  private _rerenderPieIfActive(
+    meta: TagAnalyticsMeta,
+    type: 'copyright' | 'character',
+  ): void {
+    const activeTab = document.querySelector('.di-pie-tab.active');
+    if (activeTab?.getAttribute('data-type') === type) {
+      this.chartRenderer.renderPieChart(type, meta);
+    }
   }
 
   /**
@@ -571,14 +589,19 @@ export class TagAnalyticsApp {
       });
     };
 
-    // --- Phase 1: Quick Stats ---
+    // --- Kick off Phase 1 + Phase 2 in parallel ---
+    // Both phases depend only on `initialStats` / `meta` (already in scope),
+    // so Phase 2 promises start fetching the moment they are created, no
+    // longer blocked behind Phase 1's await. Phase 3 waits on Phase 2's
+    // historyData for its `minDate` anchor, so it stays sequential.
     const tTotal = performance.now();
     log.debug(
       `Starting analysis for tag: ${tagName} (Category: ${meta.category}, Count: ${totalCount})`,
     );
 
+    // Phase 1 start
     const tGroup1Start = performance.now();
-    const quickStats = await this._runQuickStatsPhase(
+    const quickStatsPromise = this._runQuickStatsPhase(
       tagName,
       meta,
       totalCount,
@@ -586,19 +609,44 @@ export class TagAnalyticsApp {
       trackProgress,
     );
 
-    log.debug(
-      `[Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
-    );
+    // Phase 2 start (concurrent with Phase 1)
+    log.debug('[Phase 2] Starting Rankings & History in parallel...');
 
-    // --- Phase 2: Heavy Stats (Rankings, History, Milestones) ---
-    log.debug('[Phase 2] Starting Rankings & History...');
-
-    const rankingPromise = this.dataService.fetchRankingsAndResolve(
-      tagName,
-      dateStr1Y,
-      dateStrTomorrow,
-      measure,
+    // Ranking SWR: on revisit with cached rankings (delta sync path), the
+    // 4× fetchReportRanking calls (12s under the report-queue 3s cooldown)
+    // are moved off the critical path. `rankingPromise` resolves
+    // immediately with the cached report; the real network fetch runs via
+    // `rankingRevalidatePromise` and its result is applied after the
+    // dashboard is painted.
+    const canSwrRankings = Boolean(
+      runDelta &&
+      baseData?.rankings?.uploader?.allTime &&
+      baseData?.rankings?.approver?.allTime,
     );
+    let rankingPromise: Promise<RankingResult>;
+    let rankingRevalidatePromise: Promise<RankingResult> | null = null;
+    if (canSwrRankings && baseData?.rankings) {
+      const cached = baseData.rankings;
+      rankingPromise = Promise.resolve({
+        uploaderAll: cached.uploader.allTime,
+        approverAll: cached.approver.allTime,
+        uploaderYear: cached.uploader.year,
+        approverYear: cached.approver.year,
+      });
+      rankingRevalidatePromise = this.dataService.fetchRankingsAndResolve(
+        tagName,
+        dateStr1Y,
+        dateStrTomorrow,
+        measure,
+      );
+    } else {
+      rankingPromise = this.dataService.fetchRankingsAndResolve(
+        tagName,
+        dateStr1Y,
+        dateStrTomorrow,
+        measure,
+      );
+    }
 
     const first100Override: First100Override = {value: null};
     const heavyPromises = this._buildHeavyStatPromises(
@@ -611,7 +659,6 @@ export class TagAnalyticsApp {
       first100Override,
       measure,
     );
-
     const heavyTasks = [
       {
         id: 'rankings_full',
@@ -631,16 +678,13 @@ export class TagAnalyticsApp {
       {
         id: 'resolve_names',
         label: 'Resolving usernames...',
-        promise: heavyPromises.first100StatsPromise.then(stats => {
-          if (runDelta && baseData?.rankings?.uploader?.first100) return stats;
-          if (!stats) return stats;
-          return this.dataService.resolveFirst100Names(stats);
-        }),
+        // first100StatsPromise is now self-contained: it returns either the
+        // backward-scan override (already name-resolved) or a fresh
+        // resolution of the initial first-100. No double-work.
+        promise: heavyPromises.first100StatsPromise,
       },
     ];
-
-    log.debug('[Phase 2] Awaiting Heavy Stats...');
-    const heavyResults = await Promise.all(
+    const heavyResultsPromise = Promise.all(
       (
         heavyTasks as Array<{
           id: string;
@@ -650,7 +694,30 @@ export class TagAnalyticsApp {
       ).map(trackProgress),
     );
 
-    const [resolvedRankings, historyData, milestones, first100StatsRaw] =
+    // --- Phase 1 completes ---
+    // Assemble Phase 1 fields onto meta, but do NOT render yet. We now wait
+    // for Phase 2 and Phase 3 as well so the dashboard appears once, fully
+    // populated (Phase 1/2 parallelism + ranking SWR still shrink the
+    // perceived wait vs. the pre-Phase-1/2-parallel flow).
+    const quickStats = await quickStatsPromise;
+    log.debug(
+      `[Phase 1] Finished Quick Stats in ${(performance.now() - tGroup1Start).toFixed(2)}ms`,
+    );
+
+    meta.statusCounts = quickStats.statusCounts;
+    meta.latestPost = quickStats.latestPost ?? undefined;
+    meta.newPostCount = quickStats.newPostCount;
+    meta.trendingPost = quickStats.trendingPost ?? undefined;
+    meta.trendingPostNSFW = quickStats.trendingPostNSFW ?? undefined;
+    meta.copyrightCounts = quickStats.copyrightCounts ?? undefined;
+    meta.characterCounts = quickStats.characterCounts ?? undefined;
+    meta.commentaryCounts = quickStats.commentaryCounts;
+
+    // --- Phase 2 completes ---
+    log.debug('[Phase 2] Awaiting Heavy Stats...');
+    const heavyResults = await heavyResultsPromise;
+
+    const [resolvedRankings, historyData, milestones, first100Stats] =
       heavyResults as [
         {
           uploaderAll: UserRanking[];
@@ -666,25 +733,36 @@ export class TagAnalyticsApp {
         ),
       ];
 
-    // Apply backward-scan first-100 override if available
-    let first100Stats = first100StatsRaw;
+    // Backward-scan may have refined firstPost/hundredthPost on initialStats.
+    // Always re-read to pick up the latest (the correctness guard in the
+    // backward-scan block only mutates when fresh posts are available, so
+    // re-reading is safe even when no scan ran).
+    firstPost = initialStats.firstPost;
+    hundredthPost = initialStats.hundredthPost;
     if (first100Override.value) {
       log.debug('Applying updated First 100 Rankings from backward scan.');
-      first100Stats = first100Override.value;
     }
-    // Update firstPost/hundredthPost if backward scan found earlier data
-    if (first100Override.value) {
-      firstPost = initialStats.firstPost;
-      hundredthPost = initialStats.hundredthPost;
-    }
-
-    log.debug(
-      `[Group 1] Finished Quick Stats (approx) in ${(performance.now() - tGroup1Start).toFixed(2)}ms (Note: includes wait for longest item)`,
-    );
-    log.debug('All parallel tasks completed.');
 
     const {uploaderAll, approverAll, uploaderYear, approverYear} =
       resolvedRankings;
+
+    // Assembly (Phase 2 fields)
+    meta.historyData = historyData;
+    meta.precalculatedMilestones = milestones;
+    meta.firstPost = firstPost ?? undefined;
+    meta.hundredthPost = hundredthPost ?? undefined;
+    meta.rankings = {
+      uploader: {
+        allTime: uploaderAll,
+        year: uploaderYear,
+        first100: first100Stats?.uploaderRanking ?? [],
+      },
+      approver: {
+        allTime: approverAll,
+        year: approverYear,
+        first100: first100Stats?.approverRanking ?? [],
+      },
+    };
 
     // --- Phase 3: Deferred Counts (Rating) ---
     const minDate =
@@ -700,44 +778,68 @@ export class TagAnalyticsApp {
       'Rating Counts',
       this.dataService.fetchRatingCounts(tagName, minDateStr),
     );
+    meta.ratingCounts = ratingCounts;
+
+    // --- Single render: all phases complete, fully-populated dashboard ---
+    // (ranking SWR below may swap cached-for-fresh ranking entries later,
+    // but every other widget lands in its final state here.)
+    this._showUpdatedStatus(meta.updatedAt);
+    this.toggleModal(true);
+    this.renderDashboard(meta);
+
+    // --- Ranking SWR revalidation (if cached rankings were served) ---
+    // Wait for the background fetch to settle so `saveToCache` persists
+    // the fresh data, not the cached ones we rendered earlier. If the
+    // fresh report differs from what is currently on `meta.rankings`,
+    // swap it in place and re-render the rankings widget. If it matches,
+    // skip the DOM churn.
+    if (rankingRevalidatePromise) {
+      try {
+        const fresh = await rankingRevalidatePromise;
+        const currentSignature = JSON.stringify({
+          uA: meta.rankings?.uploader.allTime,
+          aA: meta.rankings?.approver.allTime,
+          uY: meta.rankings?.uploader.year,
+          aY: meta.rankings?.approver.year,
+        });
+        const freshSignature = JSON.stringify({
+          uA: fresh.uploaderAll,
+          aA: fresh.approverAll,
+          uY: fresh.uploaderYear,
+          aY: fresh.approverYear,
+        });
+        if (currentSignature !== freshSignature && meta.rankings) {
+          log.debug('Ranking SWR: applying fresh report');
+          meta.rankings = {
+            uploader: {
+              allTime: fresh.uploaderAll,
+              year: fresh.uploaderYear,
+              first100: meta.rankings.uploader.first100,
+            },
+            approver: {
+              allTime: fresh.approverAll,
+              year: fresh.approverYear,
+              first100: meta.rankings.approver.first100,
+            },
+          };
+          this._updateRankingsWidget(meta);
+        } else {
+          log.debug('Ranking SWR: cached report still fresh, no update');
+        }
+      } catch (e) {
+        log.warn('Ranking SWR revalidation failed, keeping cached', {
+          error: e,
+        });
+      }
+    }
 
     log.debug(
       `Total analysis time: ${(performance.now() - tTotal).toFixed(2)}ms`,
     );
 
-    // --- Assembly ---
-    meta.statusCounts = quickStats.statusCounts;
-    meta.ratingCounts = ratingCounts;
-    meta.latestPost = quickStats.latestPost ?? undefined;
-    meta.newPostCount = quickStats.newPostCount;
-    meta.trendingPost = quickStats.trendingPost ?? undefined;
-    meta.trendingPostNSFW = quickStats.trendingPostNSFW ?? undefined;
-    meta.copyrightCounts = quickStats.copyrightCounts ?? undefined;
-    meta.characterCounts = quickStats.characterCounts ?? undefined;
-    meta.commentaryCounts = quickStats.commentaryCounts;
-    meta.historyData = historyData;
-    meta.precalculatedMilestones = milestones;
-    meta.firstPost = firstPost ?? undefined;
-    meta.hundredthPost = hundredthPost ?? undefined;
-
-    meta.rankings = {
-      uploader: {
-        allTime: uploaderAll,
-        year: uploaderYear,
-        first100: first100Stats?.uploaderRanking ?? [],
-      },
-      approver: {
-        allTime: approverAll,
-        year: approverYear,
-        first100: first100Stats?.approverRanking ?? [],
-      },
-    };
-
+    // --- Finalize ---
     this.injectAnalyticsButton(meta, 100, '');
-    this._showUpdatedStatus(meta.updatedAt);
     await this.dataService.saveToCache(meta);
-    this.toggleModal(true);
-    this.renderDashboard(meta);
   }
 
   /**
@@ -785,19 +887,38 @@ export class TagAnalyticsApp {
     let characterPromise: Promise<Record<string, number> | null> =
       Promise.resolve(null);
 
+    // SWR swap: when the background exact-count fetch completes, replace
+    // the approximate counts on `meta` and re-render the pie chart if the
+    // user is currently viewing that category. Otherwise the update is
+    // invisible until the next tab switch reads fresh `meta` values.
+    const onExactCopyright = (exact: Record<string, number>) => {
+      meta.copyrightCounts = exact;
+      this._rerenderPieIfActive(meta, 'copyright');
+    };
+    const onExactCharacter = (exact: Record<string, number>) => {
+      meta.characterCounts = exact;
+      this._rerenderPieIfActive(meta, 'character');
+    };
+
     if (meta.category === 1) {
       copyrightPromise = measure(
         'Related Copyrights',
-        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount),
+        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount, {
+          onExactCounts: onExactCopyright,
+        }),
       );
       characterPromise = measure(
         'Related Characters',
-        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount, {
+          onExactCounts: onExactCharacter,
+        }),
       );
     } else if (meta.category === 3) {
       characterPromise = measure(
         'Related Characters',
-        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount, {
+          onExactCounts: onExactCharacter,
+        }),
       );
     }
 
@@ -937,27 +1058,14 @@ export class TagAnalyticsApp {
             ),
           );
       });
-
-      if (baseData.rankings?.uploader?.first100) {
-        initialStats.first100Stats = {
-          uploaderRanking: baseData.rankings.uploader.first100,
-          approverRanking: baseData.rankings.approver.first100,
-          ratingCounts: {},
-        };
-        first100StatsPromise = Promise.resolve(initialStats.first100Stats);
-      } else {
-        first100StatsPromise = Promise.resolve(
-          this.dataService.calculateLocalStats(initialPosts || []),
-        );
-      }
     } else {
       // --- Full path ---
       historyPromise = measure(
         'Full History (Monthly)',
-        this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date()),
-      );
-      first100StatsPromise = Promise.resolve(
-        this.dataService.calculateLocalStats(initialPosts || []),
+        this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date(), {
+          isFullScan: true,
+          totalCount,
+        }),
       );
     }
 
@@ -996,11 +1104,17 @@ export class TagAnalyticsApp {
             undefined,
             'Scanning history backwards...',
           );
-          const backwardResult = await this.dataService.fetchHistoryBackwards(
-            tagName,
-            (startDate ?? new Date()).toISOString().slice(0, 10),
-            referenceTotal,
-            forwardTotal,
+          // Phase 7 baseline instrumentation: isolates backward-scan duration
+          // in perf logs (namespace `sync.refreshStats.*`) so we can quantify
+          // the improvement before/after the planned parallelisation.
+          const backwardResult = await measure(
+            'Backward History Scan',
+            this.dataService.fetchHistoryBackwards(
+              tagName,
+              (startDate ?? new Date()).toISOString().slice(0, 10),
+              referenceTotal,
+              forwardTotal,
+            ),
           );
 
           if (backwardResult.length > 0) {
@@ -1019,31 +1133,49 @@ export class TagAnalyticsApp {
               true,
               earliestDateFound,
             );
-            if (realInitialStats) {
-              // Mutate initialStats so the caller picks up updated values
+            const hasFreshPosts = !!(
+              realInitialStats &&
+              realInitialStats.initialPosts &&
+              realInitialStats.initialPosts.length > 0
+            );
+            if (hasFreshPosts && realInitialStats) {
+              // Only overwrite when the retry fetch actually returned posts —
+              // the empty-fallback return shape of fetchInitialStats omits
+              // firstPost/hundredthPost, so mutating unconditionally would
+              // wipe the good initial values with undefined.
               initialStats.firstPost = realInitialStats.firstPost;
               initialStats.hundredthPost = realInitialStats.hundredthPost;
               initialStats.timeToHundred = realInitialStats.timeToHundred;
-
-              if (
-                realInitialStats.initialPosts &&
-                realInitialStats.initialPosts.length > 0
-              ) {
-                log.debug(
-                  'Recalculating First 100 Rankings for older posts...',
-                );
-                const newStats = this.dataService.calculateLocalStats(
-                  realInitialStats.initialPosts,
-                );
-                first100Override.value = await this.dataService
-                  .resolveFirst100Names(newStats)
-                  .catch(e => {
-                    log.warn('Failed to resolve names for older posts', {
-                      error: e,
-                    });
-                    return newStats;
+              log.debug('Recalculating First 100 Rankings for older posts...');
+              const newStats = this.dataService.calculateLocalStats(
+                realInitialStats.initialPosts!,
+              );
+              first100Override.value = await this.dataService
+                .resolveFirst100Names(newStats)
+                .catch(e => {
+                  log.warn('Failed to resolve names for older posts', {
+                    error: e,
                   });
-              }
+                  return newStats;
+                });
+            } else {
+              // Silent-wrong-result guard: backward scan found older months,
+              // but the retry /posts.json call came back empty (typically a
+              // 5xx). Without this warning the dashboard displays first-100
+              // rankings from the *initial* fetch window, which excludes the
+              // older posts that backward scan just surfaced.
+              log.warn(
+                'Backward scan surfaced older posts, but the follow-up fetchInitialStats ' +
+                  'call returned no posts — first-100 rankings will reflect the initial ' +
+                  'fetch, not the older posts. Likely a transient server error; re-run ' +
+                  'analysis to recover.',
+                {
+                  tagName,
+                  earliestDateFound,
+                  backwardMonthsFound: backwardResult.length,
+                  retryResult: realInitialStats ? 'empty' : 'null',
+                },
+              );
             }
             return fullHistory;
           }
@@ -1060,6 +1192,40 @@ export class TagAnalyticsApp {
           monthlyData || [],
           milestoneTargets,
         );
+      });
+    }
+
+    // First-100 rankings resolution is chained on historyPromise so that we
+    // resolve usernames exactly once with the correct source: the
+    // backward-scan override when one was set (rename case), otherwise the
+    // initial first-100 captured before analysis began. Previously the
+    // resolution kicked off in parallel on the initial first-100 and was
+    // discarded when backward-scan later produced an override — burning up
+    // to ~10 /users.json batches on data that would never be rendered.
+    // Dashboard renders atomically, so moving this off the parallel hot
+    // path costs no perceived latency (rankingPromise and historyPromise
+    // remain the long poles).
+    if (runDelta && baseData?.rankings?.uploader?.first100) {
+      initialStats.first100Stats = {
+        uploaderRanking: baseData.rankings.uploader.first100,
+        approverRanking: baseData.rankings.approver.first100,
+        ratingCounts: {},
+      };
+      first100StatsPromise = Promise.resolve(initialStats.first100Stats);
+    } else {
+      first100StatsPromise = historyPromise.then(async () => {
+        if (first100Override.value) return first100Override.value;
+        const initial = this.dataService.calculateLocalStats(
+          initialPosts || [],
+        );
+        try {
+          return await this.dataService.resolveFirst100Names(initial);
+        } catch (e) {
+          log.warn('Failed to resolve names for initial first-100', {
+            error: e,
+          });
+          return initial;
+        }
       });
     }
 
@@ -1113,27 +1279,35 @@ export class TagAnalyticsApp {
       e.stopPropagation();
       e.preventDefault();
       if (
-        confirm(
-          `Are you sure you want to reset the analytics data for "${this.tagName}"?\nThis will clear the local cache and fetch fresh data.`,
+        !confirm(
+          `Reset analytics data for "${this.tagName}"?\nThis clears the local cache (analytics record + monthly count history). Click the analytics button again to trigger a fresh sync.`,
         )
       ) {
-        if (this.db && this.db.tag_analytics) {
-          try {
-            await this.db.tag_analytics.delete(this.tagName);
-            log.debug(`Deleted cache for ${this.tagName}`);
-            // Close existing modal to prevent conflicts or stale state
-            this.toggleModal(false);
-            // Re-fetch immediately since user explicitly requested reset
-            // Fire-and-forget: triggered by reset button; errors surface in console.
-            void this._fetchAndRender();
-          } catch (err) {
-            log.error('Failed to delete cache:', {error: err});
-            showToast({
-              type: 'error',
-              message: 'Failed to reset data. Check console for details.',
-            });
-          }
-        }
+        return;
+      }
+      try {
+        await this.dataService.resetTagCache();
+        log.debug(`Deleted cache for ${this.tagName}`);
+        // Rewire the analytics button back to the idle state. The previous
+        // injection captured the pre-reset `tagData` in its onclick closure,
+        // so without this the next click would re-render the stale dashboard
+        // instead of triggering a fresh sync.
+        this.injectAnalyticsButton(null, undefined, 'Sync needed');
+        const statusLabel = document.getElementById('tag-analytics-status');
+        if (statusLabel) statusLabel.style.color = '#d73a49';
+        showToast({
+          type: 'success',
+          message: `"${this.tagName}" analytics cleared. Click the analytics button to re-sync.`,
+        });
+        // Close the modal — next sync is deferred until the user explicitly
+        // reopens analytics (matches UserAnalyticsApp's reset UX).
+        this.toggleModal(false);
+      } catch (err) {
+        log.error('Failed to delete cache:', {error: err});
+        showToast({
+          type: 'error',
+          message: 'Failed to reset data. Check console for details.',
+        });
       }
     };
 
@@ -1695,6 +1869,21 @@ export class TagAnalyticsApp {
    * Builds the user rankings section HTML: uploader/approver tab bar + ranking columns.
    */
   private buildRankingsSection(tagData: TagAnalyticsMeta): string {
+    // Always emit the wrapper so progressive rendering can inject the
+    // real content after Phase 2 (heavy stats) without needing to locate
+    // an insertion anchor in the surrounding HTML.
+    const inner = tagData.rankings
+      ? this.buildRankingsContent(tagData)
+      : '<div id="di-rankings-placeholder" class="di-rankings-loading">Analyzing user rankings…</div>';
+    return `<div id="di-rankings-slot">${inner}</div>`;
+  }
+
+  /**
+   * Inner HTML for the rankings section (header + three columns).
+   * Extracted so `_updateRankingsWidget` can drop it into the slot once
+   * Phase 2 data arrives without rebuilding the whole dashboard.
+   */
+  private buildRankingsContent(tagData: TagAnalyticsMeta): string {
     if (!tagData.rankings) return '';
     log.debug('renderDashboard - Initial Render - hundredthPost:', {
       hundredthPost: tagData.hundredthPost,
@@ -1808,26 +1997,51 @@ export class TagAnalyticsApp {
       this.updateNsfwVisibility();
     }
 
-    // Use Pre-fetched Data
+    // ----- Per-phase rendering (decoupled predicates) -----
+    // Progressive rendering calls `renderDashboard` once after Phase 1
+    // (Quick Stats) with partial data, then calls the `_updateAfterPhase*`
+    // helpers as heavier data arrives. Each of the blocks below handles
+    // exactly one data dependency so missing data → placeholder, present
+    // data → rendered, independent of the other blocks.
+
+    // Pie chart + pie tabs (requires statusCounts only — rating/copyright/
+    // character/commentary tabs each render their own slice when clicked).
+    if (tagData.statusCounts) {
+      this.chartRenderer.renderPieChart('status', tagData);
+      this._wirePieTabHandlers(tagData);
+    }
+
+    // History charts + milestones (Phase 2 data).
+    this._renderHistoryAndMilestones(tagData);
+
+    // Ranking tab handlers (Phase 2 data).
+    if (tagData.rankings) {
+      this._wireRankTabHandlers(tagData);
+    }
+  }
+
+  /**
+   * Renders history charts + milestones given the current tagData state.
+   * No-op if Phase 2 data isn't ready yet — the "Loading…" placeholders
+   * in `buildBottomSections` stay visible until a later call supplies it.
+   */
+  private _renderHistoryAndMilestones(tagData: TagAnalyticsMeta): void {
     const data = tagData.historyData || [];
     const loading = document.getElementById('chart-loading');
-    if (loading) loading.style.display = 'none';
 
-    if (data && data.length > 0) {
+    if (data.length > 0) {
+      if (loading) loading.style.display = 'none';
       this.chartRenderer.renderHistoryCharts(
         data,
         this.tagName,
         tagData.precalculatedMilestones,
       );
 
-      // Milestones Logic
       const milestonesContainer = document.getElementById(
         'tag-analytics-milestones',
       );
       if (milestonesContainer) {
         milestonesContainer.style.display = 'block';
-
-        // Use totalCount from meta (tagData)
         const targets = this.dataService.getMilestoneTargets(
           tagData.post_count,
         );
@@ -1843,7 +2057,6 @@ export class TagAnalyticsApp {
             nextInfo,
           );
         } else {
-          // Pass tagName, totalCount, targets
           this.dataService
             .fetchMilestones(tagData.name, [], targets)
             .then((milestonePosts: MilestoneEntry[]) => {
@@ -1858,53 +2071,75 @@ export class TagAnalyticsApp {
             });
         }
       }
-      // Pie Chart Initial Render & Tab Switching
-      if (tagData.statusCounts && tagData.ratingCounts) {
-        const type = 'status'; // Initial type
-        this.chartRenderer.renderPieChart(type, tagData);
+    }
+    // When historyData is missing, leave the "Loading History Data…"
+    // placeholder from buildBottomSections visible — Phase 2 update will
+    // either fill it or flip it to "No history data available." below.
+  }
 
-        const tabs = document.querySelectorAll('.di-pie-tab');
-        tabs.forEach(tab => {
-          (tab as HTMLElement).onclick = () => {
-            const newType = tab.getAttribute('data-type');
-            tabs.forEach(t => {
-              t.classList.remove('active');
-              (t as HTMLElement).style.background = ''; // Clear inline style to let CSS take over
-              (t as HTMLElement).style.color = ''; // Clear inline color
-            });
-            tab.classList.add('active');
-            // Don't set inline style for active, let CSS .active handle it
-            this.chartRenderer.renderPieChart(newType ?? 'status', tagData);
-          };
+  /** Binds click handlers to the pie-chart category tabs. */
+  private _wirePieTabHandlers(tagData: TagAnalyticsMeta): void {
+    const tabs = document.querySelectorAll('.di-pie-tab');
+    tabs.forEach(tab => {
+      (tab as HTMLElement).onclick = () => {
+        const newType = tab.getAttribute('data-type');
+        tabs.forEach(t => {
+          t.classList.remove('active');
+          (t as HTMLElement).style.background = '';
+          (t as HTMLElement).style.color = '';
         });
+        tab.classList.add('active');
+        this.chartRenderer.renderPieChart(newType ?? 'status', tagData);
+      };
+    });
+  }
 
-        // Ranking Tabs Logic
-        const rankTabs = document.querySelectorAll('.rank-tab');
-        rankTabs.forEach(tab => {
-          (tab as HTMLElement).onclick = () => {
-            const role = tab.getAttribute('data-role');
-            rankTabs.forEach(t => {
-              t.classList.remove('active');
-              (t as HTMLElement).style.fontWeight = 'normal';
-              (t as HTMLElement).style.color = 'var(--di-text-muted, #888)';
-            });
-            tab.classList.add('active');
-            (tab as HTMLElement).style.fontWeight = 'bold';
-            (tab as HTMLElement).style.color = 'var(--di-link, #007bff)';
-
-            this.chartRenderer.updateRankingTabs(
-              role ?? 'uploader',
-              tagData,
-              this.dataService.userNames,
-            );
-          };
+  /** Binds click handlers to the uploader/approver rank tabs. */
+  private _wireRankTabHandlers(tagData: TagAnalyticsMeta): void {
+    const rankTabs = document.querySelectorAll('.rank-tab');
+    rankTabs.forEach(tab => {
+      (tab as HTMLElement).onclick = () => {
+        const role = tab.getAttribute('data-role');
+        rankTabs.forEach(t => {
+          t.classList.remove('active');
+          (t as HTMLElement).style.fontWeight = 'normal';
+          (t as HTMLElement).style.color = 'var(--di-text-muted, #888)';
         });
-      }
-    } else {
-      if (loading) {
-        loading.textContent = 'No history data available.';
-        loading.style.display = 'block';
-      }
+        tab.classList.add('active');
+        (tab as HTMLElement).style.fontWeight = 'bold';
+        (tab as HTMLElement).style.color = 'var(--di-link, #007bff)';
+
+        this.chartRenderer.updateRankingTabs(
+          role ?? 'uploader',
+          tagData,
+          this.dataService.userNames,
+        );
+      };
+    });
+  }
+
+  /**
+   * Replaces the rankings slot with fresh content. Preserves the
+   * currently-active rank tab (uploader/approver) across the rebuild by
+   * reading `.rank-tab.active` before tearing down and clicking the
+   * equivalent tab afterward.
+   */
+  private _updateRankingsWidget(tagData: TagAnalyticsMeta): void {
+    const slot = document.getElementById('di-rankings-slot');
+    if (!slot || !tagData.rankings) return;
+
+    const activeTab = slot.querySelector('.rank-tab.active');
+    const activeRole = activeTab?.getAttribute('data-role') ?? 'uploader';
+
+    slot.innerHTML = this.buildRankingsContent(tagData);
+    this._wireRankTabHandlers(tagData);
+
+    // buildRankingsContent always starts with 'uploader' active. If the
+    // user was on 'approver', click the corresponding tab to restore
+    // state (also triggers the chart update).
+    if (activeRole === 'approver') {
+      const tabEl = slot.querySelector('.rank-tab[data-role="approver"]');
+      if (tabEl instanceof HTMLElement) tabEl.click();
     }
   }
 }

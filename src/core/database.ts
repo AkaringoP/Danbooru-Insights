@@ -9,6 +9,8 @@ import type {
   TagAnalyticsReport,
   GrassSettings,
   UserStatsRecord,
+  MonthlyCountRecord,
+  TagImplicationCacheRecord,
 } from '../types';
 
 // --- 1.5 Database (Dexie.js) ---
@@ -29,6 +31,8 @@ export class Database extends Dexie {
   tag_analytics!: Table<TagAnalyticsReport, string>;
   grass_settings!: Table<GrassSettings, string>;
   user_stats!: Table<UserStatsRecord, string>;
+  tag_monthly_counts!: Table<MonthlyCountRecord, [string, string]>;
+  tag_implications_cache!: Table<TagImplicationCacheRecord, string>;
 
   /**
    * Initializes the database with defined schemas.
@@ -163,6 +167,23 @@ export class Database extends Dexie {
     this.version(11).stores({
       posts:
         'id, uploader_id, no, created_at, score, rating, tag_count_general, [uploader_id+no], [uploader_id+score], [uploader_id+created_at]',
+    });
+
+    // [v12] Tag analytics caching layer for sync-time optimization.
+    // - tag_monthly_counts: persist per-tag, per-month post counts so
+    //   revisits only refetch the current + previous month (matches the
+    //   existing Delta sync rescan window). Compound PK `[tag+yearMonth]`,
+    //   `tag` index for bulk per-tag reads, `fetchedAt` for distance-based
+    //   TTL eviction. See `MonthlyCountRecord` in types.ts.
+    // - tag_implications_cache: global cache for `isTopLevelTag` checks.
+    //   `tag_implications` is effectively immutable; caching here lets
+    //   `fetchRelatedTagDistribution` skip up to 20 API calls per session.
+    //   PK is `tagName` (global, not per-analytics-target).
+    // `tag_analytics.lastFullScanAt` is a new schemaless field (no index)
+    // for the 90-day forced-rescan policy; added in types.ts only.
+    this.version(12).stores({
+      tag_monthly_counts: '[tag+yearMonth], tag, fetchedAt',
+      tag_implications_cache: 'tagName, fetchedAt',
     });
   }
 }
