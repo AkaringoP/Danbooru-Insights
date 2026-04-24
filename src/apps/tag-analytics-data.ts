@@ -290,6 +290,19 @@ export class TagAnalyticsDataService {
    */
   private _pendingLastFullScanAt: number | null = null;
 
+  /**
+   * Per-session memo for `/tags.json` responses. A single analysis run
+   * calls `fetchTagData` from up to four paths (run, _checkCache,
+   * fetchInitialStats, and the backward-scan retry), each costing ~300ms.
+   * Memoizing eliminates the redundant calls; the 5-minute TTL keeps the
+   * value fresh enough that `post_count` diffs still catch new uploads.
+   */
+  private _tagDataMemo = new Map<
+    string,
+    {value: DanbooruTag | null; ts: number}
+  >();
+  private readonly _tagDataTTL = 5 * 60 * 1000;
+
   constructor(db: Database, rateLimiter: RateLimitedFetch, tagName: string) {
     this.db = db;
     this.rateLimiter = rateLimiter;
@@ -2167,6 +2180,10 @@ export class TagAnalyticsDataService {
   }
 
   async fetchTagData(tagName: string): Promise<DanbooruTag | null> {
+    const cached = this._tagDataMemo.get(tagName);
+    if (cached && Date.now() - cached.ts < this._tagDataTTL) {
+      return cached.value;
+    }
     try {
       // use name_matches to find the exact tag
       const url = `/tags.json?search[name_matches]=${encodeURIComponent(tagName)}`;
@@ -2174,12 +2191,14 @@ export class TagAnalyticsDataService {
         .fetch(url)
         .then((r: Response) => r.json());
 
+      let result: DanbooruTag | null = null;
       if (Array.isArray(resp) && resp.length > 0) {
         // Find exact match to be safe
         const exact = resp.find(t => t.name === tagName);
-        return exact || resp[0];
+        result = exact || resp[0];
       }
-      return null;
+      this._tagDataMemo.set(tagName, {value: result, ts: Date.now()});
+      return result;
     } catch (e) {
       log.error('Tag fetch error', {error: e});
       return null;
