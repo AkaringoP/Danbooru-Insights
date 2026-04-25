@@ -1,14 +1,16 @@
 /// <reference types="vitest" />
 import {defineConfig} from 'vitest/config';
-import {
-  detectPerfLoggingEnabled,
-  detectDebugLoggingEnabled,
-} from './build-flags';
 
 export default defineConfig({
   define: {
-    __PERF_ENABLED__: JSON.stringify(detectPerfLoggingEnabled()),
-    __DEBUG_ENABLED__: JSON.stringify(detectDebugLoggingEnabled()),
+    // Tests always exercise the enabled paths. Build-time gating (off on
+    // `main` via build-flags.ts) is purely a release-bundle optimization
+    // — verified by bundle inspection, not by vitest. If we honored the
+    // branch fallback here, perfLogger / logger.debug tests would
+    // silently no-op on the `main` branch and only catch regressions on
+    // dev/feature branches.
+    __PERF_ENABLED__: JSON.stringify(true),
+    __DEBUG_ENABLED__: JSON.stringify(true),
   },
   test: {
     environment: 'node',

@@ -4,6 +4,18 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.4.1 — Test infrastructure fix (no user-visible change)
+
+Hotfix released the same day as v9.4.0. Production bundle is byte-identical
+to v9.4.0 — `dist/danbooruinsights.user.js` rebuilds with the same source
+under the same flags. Bumped solely to keep version numbers aligned with
+the merge commit on `main`.
+
+### Internal
+- **`vitest.config.ts`**: hardcode `__PERF_ENABLED__` and `__DEBUG_ENABLED__` to `true` instead of reading them from the build-flag branch fallback. The previous setup short-circuited `perfLogger.setEnabled` and `logger.debug` on `main`, causing the seven new perf-logger ring-buffer / p95 tests to silently no-op there. Tests now exercise the actual code paths regardless of which branch the developer is on; build-time gating remains the release-bundle optimization (verified by bundle inspection, not vitest).
+
+---
+
 ## v9.4.0 — Tag Analytics Performance + DB Reliability & Observability
 
 Two converging tracks land in this release: a **performance refactor of
