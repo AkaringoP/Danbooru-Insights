@@ -4,36 +4,96 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
-## v9.4.0 — DB Strategy Reliability & Observability (P1·P2·P5)
+## v9.4.0 — Tag Analytics Performance + DB Reliability & Observability
 
-Closes the last reliability and observability gap surfaced by the v10
-DB-strategy audit (`docs/v10/DanbooruInsights DB 전략 개선.md`). This
-release is intentionally not a speed change — its purpose is to remove
-silent failure modes at scale and to make the next performance investigation
-self-instrumenting. Schema is unchanged (still v12).
+Two converging tracks land in this release: a **performance refactor of
+the Tag Analytics pipeline** (29 % faster first-sync on large tags) and
+a **DB-strategy reliability + observability upgrade** that closes the
+remaining gaps from the v10 DB-strategy audit. Schema bumps to v12 to
+support the new tag-analytics caches; the two existing tables added in
+v12 are the only schema delta of the release.
 
-### Reliability (P1) — Quota monitoring + QuotaExceededError recovery
-- **`bulkPutSafe()`**: New quota-aware wrapper around Dexie bulk writes. On `QuotaExceededError` (including the common `AbortError` Dexie wraps it in), runs an evictor closure and retries the write once; second failure rethrows so callers surface the failure rather than loop. Wraps 5 of the 8 `bulkPut` call sites in `analytics-data-manager.ts` and `tag-analytics-data.ts`. The 3 sites inside `db.transaction(...)` callbacks keep the raw `bulkPut` to avoid `PrematureCommitError`.
-- **LRU eviction with current-user guard**: `evictOldestNonCurrentUser()` ranks users by their `danbooru_grass_last_sync_<uid>` localStorage timestamp and deletes the oldest non-current user's posts + piestats. The active profile's data is never touched, so analytics correctness is preserved even at quota pressure.
-- **Pre-emptive sampling**: 25 % of `bulkPutSafe` calls poll `navigator.storage.estimate()`; if usage/quota > 0.8, the evictor runs ahead of the write to avoid the throw entirely. No background loop — sampling is enough without leader election (P4 deferred).
-- **Persistent storage request**: `requestPersistence()` is invoked once at the end of the first successful Quick/Full sync, idempotent via the `di.persist.requested` localStorage flag. Mitigates Safari ITP 7-day eviction and Chrome's heuristic eviction for engaged users.
-- **`AbortError` unwrapping**: `unwrapAbortError()` exposes both the outer name and `.inner.name`, so quota errors hidden inside Dexie's wrapping always show up in `logger.error` payloads.
+### Tag Analytics — first-sync time -29 % on large tags
+
+Headline benchmarks (cold IDB, dev build):
+
+| Target | v9.3.x main | v9.4.0 | Δ |
+|---|---|---|---|
+| `umamusume` (198 k posts) full analysis | 84.7 s | 60.3 s | **-29 %** |
+| `gakuen_idolmaster` (22 k posts) full analysis | 28.6 s | 23.4 s | **-18 %** |
+| Backward history scan (rename target) | ~16 s | 6.98 s | **-56 %** |
+
+Pipeline structure:
+- **Phase 1 (Quick Stats) and Phase 2 (Rankings & History) now run concurrently** instead of strictly sequentially. Phase 3 (Rating Counts) stays serial because it depends on `historyData.minDate`.
+- The earlier "progressive partial paint" experiment was reverted in favor of an **atomic dashboard render** — every widget paints once, after all data is ready. This kept the UI flow steady and made the savings below safe to take (no widget would surprise the user by re-laying-out mid-paint).
+
+Persistent caches (DB schema v12):
+- **`tag_monthly_counts`** — per-tag, per-month post count cache with **distance-based TTL** (the older the month, the longer the TTL — recent months stay short, ancient months effectively immutable, capped at 90 days). Wipes the cache on user-triggered cache reset; refuses to auto-resync after a reset (the reset itself is the user's signal that they wanted fresh state).
+- **`tag_implications_cache`** — global 180-day cache for `isTopLevelTag` results. Implications are de-facto immutable per Danbooru's editorial workflow, so a long TTL is safe.
+
+Network-shape changes:
+- **Batched `tag_implications` lookup** via `search[antecedent_name_comma]=t1,t2,…&limit=1000` collapses up to 20 individual API calls into a single request. Implementation lives in `TagAnalyticsDataService.fetchTopLevelTagsBatch`.
+- **Frequency-approximated distribution** with SWR swap-in: the related-tag pie chart paints immediately from the `frequency` field in `/related_tag.json`, then the exact `/counts/posts.json` per-tag values stream in and the chart re-renders silently. First paint is no longer blocked on N count queries.
+- **Stale-while-revalidate ranking reports** on revisit: the Ranking widget paints from cache instantly and only re-fetches the report set in the background, swapping in if anything changed. Removes the visible 2 – 4 s wait on cache-warm reloads.
+
+Backward-scan fixes (the rename-target path that walks history backwards
+to find the original tag's posts):
+- Duration is now isolated as a perf-logger span (`bw.*` family) so future
+  regressions surface in p95 dashboards.
+- Override-block and first-100 resolution are deduped — a single
+  `fetchTagData` round-trip drives both, and `resolveFirst100Names` no
+  longer re-fires when the backward scan already produced names.
+- Service-instance memoization on `fetchTagData` removes duplicate
+  network calls within a session.
+
+UX touches that came along for the ride:
+- Diagnostic panel now starts hidden; a small "DI" reopen button replaces
+  the always-on overlay.
+- Cache reset now also clears the monthly cache and immediately resets the
+  status label, so the next analysis starts visibly cold.
+
+### Reliability (P1) — Quota-aware bulkPut + persistence opt-in
+
+- **`bulkPutSafe()`** (`src/core/quota-manager.ts`): quota-aware wrapper around Dexie bulk writes. On `QuotaExceededError` — including the common `AbortError` Dexie wraps it in — runs an evictor closure and retries the write once; second failure rethrows so callers surface the failure rather than loop. Wraps 5 of the 8 `bulkPut` call sites in `analytics-data-manager.ts` and `tag-analytics-data.ts`. The 3 sites inside `db.transaction(...)` callbacks keep the raw `bulkPut` to avoid `PrematureCommitError`.
+- **LRU eviction with current-user guard**: `evictOldestNonCurrentUser()` ranks users by their `danbooru_grass_last_sync_<uid>` localStorage timestamp and deletes the oldest non-current user's `posts` + `piestats`. The active profile's data is **never** touched, so analytics correctness is preserved even at quota pressure (enforced by unit test).
+- **Pre-emptive sampling**: 25 % of `bulkPutSafe` calls poll `navigator.storage.estimate()`; if usage / quota > 0.8, the evictor runs ahead of the write to avoid the throw entirely. No background loop — sampling is enough without leader election.
+- **Persistent storage request**: `requestPersistence()` is invoked once at the end of the first successful Quick / Full sync, idempotent via the `di.persist.requested` localStorage flag. Mitigates Safari ITP 7-day eviction and Chrome's heuristic eviction for engaged users.
+- **`AbortError` unwrapping**: `unwrapAbortError()` exposes both the outer name and `.inner.name`, so quota errors hidden inside Dexie's wrapping always show up in `logger.error` payloads instead of being silent.
 
 ### Reliability (P2) — Multi-tab `versionchange` / `blocked` handlers
-- `Database` now subscribes to Dexie's `versionchange` and `blocked` events. On `versionchange`, the old tab calls `db.close()` + `window.location.reload()` so the upgrading tab in another window can proceed instead of deadlocking. On `blocked`, a structured warning is logged. Eliminates the `Upgrade 'DanbooruGrassDB' blocked by other connection holding version 0.1` and `Dexie: Need to reopen db` console errors that appeared in multi-tab Phase 0 baselines (verified zero such events in v9.4 multi-tab measurements).
-- Resolved Decision (Task 0.1): no `confirm()` prompt — DanbooruInsights is a read-only widget and a confirm-cancel would only preserve the deadlock.
+
+- `Database` now subscribes to Dexie's `versionchange` and `blocked` events. On `versionchange`, the old tab calls `db.close()` + `window.location.reload()` so the upgrading tab in another window can proceed instead of deadlocking. On `blocked`, a structured warning is logged.
+- Eliminates the `Upgrade 'DanbooruGrassDB' blocked by other connection holding version 0.1` and `Dexie: Need to reopen db` console errors that appeared in multi-tab measurements: 4 such events on the v9.3.x baseline (3 concurrent tabs) → **0 events** on v9.4.0.
+- No `confirm()` prompt before reload — DanbooruInsights is a read-only widget, and a confirm-cancel would only preserve the deadlock without giving the user any meaningful work to save.
 
 ### Observability (P5) — `performance.mark` / `measure` + p95 stats + `dbi:` prefix
-- **User Timing API integration**: `perfLogger.mark()` / `measure()` now drive `performance.mark` + `performance.measure` so spans show up natively in the Chrome DevTools **Performance** panel under "User Timing". Legacy `start()` / `end()` are aliases backed by the same internals.
-- **p95/p99 stats buffer**: Each label keeps a 100-sample FIFO ring buffer. `perfLogger.stats(label)` returns `{p50, p95, p99, count}` (nearest-rank), and `perfLogger.dumpStats()` prints a p95-ranked table when `localStorage['di.perf.stats']='1'` is set. Both are dead-code-eliminated on `main` builds.
-- **Unified `dbi:` prefix**: 59 perf labels rewritten across `analytics-data-manager.ts`, `user-analytics-app.ts`, and `user-analytics-data.ts` to the `dbi:<channel>:<op>:<phase>` namespace (e.g. `sync.full.page.w0` → `dbi:db:sync:full:page.w0`, `render.fetchData.summaryStats` → `dbi:net:fetchData:summaryStats`). Makes labels grep-friendly and distinguishable from browser-built-in performance entries.
+
+- **User Timing API integration**: `perfLogger.mark()` / `measure()` now drive `performance.mark` + `performance.measure`, so spans appear natively in the Chrome DevTools **Performance** panel under "User Timing". Legacy `start()` / `end()` are aliases backed by the same internals — call sites can mix and match.
+- **p95 / p99 stats buffer**: each label keeps a 100-sample FIFO ring buffer. `perfLogger.stats(label)` returns `{p50, p95, p99, count}` (nearest-rank), and `perfLogger.dumpStats()` prints a p95-ranked table when `localStorage['di.perf.stats']='1'` is set. Both are dead-code-eliminated on `main` builds, so leaving the calls in code costs nothing.
+- **Unified `dbi:` label namespace**: 59 perf labels rewritten across `analytics-data-manager.ts`, `user-analytics-app.ts`, and `user-analytics-data.ts` to `dbi:<channel>:<op>:<phase>` (e.g. `sync.full.page.w0` → `dbi:db:sync:full:page.w0`, `render.fetchData.summaryStats` → `dbi:net:fetchData:summaryStats`). Makes labels grep-friendly and clearly distinguishable from browser-built-in performance entries.
 
 ### Internal
-- **Phase 0 / Phase 4 benchmark workspace**: New `bench/` directory holds the side-by-side userscript artifacts (`bench/main.user.js`, `bench/feature.user.js`) with `@updateURL` stripped to prevent Tampermonkey from auto-overwriting the captured baseline. New `scripts/bench-collect.ts` parses both `[Perf #N]` and the legacy `[DI:…] DEBUG [Task] / [Phase] / [PerfProbe]` formats; `scripts/bench-compare.ts` normalizes labels through the v9.3 → v9.4 alias table and emits a Markdown diff with ±5 % regression flagging. All `bench/` artifacts are gitignored.
-- **Test coverage**: 31 new tests across `quota-manager.test.ts`, `database-versionchange.test.ts`, and `perf-logger-p95.test.ts`. Total 264 / 19 (was 230 / 16 on `main`).
 
-### Phase 4 outcome
-The headline win is P2: zero `versionchange` / `blocked` console events in the multi-tab baseline scenario where v9.3.0 produced 4. Wall-clock per-scenario regressions in the Phase 4 reports are **not credible as code-level changes** — they reflect Danbooru API server-side latency variance at measurement time (single-request `dbi:db:sync:full:countQuery` jumped from 305 ms to 5996 ms — implausible from a µs-scale wrapper). Network-independent metrics (`bulkPut.w*` p95 in S1) showed +0.8 % to +7.5 %, the expected `bulkPutSafe` overhead. See `bench/reports/phase4-summary.md` for the full forensic interpretation.
+- **Schema migration**: Dexie v11 → v12 with two new tables (`tag_monthly_counts`, `tag_implications_cache`); existing tables and indexes unchanged.
+- **Bench A/B tooling**: `scripts/bench-collect.ts` parses both `[Perf #N]` (perf-logger) and the legacy `[DI:…] DEBUG [Task] / [Phase] / [PerfProbe]` (tag-analytics debug) families; `scripts/bench-compare.ts` normalizes labels through a v9.3 → v9.4 alias table and emits a Markdown diff with ±5 % regression flagging. The `bench/` workspace (saved baseline / feature userscripts, captured logs, generated reports) is gitignored.
+- **Build variant detection** centralized via branch-fallback in `build-flags.ts` — `DI_PERF` / `DI_DEBUG` / `DI_BUILD_VARIANT` env overrides keep working for Phase 0 / Phase 4 measurements without code changes.
+- **Test coverage**: +34 tests / +3 files vs the v9.3.1 baseline. Quota recovery (21), perf-logger ring buffer + p95 (10), and `versionchange` handler (3) are the new files. Total 264 / 19.
+- **ESLint**: `@typescript-eslint` override scope tightened so it only applies where the plugin is actually loaded, and the local build-comparison artifact is now in the ignore list.
+
+### Forensic note on the wall-clock comparison
+
+Phase 4 ran a side-by-side A / B between the v9.3.x main build and the
+v9.4.0 feature build using the new `bench/` tooling. The headline
+result is the P2 deadlock removal (4 events → 0). Many wall-clock
+metrics, however, regressed +50 % to +1860 % — including a single
+`/counts/posts.json` request jumping from 305 ms to 5996 ms, which is
+implausible from a µs-scale wrapper. The pattern is consistent across
+network-bound spans and absent on network-independent ones (e.g.
+`dbi:db:sync:full:bulkPut.w*` showed +0.8 % to +7.5 %, exactly the
+expected `bulkPutSafe` overhead). The most likely cause is Danbooru
+API server-side latency variance at measurement time, not a code
+change. Full interpretation in `bench/reports/phase4-summary.md`
+(local).
 
 ---
 
