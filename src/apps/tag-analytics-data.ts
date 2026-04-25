@@ -1,5 +1,6 @@
 import {CONFIG, DAY_MS} from '../config';
 import {createLogger} from '../core/logger';
+import {bulkPutSafe, evictOldestNonCurrentUser} from '../core/quota-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import type {Database} from '../core/database';
 import type {
@@ -403,7 +404,11 @@ export class TagAnalyticsDataService {
         count: e.count,
         fetchedAt: now,
       }));
-      await this.db.tag_monthly_counts.bulkPut(records);
+      // Tag pages have no current-user context; pass `0` so the evictor
+      // can pick any user's posts as the LRU victim if quota is hit.
+      await bulkPutSafe(this.db.tag_monthly_counts, records, () =>
+        evictOldestNonCurrentUser(this.db!, 0),
+      );
     } catch (e) {
       log.warn('Failed to write monthly counts cache', {error: e});
     }
@@ -511,7 +516,10 @@ export class TagAnalyticsDataService {
       entries.forEach((isTopLevel, tagName) => {
         records.push({tagName, isTopLevel, fetchedAt: now});
       });
-      await this.db.tag_implications_cache.bulkPut(records);
+      // No user context on tag pages — see `tag_monthly_counts` rationale above.
+      await bulkPutSafe(this.db.tag_implications_cache, records, () =>
+        evictOldestNonCurrentUser(this.db!, 0),
+      );
     } catch (e) {
       log.warn('Failed to write tag_implications cache', {error: e});
     }

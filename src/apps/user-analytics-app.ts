@@ -761,7 +761,7 @@ export class UserAnalyticsApp {
       path: 'unknown' as 'quickSync' | 'syncSkipped' | 'unknown',
       preTotal: 0,
     };
-    perfLogger.start('render.total');
+    perfLogger.start('dbi:render:total');
 
     try {
       const content = document.getElementById(`${this.modalId}-content`);
@@ -779,19 +779,19 @@ export class UserAnalyticsApp {
       // Quick Sync Pre-Check: If total posts ≤ MAX_QUICK_SYNC_POSTS and DB is incomplete,
       // fetch all posts inline (no sync UI required) before rendering the dashboard.
       const MAX_QUICK_SYNC_POSTS = CONFIG.MAX_OPTIMIZED_POSTS;
-      perfLogger.start('render.precheck');
+      perfLogger.start('dbi:render:precheck');
       // Split the two calls into their own labels: syncStats is a local DB
       // lookup, totalCount hits the Danbooru API. Combining them hides which
       // one dominates — useful when evaluating DB-side optimizations.
       const [preStats, preTotal] = await Promise.all([
-        perfLogger.wrap('render.precheck.syncStats', () =>
+        perfLogger.wrap('dbi:render:precheck:syncStats', () =>
           this.dataManager.getSyncStats(this.context.targetUser),
         ),
-        perfLogger.wrap('render.precheck.totalCount', () =>
+        perfLogger.wrap('dbi:render:precheck:totalCount', () =>
           this.dataManager.getTotalPostCount(this.context.targetUser),
         ),
       ]);
-      perfLogger.end('render.precheck', {
+      perfLogger.end('dbi:render:precheck', {
         total: preTotal,
         synced: preStats.count,
       });
@@ -855,7 +855,7 @@ export class UserAnalyticsApp {
         ? undefined
         : {syncStats: preStats, totalCount: preTotal};
       const dashboardData = await perfLogger.wrap(
-        'render.fetchData.total',
+        'dbi:net:fetchData:total',
         () => this.dataService.fetchDashboardData(this.context, prefetched),
       );
       const {
@@ -1524,7 +1524,7 @@ export class UserAnalyticsApp {
       topPostContainer.style.flexDirection = 'column';
 
       // --- PIE CHART WIDGET ---
-      perfLogger.start('render.widget.pie');
+      perfLogger.start('dbi:render:widget:pie');
       const pieResult = renderPieWidget(
         pieContainer,
         distributions,
@@ -1533,13 +1533,13 @@ export class UserAnalyticsApp {
         this.context,
         firstUploadDate,
       );
-      perfLogger.end('render.widget.pie');
+      perfLogger.end('dbi:render:widget:pie');
 
       // --- TOP POSTS WIDGET ---
       // Random posts are passed as a Promise so the widget renders now with
       // a placeholder and swaps in the real post when the fetch resolves —
       // keeps Random (the only uncached source) off the blocking path.
-      perfLogger.start('render.widget.topPosts');
+      perfLogger.start('dbi:render:widget:topPosts');
       const topPostsResult = renderTopPostsWidget(
         topPostContainer,
         topPosts,
@@ -1549,7 +1549,7 @@ export class UserAnalyticsApp {
         this.db,
         this.context,
       );
-      perfLogger.end('render.widget.topPosts');
+      perfLogger.end('dbi:render:widget:topPosts');
 
       topStatsRow.appendChild(pieContainer);
       topStatsRow.appendChild(topPostContainer);
@@ -1562,7 +1562,7 @@ export class UserAnalyticsApp {
       dashboardDiv.appendChild(milestonesDiv);
 
       const milestonesResult = await perfLogger.wrap(
-        'render.widget.milestones',
+        'dbi:render:widget:milestones',
         () =>
           renderMilestonesWidget(
             milestonesDiv,
@@ -1580,7 +1580,7 @@ export class UserAnalyticsApp {
       };
 
       // 4. Monthly Activity Chart
-      await perfLogger.wrap('render.widget.history', () =>
+      await perfLogger.wrap('dbi:render:widget:history', () =>
         renderHistoryChart(
           dashboardDiv,
           this.db,
@@ -1594,19 +1594,19 @@ export class UserAnalyticsApp {
       const createdTagsContainer = document.createElement('div');
       createdTagsContainer.style.marginTop = '35px';
       dashboardDiv.appendChild(createdTagsContainer);
-      perfLogger.start('render.widget.createdTags');
+      perfLogger.start('dbi:render:widget:createdTags');
       renderCreatedTagsWidget(
         createdTagsContainer,
         this.dataManager,
         this.context.targetUser,
       );
-      perfLogger.end('render.widget.createdTags');
+      perfLogger.end('dbi:render:widget:createdTags');
 
       // 6. Tag Cloud Widget
       const tagCloudContainer = document.createElement('div');
       tagCloudContainer.style.marginTop = '35px';
       dashboardDiv.appendChild(tagCloudContainer);
-      perfLogger.start('render.widget.tagCloud');
+      perfLogger.start('dbi:render:widget:tagCloud');
       renderTagCloudWidget(tagCloudContainer, {
         initialData: tagCloudGeneral,
         fetchData: (catId: number) =>
@@ -1619,11 +1619,11 @@ export class UserAnalyticsApp {
           {id: 4, label: 'Char', color: '#00ab2c'},
         ],
       });
-      perfLogger.end('render.widget.tagCloud');
+      perfLogger.end('dbi:render:widget:tagCloud');
 
       // 6. Scatter Plot Widget
       if (scatterData.length > 0) {
-        perfLogger.start('render.widget.scatter');
+        perfLogger.start('dbi:render:widget:scatter');
         renderScatterPlot(
           dashboardDiv,
           scatterData,
@@ -1646,7 +1646,9 @@ export class UserAnalyticsApp {
               dataManager.fetchPostDetails(postId),
           },
         );
-        perfLogger.end('render.widget.scatter', {points: scatterData.length});
+        perfLogger.end('dbi:render:widget:scatter', {
+          points: scatterData.length,
+        });
       }
 
       // 7. Footer credit (always last)
@@ -1664,7 +1666,7 @@ export class UserAnalyticsApp {
       scheduleRevalidate('milestones1k', milestones1kStartRevalidate);
       scheduleRevalidate('levelChanges', levelChangesStartRevalidate);
     } finally {
-      perfLogger.end('render.total', perfMeta);
+      perfLogger.end('dbi:render:total', perfMeta);
       this.isRendering = false;
     }
   }
