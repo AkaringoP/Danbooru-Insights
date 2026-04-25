@@ -4,6 +4,11 @@ import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
 import {perfLogger} from './perf-logger';
 import {createLogger} from './logger';
+import {
+  bulkPutSafe,
+  evictOldestNonCurrentUser,
+  requestPersistence,
+} from './quota-manager';
 import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
@@ -1275,7 +1280,7 @@ export class AnalyticsDataManager extends DataManager {
 
       // Fetch Counts Concurrent
       await perfLogger.wrap(
-        'sync.refreshStats.mapConcurrent',
+        'dbi:db:refresh:mapConcurrent',
         () =>
           this.mapConcurrent(top10, 3, async obj => {
             const tagName = obj.tagName;
@@ -1395,7 +1400,7 @@ export class AnalyticsDataManager extends DataManager {
         }));
 
       await perfLogger.wrap(
-        'sync.refreshStats.mapConcurrent',
+        'dbi:db:refresh:mapConcurrent',
         () =>
           this.mapConcurrent(top10, 3, async obj => {
             const tagName = obj.tagName;
@@ -2107,7 +2112,9 @@ export class AnalyticsDataManager extends DataManager {
       }
 
       if (updates.length > 0) {
-        await this.db.posts.bulkPut(updates);
+        await bulkPutSafe(this.db.posts, updates, () =>
+          evictOldestNonCurrentUser(this.db, uploaderId),
+        );
         if (onProgress) onProgress(updated, total);
       }
 
@@ -3167,18 +3174,18 @@ export class AnalyticsDataManager extends DataManager {
       pagesCommitted: 0,
       finalCurrentNo: 0,
     };
-    perfLogger.start('sync.full.total');
+    perfLogger.start('dbi:db:sync:full:total');
 
     try {
       // 1. Get total count
-      const total = await perfLogger.wrap('sync.full.countQuery', () =>
+      const total = await perfLogger.wrap('dbi:db:sync:full:countQuery', () =>
         this.getTotalPostCount(userInfo),
       );
       perfStats.totalPosts = total;
 
       // 2. Resume Check
       // Strategy: overlapping sync (1 month back) to catch updates (score/tags)
-      perfLogger.start('sync.full.resumeCheck');
+      perfLogger.start('dbi:db:sync:full:resumeCheck');
       const newestArr = await this.db.posts
         .where('uploader_id')
         .equals(uploaderId)
@@ -3226,7 +3233,7 @@ export class AnalyticsDataManager extends DataManager {
       }
       perfStats.startId = startId;
       perfStats.initialCurrentNo = currentNo;
-      perfLogger.end('sync.full.resumeCheck', {
+      perfLogger.end('dbi:db:sync:full:resumeCheck', {
         startId,
         initialCurrentNo: currentNo,
         hasHistory: newestArr.length > 0,
@@ -3264,9 +3271,9 @@ export class AnalyticsDataManager extends DataManager {
       let nextExpectedPage = 1;
 
       const worker = async (workerId: number) => {
-        const workerLabel = `sync.full.worker.${workerId}`;
-        const pageLabel = `sync.full.page.w${workerId}`;
-        const bulkPutLabel = `sync.full.bulkPut.w${workerId}`;
+        const workerLabel = `dbi:db:sync:full:worker.${workerId}`;
+        const pageLabel = `dbi:db:sync:full:page.w${workerId}`;
+        const bulkPutLabel = `dbi:db:sync:full:bulkPut.w${workerId}`;
         let pagesFetched = 0;
         let pagesCommittedByWorker = 0;
         perfLogger.start(workerLabel);
@@ -3379,7 +3386,9 @@ export class AnalyticsDataManager extends DataManager {
                   });
 
                   perfLogger.start(bulkPutLabel);
-                  await this.db.posts.bulkPut(bulkData);
+                  await bulkPutSafe(this.db.posts, bulkData, () =>
+                    evictOldestNonCurrentUser(this.db, uploaderId),
+                  );
                   perfLogger.end(bulkPutLabel, {
                     workerId,
                     page: nextExpectedPage,
@@ -3457,8 +3466,13 @@ export class AnalyticsDataManager extends DataManager {
       // If startId was 0, it was a Full Sync; otherwise it's a Partial Sync
       await this.refreshAllStats(userInfo, startId === 0);
       perfStats.finalCurrentNo = currentNo;
+
+      // First successful sync = meaningful engagement signal. Ask the
+      // browser for persistent storage so this user's analytics survive
+      // Safari ITP / Chrome eviction heuristics. Idempotent across calls.
+      await requestPersistence();
     } finally {
-      perfLogger.end('sync.full.total', perfStats);
+      perfLogger.end('dbi:db:sync:full:total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
     }
@@ -3494,14 +3508,14 @@ export class AnalyticsDataManager extends DataManager {
     };
 
     const perfStats = {totalPosts: 0, pages: 0, writtenPosts: 0};
-    perfLogger.start('sync.quick.total');
+    perfLogger.start('dbi:db:sync:quick:total');
 
     try {
       const uploaderId = parseInt(userInfo.id ?? '0');
       const normalizedName = userInfo.name.replace(/ /g, '_');
 
       // 1. Get total count
-      const total = await perfLogger.wrap('sync.quick.countQuery', () =>
+      const total = await perfLogger.wrap('dbi:db:sync:quick:countQuery', () =>
         this.getTotalPostCount(userInfo),
       );
       perfStats.totalPosts = total;
@@ -3517,7 +3531,7 @@ export class AnalyticsDataManager extends DataManager {
       let no = 0;
 
       while (hasMore) {
-        perfLogger.start('sync.quick.page');
+        perfLogger.start('dbi:db:sync:quick:page');
         const pageIndex = perfStats.pages;
 
         const params = new URLSearchParams({
@@ -3535,7 +3549,7 @@ export class AnalyticsDataManager extends DataManager {
           .then((r: Response) => r.json());
 
         if (!Array.isArray(batch) || batch.length === 0) {
-          perfLogger.end('sync.quick.page', {
+          perfLogger.end('dbi:db:sync:quick:page', {
             page: pageIndex,
             cursor: page,
             fetched: 0,
@@ -3571,15 +3585,17 @@ export class AnalyticsDataManager extends DataManager {
           };
         });
 
-        perfLogger.start('sync.quick.bulkPut');
-        await this.db.posts.bulkPut(bulkData);
-        perfLogger.end('sync.quick.bulkPut', {count: bulkData.length});
+        perfLogger.start('dbi:db:sync:quick:bulkPut');
+        await bulkPutSafe(this.db.posts, bulkData, () =>
+          evictOldestNonCurrentUser(this.db, uploaderId),
+        );
+        perfLogger.end('dbi:db:sync:quick:bulkPut', {count: bulkData.length});
 
         reportProgress(no, total);
 
         perfStats.pages++;
         perfStats.writtenPosts += bulkData.length;
-        perfLogger.end('sync.quick.page', {
+        perfLogger.end('dbi:db:sync:quick:page', {
           page: pageIndex,
           cursor: page,
           fetched: batch.length,
@@ -3609,8 +3625,11 @@ export class AnalyticsDataManager extends DataManager {
 
       // 7. Refresh all stats (full sync)
       await this.refreshAllStats(userInfo, true);
+
+      // Engagement signal — see syncAllPosts for rationale.
+      await requestPersistence();
     } finally {
-      perfLogger.end('sync.quick.total', perfStats);
+      perfLogger.end('dbi:db:sync:quick:total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
     }
@@ -3683,43 +3702,43 @@ export class AnalyticsDataManager extends DataManager {
         AnalyticsDataManager.onProgressCallback(current, total, msg);
       }
     };
-    perfLogger.start('sync.refreshStats.total');
+    perfLogger.start('dbi:db:refresh:total');
     try {
       await Promise.all([
-        perfLogger.wrap('sync.refreshStats.status', () =>
+        perfLogger.wrap('dbi:db:refresh:status', () =>
           this.getStatusDistribution(userInfo, null, true),
         ),
-        perfLogger.wrap('sync.refreshStats.rating', () =>
+        perfLogger.wrap('dbi:db:refresh:rating', () =>
           this.getRatingDistribution(userInfo, null, true),
         ),
-        perfLogger.wrap('sync.refreshStats.character', () =>
+        perfLogger.wrap('dbi:db:refresh:character', () =>
           this.getCharacterDistribution(
             userInfo,
             forceRefresh,
             progressReporter,
           ),
         ),
-        perfLogger.wrap('sync.refreshStats.copyright', () =>
+        perfLogger.wrap('dbi:db:refresh:copyright', () =>
           this.getCopyrightDistribution(
             userInfo,
             forceRefresh,
             progressReporter,
           ),
         ),
-        perfLogger.wrap('sync.refreshStats.favCopyright', () =>
+        perfLogger.wrap('dbi:db:refresh:favCopyright', () =>
           this.getFavCopyrightDistribution(userInfo, forceRefresh),
         ),
-        perfLogger.wrap('sync.refreshStats.breasts', () =>
+        perfLogger.wrap('dbi:db:refresh:breasts', () =>
           this.getBreastsDistribution(userInfo, forceRefresh, progressReporter),
         ),
-        perfLogger.wrap('sync.refreshStats.hairLength', () =>
+        perfLogger.wrap('dbi:db:refresh:hairLength', () =>
           this.getHairLengthDistribution(
             userInfo,
             forceRefresh,
             progressReporter,
           ),
         ),
-        perfLogger.wrap('sync.refreshStats.hairColor', () =>
+        perfLogger.wrap('dbi:db:refresh:hairColor', () =>
           this.getHairColorDistribution(
             userInfo,
             forceRefresh,
@@ -3727,36 +3746,36 @@ export class AnalyticsDataManager extends DataManager {
           ),
         ),
         // Always refresh Random Posts
-        perfLogger.wrap('sync.refreshStats.randomPosts', () =>
+        perfLogger.wrap('dbi:db:refresh:randomPosts', () =>
           this.getRandomPosts(userInfo),
         ),
         // Warm the level-change-history cache on every sync — the dashboard
         // always reads it, and the API is cheap compared to the distribution
         // calls above (no per-user search combinatorics).
-        perfLogger.wrap('sync.refreshStats.levelChanges', () =>
+        perfLogger.wrap('dbi:db:refresh:levelChanges', () =>
           this.getLevelChangeHistory(userInfo, true),
         ),
         // Warm the milestones cache for the step=1000 view that renderDashboard
         // always requests. Both NSFW values so toggling is a cache hit too.
-        perfLogger.wrap('sync.refreshStats.milestonesSfw', () =>
+        perfLogger.wrap('dbi:db:refresh:milestonesSfw', () =>
           this.getMilestones(userInfo, false, 1000, true),
         ),
-        perfLogger.wrap('sync.refreshStats.milestonesNsfw', () =>
+        perfLogger.wrap('dbi:db:refresh:milestonesNsfw', () =>
           this.getMilestones(userInfo, true, 1000, true),
         ),
         // Refresh Popular Posts only on Full Sync
         ...(isFullSync
           ? [
-              perfLogger.wrap('sync.refreshStats.topPostsByType', () =>
+              perfLogger.wrap('dbi:db:refresh:topPostsByType', () =>
                 this.getTopPostsByType(userInfo, true),
               ),
-              perfLogger.wrap('sync.refreshStats.recentPopular', () =>
+              perfLogger.wrap('dbi:db:refresh:recentPopular', () =>
                 this.getRecentPopularPosts(userInfo, true),
               ),
-              perfLogger.wrap('sync.refreshStats.topScoreSfw', () =>
+              perfLogger.wrap('dbi:db:refresh:topScoreSfw', () =>
                 this.getTopScorePost(userInfo, 'sfw'),
               ),
-              perfLogger.wrap('sync.refreshStats.topScoreNsfw', () =>
+              perfLogger.wrap('dbi:db:refresh:topScoreNsfw', () =>
                 this.getTopScorePost(userInfo, 'nsfw'),
               ),
             ]
@@ -3765,7 +3784,7 @@ export class AnalyticsDataManager extends DataManager {
     } catch (e: unknown) {
       log.warn('Failed to refresh stats', {error: e});
     } finally {
-      perfLogger.end('sync.refreshStats.total', {isFullSync});
+      perfLogger.end('dbi:db:refresh:total', {isFullSync});
     }
   }
 

@@ -19,10 +19,27 @@ import gtsIgnores from 'gts/eslint.ignores.js';
 export default defineConfig([
   // Ignore build output and ESLint's own config file (which gts's TS parser
   // tries to parse as a script despite `type: "module"` in package.json).
-  {ignores: [...gtsIgnores, 'dist/', 'eslint.config.js']},
+  {
+    ignores: [
+      ...gtsIgnores,
+      'dist/',
+      'eslint.config.js',
+      // Local build-comparison artifact — hand-edited for perf measurement,
+      // not source. Mirrors the .gitignore entry for the same file.
+      'danbooruinsights-main.user.js',
+      // Local benchmark workspace — saved baseline userscripts, captured
+      // DevTools logs, and generated reports. Mirrors the .gitignore entry.
+      'bench/',
+    ],
+  },
   ...gtsRules,
   // Project-wide overrides applied after gts so they take precedence.
+  // The `files` scope must match gts's own TS block — that's where the
+  // `@typescript-eslint` plugin is registered (via `extends: [tseslint.configs.recommended]`).
+  // Without this scope, ESLint tries to apply the `@typescript-eslint/*` rule
+  // to files where the plugin isn't loaded and aborts with a plugin-not-found error.
   {
+    files: ['**/*.ts', '**/*.tsx'],
     rules: {
       // Allow the `_foo` prefix convention for intentionally unused parameters,
       // caught destructures, and rest siblings. Keeps the typical escape hatch

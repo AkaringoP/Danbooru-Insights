@@ -1,4 +1,5 @@
 import Dexie, {type Table} from 'dexie';
+import {createLogger} from './logger';
 import type {
   DailyCountRecord,
   PostRecord,
@@ -9,7 +10,34 @@ import type {
   TagAnalyticsReport,
   GrassSettings,
   UserStatsRecord,
+  MonthlyCountRecord,
+  TagImplicationCacheRecord,
 } from '../types';
+
+const log = createLogger('Database');
+
+/**
+ * Multi-tab `versionchange` handler. Exposed for testability; closes the
+ * database and reloads the page so the upgrading tab in another window
+ * can proceed instead of getting stuck behind us. Per Resolved Decisions
+ * (Task 0.1): no confirm prompt — DanbooruInsights is a read-only widget.
+ */
+export function onVersionChange(db: Dexie): void {
+  db.close();
+  window.location.reload();
+}
+
+/**
+ * Multi-tab `blocked` handler. Exposed for testability. Reaching this
+ * point means another tab is waiting for us to close — `versionchange`
+ * should normally have closed us first, so this is a diagnostic warning
+ * rather than an action.
+ */
+export function onBlocked(): void {
+  log.warn(
+    'DB upgrade blocked by another tab — versionchange handler should have closed us first',
+  );
+}
 
 // --- 1.5 Database (Dexie.js) ---
 /**
@@ -29,6 +57,8 @@ export class Database extends Dexie {
   tag_analytics!: Table<TagAnalyticsReport, string>;
   grass_settings!: Table<GrassSettings, string>;
   user_stats!: Table<UserStatsRecord, string>;
+  tag_monthly_counts!: Table<MonthlyCountRecord, [string, string]>;
+  tag_implications_cache!: Table<TagImplicationCacheRecord, string>;
 
   /**
    * Initializes the database with defined schemas.
@@ -164,5 +194,30 @@ export class Database extends Dexie {
       posts:
         'id, uploader_id, no, created_at, score, rating, tag_count_general, [uploader_id+no], [uploader_id+score], [uploader_id+created_at]',
     });
+
+    // [v12] Tag analytics caching layer for sync-time optimization.
+    // - tag_monthly_counts: persist per-tag, per-month post counts so
+    //   revisits only refetch the current + previous month (matches the
+    //   existing Delta sync rescan window). Compound PK `[tag+yearMonth]`,
+    //   `tag` index for bulk per-tag reads, `fetchedAt` for distance-based
+    //   TTL eviction. See `MonthlyCountRecord` in types.ts.
+    // - tag_implications_cache: global cache for `isTopLevelTag` checks.
+    //   `tag_implications` is effectively immutable; caching here lets
+    //   `fetchRelatedTagDistribution` skip up to 20 API calls per session.
+    //   PK is `tagName` (global, not per-analytics-target).
+    // `tag_analytics.lastFullScanAt` is a new schemaless field (no index)
+    // for the 90-day forced-rescan policy; added in types.ts only.
+    this.version(12).stores({
+      tag_monthly_counts: '[tag+yearMonth], tag, fetchedAt',
+      tag_implications_cache: 'tagName, fetchedAt',
+    });
+
+    // Multi-tab coordination. Without these handlers, opening a newer
+    // userscript build in another tab causes the upgrading tab to deadlock
+    // ('blocked') while the older tab keeps holding a connection at the
+    // previous schema version — surfaced in our v9.3.0 baseline as
+    // "Upgrade 'DanbooruGrassDB' blocked by other connection ..." in S5.
+    this.on('versionchange', () => onVersionChange(this));
+    this.on('blocked', () => onBlocked());
   }
 }

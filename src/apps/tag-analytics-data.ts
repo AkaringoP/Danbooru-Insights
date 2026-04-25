@@ -1,7 +1,7 @@
 import {CONFIG, DAY_MS} from '../config';
 import {createLogger} from '../core/logger';
+import {bulkPutSafe, evictOldestNonCurrentUser} from '../core/quota-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
-import {isTopLevelTag} from '../utils';
 import type {Database} from '../core/database';
 import type {
   DanbooruPost,
@@ -10,10 +10,13 @@ import type {
   DanbooruRelatedTag,
   DanbooruRelatedTagResponse,
   DanbooruCountResponse,
+  DanbooruTagImplication,
   HistoryEntry,
   MilestoneEntry,
   UserRanking,
   TagAnalyticsMeta,
+  MonthlyCountRecord,
+  TagImplicationCacheRecord,
 } from '../types';
 
 type MonthlyCountsData = HistoryEntry[] & {historyCutoff?: string};
@@ -48,7 +51,7 @@ type ReportEntry = {
   post_count?: number;
 };
 
-type RankingResult = {
+export type RankingResult = {
   uploaderAll: UserRanking[];
   approverAll: UserRanking[];
   uploaderYear: UserRanking[];
@@ -59,6 +62,214 @@ type UserEntry = {name: string; level: string};
 type UserEntryWithId = {id: number; name: string; level: string};
 
 const log = createLogger('TagAnalyticsData');
+
+// ---------------------------------------------------------------------------
+// Monthly count cache TTL (pure, exported for testing)
+// ---------------------------------------------------------------------------
+
+/** Milliseconds per day — local copy so TTL logic stays self-contained. */
+const CACHE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Drift threshold above which cached monthly sums force a cache invalidation. */
+export const MONTHLY_CACHE_DRIFT_THRESHOLD = 0.02;
+
+/** Interval after which a full rescan is forced regardless of per-month TTL. */
+export const MONTHLY_CACHE_FULL_RESCAN_MS = 90 * CACHE_DAY_MS;
+
+/**
+ * Distance in whole months from `yearMonth` (`YYYY-MM`) to `now`.
+ * Returns 0 for the current month, 1 for last month, and so on. Negative
+ * values (future months) should not occur in practice but are handled.
+ */
+export function computeMonthsDistance(
+  yearMonth: string,
+  now: Date = new Date(),
+): number {
+  const [y, m] = yearMonth.split('-').map(Number);
+  return (now.getUTCFullYear() - y) * 12 + (now.getUTCMonth() + 1 - m);
+}
+
+/**
+ * Distance-based TTL for monthly count cache entries.
+ *   0–1 months old: always stale (Delta sync owns this window)
+ *   2–12 months: 7 days
+ *   13–36 months: 30 days
+ *   37+ months: 180 days
+ */
+export function isMonthlyCountValid(
+  yearMonth: string,
+  fetchedAt: number,
+  now: number,
+): boolean {
+  const distance = computeMonthsDistance(yearMonth, new Date(now));
+  if (distance <= 1) return false;
+  const age = now - fetchedAt;
+  if (age < 0) return false;
+  if (distance <= 12) return age < 7 * CACHE_DAY_MS;
+  if (distance <= 36) return age < 30 * CACHE_DAY_MS;
+  return age < 180 * CACHE_DAY_MS;
+}
+
+// ---------------------------------------------------------------------------
+// Tag implications cache (top-level tag detection)
+// ---------------------------------------------------------------------------
+
+/** TTL for persisted implication lookups. tag_implications is near-immutable. */
+export const IMPLICATIONS_CACHE_TTL_MS = 180 * CACHE_DAY_MS;
+
+/** Max tag names per batched /tag_implications.json call (URL-length budget). */
+export const IMPLICATIONS_BATCH_CHUNK_SIZE = 50;
+
+/**
+ * Module-level in-memory cache for top-level flags. Populated from the
+ * persistent table on first read and by every successful batch fetch, so
+ * repeat lookups within a session cost zero I/O.
+ */
+const topLevelSessionCache = new Map<string, boolean>();
+
+/** Resets the session cache — exported for tests. */
+export function resetTopLevelSessionCache(): void {
+  topLevelSessionCache.clear();
+}
+
+/**
+ * Parses a /tag_implications.json batch response into a `name → isTopLevel`
+ * map for a given input chunk. Tags present in the chunk but not in the
+ * response are top-level (no implications); tags appearing as
+ * `antecedent_name` in any implication are NOT top-level.
+ *
+ * Pure / exported for testing.
+ */
+export function parseImplicationsResponse(
+  chunk: string[],
+  imps: unknown,
+): Map<string, boolean> {
+  const result = new Map<string, boolean>();
+  chunk.forEach(name => result.set(name, true));
+  if (Array.isArray(imps)) {
+    for (const imp of imps as Array<Partial<DanbooruTagImplication>>) {
+      const name = imp?.antecedent_name;
+      if (name && result.has(name)) {
+        result.set(name, false);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Checks whether a persistent implication cache record is still fresh.
+ * Exported for tests.
+ */
+export function isImplicationCacheValid(
+  fetchedAt: number,
+  now: number,
+): boolean {
+  const age = now - fetchedAt;
+  return age >= 0 && age < IMPLICATIONS_CACHE_TTL_MS;
+}
+
+// ---------------------------------------------------------------------------
+// Related-tag distribution: approximation + SWR helpers
+// ---------------------------------------------------------------------------
+
+/** Minimum total frequency to emit an "Others" slice (0.5%). */
+export const DISTRIBUTION_OTHERS_MIN_FREQ = 0.005;
+
+/** Cumulative frequency cutoff where we stop emitting individual slices. */
+export const DISTRIBUTION_CUTOFF_FREQ = 0.95;
+
+/** Top-N candidates kept after top-level filtering, capped to what the UI needs. */
+export const DISTRIBUTION_TOP_N = 10;
+
+/** Shape of a single slice returned by `buildDistributionApprox`. */
+export interface DistributionSlice {
+  /** Display name (underscores replaced with spaces). */
+  name: string;
+  /** Raw tag name (underscored); `"others"` for the residual slice. */
+  key: string;
+  /** 0..1 frequency from `/related_tag.json`. */
+  frequency: number;
+  /** Approximate post count (`frequency × totalCount`, rounded down). */
+  count: number;
+  /** Present + true only for the residual aggregate slice. */
+  isOther?: boolean;
+}
+
+/**
+ * Builds the sorted top-10 distribution with approximate counts + "Others"
+ * cutoff. Pure / exported for testing.
+ *
+ * Counts are derived as `frequency × totalCount`; the exact per-combination
+ * `/counts/posts.json` query is deferred to `revalidateRelatedTagCounts`
+ * (SWR pattern) so initial render never blocks on 10 serial-rate-limited
+ * requests.
+ */
+export function buildDistributionApprox(
+  filteredCandidates: DanbooruRelatedTag[],
+  totalCount: number,
+): DistributionSlice[] {
+  // Sort defensively before slicing to top-N — the production caller
+  // receives already-sorted input from /related_tag.json, but we don't
+  // want correctness to rely on that assumption.
+  const getFreq = (c: DanbooruRelatedTag): number =>
+    c.related_tag ? c.related_tag.frequency : c.frequency || 0;
+  const sorted = [...filteredCandidates].sort(
+    (a, b) => getFreq(b) - getFreq(a),
+  );
+
+  const topTags: DistributionSlice[] = sorted
+    .slice(0, DISTRIBUTION_TOP_N)
+    .map(item => {
+      const freq = getFreq(item);
+      return {
+        name: item.tag.name.replace(/_/g, ' '),
+        key: item.tag.name,
+        frequency: freq,
+        count: Math.max(0, Math.floor(freq * Math.max(0, totalCount))),
+      };
+    });
+
+  const finalTags: DistributionSlice[] = [];
+  let currentSumFreq = 0;
+  for (const t of topTags) {
+    finalTags.push(t);
+    currentSumFreq += t.frequency;
+    if (currentSumFreq > DISTRIBUTION_CUTOFF_FREQ) break;
+  }
+
+  // Only emit "Others" when there's at least one real slice to be "other"
+  // relative to — a zero-candidate input should yield an empty list, not
+  // a single all-encompassing Others slice.
+  if (finalTags.length > 0) {
+    const remainFreq = Math.max(0, 1 - currentSumFreq);
+    if (remainFreq > DISTRIBUTION_OTHERS_MIN_FREQ) {
+      const othersCount = Math.floor(Math.max(0, totalCount) * remainFreq);
+      if (othersCount > 0) {
+        finalTags.push({
+          name: 'Others',
+          key: 'others',
+          frequency: remainFreq,
+          count: othersCount,
+          isOther: true,
+        });
+      }
+    }
+  }
+
+  return finalTags;
+}
+
+/** Collapses distribution slices into the `{tag: count}` shape the pie chart expects. */
+export function distributionToCountMap(
+  slices: DistributionSlice[],
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const s of slices) {
+    result[s.key] = s.count;
+  }
+  return result;
+}
 
 /**
  * Data service for TagAnalyticsApp.
@@ -72,6 +283,26 @@ export class TagAnalyticsDataService {
     string,
     {name: string; level: string; id?: number | string}
   >;
+
+  /**
+   * Stash for `lastFullScanAt` to be merged into the next `saveToCache`
+   * call. Set by `fetchMonthlyCounts` when a full rescan completes and
+   * the tag_analytics record does not yet exist (first visit).
+   */
+  private _pendingLastFullScanAt: number | null = null;
+
+  /**
+   * Per-session memo for `/tags.json` responses. A single analysis run
+   * calls `fetchTagData` from up to four paths (run, _checkCache,
+   * fetchInitialStats, and the backward-scan retry), each costing ~300ms.
+   * Memoizing eliminates the redundant calls; the 5-minute TTL keeps the
+   * value fresh enough that `post_count` diffs still catch new uploads.
+   */
+  private _tagDataMemo = new Map<
+    string,
+    {value: DanbooruTag | null; ts: number}
+  >();
+  private readonly _tagDataTTL = 5 * 60 * 1000;
 
   constructor(db: Database, rateLimiter: RateLimitedFetch, tagName: string) {
     this.db = db;
@@ -113,13 +344,248 @@ export class TagAnalyticsDataService {
   async saveToCache(data: TagAnalyticsMeta): Promise<void> {
     if (!this.db || !this.db.tag_analytics) return;
     try {
+      // Preserve `lastFullScanAt` across saves: either the value stashed by
+      // `fetchMonthlyCounts` on first-visit full scan, or the existing
+      // value on the record (subsequent saves must not wipe it).
+      let lastFullScanAt: number | undefined;
+      if (this._pendingLastFullScanAt !== null) {
+        lastFullScanAt = this._pendingLastFullScanAt;
+      } else {
+        const existing = await this.db.tag_analytics.get(this.tagName);
+        lastFullScanAt = existing?.lastFullScanAt;
+      }
+
       await this.db.tag_analytics.put({
         tagName: this.tagName,
         updatedAt: Date.now(),
         data: data,
+        lastFullScanAt,
       });
+      this._pendingLastFullScanAt = null;
     } catch (e) {
       log.warn('Cache save failed', {error: e});
+    }
+  }
+
+  /**
+   * Bulk-reads monthly count cache entries for this tag.
+   * Returns a Map keyed by `yearMonth` (missing entries are simply absent).
+   */
+  private async readMonthlyCountsCache(
+    yearMonths: string[],
+  ): Promise<Map<string, MonthlyCountRecord>> {
+    const result = new Map<string, MonthlyCountRecord>();
+    if (!this.db?.tag_monthly_counts || yearMonths.length === 0) return result;
+    try {
+      const keys = yearMonths.map(ym => [this.tagName, ym] as [string, string]);
+      const records = await this.db.tag_monthly_counts.bulkGet(keys);
+      records.forEach((r, i) => {
+        if (r) result.set(yearMonths[i], r);
+      });
+    } catch (e) {
+      log.warn('Failed to read monthly counts cache', {error: e});
+    }
+    return result;
+  }
+
+  /**
+   * Bulk-writes fetched monthly counts into the cache.
+   * `fetchedAt` is stamped once for the whole batch.
+   */
+  private async writeMonthlyCountsCache(
+    entries: Array<{yearMonth: string; count: number}>,
+  ): Promise<void> {
+    if (!this.db?.tag_monthly_counts || entries.length === 0) return;
+    try {
+      const now = Date.now();
+      const records: MonthlyCountRecord[] = entries.map(e => ({
+        tag: this.tagName,
+        yearMonth: e.yearMonth,
+        count: e.count,
+        fetchedAt: now,
+      }));
+      // Tag pages have no current-user context; pass `0` so the evictor
+      // can pick any user's posts as the LRU victim if quota is hit.
+      await bulkPutSafe(this.db.tag_monthly_counts, records, () =>
+        evictOldestNonCurrentUser(this.db!, 0),
+      );
+    } catch (e) {
+      log.warn('Failed to write monthly counts cache', {error: e});
+    }
+  }
+
+  /**
+   * Batched `/tag_implications.json` lookup for top-level detection.
+   *
+   * Only entries from successfully-fetched chunks are included in the
+   * returned map. A chunk failure leaves its tags absent (safe fallback:
+   * callers treat absent as "unknown → default true" without caching).
+   *
+   * Batch size caps URL length; Danbooru's `antecedent_name_comma` supports
+   * multi-name lookups so 20-tag candidate sets collapse to one request.
+   */
+  private async fetchTopLevelTagsBatch(
+    tagNames: string[],
+  ): Promise<Map<string, boolean>> {
+    const result = new Map<string, boolean>();
+    if (tagNames.length === 0) return result;
+
+    for (let i = 0; i < tagNames.length; i += IMPLICATIONS_BATCH_CHUNK_SIZE) {
+      const chunk = tagNames.slice(i, i + IMPLICATIONS_BATCH_CHUNK_SIZE);
+      const url = `/tag_implications.json?search[antecedent_name_comma]=${encodeURIComponent(chunk.join(','))}&limit=1000`;
+      try {
+        const imps = await this.rateLimiter
+          .fetch(url)
+          .then((r: Response) => r.json());
+        const parsed = parseImplicationsResponse(chunk, imps);
+        parsed.forEach((v, k) => result.set(k, v));
+      } catch (e) {
+        log.warn('Batch tag_implications fetch failed', {
+          error: e,
+          chunkSize: chunk.length,
+        });
+        // Leave this chunk's tags unset in result — caller falls back to
+        // safe default (true) without caching the unreliable answer.
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Reads persisted top-level flags for the requested tags, honoring the
+   * 180-day TTL and populating the session cache along the way. Returns a
+   * map only for cache-hit entries; missing/expired entries are absent.
+   */
+  private async readImplicationCache(
+    tagNames: string[],
+  ): Promise<Map<string, boolean>> {
+    const result = new Map<string, boolean>();
+    if (tagNames.length === 0) return result;
+
+    // 1) Session cache fast path.
+    const missing: string[] = [];
+    for (const name of tagNames) {
+      const hit = topLevelSessionCache.get(name);
+      if (hit !== undefined) {
+        result.set(name, hit);
+      } else {
+        missing.push(name);
+      }
+    }
+
+    if (missing.length === 0 || !this.db?.tag_implications_cache) {
+      return result;
+    }
+
+    // 2) Persistent store lookup, filtered by 180d TTL.
+    try {
+      const now = Date.now();
+      const records = await this.db.tag_implications_cache.bulkGet(missing);
+      records.forEach((r, i) => {
+        if (r && isImplicationCacheValid(r.fetchedAt, now)) {
+          result.set(missing[i], r.isTopLevel);
+          topLevelSessionCache.set(missing[i], r.isTopLevel);
+        }
+      });
+    } catch (e) {
+      log.warn('Failed to read tag_implications cache', {error: e});
+    }
+
+    return result;
+  }
+
+  /**
+   * Persists successfully-fetched top-level flags. Session cache is updated
+   * atomically; persistent write is best-effort (failures log a warning).
+   */
+  private async writeImplicationCache(
+    entries: Map<string, boolean>,
+  ): Promise<void> {
+    if (entries.size === 0) return;
+
+    // Update session cache unconditionally — fast, synchronous, always safe.
+    entries.forEach((isTopLevel, tagName) => {
+      topLevelSessionCache.set(tagName, isTopLevel);
+    });
+
+    if (!this.db?.tag_implications_cache) return;
+    try {
+      const now = Date.now();
+      const records: TagImplicationCacheRecord[] = [];
+      entries.forEach((isTopLevel, tagName) => {
+        records.push({tagName, isTopLevel, fetchedAt: now});
+      });
+      // No user context on tag pages — see `tag_monthly_counts` rationale above.
+      await bulkPutSafe(this.db.tag_implications_cache, records, () =>
+        evictOldestNonCurrentUser(this.db!, 0),
+      );
+    } catch (e) {
+      log.warn('Failed to write tag_implications cache', {error: e});
+    }
+  }
+
+  /**
+   * Resolves top-level flags for a list of tags using cache-first strategy.
+   * Cache hits are served immediately; misses are batch-fetched and
+   * persisted. Tags still unresolved after a failed batch fall back to
+   * `true` (treat-as-top-level) so filtering stays permissive.
+   *
+   * Public so `TagAnalyticsApp._fetchPostTags` can share the same cache +
+   * batch pipeline for its copyright-candidate filter.
+   */
+  async getTopLevelFlags(tagNames: string[]): Promise<Map<string, boolean>> {
+    const cached = await this.readImplicationCache(tagNames);
+    const missing = tagNames.filter(n => !cached.has(n));
+    if (missing.length === 0) return cached;
+
+    const fetched = await this.fetchTopLevelTagsBatch(missing);
+    if (fetched.size > 0) {
+      await this.writeImplicationCache(fetched);
+    }
+
+    // Merge: fetched → cached, and fill remaining gaps with the safe
+    // default (true) without persisting them.
+    for (const name of missing) {
+      if (fetched.has(name)) {
+        cached.set(name, fetched.get(name) as boolean);
+      } else {
+        cached.set(name, true);
+      }
+    }
+    return cached;
+  }
+
+  /** Drops every cached monthly count for this tag (drift invalidation). */
+  private async invalidateMonthlyCountsCache(): Promise<void> {
+    if (!this.db?.tag_monthly_counts) return;
+    try {
+      await this.db.tag_monthly_counts
+        .where('tag')
+        .equals(this.tagName)
+        .delete();
+    } catch (e) {
+      log.warn('Failed to invalidate monthly counts cache', {error: e});
+    }
+  }
+
+  /**
+   * Persists the "last full scan" timestamp for this tag.
+   * Updates the existing tag_analytics record in place if present; otherwise
+   * stashes into `_pendingLastFullScanAt` for the next `saveToCache` call.
+   */
+  private async persistFullScanMarker(ts: number): Promise<void> {
+    if (!this.db?.tag_analytics) return;
+    try {
+      const existing = await this.db.tag_analytics.get(this.tagName);
+      if (existing) {
+        existing.lastFullScanAt = ts;
+        await this.db.tag_analytics.put(existing);
+      } else {
+        this._pendingLastFullScanAt = ts;
+      }
+    } catch (e) {
+      log.warn('Failed to persist full scan marker', {error: e});
     }
   }
 
@@ -169,6 +635,29 @@ export class TagAnalyticsDataService {
     if (typeof days === 'number' && days > 0) {
       localStorage.setItem('danbooru_tag_analytics_retention', String(days));
     }
+  }
+
+  /**
+   * Wipes every per-tag cache entry for the tag this service was constructed
+   * for — the tag_analytics record itself and all tag_monthly_counts rows.
+   * Leaves the global `tag_implications_cache` alone (it's TTL-managed and
+   * shared across tags; evicting it here would penalise unrelated lookups).
+   *
+   * Called by the "reset data" UI button. After this runs, the next
+   * analytics request for the tag performs a full fresh sync — no auto
+   * re-fetch inside this call (by design; matches UserAnalyticsApp's
+   * reset UX where the user explicitly re-triggers the sync).
+   */
+  async resetTagCache(): Promise<void> {
+    if (!this.db) return;
+    if (this.db.tag_analytics) {
+      await this.db.tag_analytics.delete(this.tagName);
+    }
+    await this.invalidateMonthlyCountsCache();
+    // Reset session state so a later re-open within the same page load
+    // doesn't carry stale scan markers or user name lookups.
+    this._pendingLastFullScanAt = null;
+    this.userNames = {};
   }
 
   /**
@@ -506,6 +995,15 @@ export class TagAnalyticsDataService {
     tagName: string,
     categoryId: number,
     totalTagCount: number,
+    opts: {
+      /**
+       * Optional SWR hook. When provided, initial approximate counts are
+       * returned immediately and exact `/counts/posts.json` lookups run
+       * in the background, invoking `onExactCounts` once complete. Omit
+       * to disable SWR (returns approximations only, no background fetch).
+       */
+      onExactCounts?: (counts: Record<string, number>) => void;
+    } = {},
   ): Promise<Record<string, number> | null> {
     const catName = categoryId === 3 ? 'Copyright' : 'Character';
 
@@ -519,97 +1017,95 @@ export class TagAnalyticsDataService {
       if (!resp || !resp.related_tags || !Array.isArray(resp.related_tags))
         return null;
 
-      const tags: DanbooruRelatedTag[] = resp.related_tags; // [{ "tag": {...}, "frequency": 0.5, "related_tag": {...} }]
+      const tags: DanbooruRelatedTag[] = resp.related_tags;
 
       // Limit to top 20 candidates for performance
       const candidates: DanbooruRelatedTag[] = tags.slice(0, 20);
 
-      // 2. Filter Top-Level (Check Implications)
-      const checks = await Promise.all(
-        candidates.map(async (item: DanbooruRelatedTag) =>
-          (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
-        ),
+      // 2. Filter Top-Level via a SINGLE batched implications lookup
+      //    (previously 20 serial-rate-limited calls). Session + 180d
+      //    persistent cache make this ~free after warmup.
+      const flags = await this.getTopLevelFlags(
+        candidates.map(c => c.tag.name),
+      );
+      const filtered = candidates.filter(
+        item => flags.get(item.tag.name) === true,
       );
 
-      const filtered = checks.filter(
-        (item): item is DanbooruRelatedTag => item !== null,
-      );
+      // 3. Build approximate distribution from frequency × totalCount.
+      //    No per-combination /counts/posts.json queries here — the SWR
+      //    background fetch below supplies exact values without blocking
+      //    the initial render.
+      const slices = buildDistributionApprox(filtered, totalTagCount);
+      const approxResult = distributionToCountMap(slices);
 
-      // 3. Take Top 10 by Frequency
-      // Note: related_tag.json response item has `related_tag` property with `frequency`.
-      // UserAnalyticsApp used `item.frequency` on the item itself?
-      // Let's assume the root item has frequency or handle both.
-      // Actually, let's map carefully.
-      const topTags = filtered.slice(0, 10).map(item => ({
-        name: item.tag.name.replace(/_/g, ' '),
-        key: item.tag.name,
-        frequency: item.related_tag
-          ? item.related_tag.frequency
-          : item.frequency || 0,
-        count: 0,
-      }));
+      // 4. SWR: kick off exact per-combination count fetches in the
+      //    background. Fire-and-forget; callers that opted in via
+      //    `opts.onExactCounts` receive the refined map when ready.
+      if (opts.onExactCounts && slices.length > 0) {
+        void this.revalidateRelatedTagCounts(
+          tagName,
+          slices,
+          opts.onExactCounts,
+        );
+      }
 
-      // 4. Fetch Counts
+      return approxResult;
+    } catch (e) {
+      log.warn(`Failed to fetch ${catName} distribution`, {error: e});
+      return null;
+    }
+  }
+
+  /**
+   * Background refetch of exact per-combination counts (SWR swap-in).
+   *
+   * Runs 10 parallel `/counts/posts.json` queries through the rate-limited
+   * queue; per-slice failures keep the approximate count instead. Errors
+   * are logged at debug level so a noisy network doesn't spam the console.
+   */
+  private async revalidateRelatedTagCounts(
+    tagName: string,
+    slices: DistributionSlice[],
+    onExactCounts: (counts: Record<string, number>) => void,
+  ): Promise<void> {
+    try {
+      const fetchable = slices.filter(s => !s.isOther);
+      const resolved: Record<string, number> = {};
+
       await Promise.all(
-        topTags.map(async obj => {
+        fetchable.map(async slice => {
           try {
-            const query = `${tagName} ${obj.key}`;
+            const query = `${tagName} ${slice.key}`;
             const cUrl = `/counts/posts.json?tags=${encodeURIComponent(query)}`;
             const cResp = await this.rateLimiter
               .fetch(cUrl)
               .then((r: Response) => r.json());
-            const c =
+            const exact =
               (cResp && cResp.counts
                 ? cResp.counts.posts
                 : cResp
                   ? cResp.posts
                   : 0) || 0;
-            obj.count = c;
+            resolved[slice.key] = exact;
           } catch (e) {
-            log.debug('Failed to fetch combined tag count', {error: e});
+            log.debug('SWR exact count fetch failed, keeping approx', {
+              tag: slice.key,
+              error: e,
+            });
+            resolved[slice.key] = slice.count;
           }
         }),
       );
 
-      // 5. Accumulate Frequency for Cutoff
-      const finalTags = [];
-      let currentSumFreq = 0.0;
-      const threshold = 0.95;
+      // Pass-through the "Others" slice — it's already an aggregate
+      // estimate from (1 - cumulative frequency) × totalCount.
+      const others = slices.find(s => s.isOther);
+      if (others) resolved[others.key] = others.count;
 
-      // Ensure sorted descending by frequency
-      topTags.sort((a, b) => b.frequency - a.frequency);
-
-      for (const t of topTags) {
-        finalTags.push(t);
-        currentSumFreq += t.frequency;
-        if (currentSumFreq > threshold) break;
-      }
-
-      // Calculate Others
-      const remainFreq = Math.max(0, 1.0 - currentSumFreq);
-      if (remainFreq > 0.005) {
-        // Show if > 0.5%
-        const othersCount = Math.floor(totalTagCount * remainFreq);
-        if (othersCount > 0) {
-          finalTags.push({
-            name: 'Others',
-            key: 'others',
-            count: othersCount,
-            isOther: true,
-          });
-        }
-      }
-
-      // Return Object for Pie Chart
-      const result: Record<string, number> = {};
-      finalTags.forEach(t => {
-        result[t.key] = t.count;
-      });
-
-      return result;
+      onExactCounts(resolved);
     } catch (e) {
-      log.warn(`Failed to fetch ${catName} distribution`, {error: e});
-      return null;
+      log.debug('SWR revalidation aborted', {error: e});
     }
   }
 
@@ -698,7 +1194,10 @@ export class TagAnalyticsDataService {
     lastDate: Date | string,
     startDate: Date | string,
   ): Promise<HistoryEntry[]> {
-    if (!lastDate) return this.fetchMonthlyCounts(tagName, startDate);
+    if (!lastDate) {
+      // Falling through to full scan — let the caching layer treat it as such.
+      return this.fetchMonthlyCounts(tagName, startDate, {isFullScan: true});
+    }
 
     // Delta Sync: Check last 2 months only
     const now = new Date();
@@ -711,6 +1210,8 @@ export class TagAnalyticsDataService {
         ? twoMonthsAgo
         : lastDate || startDate;
 
+    // Delta path: isFullScan=false (default) so forced-rescan/drift guard
+    // stay idle; the two months in range are always TTL-stale and get fetched.
     return this.fetchMonthlyCounts(tagName, effectiveStart);
   }
 
@@ -912,14 +1413,29 @@ export class TagAnalyticsDataService {
 
   /**
    * Fetches monthly post counts for the tag since the start date.
-   * Iterates month by month to build a complete history.
-   * @param {string} tagName The tag name.
-   * @param {!Date} startDate The date to start fetching from.
-   * @return {Promise<!Array<{date: !Date, count: number, cumulative: number}>>} Array of monthly data.
+   *
+   * Cache-aware path: when the `tag_monthly_counts` table has entries for
+   * months outside the Delta sync window (current + previous month), those
+   * counts are reused subject to distance-based TTL. Freshly fetched months
+   * are written back to the cache. On a full-range call, a 2% drift guard
+   * compares cached sum to `opts.totalCount`; a 90-day forced rescan bypasses
+   * cache entirely to recover from slow erosion the drift guard misses.
+   *
+   * @param tagName The tag name.
+   * @param startDate The date to start fetching from.
+   * @param opts Optional caching hints. `isFullScan` should be true only when
+   *   the call covers the full historical range (enables forced-rescan and
+   *   drift guard). `totalCount` enables the drift guard. `skipCache` forces
+   *   a fresh network fetch for every month.
    */
   async fetchMonthlyCounts(
     tagName: string,
     startDate: Date | string,
+    opts: {
+      totalCount?: number;
+      isFullScan?: boolean;
+      skipCache?: boolean;
+    } = {},
   ): Promise<MonthlyCountsData> {
     const startDateObj =
       startDate instanceof Date ? startDate : new Date(startDate);
@@ -928,18 +1444,13 @@ export class TagAnalyticsDataService {
     const startMonth = startDateObj.getMonth(); // 0-based
 
     const now = new Date();
-    const monthlyData: MonthlyCountsData = [];
-    let cumulative = 0;
+    const nowMs = now.getTime();
 
     // Iterate Month by Month
-    // Note: This could be many requests.
-    // Example: 2005 to 2026 = 21 years * 12 = 252 requests.
-    // Rate Limit: 6 req/s => ~42 seconds total.
-    // Optimization: Parallelize by year?
-    // User said "Start from first upload month... iteratively".
-    // We will generate all promises and feed them to RateLimiter.
-
-    const tasks = [];
+    // Example full range: 2005 to 2026 = 21 years * 12 = 252 requests @ 6rps ≈ 42s.
+    // The cache layer below lets revisits reuse most of that work.
+    type Task = {dateStr: string; yearMonth: string; queryDate: string};
+    const tasks: Task[] = [];
     // Use UTC to avoid timezone shifts in labels (April appearing as March)
     const current = new Date(Date.UTC(startYear, startMonth, 1));
 
@@ -947,6 +1458,7 @@ export class TagAnalyticsDataService {
       const y = current.getUTCFullYear();
       const m = current.getUTCMonth() + 1; // 1-based for API
       const dateStr = `${y}-${String(m).padStart(2, '0')}-01`;
+      const yearMonth = `${y}-${String(m).padStart(2, '0')}`;
 
       // Next Month for Range
       const nextMonth = new Date(current);
@@ -957,66 +1469,198 @@ export class TagAnalyticsDataService {
       // Danbooru counts API needs the date filter INSIDE the tags parameter
       let rangeEnd = `${nextY}-${String(nextM).padStart(2, '0')}-01`;
 
-      // [OPTIMIZATION] If next month is in the future, cap the range at NOW to ensure consistency
-      // This prevents race conditions where new posts are added during the fetch.
+      // [OPTIMIZATION] Cap range at NOW when the month is the current one to
+      // avoid race conditions with posts added during the fetch.
       if (nextMonth > now) {
-        rangeEnd = now.toISOString(); // Use full timestamp
+        rangeEnd = now.toISOString();
       }
 
       const queryDate = `${y}-${String(m).padStart(2, '0')}-01...${rangeEnd}`;
 
-      tasks.push({
-        dateObj: new Date(current), // Clone
-        dateStr,
-        queryDate,
-      });
+      tasks.push({dateStr, yearMonth, queryDate});
 
       current.setUTCMonth(current.getUTCMonth() + 1);
     }
 
-    // Create Promises
-    const promises = tasks.map(task => {
-      const params = new URLSearchParams({
-        tags: `${tagName} status:any date:${task.queryDate}`, // Correct: date must be in tags
-      });
-      const url = `/counts/posts.json?${params.toString()}`;
+    // -------------------------------------------------------------------
+    // Cache layer
+    // -------------------------------------------------------------------
+    const cacheEnabled =
+      !opts.skipCache && this.db?.tag_monthly_counts !== undefined;
 
-      return this.rateLimiter
-        .fetch(url)
-        .then((r: Response) => r.json())
-        .then((data: DanbooruCountResponse) => {
-          // Handle different response formats: { "counts": { "posts": N } } or { "posts": N }
-          const count =
-            (data && data.counts ? data.counts.posts : data ? data.posts : 0) ||
-            0;
-          return {
-            date: task.dateStr,
-            count: count,
-            cumulative: 0,
-          };
-        })
-        .catch((e: unknown) => {
-          log.warn(`Failed month ${task.dateStr}`, {error: e});
-          return {date: task.dateStr, count: 0, cumulative: 0};
+    // 90-day forced rescan — only meaningful on a full-range call. First
+    // visits (lastScan === 0) also take this path so we always mark the
+    // scan timestamp after a successful first fetch.
+    let forcedFullScan = false;
+    if (cacheEnabled && opts.isFullScan) {
+      const lastScan = await this.getLastFullScanAt();
+      if (lastScan === 0 || nowMs - lastScan > MONTHLY_CACHE_FULL_RESCAN_MS) {
+        forcedFullScan = true;
+        log.debug('Monthly cache: forced full rescan', {
+          tag: tagName,
+          lastScan,
+          ageDays:
+            lastScan === 0
+              ? null
+              : Math.round((nowMs - lastScan) / CACHE_DAY_MS),
         });
-    });
+      }
+    }
 
-    // Execute all via Rate Limit
-    const results = await Promise.all(promises);
+    // Read cache (unless forced-rescan / cache disabled)
+    let cached = new Map<string, MonthlyCountRecord>();
+    if (cacheEnabled && !forcedFullScan) {
+      cached = await this.readMonthlyCountsCache(tasks.map(t => t.yearMonth));
 
-    // Sort and Accumulate
-    results.sort((a, b) => a.date.localeCompare(b.date));
+      // Drift guard — only runs on full-range call with near-complete cache.
+      // Compares cached sum to remote totalCount; > 2% drift invalidates.
+      if (
+        opts.isFullScan &&
+        opts.totalCount !== undefined &&
+        opts.totalCount > 0 &&
+        tasks.length > 0 &&
+        cached.size / tasks.length > 0.95
+      ) {
+        let cachedSum = 0;
+        cached.forEach(r => {
+          cachedSum += r.count;
+        });
+        const drift = Math.abs(cachedSum - opts.totalCount) / opts.totalCount;
+        if (drift > MONTHLY_CACHE_DRIFT_THRESHOLD) {
+          log.warn('Monthly cache drift detected, invalidating', {
+            tag: tagName,
+            cachedSum,
+            totalCount: opts.totalCount,
+            drift,
+          });
+          await this.invalidateMonthlyCountsCache();
+          cached = new Map();
+          forcedFullScan = true;
+        }
+      }
+    }
 
-    results.forEach(item => {
+    // Split tasks into cache-hit and needs-fetch
+    const cachedResults: HistoryEntry[] = [];
+    const fetchTasks: Task[] = [];
+    for (const task of tasks) {
+      const entry = forcedFullScan ? undefined : cached.get(task.yearMonth);
+      if (
+        entry &&
+        isMonthlyCountValid(task.yearMonth, entry.fetchedAt, nowMs)
+      ) {
+        cachedResults.push({
+          date: task.dateStr,
+          count: entry.count,
+          cumulative: 0,
+        });
+      } else {
+        fetchTasks.push(task);
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Network fetch for missing/expired months
+    // -------------------------------------------------------------------
+    const fetchedResults = await Promise.all(
+      fetchTasks.map(task => {
+        const params = new URLSearchParams({
+          tags: `${tagName} status:any date:${task.queryDate}`,
+        });
+        const url = `/counts/posts.json?${params.toString()}`;
+
+        return this.rateLimiter
+          .fetch(url)
+          .then((r: Response) => r.json())
+          .then((data: DanbooruCountResponse) => {
+            const count =
+              (data && data.counts
+                ? data.counts.posts
+                : data
+                  ? data.posts
+                  : 0) || 0;
+            return {
+              date: task.dateStr,
+              yearMonth: task.yearMonth,
+              count,
+              ok: true as const,
+            };
+          })
+          .catch((e: unknown) => {
+            log.warn(`Failed month ${task.dateStr}`, {error: e});
+            return {
+              date: task.dateStr,
+              yearMonth: task.yearMonth,
+              count: 0,
+              ok: false as const,
+            };
+          });
+      }),
+    );
+
+    // -------------------------------------------------------------------
+    // Write fetched results back to cache (only successful fetches)
+    // -------------------------------------------------------------------
+    if (cacheEnabled) {
+      const toWrite = fetchedResults
+        .filter(r => r.ok)
+        .map(r => ({yearMonth: r.yearMonth, count: r.count}));
+      if (toWrite.length > 0) {
+        await this.writeMonthlyCountsCache(toWrite);
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Persist last-full-scan marker when this was a forced full scan AND
+    // every task actually went to the network successfully. Partial failures
+    // mean we can't vouch for the cache's completeness, so we skip the mark.
+    // -------------------------------------------------------------------
+    if (
+      cacheEnabled &&
+      forcedFullScan &&
+      fetchTasks.length === tasks.length &&
+      fetchedResults.every(r => r.ok)
+    ) {
+      await this.persistFullScanMarker(nowMs);
+    }
+
+    // -------------------------------------------------------------------
+    // Combine cached + fetched, sort chronologically, compute cumulative
+    // -------------------------------------------------------------------
+    const combined: HistoryEntry[] = [
+      ...cachedResults,
+      ...fetchedResults.map(r => ({
+        date: r.date,
+        count: r.count,
+        cumulative: 0,
+      })),
+    ];
+    combined.sort((a, b) => a.date.localeCompare(b.date));
+
+    let cumulative = 0;
+    for (const item of combined) {
       cumulative += item.count;
       item.cumulative = cumulative;
-      monthlyData.push(item);
-    });
+    }
 
-    // Attach the cutoff time (now) to the array for consistency check
+    const monthlyData: MonthlyCountsData = combined;
     monthlyData.historyCutoff = now.toISOString();
-
     return monthlyData;
+  }
+
+  /**
+   * Reads the last full-scan timestamp from the tag_analytics record.
+   * Returns 0 if the record does not exist or the field is absent.
+   */
+  private async getLastFullScanAt(): Promise<number> {
+    if (!this.db?.tag_analytics) return 0;
+    try {
+      const record = await this.db.tag_analytics.get(this.tagName);
+      return record?.lastFullScanAt ?? 0;
+    } catch (e) {
+      log.warn('Failed to read lastFullScanAt', {error: e});
+      return 0;
+    }
   }
 
   /**
@@ -1544,6 +2188,10 @@ export class TagAnalyticsDataService {
   }
 
   async fetchTagData(tagName: string): Promise<DanbooruTag | null> {
+    const cached = this._tagDataMemo.get(tagName);
+    if (cached && Date.now() - cached.ts < this._tagDataTTL) {
+      return cached.value;
+    }
     try {
       // use name_matches to find the exact tag
       const url = `/tags.json?search[name_matches]=${encodeURIComponent(tagName)}`;
@@ -1551,12 +2199,14 @@ export class TagAnalyticsDataService {
         .fetch(url)
         .then((r: Response) => r.json());
 
+      let result: DanbooruTag | null = null;
       if (Array.isArray(resp) && resp.length > 0) {
         // Find exact match to be safe
         const exact = resp.find(t => t.name === tagName);
-        return exact || resp[0];
+        result = exact || resp[0];
       }
-      return null;
+      this._tagDataMemo.set(tagName, {value: result, ts: Date.now()});
+      return result;
     } catch (e) {
       log.error('Tag fetch error', {error: e});
       return null;

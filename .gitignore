@@ -32,3 +32,13 @@ checklist.md
 
 # Task archive (local-only translated TASK.md snapshots)
 .archive/
+
+# Local build-comparison artifact (manually-saved alternate-branch userscript
+# for side-by-side perf measurement; not source, not produced by the build).
+danbooruinsights-main.user.js
+
+# Local benchmark workspace — saved baseline userscripts, captured DevTools
+# console logs from manual A/B runs, and generated comparison reports.
+# Created during Phase 0 of feature/db-strategy-upgrade. See PLAN.md
+# "성능 비교 전략" and TASK.md Tasks 0.2 ~ 4.2.
+bench/

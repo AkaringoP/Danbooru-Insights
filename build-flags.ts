@@ -52,3 +52,22 @@ export function detectDebugLoggingEnabled(): boolean {
   if (process.env.DI_DEBUG === '1') return true;
   return getCurrentBranch() !== 'main';
 }
+
+/**
+ * Build-time variant: selects the UserScript metadata flavor (name, namespace,
+ * updateURL branch) baked into the bundle header.
+ *
+ * Resolution order:
+ *   1. `DI_BUILD_VARIANT=prod` or `=dev` — explicit override always wins.
+ *   2. `prod` on the `main` branch (release builds).
+ *   3. `dev` on every other branch (develop / feature / hotfix).
+ *
+ * The `dev` variant uses a distinct `@name` and `@namespace` so it can be
+ * installed alongside the release build in Tampermonkey without collision.
+ */
+export function detectBuildVariant(): 'dev' | 'prod' {
+  const override = process.env.DI_BUILD_VARIANT;
+  if (override === 'prod') return 'prod';
+  if (override === 'dev') return 'dev';
+  return getCurrentBranch() === 'main' ? 'prod' : 'dev';
+}
