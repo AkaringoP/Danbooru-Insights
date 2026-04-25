@@ -1,4 +1,5 @@
 import Dexie, {type Table} from 'dexie';
+import {createLogger} from './logger';
 import type {
   DailyCountRecord,
   PostRecord,
@@ -12,6 +13,31 @@ import type {
   MonthlyCountRecord,
   TagImplicationCacheRecord,
 } from '../types';
+
+const log = createLogger('Database');
+
+/**
+ * Multi-tab `versionchange` handler. Exposed for testability; closes the
+ * database and reloads the page so the upgrading tab in another window
+ * can proceed instead of getting stuck behind us. Per Resolved Decisions
+ * (Task 0.1): no confirm prompt — DanbooruInsights is a read-only widget.
+ */
+export function onVersionChange(db: Dexie): void {
+  db.close();
+  window.location.reload();
+}
+
+/**
+ * Multi-tab `blocked` handler. Exposed for testability. Reaching this
+ * point means another tab is waiting for us to close — `versionchange`
+ * should normally have closed us first, so this is a diagnostic warning
+ * rather than an action.
+ */
+export function onBlocked(): void {
+  log.warn(
+    'DB upgrade blocked by another tab — versionchange handler should have closed us first',
+  );
+}
 
 // --- 1.5 Database (Dexie.js) ---
 /**
@@ -185,5 +211,13 @@ export class Database extends Dexie {
       tag_monthly_counts: '[tag+yearMonth], tag, fetchedAt',
       tag_implications_cache: 'tagName, fetchedAt',
     });
+
+    // Multi-tab coordination. Without these handlers, opening a newer
+    // userscript build in another tab causes the upgrading tab to deadlock
+    // ('blocked') while the older tab keeps holding a connection at the
+    // previous schema version — surfaced in our v9.3.0 baseline as
+    // "Upgrade 'DanbooruGrassDB' blocked by other connection ..." in S5.
+    this.on('versionchange', () => onVersionChange(this));
+    this.on('blocked', () => onBlocked());
   }
 }

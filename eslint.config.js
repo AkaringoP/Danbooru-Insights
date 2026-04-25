@@ -27,6 +27,9 @@ export default defineConfig([
       // Local build-comparison artifact — hand-edited for perf measurement,
       // not source. Mirrors the .gitignore entry for the same file.
       'danbooruinsights-main.user.js',
+      // Local benchmark workspace — saved baseline userscripts, captured
+      // DevTools logs, and generated reports. Mirrors the .gitignore entry.
+      'bench/',
     ],
   },
   ...gtsRules,

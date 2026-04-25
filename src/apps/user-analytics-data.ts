@@ -110,7 +110,7 @@ export class UserAnalyticsDataService {
 
     // 1. Fetch Summary Stats first (Local DB) to get starting date for optimizations
     const summaryStats = await perfLogger.wrap(
-      'render.fetchData.summaryStats',
+      'dbi:net:fetchData:summaryStats',
       () => dataManager.getSummaryStats(user),
     );
     const {firstUploadDate} = summaryStats;
@@ -120,7 +120,7 @@ export class UserAnalyticsDataService {
     // intentionally uncached (every open should produce a new pick), so it
     // would otherwise dominate the fetchData tail (~1.3s).
     const randomPostsPromise = perfLogger.wrap(
-      'render.fetchData.randomPosts',
+      'dbi:net:fetchData:randomPosts',
       () => dataManager.getRandomPosts(user),
     );
 
@@ -144,18 +144,18 @@ export class UserAnalyticsDataService {
     ] = await Promise.all([
       prefetched
         ? Promise.resolve(prefetched.syncStats)
-        : perfLogger.wrap('render.fetchData.syncStats', () =>
+        : perfLogger.wrap('dbi:net:fetchData:syncStats', () =>
             dataManager.getSyncStats(user),
           ),
       prefetched
         ? Promise.resolve(prefetched.totalCount)
-        : perfLogger.wrap('render.fetchData.totalCount', () =>
+        : perfLogger.wrap('dbi:net:fetchData:totalCount', () =>
             dataManager.getTotalPostCount(user),
           ),
       // Distributions that were already cache-first before this work:
       // they hit piestats immediately and need no SWR (their cache is
       // only warmed on explicit sync, which is the existing behaviour).
-      perfLogger.wrap('render.fetchData.distributions', () =>
+      perfLogger.wrap('dbi:net:fetchData:distributions', () =>
         Promise.all([
           dataManager.getCharacterDistribution(user),
           dataManager.getCopyrightDistribution(user),
@@ -198,14 +198,14 @@ export class UserAnalyticsDataService {
         'status_dist',
         uploaderId,
         () => dataManager.getStatusDistribution(user, firstUploadDate, true),
-        'render.fetchData.status',
+        'dbi:net:fetchData:status',
       ),
       swrStats(
         dataManager,
         'rating_dist',
         uploaderId,
         () => dataManager.getRatingDistribution(user, firstUploadDate, true),
-        'render.fetchData.rating',
+        'dbi:net:fetchData:rating',
       ),
       // SWR: return cached value now, revalidate in background. fresh fetch
       // uses forceRefresh=true so it bypasses the in-method cache and
@@ -215,23 +215,23 @@ export class UserAnalyticsDataService {
         'top_posts_by_type',
         uploaderId,
         () => dataManager.getTopPostsByType(user, true),
-        'render.fetchData.topPosts',
+        'dbi:net:fetchData:topPosts',
       ),
       swrStats(
         dataManager,
         'recent_popular_posts',
         uploaderId,
         () => dataManager.getRecentPopularPosts(user, true),
-        'render.fetchData.recentPopular',
+        'dbi:net:fetchData:recentPopular',
       ),
       swrStats(
         dataManager,
         `milestones_1000_${isNsfwEnabled ? '1' : '0'}`,
         uploaderId,
         () => dataManager.getMilestones(user, isNsfwEnabled, 1000, true),
-        'render.fetchData.milestones1k',
+        'dbi:net:fetchData:milestones1k',
       ),
-      perfLogger.wrap('render.fetchData.scatterData', () =>
+      perfLogger.wrap('dbi:net:fetchData:scatterData', () =>
         dataManager.getScatterData(user),
       ),
       swrStats(
@@ -239,18 +239,18 @@ export class UserAnalyticsDataService {
         'level_change_history',
         uploaderId,
         () => dataManager.getLevelChangeHistory(user, true),
-        'render.fetchData.levelChanges',
+        'dbi:net:fetchData:levelChanges',
       ),
-      perfLogger.wrap('render.fetchData.timelineMilestones', () =>
+      perfLogger.wrap('dbi:net:fetchData:timelineMilestones', () =>
         dataManager.getTimelineMilestones(user),
       ),
-      perfLogger.wrap('render.fetchData.tagCloudGeneral', () =>
+      perfLogger.wrap('dbi:net:fetchData:tagCloudGeneral', () =>
         dataManager.getTagCloudData(user, 0),
       ),
-      perfLogger.wrap('render.fetchData.userStats', () =>
+      perfLogger.wrap('dbi:net:fetchData:userStats', () =>
         dataManager.getUserStats(user),
       ),
-      perfLogger.wrap('render.fetchData.needsBackfill', () =>
+      perfLogger.wrap('dbi:net:fetchData:needsBackfill', () =>
         dataManager.needsPostMetadataBackfill(user),
       ),
     ]);
