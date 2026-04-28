@@ -624,8 +624,7 @@ export function renderPieWidget(
             'd',
             (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
           )
-          .style('opacity', '1')
-          .style('filter', 'drop-shadow(0px 0px 8px rgba(255,255,255,0.4))');
+          .style('opacity', '1');
 
         // Show tooltip (same HTML building logic as mouseover)
         let html = '';
@@ -936,7 +935,23 @@ export function renderPieWidget(
       if (mode && currentPieTab !== mode) {
         currentPieTab = mode;
         updatePieTabs();
-        void loadTab(mode);
+
+        // Mobile-only fade-blur transition between tabs.
+        // The CSS rule (.di-pie-blurring) is scoped to @media (max-width: 768px),
+        // so adding the class on desktop is a no-op.
+        const pieContent = container.querySelector(
+          '.pie-content',
+        ) as HTMLElement | null;
+        pieContent?.classList.add('di-pie-blurring');
+        const minBlurMs = 380;
+        const minBlur = new Promise<void>(resolve =>
+          setTimeout(resolve, minBlurMs),
+        );
+        void Promise.all([loadTab(mode), minBlur]).then(() => {
+          if (currentPieTab === mode) {
+            pieContent?.classList.remove('di-pie-blurring');
+          }
+        });
       }
     }
   });
