@@ -804,6 +804,18 @@ export const GLOBAL_CSS = `
         align-items: center !important;
         justify-content: center !important;
       }
+      /* Mobile-only fade-blur applied during pie-tab switches.
+         Legend (.danbooru-grass-legend-scroll) stays crisp — only the
+         chart wrapper / loading state blurs. */
+      .pie-content > * {
+        transition:
+          filter 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+          opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      .pie-content.di-pie-blurring > :not(.danbooru-grass-legend-scroll) {
+        filter: blur(6px);
+        opacity: 0.5;
+      }
       .danbooru-grass-legend-scroll {
         margin-left: 0 !important;
         margin-top: 10px !important;
@@ -892,6 +904,24 @@ export const GLOBAL_CSS = `
       }
       #danbooru-grass-column {
         flex-basis: 100% !important;
+      }
+
+      /* Grass containers must not overflow viewport on mobile.
+         Inline min-width / padding from graph-renderer.ts assume desktop
+         layout; force border-box + clamp so the wrapper's right edge stays
+         inside the viewport instead of triggering a body horizontal scroll. */
+      #danbooru-grass-column,
+      #danbooru-grass-container,
+      #danbooru-grass-panel {
+        box-sizing: border-box !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+      }
+      #danbooru-grass-container {
+        padding: 10px !important;
+      }
+      #danbooru-grass-panel {
+        width: 100% !important;
       }
 
       /* Phase 4: Grass handles hide on mobile */

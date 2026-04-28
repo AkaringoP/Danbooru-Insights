@@ -4,6 +4,37 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.4.2 — Mobile UX polish
+
+Four mobile-only UX hotfixes consolidated from `develop`. No schema changes,
+no behavior changes on desktop. Touches the User Analytics dashboard's pie
+chart, tag cloud, and scatter widgets, plus the Grass settings flyout and
+container layout.
+
+### UX (mobile)
+- **Grass settings flyout** (`hotfix/settings-popover-fixes`): anchor the
+  flyout under the selected theme button on mobile and dismiss on color pick,
+  so the picker lands where the user is looking and doesn't linger after the
+  choice is made.
+- **Grass container overflow** (`hotfix/grass-mobile-overflow`): force
+  `box-sizing: border-box` and `min-width: 0` on the Grass containers in the
+  mobile media query, eliminating the thin horizontal scroll that appeared on
+  narrow viewports because inline desktop sizing wasn't being overridden.
+- **Pie chart polish** (`hotfix/pie-mobile-ux-polish`): drop the white
+  drop-shadow filter on touched slices (laggy on mobile, kept for desktop
+  hover); add a smooth fade-blur transition between pie tabs (0.35s Material
+  curve, 380ms minimum visible duration); exclude the legend from the blur
+  via a `:not()` selector so the text stays crisp during transitions.
+- **Tag cloud + scatter** (`hotfix/tagcloud-tooltip-scatter-yearlabel`): on
+  the tag cloud, the tooltip itself is now the navigation target on mobile —
+  same-tag re-tap toggles the tooltip closed instead of navigating, matching
+  the pie chart's UX. On the scatter X-axis, year labels fall back to
+  two-digit form (`09`, `14`, `25`) when year-per-pixel density is too high
+  to fit four-digit labels (≤32px/year), eliminating label collision for
+  long activity spans.
+
+---
+
 ## v9.4.1 — Test infrastructure fix (no user-visible change)
 
 Hotfix released the same day as v9.4.0. Production bundle is byte-identical
