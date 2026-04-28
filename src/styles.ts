@@ -894,6 +894,24 @@ export const GLOBAL_CSS = `
         flex-basis: 100% !important;
       }
 
+      /* Grass containers must not overflow viewport on mobile.
+         Inline min-width / padding from graph-renderer.ts assume desktop
+         layout; force border-box + clamp so the wrapper's right edge stays
+         inside the viewport instead of triggering a body horizontal scroll. */
+      #danbooru-grass-column,
+      #danbooru-grass-container,
+      #danbooru-grass-panel {
+        box-sizing: border-box !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+      }
+      #danbooru-grass-container {
+        padding: 10px !important;
+      }
+      #danbooru-grass-panel {
+        width: 100% !important;
+      }
+
       /* Phase 4: Grass handles hide on mobile */
       .di-grass-handle {
         display: none !important;
