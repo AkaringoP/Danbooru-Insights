@@ -229,22 +229,24 @@ export function createSettingsPopover(
 
   let currentFlyoutKey = '';
 
-  const toggleGrassFlyout = (_anchorEl: HTMLElement, themeKey: string) => {
+  const toggleGrassFlyout = (anchorEl: HTMLElement, themeKey: string) => {
     if (grassFlyout.style.display !== 'none' && currentFlyoutKey === themeKey) {
       grassFlyout.style.display = 'none';
       return;
     }
     currentFlyoutKey = themeKey;
 
-    // Position flyout to the right of the popover
-    const popoverRect = popover.getBoundingClientRect();
     const isMobile = window.innerWidth <= 768;
     if (isMobile) {
+      // Anchor flyout directly under the selected theme button on mobile
+      const btnRect = anchorEl.getBoundingClientRect();
       grassFlyout.style.left = '10px';
       grassFlyout.style.right = '10px';
-      grassFlyout.style.top = popoverRect.bottom + 8 + 'px';
+      grassFlyout.style.top = btnRect.bottom + 4 + 'px';
       grassFlyout.style.maxWidth = 'calc(100vw - 20px)';
     } else {
+      // Position flyout to the right of the popover on desktop
+      const popoverRect = popover.getBoundingClientRect();
       grassFlyout.style.left = popoverRect.right + 8 + 'px';
       grassFlyout.style.top = popoverRect.top + 'px';
       grassFlyout.style.right = '';
@@ -306,7 +308,7 @@ export function createSettingsPopover(
         e.stopPropagation();
         settingsManager.setGrassIndex(themeKey, idx);
         settingsManager.applyTheme(themeKey);
-        renderGrassFlyout(themeKey);
+        grassFlyout.style.display = 'none';
       };
 
       grassFlyout.appendChild(row);
