@@ -712,6 +712,11 @@ function drawScatterAxis(
   } else {
     const startYear = new Date(scale.minDate).getFullYear();
     const endYear = new Date(scale.maxDate).getFullYear();
+    // 4-digit year labels collide on long activity spans (e.g. 2009-2026)
+    // when the canvas is narrow. Below ~32px/year, fall back to 2-digit
+    // (e.g. "09", "14", "25").
+    const yearCount = endYear - startYear + 1;
+    const useShortYear = yearCount > 0 && scale.drawW / yearCount < 32;
 
     for (let y = startYear; y <= endYear; y++) {
       const d = new Date(y, 0, 1).getTime();
@@ -726,7 +731,10 @@ function drawScatterAxis(
         const xCenter = (x + xNext) / 2;
 
         if (xCenter > scale.padL - 10 && xCenter < w - PAD_R + 10) {
-          ctx.fillText(String(y), xCenter, scale.padT + scale.drawH + 15);
+          const label = useShortYear
+            ? String(y % 100).padStart(2, '0')
+            : String(y);
+          ctx.fillText(label, xCenter, scale.padT + scale.drawH + 15);
         }
 
         ctx.beginPath();
