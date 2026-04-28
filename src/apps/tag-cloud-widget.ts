@@ -133,11 +133,13 @@ export function renderTagCloudWidget(
   cloudContainer.style.minHeight = `${CLOUD_HEIGHT}px`;
   container.appendChild(cloudContainer);
 
-  // Mobile tap tooltip (created once; separate from desktop hover tooltip)
+  // Mobile tap tooltip (created once; separate from desktop hover tooltip).
+  // On touch, the tooltip itself is the navigation target — pointer-events
+  // and cursor reflect that. Aligned with pie chart and CalHeatmap UX:
+  // tag tap toggles tooltip, tooltip tap navigates.
   const cloudTooltip = document.createElement('div');
   cloudTooltip.className = 'di-tag-cloud-mobile-tooltip';
-  cloudTooltip.style.cssText =
-    'position:absolute;background:rgba(30,30,30,0.95);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;pointer-events:none;opacity:0;z-index:99999;transition:opacity 0.15s;white-space:nowrap;';
+  cloudTooltip.style.cssText = `position:absolute;background:rgba(30,30,30,0.95);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;pointer-events:${isTouch ? 'auto' : 'none'};cursor:${isTouch ? 'pointer' : 'default'};opacity:0;z-index:99999;transition:opacity 0.15s;white-space:nowrap;`;
   document.body.appendChild(cloudTooltip);
 
   // Desktop hover tooltip
@@ -158,23 +160,38 @@ export function renderTagCloudWidget(
     .style('opacity', '0')
     .style('white-space', 'nowrap');
 
-  // Two-step tap controller for mobile: first tap → highlight, second tap → navigate
+  // Two-step tap controller for mobile. UX:
+  //   - Tap a tag → 1st tap shows tooltip + highlight, 2nd tap on same tag toggles off.
+  //   - Tap the tooltip itself → navigate (the tooltip is the deliberate action).
+  // onSecondTap is reserved for navigateActive() (tooltip click); same-tag
+  // re-tap is handled inline via reset() so it never navigates.
   let tapController: TwoStepTapController<string> | null = null;
   if (isTouch) {
+    const resetCloudVisuals = () => {
+      cloudTooltip.style.opacity = '0';
+      d3.select(cloudContainer)
+        .selectAll<SVGTextElement, D3Any>('text')
+        .style('opacity', 1)
+        .style('font-size', d => `${d.size}px`);
+    };
     tapController = createTwoStepTap<string>({
       insideElements: () => [cloudContainer.querySelector('svg'), cloudTooltip],
       onFirstTap: () => {
         // Visual updates handled inline in the click handler (needs d3 `this` context)
       },
-      onSecondTap: () => {
-        // Navigation handled inline in the click handler
+      onSecondTap: tagName => {
+        // Fired only by tooltip click via navigateActive(). Same-tag re-tap
+        // on the cloud calls reset() instead, so this path always navigates.
+        const query = `user:${userName} ${tagName}`;
+        window.open(`/posts?tags=${encodeURIComponent(query)}`, '_blank');
+        resetCloudVisuals();
       },
-      onReset: () => {
-        cloudTooltip.style.opacity = '0';
-        d3.select(cloudContainer).selectAll('text').style('opacity', 1);
-      },
+      onReset: resetCloudVisuals,
       resetOnScroll: true,
       isEqual: (a, b) => a === b,
+    });
+    cloudTooltip.addEventListener('click', () => {
+      tapController?.navigateActive();
     });
   }
 
@@ -251,26 +268,28 @@ export function renderTagCloudWidget(
       })
       .on('click', function (_event: MouseEvent, d: D3Any) {
         if (tapController) {
-          const isSecondTap = tapController.tap(d.tagName as string);
-          if (isSecondTap) {
-            // 2nd tap on same tag → navigate
-            const query = `user:${userName} ${d.tagName}`;
-            window.open(`/posts?tags=${encodeURIComponent(query)}`, '_blank');
-            cloudTooltip.style.opacity = '0';
-            g.selectAll('text').style('opacity', 1);
-            d3.select(this).style('font-size', `${d.size}px`);
-          } else {
-            // 1st tap → show tooltip + highlight
-            g.selectAll('text').style('opacity', 0.2);
-            d3.select(this)
-              .style('opacity', 1)
-              .style('font-size', `${d.size * 1.08}px`);
-            cloudTooltip.innerHTML = `<strong>${d.text}</strong> — ${(d.frequency * 100).toFixed(2)}% · ${d.count.toLocaleString()} posts`;
-            cloudTooltip.style.opacity = '1';
-            const rect = (this as Element).getBoundingClientRect();
-            cloudTooltip.style.left = `${rect.left + window.scrollX + rect.width / 2 - cloudTooltip.offsetWidth / 2}px`;
-            cloudTooltip.style.top = `${rect.top + window.scrollY - cloudTooltip.offsetHeight - 8}px`;
+          const tagName = d.tagName as string;
+          // 2nd tap on same tag → toggle off (no navigation here; tooltip
+          // click is the navigation trigger).
+          if (tapController.active === tagName) {
+            tapController.reset();
+            return;
           }
+          // 1st tap or switch to a different tag → show tooltip + highlight.
+          // tap() records active for outside-tap detection and tooltip-click
+          // navigation via navigateActive().
+          tapController.tap(tagName);
+          g.selectAll<SVGTextElement, D3Any>('text')
+            .style('opacity', 0.2)
+            .style('font-size', wd => `${wd.size}px`);
+          d3.select(this)
+            .style('opacity', 1)
+            .style('font-size', `${d.size * 1.08}px`);
+          cloudTooltip.innerHTML = `<strong>${d.text}</strong> — ${(d.frequency * 100).toFixed(2)}% · ${d.count.toLocaleString()} posts`;
+          cloudTooltip.style.opacity = '1';
+          const rect = (this as Element).getBoundingClientRect();
+          cloudTooltip.style.left = `${rect.left + window.scrollX + rect.width / 2 - cloudTooltip.offsetWidth / 2}px`;
+          cloudTooltip.style.top = `${rect.top + window.scrollY - cloudTooltip.offsetHeight - 8}px`;
           return;
         }
         // Desktop: navigate directly
