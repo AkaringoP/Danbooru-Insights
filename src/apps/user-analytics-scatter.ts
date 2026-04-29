@@ -317,8 +317,6 @@ function buildScatterDom(): ScatterDom {
     downvoteButtons.push(btn);
   });
 
-  scatterDiv.appendChild(downvoteContainer);
-
   // Reset Scale Button (year drill-down)
   const resetBtn = document.createElement('button');
   resetBtn.textContent = '<';
@@ -422,6 +420,11 @@ function buildScatterDom(): ScatterDom {
   canvas.style.height = '100%';
   canvasContainer.appendChild(canvas);
   scatterDiv.appendChild(filterContainer);
+  // Append downvote AFTER filter so the mobile static-flow stack ends with
+  // [toggle][canvas][filter][downvote] (downvote below the bottom badge).
+  // PC layout (>768px) is unaffected: both remain absolute-positioned at
+  // top:15px / top:45px right:15px regardless of DOM order.
+  scatterDiv.appendChild(downvoteContainer);
 
   const ctx = canvas.getContext('2d', {alpha: false});
 
