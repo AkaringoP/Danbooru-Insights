@@ -2,7 +2,8 @@ import type {ScatterDataPoint, DanbooruPost} from '../types';
 import type {ChartContext} from './user-analytics-charts';
 import type {LevelChangeEvent} from '../core/analytics-data-manager';
 import {attachPostHoverCard, hidePostHoverCard} from '../ui/post-hover-card';
-import {isTouchDevice} from '../ui/two-step-tap';
+import {createTwoStepTap, isTouchDevice} from '../ui/two-step-tap';
+import type {TwoStepTapController} from '../ui/two-step-tap';
 import {getPalette} from '../ui/theme-palette';
 import {createLogger} from '../core/logger';
 
@@ -32,7 +33,7 @@ export interface ScatterPlotOptions {
 // Internal types (Task 5 — renderScatterPlot decomposition)
 // ============================================================
 
-type ScatterMode = 'score' | 'tags';
+export type ScatterMode = 'score' | 'tags';
 type ScatterRating = 'g' | 's' | 'q' | 'e';
 
 /**
@@ -43,7 +44,7 @@ type ScatterRating = 'g' | 's' | 'q' | 'e';
  * `stepY` is included so `drawScatterGrid` knows whether to skip the "10"
  * label (handled separately in red bold by `drawY10Emphasis` for tag mode).
  */
-interface ScatterScale {
+export interface ScatterScale {
   minDate: number;
   maxDate: number;
   maxVal: number;
@@ -76,6 +77,13 @@ interface ScatterState {
   activeRatingFilters: Record<ScatterRating, boolean>;
   /** True while the Y=10 hit area is hovered (Tag Count mode). */
   y10Highlight: boolean;
+  /**
+   * Currently selected Y-grid threshold value (Score or Tag Count mode).
+   * When non-null, points with `yVal >= activeYThreshold` are highlighted
+   * and a dashed line is drawn at that y. Mutually exclusive with
+   * `y10Highlight` — when both could apply, threshold wins.
+   */
+  activeYThreshold: number | null;
 
   // Backfill UI status (mirrored from options.needsBackfill on init)
   backfillInProgress: boolean;
@@ -126,6 +134,9 @@ interface ScatterDom {
   y10Hit: HTMLElement;
   y10Tooltip: HTMLElement;
 
+  // Per-render Y-grid hit areas (regenerated each render pass)
+  gridHitsContainer: HTMLElement;
+
   // Drag selection
   selectionDiv: HTMLElement;
   rangeLabel: HTMLElement;
@@ -145,6 +156,7 @@ function createInitialScatterState(options: ScatterPlotOptions): ScatterState {
     activeDownvoteFilter: null,
     activeRatingFilters: {g: true, s: true, q: true, e: true},
     y10Highlight: false,
+    activeYThreshold: null,
 
     backfillInProgress: options.needsBackfill === true,
     backfillFailed: false,
@@ -430,6 +442,15 @@ function buildScatterDom(): ScatterDom {
   y10Hit.setAttribute('aria-label', 'Show posts with less than 10 tags');
   canvasContainer.appendChild(y10Hit);
 
+  // Y-grid threshold hit areas (regenerated each render). The container is
+  // pointer-events:none so it doesn't block underlying canvas events; each
+  // child div re-enables pointer-events for its own bbox. Same z-index tier
+  // as y10Hit but never overlaps (Y=10 is excluded in tag mode hits).
+  const gridHitsContainer = document.createElement('div');
+  gridHitsContainer.style.cssText =
+    'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:6;';
+  canvasContainer.appendChild(gridHitsContainer);
+
   // Y=10 tooltip
   const y10Tooltip = document.createElement('div');
   y10Tooltip.style.cssText =
@@ -476,6 +497,7 @@ function buildScatterDom(): ScatterDom {
     yearLabel,
     y10Hit,
     y10Tooltip,
+    gridHitsContainer,
     selectionDiv,
     rangeLabel,
     popover,
@@ -589,6 +611,43 @@ function filterVisiblePoints(
 }
 
 // ============================================================
+// Pure helpers for Y-grid threshold interaction (testable, no DOM)
+// ============================================================
+
+/**
+ * Returns the Y-grid values that are eligible for the threshold interaction.
+ * Excludes 0 (matches everything), the topmost grid value (no points above
+ * by construction), and Y=10 in tag mode (reserved for the existing `<10`
+ * affordance).
+ *
+ * @internal exported for tests
+ */
+export function getEligibleYThresholds(scale: ScatterScale): number[] {
+  const out: number[] = [];
+  if (scale.stepY <= 0 || scale.maxVal <= 0) return out;
+  for (let val = scale.stepY; val < scale.maxVal; val += scale.stepY) {
+    if (scale.mode === 'tags' && val === 10) continue;
+    out.push(val);
+  }
+  return out;
+}
+
+/**
+ * Builds the Danbooru posts search URL for the `>= value` filter using the
+ * appropriate field for the active mode (`score` or `gentags`).
+ *
+ * @internal exported for tests
+ */
+export function buildPostsUrlForThreshold(
+  userName: string,
+  mode: ScatterMode,
+  value: number,
+): string {
+  const field = mode === 'score' ? 'score' : 'gentags';
+  return `/posts?tags=${encodeURIComponent(`user:${userName} ${field}:>=${value}`)}`;
+}
+
+// ============================================================
 // Drawing helpers (canvas + overlay div)
 // ============================================================
 
@@ -661,6 +720,31 @@ function drawY10Emphasis(
   ctx.fillText('10', scale.padL - 5, actualY10 + 3);
 
   return actualY10;
+}
+
+/**
+ * Draws a dashed horizontal line at the active threshold value. Color is
+ * deliberately distinct from the Y=10 affordance (gray dashes + red label)
+ * so the two are visually unambiguous when both could plausibly apply.
+ */
+function drawYThresholdLine(
+  ctx: CanvasRenderingContext2D,
+  scale: ScatterScale,
+  w: number,
+  value: number,
+): void {
+  if (scale.maxVal <= 0) return;
+  const y = scale.padT + scale.drawH - (value / scale.maxVal) * scale.drawH;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = 'rgba(91, 173, 232, 0.85)';
+  ctx.lineWidth = 1;
+  ctx.moveTo(scale.padL, y);
+  ctx.lineTo(w - PAD_R, y);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawScatterAxis(
@@ -752,8 +836,13 @@ function drawScatterPoints(
   state: ScatterState,
   scale: ScatterScale,
 ): void {
-  const highlightActive = state.y10Highlight && state.mode === 'tags';
-  // Two-pass render when highlighting: dim background first, then black on top
+  // Y-grid threshold takes precedence over Y=10 highlight when both could
+  // apply (e.g. user hovers a grid label while Tag Count mode is active).
+  const thresholdActive = state.activeYThreshold !== null;
+  const y10Active =
+    !thresholdActive && state.y10Highlight && state.mode === 'tags';
+  const threshold = state.activeYThreshold ?? 0;
+  // Two-pass render when y10Active: dim background first, then bold red on top.
   const highlightedPoints: Array<[number, number]> = [];
 
   points.forEach(pt => {
@@ -766,7 +855,7 @@ function drawScatterPoints(
       scale.padL + ((xVal - scale.minDate) / scale.timeRange) * scale.drawW;
     const y = scale.padT + scale.drawH - (yVal / scale.maxVal) * scale.drawH;
 
-    if (highlightActive && (pt.t || 0) < 10) {
+    if (y10Active && (pt.t || 0) < 10) {
       highlightedPoints.push([x, y]);
       return;
     }
@@ -777,15 +866,18 @@ function drawScatterPoints(
     else if (pt.r === 'q') color = '#ab47bc';
     else if (pt.r === 'e') color = '#f44336';
 
-    if (highlightActive) {
+    if (y10Active) {
       ctx.globalAlpha = 0.2;
+    } else if (thresholdActive) {
+      ctx.globalAlpha = yVal >= threshold ? 1 : 0.2;
     }
     ctx.fillStyle = color;
     ctx.fillRect(x - 1, y - 1, 2, 2);
   });
 
-  if (highlightActive) {
-    ctx.globalAlpha = 1;
+  ctx.globalAlpha = 1;
+
+  if (y10Active) {
     // Bold red — visible on both light and dark backgrounds. Shares color
     // with rating:e points, but acceptable because other ratings dim out
     // while the gentags<10 highlight is active.
@@ -863,6 +955,70 @@ function drawScatterOverlays(
 }
 
 // ============================================================
+// Y-grid hit area regeneration (called every render)
+// ============================================================
+
+/**
+ * Rebuilds the per-tick clickable hit areas in the Y-axis label gutter.
+ *
+ * Called from `renderScatterCanvas` because eligible thresholds depend on the
+ * current `stepY` / `maxVal`, which change with mode toggles and year zoom.
+ * Each child div re-enables `pointer-events:auto` (the parent container is
+ * `pointer-events:none` so it doesn't block underlying canvas events).
+ */
+function regenerateYGridHits(
+  state: ScatterState,
+  dom: ScatterDom,
+  scale: ScatterScale,
+  userName: string,
+  twoStepTap: TwoStepTapController<number>,
+  rerender: () => void,
+): void {
+  dom.gridHitsContainer.innerHTML = '';
+
+  const eligible = getEligibleYThresholds(scale);
+  if (eligible.length === 0) return;
+
+  const isTouch = isTouchDevice();
+  const fieldLabel = scale.mode === 'score' ? 'score' : 'tag count';
+
+  for (const val of eligible) {
+    const pixelY =
+      scale.padT + scale.drawH - (val / scale.maxVal) * scale.drawH;
+
+    const hit = document.createElement('div');
+    hit.style.cssText = `position:absolute;left:0;width:${scale.padL}px;top:${pixelY - 9}px;height:18px;pointer-events:auto;cursor:pointer;`;
+    hit.setAttribute('aria-label', `Filter posts with ${fieldLabel} >= ${val}`);
+    hit.dataset.threshold = String(val);
+
+    if (!isTouch) {
+      hit.addEventListener('mouseenter', () => {
+        if (state.activeYThreshold === val) return;
+        state.activeYThreshold = val;
+        rerender();
+      });
+      hit.addEventListener('mouseleave', () => {
+        if (state.activeYThreshold !== val) return;
+        state.activeYThreshold = null;
+        rerender();
+      });
+      hit.addEventListener('click', e => {
+        e.stopPropagation();
+        const url = buildPostsUrlForThreshold(userName, state.mode, val);
+        window.open(url, '_blank');
+      });
+    } else {
+      hit.addEventListener('click', e => {
+        e.stopPropagation();
+        twoStepTap.tap(val);
+      });
+    }
+
+    dom.gridHitsContainer.appendChild(hit);
+  }
+}
+
+// ============================================================
 // Render canvas orchestrator
 // ============================================================
 
@@ -873,6 +1029,9 @@ function renderScatterCanvas(
   context: ChartContext,
   levelChanges: LevelChangeEvent[],
   options: ScatterPlotOptions,
+  userName: string,
+  twoStepTap: TwoStepTapController<number>,
+  rerender: () => void,
 ): void {
   const {ctx, canvas, canvasContainer, scatterDiv, overlayDiv} = dom;
   if (!scatterDiv.isConnected || !ctx) return;
@@ -919,7 +1078,19 @@ function renderScatterCanvas(
   }
 
   const visiblePoints = filterVisiblePoints(state, scatterData, state.scale);
-  dom.countLabel.textContent = `${visiblePoints.length} items`;
+
+  // Count label: when a Y-grid threshold is active, show only the matching
+  // count (e.g. "123 items") so the badge reflects the highlighted subset.
+  if (state.activeYThreshold !== null) {
+    const t = state.activeYThreshold;
+    const matched = visiblePoints.reduce((acc, d) => {
+      const yVal = state.mode === 'tags' ? d.t || 0 : d.s;
+      return yVal >= t ? acc + 1 : acc;
+    }, 0);
+    dom.countLabel.textContent = `${matched} items`;
+  } else {
+    dom.countLabel.textContent = `${visiblePoints.length} items`;
+  }
 
   // Draw grid + Y=10 emphasis (tag mode only)
   const {y10Pos} = drawScatterGrid(ctx, state.scale, w, canvas);
@@ -933,10 +1104,18 @@ function renderScatterCanvas(
     dom.y10Hit.style.top = `${finalY10 - 9}px`;
   }
 
+  // Threshold line (only while a grid label is hovered/tapped)
+  if (state.activeYThreshold !== null) {
+    drawYThresholdLine(ctx, state.scale, w, state.activeYThreshold);
+  }
+
+  // Regenerate per-tick Y-grid hit areas (positions depend on stepY/maxVal)
+  regenerateYGridHits(state, dom, state.scale, userName, twoStepTap, rerender);
+
   // Draw axis (months when zoomed into a year, years otherwise)
   drawScatterAxis(ctx, state, state.scale, w, canvas);
 
-  // Draw points (with optional Y=10 highlight pass)
+  // Draw points (with optional Y=10 or Y-threshold highlight pass)
   drawScatterPoints(ctx, visiblePoints, state, state.scale);
 
   // Draw overlay lines (join date, level changes, score era marker)
@@ -984,6 +1163,7 @@ function wireModeToggle(
   state: ScatterState,
   dom: ScatterDom,
   rerender: () => void,
+  clearYThreshold: () => void,
 ): void {
   dom.toggleButtons.forEach(btn => {
     btn.onclick = () => {
@@ -1007,6 +1187,8 @@ function wireModeToggle(
         updateDownvoteButtonStyles(state, dom);
       }
       updateDownvoteVisibility(state, dom);
+      // Y-grid threshold's stepY/maxVal differ between modes — drop it.
+      clearYThreshold();
       rerender();
     };
   });
@@ -1060,11 +1242,13 @@ function wireYearReset(
   state: ScatterState,
   dom: ScatterDom,
   rerender: () => void,
+  clearYThreshold: () => void,
 ): void {
   dom.resetBtn.onclick = () => {
     state.selectedYear = null;
     dom.resetBtn.style.display = 'none';
     dom.yearLabel.style.display = 'none';
+    clearYThreshold();
     rerender();
   };
 }
@@ -1187,6 +1371,7 @@ function wireYearZoom(
   state: ScatterState,
   dom: ScatterDom,
   rerender: () => void,
+  clearYThreshold: () => void,
 ): void {
   // Click Listener for Year Zoom
   dom.canvas.addEventListener('click', e => {
@@ -1208,6 +1393,7 @@ function wireYearZoom(
         clickedYear >= new Date(state.scale.minDate).getFullYear() &&
         clickedYear <= new Date(state.scale.maxDate).getFullYear()
       ) {
+        clearYThreshold();
         state.selectedYear = clickedYear;
         rerender();
       }
@@ -1246,6 +1432,7 @@ function wireDragSelection(
   dom: ScatterDom,
   scatterData: ScatterDataPoint[],
   showPopover: ShowPopoverFn,
+  clearYThreshold: () => void,
 ): void {
   const isTouch = isTouchDevice();
 
@@ -1364,6 +1551,7 @@ function wireDragSelection(
     if (Math.abs(endX - ds.x) >= 5 || Math.abs(endY - ds.y) >= 5) {
       state.ignoreNextClick = true;
       state.lastDragEndTime = Date.now();
+      clearYThreshold();
     }
 
     // A click (not a drag) → hide the selection box
@@ -1651,6 +1839,38 @@ export function renderScatterPlot(
 ): void {
   const dom = buildScatterDom();
   const state = createInitialScatterState(options);
+  const userName = context.targetUser?.normalizedName ?? '';
+
+  // Two-step tap controller for Y-grid threshold on touch devices.
+  // First tap on a value → highlight; second tap on the same value → navigate.
+  // Outside tap auto-resets via the controller's document handler.
+  const twoStepTap = createTwoStepTap<number>({
+    insideElements: () => Array.from(dom.gridHitsContainer.children),
+    onFirstTap: val => {
+      state.activeYThreshold = val;
+      rerender();
+    },
+    onSecondTap: val => {
+      // Read state.mode live so a (hypothetical) mode switch between taps is
+      // honored. Mode toggles also trigger clearYThreshold so this is academic.
+      const url = buildPostsUrlForThreshold(userName, state.mode, val);
+      window.open(url, '_blank');
+    },
+    onReset: () => {
+      state.activeYThreshold = null;
+      rerender();
+    },
+  });
+
+  // Centralized Y-threshold reset — invoked by handlers that change scale
+  // (mode toggle, year zoom in/out, drag select) so the highlight doesn't
+  // become stale or meaningless after the underlying scale changes.
+  const clearYThreshold = () => {
+    if (state.activeYThreshold !== null) {
+      state.activeYThreshold = null;
+      twoStepTap.reset();
+    }
+  };
 
   // Re-render trigger closure: captured by every wire* helper.
   const rerender = () =>
@@ -1661,13 +1881,16 @@ export function renderScatterPlot(
       context,
       levelChanges,
       options,
+      userName,
+      twoStepTap,
+      rerender,
     );
 
   // Wire control panels (top-bar buttons + filters + reset)
-  wireModeToggle(state, dom, rerender);
+  wireModeToggle(state, dom, rerender, clearYThreshold);
   wireDownvoteFilter(state, dom, rerender);
   wireRatingFilter(state, dom, rerender);
-  wireYearReset(state, dom, rerender);
+  wireYearReset(state, dom, rerender, clearYThreshold);
 
   // Wire the Y=10 hit affordance (Tag Count mode tooltip)
   wireY10Tooltip(state, dom, options, context, rerender);
@@ -1676,8 +1899,8 @@ export function renderScatterPlot(
   const showPopover = createScatterPopover(state, dom, options);
 
   // Wire interaction handlers (year zoom + drag-to-select)
-  wireYearZoom(state, dom, rerender);
-  wireDragSelection(state, dom, scatterData, showPopover);
+  wireYearZoom(state, dom, rerender, clearYThreshold);
+  wireDragSelection(state, dom, scatterData, showPopover, clearYThreshold);
 
   // Initial mode visibility for downvote container (mirrors pre-decomposition order)
   updateDownvoteVisibility(state, dom);
