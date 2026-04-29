@@ -4,6 +4,48 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.4.3 — Scatter Y-grid threshold filter
+
+Adds an interactive Y-axis grid affordance to the User Analytics "Post
+Performance" scatter plot, plus a mobile layout fix for the downvote
+filter pill. No schema changes.
+
+### UX
+- **Interactive Y-grid threshold** (scatter plot): hovering a Y-axis grid
+  label (e.g. `50`, `100` on Score; `25`, `75` on Tag Count) dims points
+  below that value and draws a dashed blue threshold line at `y = N`. The
+  bottom count badge updates to show only the matching post count
+  (`123 items`). Clicking the label opens
+  `/posts?tags=user:<name> score:>=N` (or `gentags:>=N` in Tag Count
+  mode) in a new tab. On touch devices the affordance follows the
+  established two-step tap pattern (first tap highlights, second tap
+  navigates, outside tap resets). The existing Tag Count `Y=10`
+  affordance is preserved verbatim — `Y=10` is excluded from the new
+  ">=N" interaction so the `<10` highlight + tooltip continues to work
+  unchanged. `Y=0` and the topmost grid value are also excluded
+  (degenerate cases). The threshold auto-clears on mode toggle, year
+  zoom in/out, and drag-select to avoid stale highlights when the
+  underlying scale changes.
+- **Downvote pill order on mobile** (`hotfix/scatter-downvote-mobile-order`):
+  the v9.4.2 mobile fix made `.di-scatter-filter` and
+  `.di-scatter-downvote` `position: static`, but DOM append order put
+  the downvote pill *above* the chart instead of below the
+  `891 items / G S Q E` count badge. Reordered the `appendChild` calls
+  so the mobile static-flow stack ends with
+  `[toggle][chart][filter][downvote]`. Desktop is unaffected — both
+  pills stay absolute-positioned at `top:15px` / `top:45px right:15px`.
+
+### Internal
+- New pure helpers `getEligibleYThresholds(scale)` and
+  `buildPostsUrlForThreshold(userName, mode, value)` exported from
+  `src/apps/user-analytics-scatter.ts` for unit testing. 10 new tests
+  in `test/user-analytics-scatter.test.ts` cover the eligibility
+  filter (excludes 0, the topmost value, and `Y=10` in tag mode) and
+  the URL builder (uses `score` for Score mode, `gentags` for Tag
+  Count mode, encodes user names with whitespace).
+
+---
+
 ## v9.4.2 — Mobile UX polish
 
 Four mobile-only UX hotfixes consolidated from `develop`. No schema changes,
