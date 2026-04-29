@@ -1854,6 +1854,12 @@ export function renderScatterPlot(
       // Read state.mode live so a (hypothetical) mode switch between taps is
       // honored. Mode toggles also trigger clearYThreshold so this is academic.
       const url = buildPostsUrlForThreshold(userName, state.mode, val);
+      // Clear highlight before navigating: the controller's internal
+      // activeDatum is already null at this point, but the widget's own
+      // activeYThreshold needs an explicit reset so the dim/line UI doesn't
+      // persist when the user returns to the page.
+      state.activeYThreshold = null;
+      rerender();
       window.open(url, '_blank');
     },
     onReset: () => {
