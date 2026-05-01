@@ -313,7 +313,20 @@ export class UserAnalyticsApp {
       const syncTotal = await this.dataManager.getTotalPostCount(
         this.context.targetUser,
       );
-      if (syncTotal > 0 && syncTotal <= MAX_QUICK_SYNC_POSTS) {
+      // 0 uploads: nothing to sync, and refreshAllStats would 404 on /random.
+      if (syncTotal === 0) {
+        if (animInterval) clearInterval(animInterval);
+        this.isFullySynced = true;
+        void this.updateHeaderStatus();
+        if (btn) {
+          btn.innerHTML = originalText;
+          (btn as HTMLButtonElement).disabled = false;
+          btn.style.cursor = 'pointer';
+        }
+        if (shouldRender) this.toggleModal(true);
+        return;
+      }
+      if (syncTotal <= MAX_QUICK_SYNC_POSTS) {
         await this.dataManager.quickSyncAllPosts(
           this.context.targetUser,
           onProgress,
@@ -396,11 +409,14 @@ export class UserAnalyticsApp {
     // Dynamic Sync Threshold
     const settingsManager = new SettingsManager();
     const tolerance = settingsManager.getSyncThreshold();
-    const isSynced = total > 0 && count >= total - tolerance;
+    // total === 0: user has never uploaded — vacuously fully synced.
+    // Suppresses auto-sync on menu click (would otherwise 404 on /random).
+    const isSynced = total === 0 || count >= total - tolerance;
     this.isFullySynced = isSynced; // Store state for auto-sync check
 
     // Update UI
-    const statusColor = stats.lastSync && isSynced ? '#28a745' : '#d73a49';
+    const statusColor =
+      total === 0 || (stats.lastSync && isSynced) ? '#28a745' : '#d73a49';
     el.innerHTML = '';
     el.style.color = statusColor;
     el.title = `Last synced: ${lastSyncText}`;
@@ -411,7 +427,10 @@ export class UserAnalyticsApp {
     row1.style.alignItems = 'center';
 
     const text1 = document.createElement('span');
-    text1.textContent = `Synced: ${count.toLocaleString()} / ${(total || '?').toLocaleString()}`;
+    text1.textContent =
+      total === 0
+        ? 'No uploads'
+        : `Synced: ${count.toLocaleString()} / ${total.toLocaleString()}`;
     text1.style.color = statusColor; // Force color
     text1.style.fontWeight = 'bold'; // Optional: Make it pop a bit more if needed, but user didn't ask. I'll stick to color.
     row1.appendChild(text1);
@@ -796,6 +815,34 @@ export class UserAnalyticsApp {
         synced: preStats.count,
       });
       perfMeta.preTotal = preTotal;
+
+      // Zero-upload user: short-circuit before fetchDashboardData. Several
+      // distribution fetchers (random, hair, fav-copyright) hit
+      // /posts/random.json which 404s on a user with no posts.
+      if (preTotal === 0 && preStats.count === 0) {
+        perfMeta.path = 'syncSkipped';
+        this.isFullySynced = true;
+        content.innerHTML = '';
+        const header = document.createElement('div');
+        header.style.marginBottom = '25px';
+        header.innerHTML = `
+          <h2 style="margin-top:0; color:var(--di-text, #333); margin-bottom:4px;">Analytics Dashboard</h2>
+          <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(this.context.targetUser.level_string)}">${this.context.targetUser.name}</span></p>
+        `;
+        content.appendChild(header);
+
+        const empty = document.createElement('div');
+        empty.style.cssText =
+          'text-align:center; padding:60px 20px; color:var(--di-text-secondary, #666);';
+        empty.innerHTML = `
+          <div style="font-size:48px; margin-bottom:20px;">📭</div>
+          <h3 style="margin-top:0;">No uploads to analyze</h3>
+          <p>This user has not uploaded any posts yet, so there is nothing to report.</p>
+        `;
+        content.appendChild(empty);
+        content.insertAdjacentHTML('beforeend', dashboardFooterHtml());
+        return;
+      }
 
       let didQuickSync = false;
       if (
