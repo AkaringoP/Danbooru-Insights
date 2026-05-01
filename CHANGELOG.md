@@ -4,6 +4,34 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.4.4 — Zero-post empty-state handling
+
+Hotfix for a broken UX path on subjects with no posts. Opening the
+User Analytics dashboard on a profile with 0 uploads previously triggered
+a sync attempt that 404ed on `/posts/random.json` and reset the dialog
+back to the start. The Tag Analytics flow on a 0-post tag silently
+returned with the status label stuck at "Waiting...". No schema changes.
+
+### Fixes
+- **User Analytics** ([`hotfix/zero-post-user-empty-state`]): when
+  `getTotalPostCount` reports 0 and the local DB is empty, `renderDashboard`
+  now short-circuits before `fetchDashboardData` and renders an
+  empty-state panel ("No uploads to analyze"). `updateHeaderStatus`
+  treats `total === 0` as vacuously fully synced so the header pill no
+  longer turns red and the menu click no longer triggers
+  `performPartialSync`. `performPartialSync` itself early-returns on
+  `syncTotal === 0` as a defensive backstop so the
+  `syncAllPosts → refreshAllStats → /random.json` 404 cascade can no
+  longer fire.
+- **Tag Analytics**: `_fetchAndRender` now distinguishes a null
+  `initialStats` (fetch failure, kept as silent log.warn) from
+  `totalCount === 0` (empty tag). The latter renders an empty-state
+  modal mirroring the User Analytics pattern, so the analytics button
+  on a tag with no posts no longer leaves the user staring at a
+  "Waiting..." label.
+
+---
+
 ## v9.4.3 — Scatter Y-grid threshold filter
 
 Adds an interactive Y-axis grid affordance to the User Analytics "Post

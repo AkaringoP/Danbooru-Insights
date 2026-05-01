@@ -209,7 +209,7 @@ export class TagAnalyticsApp {
         tagName,
         baseData,
       );
-      if (!initialStats || initialStats.totalCount === 0) {
+      if (!initialStats) {
         log.warn(`Could not fetch initial stats for tag: "${tagName}"`);
         return;
       }
@@ -226,6 +226,16 @@ export class TagAnalyticsApp {
         if (status) status.remove();
         return;
       }
+
+      // Zero-post tag: render empty-state modal instead of running the
+      // full pipeline (which would compute over an empty post array and
+      // produce a broken dashboard).
+      if (totalCount === 0) {
+        this.injectAnalyticsButton(null);
+        this._renderEmptyState(tagName, meta);
+        return;
+      }
+
       this.injectAnalyticsButton(meta);
 
       // 3. Route to small-tag or large-tag path
@@ -312,6 +322,47 @@ export class TagAnalyticsApp {
     this.toggleModal(true);
     this.renderDashboard(cachedData);
     return null; // Served from cache
+  }
+
+  /**
+   * Renders an empty-state modal for tags that have 0 posts.
+   * Mirrors the UserAnalyticsApp empty-state pattern so the click does not
+   * appear silently broken.
+   */
+  private _renderEmptyState(tagName: string, meta: TagAnalyticsMeta): void {
+    if (!document.getElementById('tag-analytics-modal')) {
+      this.createModal();
+    }
+    const content = document.getElementById('tag-analytics-content');
+    if (!content) return;
+
+    const categoryMap: Record<number, string> = {
+      1: 'Artist',
+      3: 'Copyright',
+      4: 'Character',
+    };
+    const colorMap: Record<number, string> = {
+      1: '#c00004',
+      3: '#a800aa',
+      4: '#00ab2c',
+    };
+    const categoryLabel = categoryMap[meta.category] || 'Tag';
+    const titleColor = colorMap[meta.category] || 'var(--di-text, #333)';
+
+    content.innerHTML = `
+      <div style="margin-bottom:25px;">
+        <h2 style="margin-top:0; color:${titleColor}; margin-bottom:4px;">${escapeHtml(tagName)}</h2>
+        <p style="color:var(--di-text-secondary, #666); margin:0;">${categoryLabel} analytics</p>
+      </div>
+      <div style="text-align:center; padding:60px 20px; color:var(--di-text-secondary, #666);">
+        <div style="font-size:48px; margin-bottom:20px;">📭</div>
+        <h3 style="margin-top:0;">No posts to analyze</h3>
+        <p>This tag currently has no posts, so there is nothing to report.</p>
+      </div>
+      ${dashboardFooterHtml()}
+    `;
+
+    this.toggleModal(true);
   }
 
   /**
