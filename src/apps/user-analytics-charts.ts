@@ -7,8 +7,12 @@ import type {
   LevelChangeEvent,
   MonthlyStatEntry,
 } from '../core/analytics-data-manager';
-import {getBestThumbnailUrl} from '../utils';
-import {computePercentages} from './user-analytics-pie-helpers';
+import {escapeHtml, getBestThumbnailUrl} from '../utils';
+import {
+  computePercentages,
+  safeColor,
+  safeThumbUrl,
+} from './user-analytics-pie-helpers';
 import type {Database} from '../core/database';
 import type {
   D3Any,
@@ -528,20 +532,22 @@ export function renderPieWidget(
 
         let html = '';
         const details = d.data.details;
-        const thumbUrl = details.thumb;
-        const thumbHtml = thumbUrl
+        const safeThumb = safeThumbUrl(details.thumb);
+        const thumbHtml = safeThumb
           ? `
         <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
-          <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;">
+          <img src="${escapeHtml(safeThumb)}" style="width: 100%; height: 100%; object-fit: cover;">
         </div>`
           : '';
+        const sliceColor = safeColor(d.data.color);
+        const safeLabel = escapeHtml(d.data.label);
 
         if (currentPieTab === 'rating') {
           html = `
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
             <div>
-              <div style="font-weight: bold; color: ${d.data.color}; margin-bottom: 4px; font-size: 14px;">${d.data.label}</div>
+              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px;">${safeLabel}</div>
               <div style="font-size: 11px; color: #ccc;">Count: <strong style="color:#fff;">${details.count.toLocaleString()}</strong></div>
               <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${pctFor(d.data.label)}</strong></div>
             </div>
@@ -553,7 +559,7 @@ export function renderPieWidget(
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
             <div style="max-width: 180px;">
-              <div style="font-weight: bold; color: ${d.data.color}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${d.data.label}</div>
+              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${safeLabel}</div>
               <div style="font-size: 11px; color: #ccc;">Freq: <strong style="color:#fff;">${percentage}</strong></div>
               ${!details.isOther ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
             </div>
@@ -641,20 +647,22 @@ export function renderPieWidget(
         // Show tooltip (same HTML building logic as mouseover)
         let html = '';
         const details = datum.data.details;
-        const thumbUrl = details.thumb;
-        const thumbHtml = thumbUrl
+        const safeThumb = safeThumbUrl(details.thumb);
+        const thumbHtml = safeThumb
           ? `
         <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
-          <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;">
+          <img src="${escapeHtml(safeThumb)}" style="width: 100%; height: 100%; object-fit: cover;">
         </div>`
           : '';
+        const sliceColor = safeColor(datum.data.color);
+        const safeLabel = escapeHtml(datum.data.label);
 
         if (currentPieTab === 'rating') {
           html = `
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
             <div>
-              <div style="font-weight: bold; color: ${datum.data.color}; margin-bottom: 4px; font-size: 14px;">${datum.data.label}</div>
+              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px;">${safeLabel}</div>
               <div style="font-size: 11px; color: #ccc;">Count: <strong style="color:#fff;">${details.count.toLocaleString()}</strong></div>
               <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${pctFor(datum.data.label)}</strong></div>
             </div>
@@ -665,7 +673,7 @@ export function renderPieWidget(
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
             <div style="max-width: 180px;">
-              <div style="font-weight: bold; color: ${datum.data.color}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${datum.data.label}</div>
+              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${safeLabel}</div>
               <div style="font-size: 11px; color: #ccc;">Freq: <strong style="color:#fff;">${percentage}</strong></div>
               ${!details.isOther ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
             </div>
@@ -768,15 +776,21 @@ export function renderPieWidget(
             }
           }
 
+          const swatchColor = safeColor(d.color);
+          const safeLabel = escapeHtml(d.label);
+          const safeUrl = escapeHtml(targetUrl);
+          const countTitle = d.details.count
+            ? escapeHtml(d.details.count.toLocaleString())
+            : '';
           return `
                <div style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
-                  <div style="width:12px; height:12px; background:${d.color}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
+                  <div style="width:12px; height:12px; background:${swatchColor}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
                   ${
                     d.details.isOther
-                      ? `<div style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${d.label}">${d.label}</div>`
-                      : `<a href="${targetUrl}" target="_blank" class="di-hover-underline" style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${d.label}">${d.label}</a>`
+                      ? `<div style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${safeLabel}">${safeLabel}</div>`
+                      : `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="di-hover-underline" style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${safeLabel}">${safeLabel}</a>`
                   }
-                  <div style="font-weight:bold; color:var(--di-text, #333); margin-left:auto;" title="${d.details.count ? d.details.count.toLocaleString() : ''}">${pct}</div>
+                  <div style="font-weight:bold; color:var(--di-text, #333); margin-left:auto;" title="${countTitle}">${pct}</div>
                </div>`;
         })
         .join('');

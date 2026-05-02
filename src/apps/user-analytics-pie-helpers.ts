@@ -46,3 +46,36 @@ export function computePercentages(values: number[], decimals = 1): string[] {
 
   return floored.map(v => (v / factor).toFixed(decimals) + '%');
 }
+
+/**
+ * Whitelists hex colors (`#rgb`, `#rrggbb`, `#rrggbbaa`). Anything else
+ * — including CSS keywords, `var(...)` references, or attacker-controlled
+ * strings like `red; background-image:url(javascript:...)` — is replaced
+ * with `#999`. Used wherever a slice color flows from data into a `style`
+ * attribute (legend swatch, tooltip header), since `hair_color` carries
+ * backend-derived colors.
+ */
+export function safeColor(c: unknown): string {
+  const s = String(c ?? '');
+  return /^#[0-9a-fA-F]{3,8}$/.test(s) ? s : '#999';
+}
+
+/**
+ * Returns the input only if it's an `https://` URL on a `donmai.us`
+ * subdomain (Danbooru's CDN). Anything else returns `null`, in which
+ * case the caller should omit the thumbnail entirely. Prevents
+ * `<img src="..." onerror="...">`-style escapes when a malicious or
+ * malformed thumb URL slips into PieSlice.details.thumb via the async
+ * `DanbooruInsights:DataUpdated` merge.
+ */
+export function safeThumbUrl(u: unknown): string | null {
+  const s = String(u ?? '');
+  // Reject any whitespace / quote / angle-bracket characters anywhere — they
+  // have no place in a real CDN URL and would let an attacker break out of
+  // a `src="..."` attribute even before escapeHtml gets a chance.
+  return /^https:\/\/(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)*donmai\.us\/[^\s"'<>]+$/i.test(
+    s,
+  )
+    ? s
+    : null;
+}
