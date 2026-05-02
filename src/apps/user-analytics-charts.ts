@@ -635,7 +635,11 @@ export function renderPieWidget(
           .style('filter', 'none');
       };
 
-      // Two-step tap: touch slice → show tooltip, tap tooltip → navigate
+      // Mobile interaction model: tap slice → preview (highlight + tooltip),
+      // tap tooltip → navigate. A second tap on the same slice is a no-op
+      // (preview persists) — navigateOnSameTap:false suppresses the shared
+      // util's default double-tap-to-navigate behavior, so the only path to
+      // navigation is the tooltip click below.
       const pieTap: TwoStepTapController<d3.PieArcDatum<PieSlice>> =
         createTwoStepTap({
           insideElements: () => [
@@ -653,6 +657,7 @@ export function renderPieWidget(
             tooltip.style('opacity', 0);
             resetSlices();
           },
+          navigateOnSameTap: false,
         });
 
       // Helper to handle touch on a slice
