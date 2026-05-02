@@ -11,6 +11,7 @@ import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import {
   buildSearchQuery,
   computePercentages,
+  pickFittingPosition,
   safeColor,
   safeThumbUrl,
 } from './user-analytics-pie-helpers';
@@ -723,12 +724,13 @@ export function renderPieWidget(
 
         tooltip.html(html).style('opacity', 1);
 
-        // Position the tooltip on the side OPPOSITE to where the touch
-        // landed relative to the chart wrapper's center — touches on the
-        // right half push the tooltip leftward, lower-half touches push it
-        // upward. This keeps the tooltip away from the modal edge that
-        // the touched slice is closest to (preventing horizontal page
-        // scroll on narrow mobile widths) and away from the legend below.
+        // Pick the first candidate position that fits the tooltip's
+        // natural size entirely inside (card-horizontal × wrapper-vertical
+        // ∩ viewport). Tooltip width/height are NOT modified — the user
+        // explicitly rejected size reduction. If every candidate fails
+        // (extremely narrow card vs long-label tooltip), fall back to a
+        // viewport-clamped origin; horizontal page scroll is independently
+        // prevented by the body scroll lock so this fallback is safe.
         const tooltipNode = tooltip.node() as HTMLElement | null;
         const tw = tooltipNode?.offsetWidth ?? 0;
         const th = tooltipNode?.offsetHeight ?? 0;
@@ -739,55 +741,53 @@ export function renderPieWidget(
         const wrapperRect = chartWrapper.getBoundingClientRect();
         const wrapperCenterDocX =
           wrapperRect.left + wrapperRect.width / 2 + window.scrollX;
-        const wrapperCenterDocY =
-          wrapperRect.top + wrapperRect.height / 2 + window.scrollY;
-        const touchOnRight = touch.pageX > wrapperCenterDocX;
-        const touchOnLower = touch.pageY > wrapperCenterDocY;
-        const minLeft = Math.max(
-          cardRect.left + window.scrollX + margin,
-          window.scrollX + margin,
-        );
-        const maxRight = Math.min(
-          cardRect.right + window.scrollX - margin,
-          window.scrollX + vw - margin,
-        );
-        const minTop = Math.max(
-          wrapperRect.top + window.scrollY + margin,
-          window.scrollY + margin,
-        );
-        const maxBottom = Math.min(
-          wrapperRect.bottom + window.scrollY - margin,
-          window.scrollY + vh - margin,
-        );
-        let left = touchOnRight ? touch.pageX - tw - 15 : touch.pageX + 15;
-        let top = touchOnLower ? touch.pageY - th - 15 : touch.pageY + 15;
-        // Fallback flips if the preferred side itself overflows (e.g. tap
-        // very close to the wrapper edge), then hard clamp to card/wrapper.
-        if (left + tw > maxRight) {
-          left = touch.pageX - tw - 15;
-        }
-        if (left < minLeft) {
-          left = touch.pageX + 15;
-        }
-        if (left + tw > maxRight) {
-          left = maxRight - tw;
-        }
-        if (left < minLeft) {
-          left = minLeft;
-        }
-        if (top + th > maxBottom) {
-          top = touch.pageY - th - 15;
-        }
-        if (top < minTop) {
-          top = touch.pageY + 15;
-        }
-        if (top + th > maxBottom) {
-          top = maxBottom - th;
-        }
-        if (top < minTop) {
-          top = minTop;
-        }
-        tooltip.style('left', left + 'px').style('top', top + 'px');
+        const bounds = {
+          minLeft: Math.max(
+            cardRect.left + window.scrollX + margin,
+            window.scrollX + margin,
+          ),
+          maxRight: Math.min(
+            cardRect.right + window.scrollX - margin,
+            window.scrollX + vw - margin,
+          ),
+          minTop: Math.max(
+            wrapperRect.top + window.scrollY + margin,
+            window.scrollY + margin,
+          ),
+          maxBottom: Math.min(
+            wrapperRect.bottom + window.scrollY - margin,
+            window.scrollY + vh - margin,
+          ),
+        };
+        const candidates = [
+          // Four touch-relative quadrants (priority: away from modal edge)
+          {left: touch.pageX - tw - 15, top: touch.pageY - th - 15},
+          {left: touch.pageX + 15, top: touch.pageY - th - 15},
+          {left: touch.pageX - tw - 15, top: touch.pageY + 15},
+          {left: touch.pageX + 15, top: touch.pageY + 15},
+          // Wrapper-center horizontal alignment, vertical above/below — used
+          // when an edge slice prevents any of the four touch-relative
+          // candidates from fitting (typical: long copyright/character
+          // label on a narrow phone).
+          {
+            left: wrapperCenterDocX - tw / 2,
+            top: wrapperRect.top + window.scrollY - th - margin,
+          },
+          {
+            left: wrapperCenterDocX - tw / 2,
+            top: wrapperRect.bottom + window.scrollY + margin,
+          },
+        ];
+        const chosen = pickFittingPosition(candidates, tw, th, bounds) ?? {
+          left: bounds.minLeft,
+          top: Math.max(
+            bounds.minTop,
+            Math.min(bounds.maxBottom - th, touch.pageY + 15),
+          ),
+        };
+        tooltip
+          .style('left', chosen.left + 'px')
+          .style('top', chosen.top + 'px');
       };
 
       svg

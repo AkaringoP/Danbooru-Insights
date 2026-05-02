@@ -131,3 +131,46 @@ export function safeThumbUrl(u: unknown): string | null {
     ? s
     : null;
 }
+
+/**
+ * Tooltip placement candidate (document-coordinate top-left).
+ */
+export interface TooltipCandidate {
+  left: number;
+  top: number;
+}
+
+export interface TooltipBounds {
+  minLeft: number;
+  maxRight: number;
+  minTop: number;
+  maxBottom: number;
+}
+
+/**
+ * Picks the first candidate whose bounding box (origin + width/height)
+ * fits entirely inside `bounds`. Used by the mobile pie-chart tooltip
+ * to honor a "no horizontal scroll, full tooltip visible" UX without
+ * shrinking the tooltip itself — callers supply candidates in priority
+ * order (e.g. four touch-relative quadrants, then chart-wrapper-centered
+ * fallbacks). Returns `null` if no candidate fits; the caller should
+ * apply a last-resort hard clamp in that case.
+ */
+export function pickFittingPosition(
+  candidates: readonly TooltipCandidate[],
+  width: number,
+  height: number,
+  bounds: TooltipBounds,
+): TooltipCandidate | null {
+  for (const c of candidates) {
+    if (
+      c.left >= bounds.minLeft &&
+      c.left + width <= bounds.maxRight &&
+      c.top >= bounds.minTop &&
+      c.top + height <= bounds.maxBottom
+    ) {
+      return c;
+    }
+  }
+  return null;
+}
