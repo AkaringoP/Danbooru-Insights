@@ -1146,25 +1146,26 @@ export function renderPieWidget(
         const TRANSITION_MS = 350;
         // Drop any in-flight snapshot from a previous rapid tab tap so we
         // don't pile up overlays.
-        container
+        pieContent
           .querySelectorAll('.di-pie-snapshot')
           .forEach(n => n.remove());
-        // Anchor snapshot to pieContent's bounding rect via explicit
-        // longhand top/left/width/height — the `inset` shorthand interacts
-        // badly with later individual top/left writes (clearing the
-        // shorthand also clears the longhand values), which previously
-        // caused the snapshot to fall back to its static position at the
-        // bottom of the card's flex stack instead of overlaying the chart.
-        const piRect = pieContent.getBoundingClientRect();
-        const cardRect = container.getBoundingClientRect();
         const piStyles = window.getComputedStyle(pieContent);
         const snapshot = document.createElement('div');
         snapshot.className = 'di-pie-snapshot';
+        // Fill the parent (pieContent) exactly — `position: absolute` +
+        // 0/0/100%/100% relative to a positioned ancestor avoids any
+        // bounding-rect math / containing-block ambiguity that broke
+        // earlier alignment attempts. Innerlay snapshot in pieContent
+        // (not the outer card) so it tracks pieContent's exact rect even
+        // if the dashboard layout shifts. Trade-off: loadTab's uncached
+        // path wipes pieContent.innerHTML, which removes the snapshot
+        // and skips the transition for first-time tab visits — that's
+        // fine because the user still sees a Loading message there.
         snapshot.style.position = 'absolute';
-        snapshot.style.top = `${piRect.top - cardRect.top}px`;
-        snapshot.style.left = `${piRect.left - cardRect.left}px`;
-        snapshot.style.width = `${piRect.width}px`;
-        snapshot.style.height = `${piRect.height}px`;
+        snapshot.style.top = '0';
+        snapshot.style.left = '0';
+        snapshot.style.width = '100%';
+        snapshot.style.height = '100%';
         snapshot.style.display = piStyles.display;
         snapshot.style.flexDirection = piStyles.flexDirection;
         snapshot.style.alignItems = piStyles.alignItems;
@@ -1179,11 +1180,8 @@ export function renderPieWidget(
         for (const child of Array.from(pieContent.children) as HTMLElement[]) {
           snapshot.appendChild(child.cloneNode(true) as HTMLElement);
         }
-        // Append to `container` (the pie card), NOT pieContent — loadTab's
-        // uncached path replaces pieContent.innerHTML with a "Loading…"
-        // placeholder, which would wipe a snapshot that lived inside it.
-        container.style.position = container.style.position || 'relative';
-        container.appendChild(snapshot);
+        pieContent.style.position = 'relative';
+        pieContent.appendChild(snapshot);
         // Force layout commit so the browser has a "before" frame
         // (opacity:1) to interpolate from. Without this, when loadTab
         // resolves synchronously (cached tab), the microtask + RAF can
