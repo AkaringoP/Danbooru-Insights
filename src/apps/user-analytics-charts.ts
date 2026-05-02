@@ -26,6 +26,7 @@ import type {
 import {
   isTouchDevice,
   createTwoStepTap,
+  TapTracker,
   type TwoStepTapController,
 } from '../ui/two-step-tap';
 import type {PieDetails, PieSlice} from './user-analytics-data';
@@ -661,9 +662,13 @@ export function renderPieWidget(
           navigateOnSameTap: false,
         });
 
-      // Helper to handle touch on a slice
+      // Helper to handle a completed tap on a slice. Accepts both touchend
+      // events (uses event.changedTouches) and live-touch events (touches)
+      // so it can be triggered from either end-of-tap detection or future
+      // hover-style flows.
       const handleSliceTouch = (event: TouchEvent) => {
-        const touch = event.touches[0];
+        const touch = event.changedTouches[0] ?? event.touches[0];
+        if (!touch) return;
         const target = document.elementFromPoint(
           touch.clientX,
           touch.clientY,
@@ -790,19 +795,41 @@ export function renderPieWidget(
           .style('top', chosen.top + 'px');
       };
 
+      // Slice and tooltip both use TapTracker so the action only fires on
+      // a completed tap (touchstart + touchend on roughly the same spot).
+      // Why: showing the tooltip on `touchstart` would put it under the
+      // user's finger, and the synthetic `click` browsers fire after a
+      // tap would land on the tooltip and trigger navigation immediately
+      // — perceived as "one tap, two actions". With end-of-tap gating and
+      // no `tooltip.on('click')`, the synthetic click is harmless.
+      const sliceTapTracker = new TapTracker();
       svg
         .selectAll('path.danbooru-grass-pie-path')
         .on('touchstart', event => {
-          handleSliceTouch(event as TouchEvent);
+          sliceTapTracker.onTouchStart(event as TouchEvent);
         })
         .on('touchmove', event => {
-          handleSliceTouch(event as TouchEvent);
+          sliceTapTracker.onTouchMove(event as TouchEvent);
+        })
+        .on('touchend', event => {
+          if (sliceTapTracker.onTouchEnd(event as TouchEvent)) {
+            handleSliceTouch(event as TouchEvent);
+          }
         });
 
-      // Tooltip tap → navigate via controller
-      tooltip.on('click', () => {
-        pieTap.navigateActive();
-      });
+      const tooltipTapTracker = new TapTracker();
+      tooltip
+        .on('touchstart', event => {
+          tooltipTapTracker.onTouchStart(event as TouchEvent);
+        })
+        .on('touchmove', event => {
+          tooltipTapTracker.onTouchMove(event as TouchEvent);
+        })
+        .on('touchend', event => {
+          if (tooltipTapTracker.onTouchEnd(event as TouchEvent)) {
+            pieTap.navigateActive();
+          }
+        });
     }
 
     const legendDiv = pieContent.querySelector('.danbooru-grass-legend-scroll');
