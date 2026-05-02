@@ -555,7 +555,7 @@ export function renderPieWidget(
       )
       .attr('stroke', 'var(--di-chart-bg, #fff)')
       .style('stroke-width', '1px')
-      .on('mouseover', function (_event, d) {
+      .on('mouseover', function (event, d) {
         d3.select(this)
           .transition()
           .duration(200)
@@ -604,7 +604,16 @@ export function renderPieWidget(
         `;
         }
 
-        tooltip.html(html).style('opacity', 1);
+        // Position before opacity — otherwise the tooltip flashes at the
+        // previous tap's coordinates for one paint frame (offsetWidth read
+        // by other code paths forces an intermediate render at the stale
+        // position). Including the cursor position here also covers the
+        // gap before the first mousemove event.
+        tooltip
+          .html(html)
+          .style('left', event.pageX + 15 + 'px')
+          .style('top', event.pageY + 15 + 'px')
+          .style('opacity', 1);
       })
       .on('mousemove', event => {
         tooltip
@@ -735,7 +744,12 @@ export function renderPieWidget(
           </div>`;
         }
 
-        tooltip.html(html).style('opacity', 1);
+        // Update content but keep opacity at 0 — we'll flip to opacity 1
+        // only after the new position is set. Without this guard, the
+        // tooltip is briefly visible at the previous tap's coordinates
+        // because offsetWidth/offsetHeight reads below force a render
+        // before the new style.left / style.top take effect ("ghost flash").
+        tooltip.html(html);
 
         // Pick the first candidate position that fits the tooltip's
         // natural size entirely inside (card-horizontal × wrapper-vertical
@@ -812,7 +826,8 @@ export function renderPieWidget(
         };
         tooltip
           .style('left', chosen.left + 'px')
-          .style('top', chosen.top + 'px');
+          .style('top', chosen.top + 'px')
+          .style('opacity', 1);
       };
 
       // Slice and tooltip both use TapTracker so the action only fires on
