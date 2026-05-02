@@ -18,6 +18,7 @@ import {renderCreatedTagsWidget} from './created-tags-widget';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {createLogger} from '../core/logger';
 import {showToast} from '../ui/toast';
+import {lockBodyScroll, unlockBodyScroll} from '../core/scroll-lock';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
 
@@ -583,7 +584,7 @@ export class UserAnalyticsApp {
       requestAnimationFrame(() => {
         overlay.classList.add('visible');
       });
-      document.body.style.overflow = 'hidden'; // Prevent background scrolling
+      lockBodyScroll(); // Prevent background scrolling (iOS-safe)
 
       // Check Logic: If synced, show dashboard. If not, auto-sync?
       // User request: "Ask user if they want to fetch... if stop, resume later"
@@ -602,7 +603,7 @@ export class UserAnalyticsApp {
       overlay.classList.remove('visible');
       setTimeout(() => {
         overlay.style.display = 'none';
-        document.body.style.overflow = '';
+        unlockBodyScroll();
         void this.updateHeaderStatus(); // Update menu status on close
       }, 200); // Match transition duration
     }
