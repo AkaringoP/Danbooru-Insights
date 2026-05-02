@@ -8,6 +8,7 @@ import type {
   MonthlyStatEntry,
 } from '../core/analytics-data-manager';
 import {getBestThumbnailUrl} from '../utils';
+import {computePercentages} from './user-analytics-pie-helpers';
 import type {Database} from '../core/database';
 import type {
   D3Any,
@@ -357,6 +358,18 @@ export function renderPieWidget(
       return;
     }
 
+    // Largest-remainder percentages: ensures tooltip + legend agree and
+    // their sum is exactly 100% (avoids 33+33+33=99 / 16.67×6=102 displays).
+    // All tabs use 1 decimal for visual consistency between rating and others.
+    const pctStrings = computePercentages(
+      validData.map(s => s.value),
+      1,
+    );
+    const pctByLabel = new Map<string, string>(
+      validData.map((s, i) => [s.label, pctStrings[i]]),
+    );
+    const pctFor = (label: string) => pctByLabel.get(label) ?? '0.0%';
+
     // D3 Chart (Join Pattern)
     let chartWrapper = pieContent.querySelector(
       '.pie-chart-wrapper',
@@ -530,13 +543,12 @@ export function renderPieWidget(
             <div>
               <div style="font-weight: bold; color: ${d.data.color}; margin-bottom: 4px; font-size: 14px;">${d.data.label}</div>
               <div style="font-size: 11px; color: #ccc;">Count: <strong style="color:#fff;">${details.count.toLocaleString()}</strong></div>
-              <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${Math.round((d.data.value / totalValue) * 100)}%</strong></div>
+              <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${pctFor(d.data.label)}</strong></div>
             </div>
           </div>
         `;
         } else {
-          const percentage =
-            ((d.data.value / totalValue) * 100).toFixed(1) + '%';
+          const percentage = pctFor(d.data.label);
           html = `
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
@@ -644,12 +656,11 @@ export function renderPieWidget(
             <div>
               <div style="font-weight: bold; color: ${datum.data.color}; margin-bottom: 4px; font-size: 14px;">${datum.data.label}</div>
               <div style="font-size: 11px; color: #ccc;">Count: <strong style="color:#fff;">${details.count.toLocaleString()}</strong></div>
-              <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${Math.round((datum.data.value / totalValue) * 100)}%</strong></div>
+              <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${pctFor(datum.data.label)}</strong></div>
             </div>
           </div>`;
         } else {
-          const percentage =
-            ((datum.data.value / totalValue) * 100).toFixed(1) + '%';
+          const percentage = pctFor(datum.data.label);
           html = `
           <div style="display: flex; gap: 12px; align-items: start;">
             ${thumbHtml}
@@ -722,8 +733,7 @@ export function renderPieWidget(
 
       const listHtml = processedData
         .map(d => {
-          const val = (d.value / totalValue) * 100;
-          const pct = val.toFixed(1) + '%';
+          const pct = pctFor(d.label);
           let targetUrl = '#';
           let query = '';
 
