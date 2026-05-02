@@ -5,6 +5,58 @@
  * import and test them without dragging in d3 or DOM-dependent code.
  */
 
+import type {PieDetails} from './user-analytics-data';
+
+/**
+ * Builds the Danbooru `?tags=` query string for a pie slice click /
+ * legend-link target. Single source of truth — both `handlePieClick`
+ * and the legend builder call this so their URLs stay in sync (the
+ * "Mirror handlePieClick's logic" duplication was a long-standing
+ * footgun where one branch could drift from the other).
+ *
+ * Returns `null` when the slice can't produce a usable query — e.g.
+ * missing `targetName`, missing `details.rating`, or an empty tag.
+ *
+ * Note on label fallback: when a tag slice has no `tagName` we
+ * normalize the display label (`"Long Hair"` → `"long_hair"`) before
+ * using it. The historical legend builder used the raw label, which
+ * would 404 on multi-word labels — consolidating here makes the
+ * legend match the click handler's (correct) behavior.
+ */
+export function buildSearchQuery(
+  details: PieDetails,
+  fallbackLabel: string,
+  targetName: string,
+  tab: string,
+): string | null {
+  if (!targetName) return null;
+  switch (details.kind) {
+    case 'rating':
+      if (!details.rating) return null;
+      return `user:${targetName} rating:${details.rating}`;
+    case 'status':
+      if (!details.name) return null;
+      return `user:${targetName} status:${details.name}`;
+    case 'tag': {
+      if (tab === 'fav_copyright') {
+        const tag = details.tagName || fallbackLabel;
+        if (!tag) return null;
+        return `ordfav:${targetName} ${tag}`;
+      }
+      let tag: string;
+      if (details.originalTag) tag = details.originalTag;
+      else if (details.tagName === 'untagged_commentary')
+        tag = 'has:commentary -commentary -commentary_request';
+      else if (details.tagName === 'untagged_translation')
+        tag = '*_text -english_text -translation_request -translated';
+      else if (details.tagName) tag = details.tagName;
+      else tag = fallbackLabel.toLowerCase().replace(/ /g, '_');
+      if (!tag) return null;
+      return `user:${targetName} ${tag}`;
+    }
+  }
+}
+
 /**
  * Largest Remainder Method — formats a list of numbers as percentage
  * strings whose numeric values sum to exactly 100 (within `decimals`

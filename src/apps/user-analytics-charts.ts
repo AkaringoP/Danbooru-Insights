@@ -9,6 +9,7 @@ import type {
 } from '../core/analytics-data-manager';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import {
+  buildSearchQuery,
   computePercentages,
   safeColor,
   safeThumbUrl,
@@ -26,7 +27,7 @@ import {
   createTwoStepTap,
   type TwoStepTapController,
 } from '../ui/two-step-tap';
-import type {PieSlice} from './user-analytics-data';
+import type {PieDetails, PieSlice} from './user-analytics-data';
 
 /** Context needed by chart widgets that access user data. */
 export interface ChartContext {
@@ -165,53 +166,27 @@ export function renderPieWidget(
   window.addEventListener('DanbooruInsights:DataUpdated', onPieDataUpdate);
 
   /**
-   * Handles click events on pie chart slices.
+   * Handles click events on pie chart slices. Delegates the per-tab
+   * URL branching to `buildSearchQuery` so the legend (which links to
+   * the same target) and this handler stay in sync.
    */
   const handlePieClick = (d: d3.PieArcDatum<PieSlice>) => {
     const targetName =
       context.targetUser.normalizedName ||
       context.targetUser.name.replace(/ /g, '_') ||
       '';
-    if (!targetName) return;
-    let query = '';
-    const details = d.data.details;
-
-    if (currentPieTab === 'rating') {
-      if (details && details.rating) query = `rating:${details.rating}`;
-    } else if (currentPieTab === 'fav_copyright') {
-      query = `ordfav:${context.targetUser.normalizedName} ${details.tagName || d.data.label}`;
-      window.open(`/posts?tags=${encodeURIComponent(query)}`, '_blank');
-      return;
-    } else if (currentPieTab === 'status') {
-      query = `status:${details.name}`;
-    } else if (
-      [
-        'breasts',
-        'hair_length',
-        'hair_color',
-        'gender',
-        'commentary',
-        'translation',
-      ].includes(currentPieTab)
-    ) {
-      if (details.originalTag) query = details.originalTag;
-      else if (details.tagName === 'untagged_commentary')
-        query = 'has:commentary -commentary -commentary_request';
-      else if (details.tagName === 'untagged_translation')
-        query = '*_text -english_text -translation_request -translated';
-      else if (details.tagName) query = details.tagName;
-      else query = d.data.label.toLowerCase().replace(/ /g, '_');
-    } else {
-      query = details.tagName || d.data.label;
-    }
-
-    if (query) {
-      const urlPrefix = `user:${targetName}`;
-      window.open(
-        `/posts?tags=${encodeURIComponent(`${urlPrefix} ${query}`)}`,
-        '_blank',
-      );
-    }
+    const query = buildSearchQuery(
+      d.data.details,
+      d.data.label,
+      targetName,
+      currentPieTab,
+    );
+    if (!query) return;
+    window.open(
+      `/posts?tags=${encodeURIComponent(query)}`,
+      '_blank',
+      'noopener,noreferrer',
+    );
   };
 
   /**
@@ -300,6 +275,34 @@ export function renderPieWidget(
     ];
 
     const processedData: PieSlice[] = data.map((d: PieTabItem, i: number) => {
+      // Widen to a single shape — the union members from PieTabItem all
+      // expose these fields optionally, but the type system doesn't
+      // narrow them per-tab here.
+      const item = d as {
+        name?: string;
+        rating?: string;
+        label?: string;
+        tagName?: string;
+        originalTag?: string;
+        isOther?: boolean;
+        color?: string;
+        frequency?: number;
+        thumb?: string | null;
+        count: number;
+      };
+
+      const tagDetails = (): PieDetails => ({
+        kind: 'tag',
+        tagName: item.tagName,
+        originalTag: item.originalTag,
+        isOther: item.isOther,
+        count: item.count,
+        thumb: item.thumb,
+        color: item.color,
+        frequency: item.frequency,
+        name: item.name,
+      });
+
       if (
         [
           'rating',
@@ -312,38 +315,53 @@ export function renderPieWidget(
           'translation',
         ].includes(currentPieTab)
       ) {
-        {
-          // d may be {rating, label} (status/rating tabs) or DistributionItem
-          const dFlexible = d as {rating?: string; label?: string};
-          return {
-            value: d.count,
-            label:
-              currentPieTab === 'rating'
-                ? ratingLabels[dFlexible.rating as keyof typeof ratingLabels] ||
-                  dFlexible.rating ||
-                  ''
-                : dFlexible.label || d.name || '',
-            color:
-              currentPieTab === 'rating'
-                ? ratingColors[dFlexible.rating as keyof typeof ratingColors] ||
-                  '#999'
-                : currentPieTab === 'hair_color' && d.color
-                  ? d.color
-                  : d.color ||
-                    (d.isOther ? '#bdbdbd' : palette[i % palette.length]),
-            details: d,
+        let details: PieDetails;
+        if (currentPieTab === 'rating') {
+          details = {
+            kind: 'rating',
+            rating: (item.rating ?? '') as 'g' | 's' | 'q' | 'e' | '',
+            count: item.count,
+            label: item.label,
+            thumb: item.thumb,
           };
-        }
-      } else {
-        let sliceColor = d.isOther ? '#bdbdbd' : palette[i % palette.length];
-        if (currentPieTab === 'hair_color' && d.color) {
-          sliceColor = d.color;
+        } else if (currentPieTab === 'status') {
+          details = {
+            kind: 'status',
+            name: item.name ?? '',
+            count: item.count,
+            label: item.label,
+            thumb: item.thumb,
+          };
+        } else {
+          details = tagDetails();
         }
         return {
-          value: d.frequency ?? 0,
-          label: d.name ?? '',
+          value: item.count,
+          label:
+            currentPieTab === 'rating'
+              ? ratingLabels[item.rating as keyof typeof ratingLabels] ||
+                item.rating ||
+                ''
+              : item.label || item.name || '',
+          color:
+            currentPieTab === 'rating'
+              ? ratingColors[item.rating as keyof typeof ratingColors] || '#999'
+              : currentPieTab === 'hair_color' && item.color
+                ? item.color
+                : item.color ||
+                  (item.isOther ? '#bdbdbd' : palette[i % palette.length]),
+          details,
+        };
+      } else {
+        let sliceColor = item.isOther ? '#bdbdbd' : palette[i % palette.length];
+        if (currentPieTab === 'hair_color' && item.color) {
+          sliceColor = item.color;
+        }
+        return {
+          value: item.frequency ?? 0,
+          label: item.name ?? '',
           color: sliceColor,
-          details: d,
+          details: tagDetails(),
         };
       }
     });
@@ -541,6 +559,7 @@ export function renderPieWidget(
           : '';
         const sliceColor = safeColor(d.data.color);
         const safeLabel = escapeHtml(d.data.label);
+        const isOtherSlice = details.kind === 'tag' && !!details.isOther;
 
         if (currentPieTab === 'rating') {
           html = `
@@ -561,7 +580,7 @@ export function renderPieWidget(
             <div style="max-width: 180px;">
               <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${safeLabel}</div>
               <div style="font-size: 11px; color: #ccc;">Freq: <strong style="color:#fff;">${percentage}</strong></div>
-              ${!details.isOther ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
+              ${!isOtherSlice ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
             </div>
           </div>
         `;
@@ -656,6 +675,7 @@ export function renderPieWidget(
           : '';
         const sliceColor = safeColor(datum.data.color);
         const safeLabel = escapeHtml(datum.data.label);
+        const isOtherSlice = details.kind === 'tag' && !!details.isOther;
 
         if (currentPieTab === 'rating') {
           html = `
@@ -675,7 +695,7 @@ export function renderPieWidget(
             <div style="max-width: 180px;">
               <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${safeLabel}</div>
               <div style="font-size: 11px; color: #ccc;">Freq: <strong style="color:#fff;">${percentage}</strong></div>
-              ${!details.isOther ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
+              ${!isOtherSlice ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
             </div>
           </div>`;
         }
@@ -742,37 +762,18 @@ export function renderPieWidget(
       const listHtml = processedData
         .map(d => {
           const pct = pctFor(d.label);
+          const isOtherSlice = d.details.kind === 'tag' && !!d.details.isOther;
           let targetUrl = '#';
-          let query = '';
 
-          if (!d.details.isOther) {
-            if (currentPieTab === 'rating') {
-              query = `rating:${d.details.rating}`;
-              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
-            } else if (currentPieTab === 'breasts') {
-              const tag = d.label.toLowerCase().replace(/ /g, '_');
-              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${tag}`)}`;
-            } else if (currentPieTab === 'fav_copyright') {
-              query = `ordfav:${contextUser.normalizedName} ${d.details.tagName || d.label}`;
+          if (!isOtherSlice) {
+            const query = buildSearchQuery(
+              d.details,
+              d.label,
+              contextUser.normalizedName ?? '',
+              currentPieTab,
+            );
+            if (query) {
               targetUrl = `/posts?tags=${encodeURIComponent(query)}`;
-            } else if (currentPieTab === 'status') {
-              query = `status:${d.details.name}`;
-              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
-            } else {
-              // Mirror handlePieClick's logic so the legend link matches the pie-slice click target.
-              // Critical for categories where the count query is multi-tag (gender, untagged_commentary,
-              // untagged_translation): originalTag preserves the OR/exclusion query so navigation
-              // points to the same post set the count represents.
-              if (d.details.originalTag) {
-                query = d.details.originalTag;
-              } else if (d.details.tagName === 'untagged_commentary') {
-                query = 'has:commentary -commentary -commentary_request';
-              } else if (d.details.tagName === 'untagged_translation') {
-                query = '*_text -english_text -translation_request -translated';
-              } else {
-                query = d.details.tagName || d.label;
-              }
-              targetUrl = `/posts?tags=${encodeURIComponent(`user:${contextUser.normalizedName} ${query}`)}`;
             }
           }
 
@@ -786,7 +787,7 @@ export function renderPieWidget(
                <div style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
                   <div style="width:12px; height:12px; background:${swatchColor}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
                   ${
-                    d.details.isOther
+                    isOtherSlice
                       ? `<div style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${safeLabel}">${safeLabel}</div>`
                       : `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="di-hover-underline" style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${safeLabel}">${safeLabel}</a>`
                   }
