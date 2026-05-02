@@ -37,26 +37,26 @@ describe('TapTracker', () => {
     expect(t.onTouchEnd(touchEvent('changedTouches', 102, 99))).toBe(true);
   });
 
-  it('move beyond 10px cancels the tap (treated as scroll/swipe)', () => {
+  it('move beyond 15px cancels the tap (treated as scroll/swipe)', () => {
     const t = new TapTracker();
     t.onTouchStart(touchEvent('touches', 100, 100));
-    t.onTouchMove(touchEvent('touches', 100, 115)); // 15px down
+    t.onTouchMove(touchEvent('touches', 100, 120)); // 20px down
     expect(t.isTracking).toBe(false);
-    expect(t.onTouchEnd(touchEvent('changedTouches', 100, 115))).toBe(false);
-  });
-
-  it('move within 10px does not cancel the tap', () => {
-    const t = new TapTracker();
-    t.onTouchStart(touchEvent('touches', 100, 100));
-    t.onTouchMove(touchEvent('touches', 105, 95));
-    expect(t.isTracking).toBe(true);
-    expect(t.onTouchEnd(touchEvent('changedTouches', 108, 93))).toBe(true);
-  });
-
-  it('end-position drift > 10px cancels even without touchmove', () => {
-    const t = new TapTracker();
-    t.onTouchStart(touchEvent('touches', 100, 100));
     expect(t.onTouchEnd(touchEvent('changedTouches', 100, 120))).toBe(false);
+  });
+
+  it('move within 15px does not cancel the tap', () => {
+    const t = new TapTracker();
+    t.onTouchStart(touchEvent('touches', 100, 100));
+    t.onTouchMove(touchEvent('touches', 110, 95));
+    expect(t.isTracking).toBe(true);
+    expect(t.onTouchEnd(touchEvent('changedTouches', 113, 93))).toBe(true);
+  });
+
+  it('end-position drift > 15px cancels even without touchmove', () => {
+    const t = new TapTracker();
+    t.onTouchStart(touchEvent('touches', 100, 100));
+    expect(t.onTouchEnd(touchEvent('changedTouches', 100, 125))).toBe(false);
   });
 
   it('long-press past 600ms is not a tap', () => {
@@ -85,10 +85,10 @@ describe('TapTracker', () => {
     expect(t.isTracking).toBe(false);
   });
 
-  it('exact 10px / 600ms boundaries are inclusive (≤)', () => {
+  it('exact 15px / 600ms boundaries are inclusive (≤)', () => {
     const t = new TapTracker();
     t.onTouchStart(touchEvent('touches', 100, 100));
     vi.advanceTimersByTime(600);
-    expect(t.onTouchEnd(touchEvent('changedTouches', 110, 110))).toBe(true);
+    expect(t.onTouchEnd(touchEvent('changedTouches', 115, 115))).toBe(true);
   });
 });
