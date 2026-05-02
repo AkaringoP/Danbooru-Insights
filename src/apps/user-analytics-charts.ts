@@ -740,10 +740,13 @@ export function renderPieWidget(
         // Pick the first candidate position that fits the tooltip's
         // natural size entirely inside (card-horizontal × wrapper-vertical
         // ∩ viewport). Tooltip width/height are NOT modified — the user
-        // explicitly rejected size reduction. If every candidate fails
-        // (extremely narrow card vs long-label tooltip), fall back to a
-        // viewport-clamped origin; horizontal page scroll is independently
-        // prevented by the body scroll lock so this fallback is safe.
+        // explicitly rejected size reduction. Edge slices on narrow cards
+        // can't fit any of the four touch-relative quadrants, so we also
+        // try anchoring to the card's FAR side (opposite the touch) — this
+        // is the "flip across the chart" placement the user asked for. If
+        // even those fail, fall back to a viewport-clamped origin;
+        // horizontal page scroll is independently prevented by the body
+        // scroll lock so this fallback is safe.
         const tooltipNode = tooltip.node() as HTMLElement | null;
         const tw = tooltipNode?.offsetWidth ?? 0;
         const th = tooltipNode?.offsetHeight ?? 0;
@@ -752,8 +755,6 @@ export function renderPieWidget(
         const margin = 8;
         const cardRect = container.getBoundingClientRect();
         const wrapperRect = chartWrapper.getBoundingClientRect();
-        const wrapperCenterDocX =
-          wrapperRect.left + wrapperRect.width / 2 + window.scrollX;
         const bounds = {
           minLeft: Math.max(
             cardRect.left + window.scrollX + margin,
@@ -772,27 +773,38 @@ export function renderPieWidget(
             window.scrollY + vh - margin,
           ),
         };
+        // Far side of the card relative to the touch — this is where the
+        // tooltip goes when no touch-relative quadrant has room.
+        const cardCenterDocX =
+          cardRect.left + cardRect.width / 2 + window.scrollX;
+        const farSideLeft =
+          touch.pageX > cardCenterDocX ? bounds.minLeft : bounds.maxRight - tw;
         const candidates = [
-          // Four touch-relative quadrants (priority: away from modal edge)
+          // Touch-relative quadrants (priority: away from modal edge).
           {left: touch.pageX - tw - 15, top: touch.pageY - th - 15},
           {left: touch.pageX + 15, top: touch.pageY - th - 15},
           {left: touch.pageX - tw - 15, top: touch.pageY + 15},
           {left: touch.pageX + 15, top: touch.pageY + 15},
-          // Wrapper-center horizontal alignment, vertical above/below — used
-          // when an edge slice prevents any of the four touch-relative
-          // candidates from fitting (typical: long copyright/character
-          // label on a narrow phone).
-          {
-            left: wrapperCenterDocX - tw / 2,
-            top: wrapperRect.top + window.scrollY - th - margin,
-          },
-          {
-            left: wrapperCenterDocX - tw / 2,
-            top: wrapperRect.bottom + window.scrollY + margin,
-          },
+          // Far-side anchors — used when an edge slice prevents any of the
+          // four touch-relative candidates from fitting (typical: long
+          // copyright/character label on a narrow phone). All four place
+          // the tooltip at the card's opposite horizontal edge with
+          // varying vertical positions, picking the one closest to the
+          // touch.
+          {left: farSideLeft, top: touch.pageY - th / 2},
+          {left: farSideLeft, top: touch.pageY + 15},
+          {left: farSideLeft, top: touch.pageY - th - 15},
+          {left: farSideLeft, top: bounds.maxBottom - th},
+          {left: farSideLeft, top: bounds.minTop},
         ];
         const chosen = pickFittingPosition(candidates, tw, th, bounds) ?? {
-          left: bounds.minLeft,
+          // Last-resort fallback: align to far side horizontally, clamp
+          // vertically near the touch. Shouldn't trigger in practice now
+          // that far-side candidates explore the full vertical range.
+          left: Math.max(
+            bounds.minLeft,
+            Math.min(bounds.maxRight - tw, farSideLeft),
+          ),
           top: Math.max(
             bounds.minTop,
             Math.min(bounds.maxBottom - th, touch.pageY + 15),
