@@ -10,6 +10,74 @@ export function isTouchDevice(): boolean {
   return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 }
 
+/**
+ * Detects an intentional "tap" (touchstart + touchend on roughly the same
+ * spot, within a short time) — distinct from a scroll/swipe.
+ *
+ * Why we can't just use the synthetic `click` event for tap detection:
+ * after a tap the browser dispatches `mouseover`/`mousedown`/`mouseup`/
+ * `click` at the touch endpoint. If the widget showed a tooltip on
+ * `touchstart` under the finger, the synthetic `click` lands on the
+ * tooltip immediately and would trigger any tooltip click handler — the
+ * user perceives "one tap, two actions". TapTracker forces both the
+ * preview gesture and the navigation gesture to require a complete,
+ * unmoved tap on each respective element.
+ *
+ * Thresholds: 10 px move budget, 600 ms time budget — typical iOS/Android
+ * tap detection values, generous enough for shaky thumbs without
+ * swallowing real swipes.
+ */
+export class TapTracker {
+  private static readonly MOVE_THRESHOLD_PX = 10;
+  private static readonly TIME_THRESHOLD_MS = 600;
+  private start: {x: number; y: number; time: number} | null = null;
+
+  /** Record the touch start. Resets any previous in-flight tap. */
+  onTouchStart(event: TouchEvent): void {
+    const t = event.touches[0];
+    this.start = t ? {x: t.clientX, y: t.clientY, time: Date.now()} : null;
+  }
+
+  /** Cancel the in-flight tap if the finger has moved past the threshold. */
+  onTouchMove(event: TouchEvent): void {
+    if (!this.start) return;
+    const t = event.touches[0];
+    if (!t) return;
+    if (
+      Math.abs(t.clientX - this.start.x) > TapTracker.MOVE_THRESHOLD_PX ||
+      Math.abs(t.clientY - this.start.y) > TapTracker.MOVE_THRESHOLD_PX
+    ) {
+      this.start = null;
+    }
+  }
+
+  /**
+   * Returns true iff this touch sequence qualifies as a tap (start was
+   * recorded, end is within both thresholds). Always clears the in-flight
+   * state.
+   */
+  onTouchEnd(event: TouchEvent): boolean {
+    const start = this.start;
+    this.start = null;
+    if (!start) return false;
+    const t = event.changedTouches[0];
+    if (!t) return false;
+    const dx = Math.abs(t.clientX - start.x);
+    const dy = Math.abs(t.clientY - start.y);
+    const dt = Date.now() - start.time;
+    return (
+      dx <= TapTracker.MOVE_THRESHOLD_PX &&
+      dy <= TapTracker.MOVE_THRESHOLD_PX &&
+      dt <= TapTracker.TIME_THRESHOLD_MS
+    );
+  }
+
+  /** True if a touch sequence is currently in flight. */
+  get isTracking(): boolean {
+    return this.start !== null;
+  }
+}
+
 export interface TwoStepTapOptions<T> {
   /**
    * Elements that constitute "inside" — taps outside all of these reset state.
