@@ -28,7 +28,10 @@ export function isTouchDevice(): boolean {
  * swallowing real swipes.
  */
 export class TapTracker {
-  private static readonly MOVE_THRESHOLD_PX = 10;
+  // 15 px is forgiving enough for natural finger drift on touch (Material
+  // Design uses ~12 dp ≈ 18 px on retina, Apple ~10 pt ≈ 20 px). 10 px was
+  // too tight and silently rejected legitimate taps.
+  private static readonly MOVE_THRESHOLD_PX = 15;
   private static readonly TIME_THRESHOLD_MS = 600;
   private start: {x: number; y: number; time: number} | null = null;
 

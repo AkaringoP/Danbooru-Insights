@@ -687,20 +687,24 @@ export function renderPieWidget(
           navigateOnSameTap: false,
         });
 
-      // Helper to handle a completed tap on a slice. Accepts both touchend
-      // events (uses event.changedTouches) and live-touch events (touches)
-      // so it can be triggered from either end-of-tap detection or future
-      // hover-style flows.
-      const handleSliceTouch = (event: TouchEvent) => {
+      // Helper to handle a completed tap on a slice. The caller passes the
+      // datum captured at touchstart (the path d3 dispatched the event from)
+      // — this avoids elementFromPoint, which is unreliable on 3D-rotated
+      // SVG paths and was causing many taps to silently fail. The path
+      // element is looked up via d3 filter on the same datum identity.
+      const handleSliceTouch = (
+        event: TouchEvent,
+        datum: d3.PieArcDatum<PieSlice>,
+      ) => {
         const touch = event.changedTouches[0] ?? event.touches[0];
-        if (!touch) return;
-        const target = document.elementFromPoint(
-          touch.clientX,
-          touch.clientY,
-        ) as Element;
+        if (!touch || !datum.data) return;
+        const target = svg
+          .selectAll<SVGPathElement, d3.PieArcDatum<PieSlice>>(
+            'path.danbooru-grass-pie-path',
+          )
+          .filter(d => d === datum)
+          .node();
         if (!target) return;
-        const datum = d3.select(target).datum() as d3.PieArcDatum<PieSlice>;
-        if (!datum || !datum.data) return;
 
         // Reset all slices, then enlarge touched slice
         resetSlices();
@@ -846,17 +850,30 @@ export function renderPieWidget(
       // — perceived as "one tap, two actions". With end-of-tap gating and
       // no `tooltip.on('click')`, the synthetic click is harmless.
       const sliceTapTracker = new TapTracker();
+      // Capture the slice datum at touchstart — we know exactly which path
+      // d3 dispatched the event from. Re-querying via elementFromPoint at
+      // touchend is unreliable on a 3D-rotated SVG (rotateX(40deg) moves
+      // hit-test boundaries off the visible pixels and elementFromPoint
+      // often returns the parent <svg> / <g> instead of the path), which
+      // made a large fraction of taps silently no-op.
+      let sliceTouchDatum: d3.PieArcDatum<PieSlice> | null = null;
       svg
-        .selectAll('path.danbooru-grass-pie-path')
-        .on('touchstart', event => {
+        .selectAll<SVGPathElement, d3.PieArcDatum<PieSlice>>(
+          'path.danbooru-grass-pie-path',
+        )
+        .on('touchstart', (event, datum) => {
           sliceTapTracker.onTouchStart(event as TouchEvent);
+          sliceTouchDatum = datum;
         })
         .on('touchmove', event => {
           sliceTapTracker.onTouchMove(event as TouchEvent);
         })
         .on('touchend', event => {
-          if (sliceTapTracker.onTouchEnd(event as TouchEvent)) {
-            handleSliceTouch(event as TouchEvent);
+          const isTap = sliceTapTracker.onTouchEnd(event as TouchEvent);
+          const datum = sliceTouchDatum;
+          sliceTouchDatum = null;
+          if (isTap && datum) {
+            handleSliceTouch(event as TouchEvent, datum);
           }
         });
 
