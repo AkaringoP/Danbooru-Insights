@@ -654,6 +654,14 @@ export function renderPieWidget(
           onSecondTap: datum => {
             handlePieClick(datum);
             tooltip.style('opacity', 0);
+            // Same fix the tag-cloud widget needed: navigation opens the
+            // post search in a new tab, so when the user comes back via
+            // browser-back the SVG state is exactly what we left it as.
+            // Without resetSlices() the highlighted slice stays in its
+            // arcHover shape and the tap tracker has no datum, so no tap
+            // will dismiss it — the chart appears frozen until a different
+            // slice is touched.
+            resetSlices();
           },
           onReset: () => {
             tooltip.style('opacity', 0);
