@@ -525,10 +525,24 @@ export function renderPieWidget(
       .style('padding', '8px 12px')
       .style('border-radius', '6px')
       .style('font-size', '12px')
-      .style('pointer-events', isTouch ? 'auto' : 'none')
+      // pointer-events is toggled in sync with opacity (auto when shown,
+      // none when hidden) so a dismissed tooltip's stale rectangle never
+      // intercepts a slice tap from underneath. See showTooltip /
+      // hideTooltip below.
+      .style('pointer-events', 'none')
       .style('cursor', isTouch ? 'pointer' : 'default')
       .style('z-index', '2147483647')
       .style('opacity', '0');
+
+    /**
+     * Hide the tooltip and disable pointer-events so its stale bounding
+     * box stops eating taps directed at slices below it. Show paths set
+     * pointer-events back to 'auto' inline (desktop hover keeps 'none' so
+     * the cursor passes through to slices).
+     */
+    const hideTooltip = () => {
+      tooltip.style('opacity', 0).style('pointer-events', 'none');
+    };
 
     svg
       .selectAll('path')
@@ -670,7 +684,7 @@ export function renderPieWidget(
           },
           onSecondTap: datum => {
             handlePieClick(datum);
-            tooltip.style('opacity', 0);
+            hideTooltip();
             // Same fix the tag-cloud widget needed: navigation opens the
             // post search in a new tab, so when the user comes back via
             // browser-back the SVG state is exactly what we left it as.
@@ -681,7 +695,7 @@ export function renderPieWidget(
             resetSlices();
           },
           onReset: () => {
-            tooltip.style('opacity', 0);
+            hideTooltip();
             resetSlices();
           },
           navigateOnSameTap: false,
@@ -839,7 +853,8 @@ export function renderPieWidget(
         tooltip
           .style('left', chosen.left + 'px')
           .style('top', chosen.top + 'px')
-          .style('opacity', 1);
+          .style('opacity', 1)
+          .style('pointer-events', 'auto');
       };
 
       // Slice and tooltip both use TapTracker so the action only fires on
