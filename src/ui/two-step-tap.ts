@@ -26,6 +26,16 @@ export interface TwoStepTapOptions<T> {
   resetOnScroll?: boolean;
   /** Custom equality check. Default: strict reference equality (===). */
   isEqual?: (a: T, b: T) => boolean;
+  /**
+   * If false, a second tap on the same datum is a no-op (preview persists)
+   * — navigation must come exclusively from `navigateActive()` (typically a
+   * tooltip click). Default: true (existing two-step behavior).
+   *
+   * Used by widgets that want "tap element → preview, tap tooltip →
+   * navigate" semantics with no double-tap-to-navigate fallback on the
+   * element itself.
+   */
+  navigateOnSameTap?: boolean;
 }
 
 export interface TwoStepTapController<T> {
@@ -96,6 +106,11 @@ export function createTwoStepTap<T>(
   return {
     tap(datum: T): boolean {
       if (activeDatum !== null && eq(activeDatum, datum)) {
+        if (options.navigateOnSameTap === false) {
+          // Same datum re-tap is a no-op; preview persists. Navigation
+          // must come from navigateActive() (typically a tooltip click).
+          return false;
+        }
         // Second tap on same element → navigate
         const d = activeDatum;
         activeDatum = null;
