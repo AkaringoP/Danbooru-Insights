@@ -66,13 +66,50 @@ async function swrStats<T>(
   return {data};
 }
 
+/**
+ * Discriminated union for `PieSlice.details`. Replaces the historic
+ * `any` typing so click-handler / legend-link branching can be checked
+ * exhaustively at compile time and a typo on `details.rating` /
+ * `details.tagName` no longer slides through to a broken URL at runtime.
+ *
+ * - `rating` (rating tab): `getRatingDistribution` returns `{rating, count, label}`.
+ * - `status` (status tab): `getStatusDistribution` returns `{name, count, label}`.
+ * - `tag`    (everything else): `DistributionItem`-shaped, possibly with
+ *   `originalTag` / `untagged_*` sentinels.
+ */
+export type PieDetails =
+  | {
+      kind: 'rating';
+      rating: 'g' | 's' | 'q' | 'e' | '';
+      count: number;
+      label?: string;
+      thumb?: string | null;
+    }
+  | {
+      kind: 'status';
+      name: string;
+      count: number;
+      label?: string;
+      thumb?: string | null;
+    }
+  | {
+      kind: 'tag';
+      tagName?: string;
+      originalTag?: string;
+      isOther?: boolean;
+      count: number;
+      thumb?: string | null;
+      color?: string;
+      frequency?: number;
+      name?: string;
+    };
+
 /** Processed pie chart slice used for D3 rendering. */
 export interface PieSlice {
   value: number;
   label: string;
   color: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  details: any; // DistributionItem | StatusItem | RatingItem
+  details: PieDetails;
 }
 
 /**
