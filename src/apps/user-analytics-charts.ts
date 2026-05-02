@@ -1146,14 +1146,25 @@ export function renderPieWidget(
         const TRANSITION_MS = 350;
         // Drop any in-flight snapshot from a previous rapid tab tap so we
         // don't pile up overlays.
-        pieContent
+        container
           .querySelectorAll('.di-pie-snapshot')
           .forEach(n => n.remove());
+        // Anchor snapshot to pieContent's bounding rect via explicit
+        // longhand top/left/width/height — the `inset` shorthand interacts
+        // badly with later individual top/left writes (clearing the
+        // shorthand also clears the longhand values), which previously
+        // caused the snapshot to fall back to its static position at the
+        // bottom of the card's flex stack instead of overlaying the chart.
+        const piRect = pieContent.getBoundingClientRect();
+        const cardRect = container.getBoundingClientRect();
         const piStyles = window.getComputedStyle(pieContent);
         const snapshot = document.createElement('div');
         snapshot.className = 'di-pie-snapshot';
         snapshot.style.position = 'absolute';
-        snapshot.style.inset = '0';
+        snapshot.style.top = `${piRect.top - cardRect.top}px`;
+        snapshot.style.left = `${piRect.left - cardRect.left}px`;
+        snapshot.style.width = `${piRect.width}px`;
+        snapshot.style.height = `${piRect.height}px`;
         snapshot.style.display = piStyles.display;
         snapshot.style.flexDirection = piStyles.flexDirection;
         snapshot.style.alignItems = piStyles.alignItems;
@@ -1161,25 +1172,16 @@ export function renderPieWidget(
         // Preserve the parent's 3D context so the cloned chart wrapper
         // keeps its rotateX(40deg) tilt during the fade.
         snapshot.style.transformStyle = 'preserve-3d';
+        snapshot.style.perspective = piStyles.perspective;
         snapshot.style.pointerEvents = 'none';
         snapshot.style.transition = `opacity ${TRANSITION_MS}ms ease`;
         snapshot.style.opacity = '1';
         for (const child of Array.from(pieContent.children) as HTMLElement[]) {
           snapshot.appendChild(child.cloneNode(true) as HTMLElement);
         }
-        pieContent.style.position = 'relative';
         // Append to `container` (the pie card), NOT pieContent — loadTab's
         // uncached path replaces pieContent.innerHTML with a "Loading…"
         // placeholder, which would wipe a snapshot that lived inside it.
-        // Snapshot anchors to pieContent's bounding rect for visual overlay.
-        const piRect = pieContent.getBoundingClientRect();
-        const cardRect = container.getBoundingClientRect();
-        snapshot.style.position = 'absolute';
-        snapshot.style.top = `${piRect.top - cardRect.top}px`;
-        snapshot.style.left = `${piRect.left - cardRect.left}px`;
-        snapshot.style.width = `${piRect.width}px`;
-        snapshot.style.height = `${piRect.height}px`;
-        snapshot.style.inset = '';
         container.style.position = container.style.position || 'relative';
         container.appendChild(snapshot);
         // Force layout commit so the browser has a "before" frame
