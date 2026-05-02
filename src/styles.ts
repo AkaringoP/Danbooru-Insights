@@ -812,18 +812,6 @@ export const GLOBAL_CSS = `
         align-items: center !important;
         justify-content: center !important;
       }
-      /* Mobile-only fade-blur applied during pie-tab switches.
-         Legend (.danbooru-grass-legend-scroll) stays crisp — only the
-         chart wrapper / loading state blurs. */
-      .pie-content > * {
-        transition:
-          filter 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-          opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-      }
-      .pie-content.di-pie-blurring > :not(.danbooru-grass-legend-scroll) {
-        filter: blur(6px);
-        opacity: 0.5;
-      }
       .danbooru-grass-legend-scroll {
         margin-left: 0 !important;
         margin-top: 10px !important;

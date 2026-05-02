@@ -1127,21 +1127,55 @@ export function renderPieWidget(
         currentPieTab = mode;
         updatePieTabs();
 
-        // Mobile-only fade-blur transition between tabs.
-        // The CSS rule (.di-pie-blurring) is scoped to @media (max-width: 768px),
-        // so adding the class on desktop is a no-op.
         const pieContent = container.querySelector(
           '.pie-content',
         ) as HTMLElement | null;
-        pieContent?.classList.add('di-pie-blurring');
-        const minBlurMs = 380;
-        const minBlur = new Promise<void>(resolve =>
-          setTimeout(resolve, minBlurMs),
-        );
-        void Promise.all([loadTab(mode), minBlur]).then(() => {
-          if (currentPieTab === mode) {
-            pieContent?.classList.remove('di-pie-blurring');
+        if (!pieContent) {
+          void loadTab(mode);
+          return;
+        }
+
+        // Crossfade — same pattern the tag-cloud widget uses (350 ms opacity
+        // transition between two overlapping wrappers). The current children
+        // (chart wrapper + legend) are cloneNode'd into an absolutely
+        // positioned snapshot that overlays the originals; the originals
+        // re-render in place via d3 join behind it; once the new data is
+        // ready, the snapshot fades to 0, revealing the freshly rendered
+        // content underneath. Keeping d3 references on the live chart
+        // wrapper means tooltip / hover bindings survive the transition.
+        const TRANSITION_MS = 350;
+        const piStyles = window.getComputedStyle(pieContent);
+        const snapshot = document.createElement('div');
+        snapshot.style.position = 'absolute';
+        snapshot.style.inset = '0';
+        snapshot.style.display = piStyles.display;
+        snapshot.style.flexDirection = piStyles.flexDirection;
+        snapshot.style.alignItems = piStyles.alignItems;
+        snapshot.style.justifyContent = piStyles.justifyContent;
+        // Preserve the parent's 3D context so the cloned chart wrapper
+        // keeps its rotateX(40deg) tilt during the fade.
+        snapshot.style.transformStyle = 'preserve-3d';
+        snapshot.style.pointerEvents = 'none';
+        snapshot.style.transition = `opacity ${TRANSITION_MS}ms ease`;
+        snapshot.style.opacity = '1';
+        for (const child of Array.from(pieContent.children) as HTMLElement[]) {
+          snapshot.appendChild(child.cloneNode(true) as HTMLElement);
+        }
+        pieContent.style.position = 'relative';
+        pieContent.appendChild(snapshot);
+
+        void loadTab(mode).then(() => {
+          if (currentPieTab !== mode) {
+            // User switched again before this tab finished — drop the
+            // stale snapshot immediately so it doesn't sit on top of the
+            // newer transition's snapshot.
+            snapshot.remove();
+            return;
           }
+          requestAnimationFrame(() => {
+            snapshot.style.opacity = '0';
+            setTimeout(() => snapshot.remove(), TRANSITION_MS);
+          });
         });
       }
     }
