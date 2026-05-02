@@ -98,7 +98,10 @@ export const GLOBAL_CSS = `
       width: 100vw;
       height: 100vh;
       height: 100dvh;
-      background: var(--di-overlay-bg, rgba(0, 0, 0, 0.4));
+      /* Opaque backdrop — the underlying Danbooru profile page must not
+         show through. Theme-aware fallback: dark variant uses the dashboard
+         background, light variant gets a solid white. */
+      background: var(--di-overlay-bg, var(--di-bg, #1a1a2e));
       z-index: 10000;
       display: none;
       justify-content: center;
@@ -119,7 +122,10 @@ export const GLOBAL_CSS = `
     #danbooru-grass-modal-window {
       width: 80%;
       max-width: 1000px;
-      height: 80%;
+      /* 100% height fills the overlay flex container fully — eliminates the
+         vertical gap that previously let the underlying page bleed through
+         above/below the modal on desktop. */
+      height: 100%;
       background: var(--di-bg-glass, rgba(255, 255, 255, 0.9));
       border-radius: 12px;
       box-shadow: 0 10px 30px var(--di-shadow, rgba(0, 0, 0, 0.2));
@@ -421,7 +427,9 @@ export const GLOBAL_CSS = `
         border-radius: 8px;
         width: 80%;
         max-width: 800px;
-        max-height: 90vh;
+        /* 100dvh handles iOS address-bar collapse; replaces 90vh which left
+           a gap that exposed the underlying profile page. */
+        max-height: 100dvh;
         position: relative;
         display: flex;
         flex-direction: column;
