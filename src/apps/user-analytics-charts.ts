@@ -70,6 +70,17 @@ type TopPostsBySfw = {sfw: DanbooruPost | null; nsfw: DanbooruPost | null};
 // ============================================================
 
 /**
+ * SVG/wrapper size in px. Sized larger than the visible chart so arcHover
+ * (1.2× outer radius) and the 3D rotateX(40deg) perspective have room to
+ * extend without bleeding into the legend or the mobile sticky header.
+ *
+ * Visible chart diameter = PIE_RADIUS * 2 = 140 px (unchanged from before).
+ * Hover headroom = PIE_SVG_SIZE / 2 - PIE_RADIUS * 1.2 = 110 - 84 = 26 px.
+ */
+const PIE_SVG_SIZE = 220;
+const PIE_RADIUS = 70;
+
+/**
  * Renders the pie chart widget with tabs (status, rating, character, copyright, etc.).
  * @param container The element to render into.
  * @param distributions Pre-fetched distribution data keyed by tab name.
@@ -402,8 +413,12 @@ export function renderPieWidget(
 
       chartWrapper = document.createElement('div');
       chartWrapper.className = 'pie-chart-wrapper';
-      chartWrapper.style.width = '180px';
-      chartWrapper.style.height = '180px';
+      // Wrapper is sized larger than the visible chart (140px diameter at
+      // radius 70) to give arcHover (1.2× scale) and the 3D rotateX(40deg)
+      // perspective room to extend without bleeding into the legend or the
+      // mobile sticky-header. See PIE_SVG_SIZE / PIE_RADIUS below.
+      chartWrapper.style.width = `${PIE_SVG_SIZE}px`;
+      chartWrapper.style.height = `${PIE_SVG_SIZE}px`;
       chartWrapper.style.cursor = 'pointer';
 
       if (!isFirefox) {
@@ -451,18 +466,21 @@ export function renderPieWidget(
 
       d3.select(chartWrapper)
         .append('svg')
-        .attr('width', 180)
-        .attr('height', 180)
+        .attr('width', PIE_SVG_SIZE)
+        .attr('height', PIE_SVG_SIZE)
         .style('overflow', 'visible')
         .append('g')
-        .attr('transform', 'translate(90,90)');
+        .attr(
+          'transform',
+          `translate(${PIE_SVG_SIZE / 2},${PIE_SVG_SIZE / 2})`,
+        );
 
       const legendDiv = document.createElement('div');
       legendDiv.className = 'danbooru-grass-legend-scroll';
       legendDiv.style.display = 'flex';
       legendDiv.style.flexDirection = 'column';
       legendDiv.style.marginLeft = '20px';
-      legendDiv.style.maxHeight = '180px';
+      legendDiv.style.maxHeight = `${PIE_SVG_SIZE}px`;
       legendDiv.style.overflowY = 'auto';
       legendDiv.style.paddingRight = '5px';
 
@@ -477,9 +495,7 @@ export function renderPieWidget(
       pieContent.appendChild(legendDiv);
     }
 
-    const width = 180;
-    const height = 180;
-    const radius = Math.min(width, height) / 2 - 20;
+    const radius = PIE_RADIUS;
 
     const svg = d3.select(chartWrapper).select('svg g');
     const pie = d3
