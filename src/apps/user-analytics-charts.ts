@@ -723,26 +723,54 @@ export function renderPieWidget(
 
         tooltip.html(html).style('opacity', 1);
 
-        // Clamp tooltip within viewport
+        // Clamp tooltip within the pie chart card horizontally (so it never
+        // bleeds into the modal edge or sibling cards) and within the chart
+        // wrapper vertically (so it never extends down into the legend
+        // section). Falls back to viewport bounds if either reference rect
+        // is degenerate.
         const tooltipNode = tooltip.node() as HTMLElement | null;
         const tw = tooltipNode?.offsetWidth ?? 0;
         const th = tooltipNode?.offsetHeight ?? 0;
         const vw = window.innerWidth;
         const vh = window.innerHeight;
         const margin = 8;
+        const cardRect = container.getBoundingClientRect();
+        const wrapperRect = chartWrapper.getBoundingClientRect();
+        const minLeft = Math.max(
+          cardRect.left + window.scrollX + margin,
+          window.scrollX + margin,
+        );
+        const maxRight = Math.min(
+          cardRect.right + window.scrollX - margin,
+          window.scrollX + vw - margin,
+        );
+        const minTop = Math.max(
+          wrapperRect.top + window.scrollY + margin,
+          window.scrollY + margin,
+        );
+        const maxBottom = Math.min(
+          wrapperRect.bottom + window.scrollY - margin,
+          window.scrollY + vh - margin,
+        );
         let left = touch.pageX + 15;
         let top = touch.pageY + 15;
-        if (left + tw > window.scrollX + vw - margin) {
+        if (left + tw > maxRight) {
           left = touch.pageX - tw - 15;
         }
-        if (left < window.scrollX + margin) {
-          left = window.scrollX + margin;
+        if (left + tw > maxRight) {
+          left = maxRight - tw;
         }
-        if (top + th > window.scrollY + vh - margin) {
+        if (left < minLeft) {
+          left = minLeft;
+        }
+        if (top + th > maxBottom) {
           top = touch.pageY - th - 15;
         }
-        if (top < window.scrollY + margin) {
-          top = window.scrollY + margin;
+        if (top + th > maxBottom) {
+          top = maxBottom - th;
+        }
+        if (top < minTop) {
+          top = minTop;
         }
         tooltip.style('left', left + 'px').style('top', top + 'px');
       };
