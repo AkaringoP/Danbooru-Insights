@@ -556,6 +556,12 @@ export function renderPieWidget(
       .attr('stroke', 'var(--di-chart-bg, #fff)')
       .style('stroke-width', '1px')
       .on('mouseover', function (event, d) {
+        // Touch devices fire synthetic mouseover/mousemove/mouseout AFTER
+        // touchend at the touch position. Without this guard, the synthetic
+        // mouseover would overwrite handleSliceTouch's far-side tooltip
+        // placement with a touch-relative one — re-introducing the right-edge
+        // clipping the touch path was specifically built to avoid.
+        if (isTouch) return;
         d3.select(this)
           .transition()
           .duration(200)
@@ -616,11 +622,13 @@ export function renderPieWidget(
           .style('opacity', 1);
       })
       .on('mousemove', event => {
+        if (isTouch) return;
         tooltip
           .style('left', event.pageX + 15 + 'px')
           .style('top', event.pageY + 15 + 'px');
       })
       .on('mouseout', function () {
+        if (isTouch) return;
         d3.select(this)
           .transition()
           .duration(200)
