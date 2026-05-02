@@ -723,11 +723,12 @@ export function renderPieWidget(
 
         tooltip.html(html).style('opacity', 1);
 
-        // Clamp tooltip within the pie chart card horizontally (so it never
-        // bleeds into the modal edge or sibling cards) and within the chart
-        // wrapper vertically (so it never extends down into the legend
-        // section). Falls back to viewport bounds if either reference rect
-        // is degenerate.
+        // Position the tooltip on the side OPPOSITE to where the touch
+        // landed relative to the chart wrapper's center — touches on the
+        // right half push the tooltip leftward, lower-half touches push it
+        // upward. This keeps the tooltip away from the modal edge that
+        // the touched slice is closest to (preventing horizontal page
+        // scroll on narrow mobile widths) and away from the legend below.
         const tooltipNode = tooltip.node() as HTMLElement | null;
         const tw = tooltipNode?.offsetWidth ?? 0;
         const th = tooltipNode?.offsetHeight ?? 0;
@@ -736,6 +737,12 @@ export function renderPieWidget(
         const margin = 8;
         const cardRect = container.getBoundingClientRect();
         const wrapperRect = chartWrapper.getBoundingClientRect();
+        const wrapperCenterDocX =
+          wrapperRect.left + wrapperRect.width / 2 + window.scrollX;
+        const wrapperCenterDocY =
+          wrapperRect.top + wrapperRect.height / 2 + window.scrollY;
+        const touchOnRight = touch.pageX > wrapperCenterDocX;
+        const touchOnLower = touch.pageY > wrapperCenterDocY;
         const minLeft = Math.max(
           cardRect.left + window.scrollX + margin,
           window.scrollX + margin,
@@ -752,10 +759,15 @@ export function renderPieWidget(
           wrapperRect.bottom + window.scrollY - margin,
           window.scrollY + vh - margin,
         );
-        let left = touch.pageX + 15;
-        let top = touch.pageY + 15;
+        let left = touchOnRight ? touch.pageX - tw - 15 : touch.pageX + 15;
+        let top = touchOnLower ? touch.pageY - th - 15 : touch.pageY + 15;
+        // Fallback flips if the preferred side itself overflows (e.g. tap
+        // very close to the wrapper edge), then hard clamp to card/wrapper.
         if (left + tw > maxRight) {
           left = touch.pageX - tw - 15;
+        }
+        if (left < minLeft) {
+          left = touch.pageX + 15;
         }
         if (left + tw > maxRight) {
           left = maxRight - tw;
@@ -765,6 +777,9 @@ export function renderPieWidget(
         }
         if (top + th > maxBottom) {
           top = touch.pageY - th - 15;
+        }
+        if (top < minTop) {
+          top = touch.pageY + 15;
         }
         if (top + th > maxBottom) {
           top = maxBottom - th;
