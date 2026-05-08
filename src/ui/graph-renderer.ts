@@ -1123,7 +1123,10 @@ export class GraphRenderer {
           const cellCount = hourlyCounts[hour] || 0;
           tooltip.style.opacity = '1';
           tooltip.innerHTML = `<strong>${hour.toString().padStart(2, '0')}:00</strong>, ${cellCount} ${metric}`;
-          this.positionTooltipAboveCell(tooltip, cellEl.getBoundingClientRect());
+          this.positionTooltipAboveCell(
+            tooltip,
+            cellEl.getBoundingClientRect(),
+          );
         },
         // Hourly cells don't navigate; same-cell re-tap is a no-op so the
         // tooltip persists until the user taps elsewhere or outside.
