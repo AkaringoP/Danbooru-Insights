@@ -4,6 +4,37 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.4.8 — Hotfix: Hourly Distribution tooltips on mobile
+
+The Hourly Distribution panel in the GrassApp summary widget had two
+mobile-only failures: the tooltip often didn't appear when a cell was
+tapped, and once it did appear, tapping a different cell wouldn't
+update or dismiss it. No schema changes.
+
+### Fix
+- **Hourly cells now drive their tooltip from real touch events**: the
+  per-cell handlers in `updateSummaryGrid` were `onmouseenter` /
+  `onmouseleave` only, which on iOS Safari + Chrome Android rely on
+  synthetic mouse events fired after a tap. Those fire unreliably and
+  often leave the cell stuck in a hover state, so subsequent taps on
+  other cells were ignored. Mirrored the pattern already used by the
+  CalHeatmap year grid: branch on `isTouchDevice()`, attach
+  `touchstart` / `touchmove` / `touchend` via a per-cell `TapTracker`
+  (15 px / 600 ms tap budget — drags still scroll), and route
+  recognised taps through a `createTwoStepTap` controller. The
+  controller manages the active-cell state and handles outside-tap
+  dismiss (document-level `touchstart` / `click`), so tapping another
+  cell moves the tooltip and tapping anywhere off the grid hides it.
+  Desktop hover behaviour is unchanged.
+- **Tooltip no longer clips above the viewport top**: extracted a
+  `positionTooltipAboveCell` helper that flips the tooltip below the
+  cell when there isn't room above, and clamps it horizontally inside
+  the viewport. Used by both the touch and desktop paths so the AM-row
+  cells (which sit near the top of the panel) render their tooltip
+  correctly when the panel is at the top of the page.
+
+---
+
 ## v9.4.7 — Hotfix: Milestones expanded-state cut-off
 
 Follow-up to v9.4.6. The collapsed-state cut-off was fixed in v9.4.6, but
