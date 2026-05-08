@@ -12,7 +12,12 @@ import type {Database} from '../core/database';
 import {SettingsManager} from '../core/settings';
 import {createSettingsPopover, applyPopoverPalette} from './settings-popover';
 import {showApprovalsDetail} from './approval-detail-popover';
-import {isTouchDevice, createTwoStepTap} from './two-step-tap';
+import {
+  isTouchDevice,
+  createTwoStepTap,
+  TapTracker,
+  type TwoStepTapController,
+} from './two-step-tap';
 
 const log = createLogger('GraphRenderer');
 
@@ -38,6 +43,16 @@ export class GraphRenderer {
    *  so callers outside renderGraph (e.g. the move-handle drag) can align
    *  the horizontal scroll after a layout change. */
   private currentYear: number | null = null;
+  /** Two-step tap controller for the Hourly Distribution grid on touch
+   *  devices. Manages active-cell state + outside-tap dismissal so tooltips
+   *  don't get stuck the way synthetic mouseenter/mouseleave do on mobile.
+   *  Recreated each updateSummaryGrid() call because the per-cell closures
+   *  capture the new hourlyCounts/metric values. */
+  private hourlyTap: TwoStepTapController<number> | null = null;
+  /** AbortController grouping the touch listeners attached to hourly cells.
+   *  Aborted at the start of each updateSummaryGrid() call so re-renders
+   *  don't stack duplicate listeners on the same cells. */
+  private hourlyTouchAbort: AbortController | null = null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -1006,6 +1021,39 @@ export class GraphRenderer {
   }
 
   /**
+   * Positions the shared tooltip above a cell, with viewport guards so it
+   * never gets clipped above the top edge or past the right/left edges.
+   * Falls back to placing the tooltip below the cell when there isn't room
+   * above (e.g. row near the top of the panel/viewport).
+   */
+  private positionTooltipAboveCell(
+    tooltip: HTMLElement,
+    cellRect: DOMRect,
+  ): void {
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const scrollX = window.scrollX;
+    const scrollY = window.scrollY;
+    const viewportWidth = window.innerWidth;
+
+    let left =
+      cellRect.left + scrollX + cellRect.width / 2 - tooltipRect.width / 2;
+    let top = cellRect.top + scrollY - tooltipRect.height - 8;
+
+    // Vertical guard: flip below the cell if it would clip above the viewport.
+    if (top < scrollY + 5) {
+      top = cellRect.bottom + scrollY + 8;
+    }
+
+    // Horizontal guards: keep within viewport.
+    const maxLeft = scrollX + viewportWidth - tooltipRect.width - 5;
+    if (left > maxLeft) left = maxLeft;
+    if (left < scrollX + 5) left = scrollX + 5;
+
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  }
+
+  /**
    * Updates the summary grid cells with heatmap colors based on hourly data.
    * @param {Array<number>} hourlyCounts Array of 24 integers (0-23).
    * @param {string} metric Current metric for thresholds.
@@ -1016,6 +1064,14 @@ export class GraphRenderer {
 
     const cells = grid.querySelectorAll('.large-grass-cell');
     if (cells.length !== 24) return;
+
+    // Tear down any previous touch wiring before re-attaching for this render.
+    // Without this, repeated metric/theme changes would stack duplicate
+    // listeners and leak document-level outside-tap handlers.
+    this.hourlyTouchAbort?.abort();
+    this.hourlyTouchAbort = null;
+    this.hourlyTap?.destroy();
+    this.hourlyTap = null;
 
     // If no data, reset to empty
     if (!hourlyCounts) {
@@ -1043,6 +1099,46 @@ export class GraphRenderer {
     // Small counts in the bottom 20% will appear as Level 0 (Empty/Gray).
     const max = Math.max(...hourlyCounts, 1);
 
+    const isTouch = isTouchDevice();
+
+    // Touch: build a controller that handles state + outside-tap dismiss.
+    // Without this, mobile relies on synthetic mouseenter/mouseleave which
+    // either don't fire or get stuck on the first cell tapped, leaving the
+    // tooltip pinned and blocking subsequent cells.
+    if (isTouch) {
+      this.hourlyTouchAbort = new AbortController();
+      const hideTooltip = () => {
+        const tooltip = document.getElementById('danbooru-grass-tooltip');
+        if (tooltip) tooltip.style.opacity = '0';
+      };
+      this.hourlyTap = createTwoStepTap<number>({
+        insideElements: () => [
+          grid,
+          document.getElementById('danbooru-grass-tooltip'),
+        ],
+        onFirstTap: hour => {
+          const tooltip = document.getElementById('danbooru-grass-tooltip');
+          const cellEl = grid.children[hour] as HTMLElement | undefined;
+          if (!tooltip || !cellEl) return;
+          const cellCount = hourlyCounts[hour] || 0;
+          tooltip.style.opacity = '1';
+          tooltip.innerHTML = `<strong>${hour.toString().padStart(2, '0')}:00</strong>, ${cellCount} ${metric}`;
+          this.positionTooltipAboveCell(
+            tooltip,
+            cellEl.getBoundingClientRect(),
+          );
+        },
+        // Hourly cells don't navigate; same-cell re-tap is a no-op so the
+        // tooltip persists until the user taps elsewhere or outside.
+        onSecondTap: () => hideTooltip(),
+        onReset: () => hideTooltip(),
+        navigateOnSameTap: false,
+      });
+    }
+
+    const signal = this.hourlyTouchAbort?.signal;
+    const tap = this.hourlyTap;
+
     cells.forEach((cell, i) => {
       const count = hourlyCounts[i] || 0;
       let level = 0;
@@ -1059,30 +1155,48 @@ export class GraphRenderer {
       // Remove native tooltip
       cell.removeAttribute('title');
 
-      // Add custom tooltip events
-      (cell as HTMLElement).onmouseenter = _e => {
-        const tooltip = document.getElementById('danbooru-grass-tooltip');
-        if (!tooltip) return;
+      if (isTouch) {
+        // Skip mouseenter/mouseleave on touch — synthetic mouse events fire
+        // unreliably after taps and leave tooltips stuck.
+        (cell as HTMLElement).onmouseenter = null;
+        (cell as HTMLElement).onmouseleave = null;
 
-        tooltip.style.opacity = '1';
-        tooltip.innerHTML = `<strong>${i.toString().padStart(2, '0')}:00</strong>, ${count} ${metric}`;
+        const tracker = new TapTracker();
+        cell.addEventListener(
+          'touchstart',
+          e => tracker.onTouchStart(e as TouchEvent),
+          {passive: true, signal},
+        );
+        cell.addEventListener(
+          'touchmove',
+          e => tracker.onTouchMove(e as TouchEvent),
+          {passive: true, signal},
+        );
+        cell.addEventListener(
+          'touchend',
+          e => {
+            if (tracker.onTouchEnd(e as TouchEvent)) {
+              tap?.tap(i);
+            }
+          },
+          {signal},
+        );
+      } else {
+        // Desktop: keep the original hover behaviour.
+        (cell as HTMLElement).onmouseenter = _e => {
+          const tooltip = document.getElementById('danbooru-grass-tooltip');
+          if (!tooltip) return;
 
-        const rect = cell.getBoundingClientRect();
-        const tooltipRect = tooltip.getBoundingClientRect();
+          tooltip.style.opacity = '1';
+          tooltip.innerHTML = `<strong>${i.toString().padStart(2, '0')}:00</strong>, ${count} ${metric}`;
+          this.positionTooltipAboveCell(tooltip, cell.getBoundingClientRect());
+        };
 
-        // Center above the cell (Add window.scrollX/Y for absolute position)
-        const left =
-          rect.left + window.scrollX + rect.width / 2 - tooltipRect.width / 2;
-        const top = rect.top + window.scrollY - tooltipRect.height - 8;
-
-        tooltip.style.left = `${left}px`;
-        tooltip.style.top = `${top}px`;
-      };
-
-      (cell as HTMLElement).onmouseleave = () => {
-        const tooltip = document.getElementById('danbooru-grass-tooltip');
-        if (tooltip) tooltip.style.opacity = '0';
-      };
+        (cell as HTMLElement).onmouseleave = () => {
+          const tooltip = document.getElementById('danbooru-grass-tooltip');
+          if (tooltip) tooltip.style.opacity = '0';
+        };
+      }
     });
 
     // Update Legend Tooltips with Dynamic Ranges
