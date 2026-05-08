@@ -4,6 +4,28 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.4.7 — Hotfix: Milestones expanded-state cut-off
+
+Follow-up to v9.4.6. The collapsed-state cut-off was fixed in v9.4.6, but
+users with many milestones (~20+ rows on mobile's 2-column layout) were
+still seeing the last row sliced in half once they clicked "Show More".
+
+### Fix
+- **Expanded milestone grid now sizes to actual content height**: the
+  expanded-state `max-height` was hardcoded to `2000px`, which on mobile
+  fits ~19 rows of ~100px cards before clipping the next row mid-card —
+  so a user with 38+ milestones (~20 rows) lost the last row right above
+  the "Monthly Activity" heading. The two `'2000px'` assignments in
+  `renderMilestonesWidget` (initial render when already expanded, and
+  inside the Show More click handler) now use
+  `milestoneContainer.scrollHeight + 'px'` instead, so the container
+  expands to exactly fit whatever the current milestone step (1k, 2.5k,
+  5k, repdigit, …) produces. The existing `transition: max-height 0.3s
+  ease` animates smoothly from collapsed (90px mobile / 110px desktop)
+  to the computed scrollHeight.
+
+---
+
 ## v9.4.6 — Hotfix: User Analytics milestones display on mobile
 
 Two small but visible regressions in the User Analytics milestones widget
