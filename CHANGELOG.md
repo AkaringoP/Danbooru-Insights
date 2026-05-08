@@ -4,6 +4,30 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.4.6 — Hotfix: User Analytics milestones display on mobile
+
+Two small but visible regressions in the User Analytics milestones widget
+on mobile. No schema changes.
+
+### Fixes
+- **NSFW milestone cards no longer collapse into a 45×45 box**: the mobile
+  CSS rule that resized the thumbnail wrapper (`#analytics-milestone-container > a > div:last-child`)
+  fell through to the text div whenever the thumbnail was omitted (NSFW
+  filter off + NSFW post), squeezing the card so the date wrapped onto two
+  lines and "Score:" was clipped. Scoped the rule to
+  `:last-child:not(:first-child)` so it only matches when an actual
+  sibling thumbnail exists.
+- **Collapsed milestone grid no longer cuts cards mid-row on mobile**: the
+  inline `max-height:110px` showed one full row plus ~25–30px of the next
+  row on mobile (cards are ~75–80px tall with the smaller padding/thumb),
+  so the next row's cards were sliced in half right above "Monthly
+  Activity". Moved collapse height onto a `.di-milestone-collapsed` class
+  and overrode it to `90px` inside the `(max-width: 768px)` block; the
+  Show More / Show Less toggle now flips the class alongside the existing
+  inline max-height.
+
+---
+
 ## v9.4.5 — Pie chart UX overhaul + dashboard isolation
 
 Mobile-focused polish pass on the User Analytics pie-chart widget plus

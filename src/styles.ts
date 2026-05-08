@@ -978,9 +978,16 @@ export const GLOBAL_CSS = `
       #analytics-milestone-container > .di-next-milestone-card {
         padding: 8px !important;
       }
-      #analytics-milestone-container > a > div:last-child {
+      /* Only size the thumbnail wrapper (second div), not the text div
+         when the thumbnail is hidden for NSFW posts. */
+      #analytics-milestone-container > a > div:last-child:not(:first-child) {
         width: 45px !important;
         height: 45px !important;
+      }
+      /* Mobile cards are shorter (~75-80px); 110px would cut the next row
+         mid-card. Show one full row when collapsed. */
+      #analytics-milestone-container.di-milestone-collapsed {
+        max-height: 90px !important;
       }
 
       /* Fix 10: Created Tags pagination wrap */
