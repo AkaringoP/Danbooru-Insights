@@ -1718,7 +1718,8 @@ export async function renderMilestonesWidget(
 
       if (isMilestoneExpanded) {
         milestoneContainer.classList.remove('di-milestone-collapsed');
-        milestoneContainer.style.maxHeight = '2000px';
+        milestoneContainer.style.maxHeight =
+          milestoneContainer.scrollHeight + 'px';
         btn.textContent = 'Show Less';
       }
 
@@ -1726,7 +1727,8 @@ export async function renderMilestonesWidget(
         isMilestoneExpanded = !isMilestoneExpanded;
         if (isMilestoneExpanded) {
           milestoneContainer.classList.remove('di-milestone-collapsed');
-          milestoneContainer.style.maxHeight = '2000px';
+          milestoneContainer.style.maxHeight =
+            milestoneContainer.scrollHeight + 'px';
           btn.textContent = 'Show Less';
         } else {
           milestoneContainer.classList.add('di-milestone-collapsed');
