@@ -2159,7 +2159,11 @@ export class GraphRenderer {
                     const pageX = (rect?.left ?? 0) + window.scrollX;
                     const pageY = (rect?.bottom ?? 0) + window.scrollY;
                     const synthetic = {pageX, pageY} as MouseEvent;
-                    void this.showApprovalsDetail(dateStr, userIdVal, synthetic);
+                    void this.showApprovalsDetail(
+                      dateStr,
+                      userIdVal,
+                      synthetic,
+                    );
                     tooltip.style('opacity', 0);
                     return;
                   }
