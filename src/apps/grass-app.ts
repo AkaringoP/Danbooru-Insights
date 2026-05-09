@@ -1,11 +1,22 @@
 import {DataManager} from '../core/data-manager';
 import {GraphRenderer} from '../ui/graph-renderer';
 import {createLogger} from '../core/logger';
+import {showToast} from '../ui/toast';
+import {
+  computeAutoThresholds,
+  detectSaturation,
+  dismissSuggestion,
+  fetchActiveDayCounts,
+  MIN_ACTIVE_DAYS,
+  mostRecentBoundary,
+  wasDismissed,
+  wouldTuningImprove,
+} from '../core/threshold-tuner';
 import type {RateLimitedFetch} from '../core/rate-limiter';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
 import type {ProfileContext} from '../core/profile-context';
-import type {Metric} from '../types';
+import type {Metric, Threshold4} from '../types';
 
 const log = createLogger('GrassApp');
 
@@ -164,6 +175,20 @@ export class GrassApp {
         // listener in main.ts uses `{once: true}`; subsequent
         // year/metric changes re-dispatch harmlessly.
         window.dispatchEvent(new CustomEvent('di:sync-complete'));
+
+        // Order matters: scheduled sweep runs first. If it applies, the
+        // saturation prompt sees hasProfileThresholds=true (or a fresh
+        // tune time) and skips so the user isn't double-prompted.
+        void (async () => {
+          const ran = await this.maybeRunScheduledAutoTune(userId, () =>
+            updateView(),
+          );
+          if (!ran) {
+            await this.maybeSuggestAutoTune(userId, currentMetric, () =>
+              updateView(),
+            );
+          }
+        })();
       } catch (e: unknown) {
         log.error('Failed to render grass graph', {error: e});
         const message =
@@ -176,5 +201,237 @@ export class GrassApp {
 
     // Initial Load
     void updateView();
+  }
+
+  /**
+   * Inspects the just-rendered grass and, if the active-day distribution
+   * is saturated *and* a tuning would meaningfully redistribute it, shows
+   * a toast offering to apply per-profile thresholds. Silently no-ops when
+   * the profile already has an override, was dismissed this session, or
+   * tuning would not visibly help.
+   */
+  async maybeSuggestAutoTune(
+    userId: string,
+    metric: Metric,
+    refreshView: () => void,
+  ): Promise<void> {
+    try {
+      if (this.settings.hasProfileThresholds(userId, metric)) return;
+      if (wasDismissed(userId)) return;
+
+      const samples = await fetchActiveDayCounts(this.db, userId, metric);
+      if (samples.length < MIN_ACTIVE_DAYS) return;
+
+      const current = this.settings.getThresholdsForView(userId, metric);
+      const saturation = detectSaturation(samples, current);
+      if (saturation === null) return;
+
+      const proposed = computeAutoThresholds(samples);
+      if (proposed === null) return;
+      if (!wouldTuningImprove(samples, current, proposed)) return;
+
+      showToast({
+        type: 'info',
+        message:
+          "This user's activity doesn't fit the current thresholds well. Tune for this profile?",
+        duration: 0,
+        // X (close) = session-level dismiss — same as the explicit
+        // [Dismiss] button so the user isn't bothered again until they
+        // refresh the page.
+        onClose: () => dismissSuggestion(userId),
+        actions: [
+          {
+            label: 'Apply',
+            onClick: () => {
+              // hasProfileThresholds was already false at this point (the
+              // guard above returned early otherwise), so Undo restores
+              // the bare global fallback by clearing the override.
+              this.settings.setProfileThresholds(userId, metric, proposed);
+              this.settings.setProfileTuneTime(userId, metric, Date.now());
+              refreshView();
+              showToast({
+                type: 'success',
+                message: 'Thresholds tuned for this profile.',
+                duration: 8000,
+                actions: [
+                  {
+                    label: 'Undo',
+                    onClick: () => {
+                      this.settings.clearProfileThreshold(userId, metric);
+                      // Don't re-prompt the user this session — they
+                      // explicitly walked it back.
+                      dismissSuggestion(userId);
+                      refreshView();
+                    },
+                  },
+                ],
+              });
+            },
+          },
+          {
+            label: 'Dismiss',
+            onClick: () => dismissSuggestion(userId),
+          },
+        ],
+      });
+    } catch (e: unknown) {
+      log.warn('Auto-tune suggestion check failed', {error: e});
+    }
+  }
+
+  /**
+   * Periodic-cadence auto-tune sweep. When the user has enabled the
+   * scheduler, this checks all three metrics for the current profile and
+   * — if the active period boundary has passed without a recorded
+   * decision — collects the metrics whose proposed values would actually
+   * change. If any candidates remain, shows a single prompt toast that
+   * applies (or skips) all of them in one go.
+   *
+   * Returns true when a scheduler-driven prompt was shown OR the period
+   * was silently marked as handled (no-op tuning), so the caller can skip
+   * the saturation prompt to avoid double-toasting.
+   */
+  async maybeRunScheduledAutoTune(
+    userId: string,
+    refreshView: () => void,
+  ): Promise<boolean> {
+    try {
+      const schedule = this.settings.getAutoTuneSchedule();
+      if (!schedule.enabled) return false;
+      // Shared session-dismiss memory with the saturation prompt — if the
+      // user has X'd out either flavor of auto-tune toast this session,
+      // we don't pile on with the other. Refresh restores both.
+      if (wasDismissed(userId)) return false;
+
+      const boundaryMs = mostRecentBoundary(
+        new Date(),
+        schedule.interval,
+      ).getTime();
+      const metrics: Metric[] = ['uploads', 'approvals', 'notes'];
+
+      type Candidate = {
+        metric: Metric;
+        previous: Threshold4;
+        proposed: Threshold4;
+        hadOverride: boolean;
+        changed: boolean;
+      };
+      const candidates: Candidate[] = [];
+
+      for (const metric of metrics) {
+        // Already decided this period for this metric.
+        if (this.settings.getProfileTuneTime(userId, metric) >= boundaryMs) {
+          continue;
+        }
+        const samples = await fetchActiveDayCounts(this.db, userId, metric);
+        if (samples.length < MIN_ACTIVE_DAYS) continue;
+        const proposed = computeAutoThresholds(samples);
+        if (proposed === null) continue;
+        const previous = this.settings.getThresholdsForView(userId, metric);
+        const hadOverride = this.settings.hasProfileThresholds(userId, metric);
+        const changed = !proposed.every((v, i) => v === previous[i]);
+        candidates.push({metric, previous, proposed, hadOverride, changed});
+      }
+
+      if (candidates.length === 0) return false;
+
+      const changing = candidates.filter(c => c.changed);
+      // If everything would be a no-op, mark the period as handled silently
+      // so we don't re-check on every page load.
+      if (changing.length === 0) {
+        const now = Date.now();
+        for (const c of candidates) {
+          this.settings.setProfileTuneTime(userId, c.metric, now);
+        }
+        return true;
+      }
+
+      const labelMap: Record<Metric, string> = {
+        uploads: 'Uploads',
+        approvals: 'Approvals',
+        notes: 'Notes',
+      };
+      const labelList = changing.map(c => labelMap[c.metric]).join(', ');
+
+      showToast({
+        type: 'info',
+        message: `Scheduled auto-tune ready: ${labelList}. Apply for this profile?`,
+        duration: 0,
+        // X (close) = session-level dismiss. Distinct from [Dismiss]
+        // which marks the period itself as handled (tuneTime = now);
+        // X just silences the prompt until next refresh.
+        onClose: () => dismissSuggestion(userId),
+        actions: [
+          {
+            label: 'Apply',
+            onClick: () =>
+              this.applyScheduledTune(userId, changing, refreshView),
+          },
+          {
+            label: 'Dismiss',
+            onClick: () => {
+              // Mark every candidate (including no-op ones) as decided
+              // for this period so we don't re-prompt until the next
+              // boundary passes.
+              const now = Date.now();
+              for (const c of candidates) {
+                this.settings.setProfileTuneTime(userId, c.metric, now);
+              }
+            },
+          },
+        ],
+      });
+      return true;
+    } catch (e: unknown) {
+      log.warn('Scheduled auto-tune check failed', {error: e});
+      return false;
+    }
+  }
+
+  /** Applies a batch of scheduled tunings and shows a combined Undo toast. */
+  private applyScheduledTune(
+    userId: string,
+    changing: Array<{
+      metric: Metric;
+      previous: Threshold4;
+      proposed: Threshold4;
+      hadOverride: boolean;
+    }>,
+    refreshView: () => void,
+  ): void {
+    const now = Date.now();
+    for (const c of changing) {
+      // Type narrowing: proposed is non-null in the changing list.
+      this.settings.setProfileThresholds(userId, c.metric, c.proposed);
+      this.settings.setProfileTuneTime(userId, c.metric, now);
+    }
+    refreshView();
+    showToast({
+      type: 'success',
+      message: `Auto-tuned ${changing.length} metric${changing.length === 1 ? '' : 's'} for this profile.`,
+      duration: 8000,
+      actions: [
+        {
+          label: 'Undo',
+          onClick: () => {
+            for (const c of changing) {
+              if (c.hadOverride) {
+                this.settings.setProfileThresholds(
+                  userId,
+                  c.metric,
+                  c.previous,
+                );
+              } else {
+                this.settings.clearProfileThreshold(userId, c.metric);
+              }
+              // Tune time stays — period remains "handled" so we don't
+              // immediately re-prompt the user who just walked it back.
+            }
+            dismissSuggestion(userId);
+            refreshView();
+          },
+        },
+      ],
+    });
   }
 }

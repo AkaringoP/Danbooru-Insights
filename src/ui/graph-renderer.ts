@@ -38,6 +38,10 @@ export class GraphRenderer {
    *  so callers outside renderGraph (e.g. the move-handle drag) can align
    *  the horizontal scroll after a layout change. */
   private currentYear: number | null = null;
+  /** The metric being rendered right now. Used to keep the settings
+   *  popover's threshold-editor dropdown aligned with what the user is
+   *  actually looking at. */
+  private currentMetric: string = 'uploads';
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -1179,6 +1183,7 @@ export class GraphRenderer {
     }
 
     this.currentYear = year;
+    this.currentMetric = metric;
 
     // Update Header with Total Count and Embedded Year Selector
     const total = Object.values(dailyData || {}).reduce(
@@ -1770,11 +1775,16 @@ export class GraphRenderer {
       };
 
       // 3.1.5 Settings Popover
-      const {popover, close: closeSettings} = createSettingsPopover({
+      const {
+        popover,
+        close: closeSettings,
+        refresh: refreshSettings,
+      } = createSettingsPopover({
         settingsManager: this.settingsManager,
         db: this.db,
         metric,
         settingsBtn,
+        targetUserId: String(userIdVal),
         closeSettings: onSettingsClose,
         onRefresh,
       });
@@ -1784,6 +1794,11 @@ export class GraphRenderer {
         if (current === 'block') {
           closeSettings();
         } else {
+          // Pull the latest settings before showing — they may have
+          // changed via the auto-tune suggestion toast while the popover
+          // was closed. Also align the metric dropdown to whatever the
+          // user is currently viewing in the main grass.
+          refreshSettings(this.currentMetric);
           // Position popover near the settings button
           const btnRect = settingsBtn.getBoundingClientRect();
           popover.style.left = btnRect.left + 'px';
@@ -1844,7 +1859,8 @@ export class GraphRenderer {
     }
     */
 
-    const currentThresholds = this.settingsManager.getThresholds(
+    const currentThresholds = this.settingsManager.getThresholdsForView(
+      String(userIdVal),
       metric as import('../types').Metric,
     );
 
@@ -2112,7 +2128,8 @@ export class GraphRenderer {
 
           // 2. Tooltips for Legend Cells
           // Calculate ranges based on thresholds [t1, t2, t3, t4]
-          const t = this.settingsManager.getThresholds(
+          const t = this.settingsManager.getThresholdsForView(
+            String(userIdVal),
             metric as import('../types').Metric,
           );
           const legendThresholds = [

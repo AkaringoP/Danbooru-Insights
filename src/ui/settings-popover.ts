@@ -1,9 +1,23 @@
 import {CONFIG} from '../config';
 import {DataManager} from '../core/data-manager';
 import {showToast} from './toast';
+import {showThresholdPreviewModal} from './threshold-preview-modal';
+import {
+  computeAutoThresholds,
+  dismissSuggestion,
+  fetchActiveDayCounts,
+  MIN_ACTIVE_DAYS,
+} from '../core/threshold-tuner';
 import type {SettingsManager} from '../core/settings';
-import type {Metric, GrassOption} from '../types';
+import type {Metric, GrassOption, ScheduleInterval, Threshold4} from '../types';
 import type {Database} from '../core/database';
+
+/** Display labels for the toast/modal copy (capitalized metric names). */
+const METRIC_LABEL: Record<Metric, string> = {
+  uploads: 'Uploads',
+  approvals: 'Approvals',
+  notes: 'Notes',
+};
 
 /** Light palette for popover elements (when a light grass theme is selected). */
 const POPOVER_LIGHT: Record<string, string> = {
@@ -64,6 +78,11 @@ export interface SettingsPopoverOptions {
   db: Database;
   metric: string;
   settingsBtn: HTMLElement;
+  /**
+   * The viewed profile's userId (or username fallback). Used by the
+   * auto-tune button to write per-profile threshold overrides.
+   */
+  targetUserId: string;
   /** Called when settings have changed and the graph should re-render. */
   closeSettings: () => void;
   onRefresh: () => void;
@@ -74,6 +93,14 @@ export interface SettingsPopoverResult {
   popover: HTMLElement;
   /** Close the popover, validating thresholds first. */
   close: () => void;
+  /**
+   * Re-render the threshold editor inputs from the current settings, and
+   * (when `metric` is supplied) align the metric dropdown to it. Call
+   * just before showing the popover so external changes (e.g. the
+   * auto-tune suggestion toast writing per-profile values while the
+   * popover is closed) and main-metric switches are visible on next open.
+   */
+  refresh: (metric?: string) => void;
 }
 
 /**
@@ -85,15 +112,22 @@ export interface SettingsPopoverResult {
 export function createSettingsPopover(
   options: SettingsPopoverOptions,
 ): SettingsPopoverResult {
-  const {settingsManager, db, metric, settingsBtn, closeSettings, onRefresh} =
-    options;
+  const {
+    settingsManager,
+    db,
+    metric,
+    settingsBtn,
+    targetUserId,
+    closeSettings,
+    onRefresh,
+  } = options;
 
   let settingsChanged = false;
 
   const validateThresholds = (): {valid: boolean; msg?: string} => {
     const modes: Metric[] = ['uploads', 'approvals', 'notes'];
     for (const m of modes) {
-      const vals = settingsManager.getThresholds(m);
+      const vals = settingsManager.getThresholdsForView(targetUserId, m);
       for (let i = 0; i < vals.length - 1; i++) {
         if (vals[i] >= vals[i + 1]) {
           return {
@@ -211,7 +245,7 @@ export function createSettingsPopover(
           .forEach(el => el.classList.remove('active'));
         icon.classList.add('active');
         // Update popover palette to match the selected grass theme
-        applyPopoverPalette([popover, grassFlyout], key);
+        applyPopoverPalette([popover, grassFlyout, schedHelpTip], key);
       }
       // Toggle grass flyout (show on click of active theme, or on first apply)
       toggleGrassFlyout(icon, key);
@@ -323,12 +357,52 @@ export function createSettingsPopover(
     }
   });
 
+  // --- 1c. Snap-to-Edge Toggle (lives between the theme grid and the
+  // thresholds section per user preference — the threshold-related
+  // controls below stay grouped together). ---
+  const snapRow = document.createElement('div');
+  snapRow.style.cssText =
+    'display:flex;align-items:center;gap:6px;margin-top:12px;';
+  const snapCheckbox = document.createElement('input');
+  snapCheckbox.type = 'checkbox';
+  snapCheckbox.id = 'di-snap-to-edge';
+  snapCheckbox.checked = settingsManager.getSnapToEdge();
+  snapCheckbox.style.cssText = 'margin:0;cursor:pointer;';
+  const snapLabel = document.createElement('label');
+  snapLabel.htmlFor = 'di-snap-to-edge';
+  snapLabel.textContent = 'Snap to edge when resizing';
+  snapLabel.style.cssText =
+    'font-size:11px;color:var(--di-text, #333);cursor:pointer;user-select:none;';
+  snapCheckbox.onchange = () => {
+    settingsManager.setSnapToEdge(snapCheckbox.checked);
+  };
+  snapRow.appendChild(snapCheckbox);
+  snapRow.appendChild(snapLabel);
+  popover.appendChild(snapRow);
+
   // --- 2. Thresholds Section ---
+  // Divider above visually separates the general UI options (snap-to-edge)
+  // from the threshold-related controls below.
+  const threshHeaderRow = document.createElement('div');
+  threshHeaderRow.style.cssText =
+    'display:flex;align-items:center;justify-content:space-between;' +
+    'margin-top:14px;padding-top:12px;margin-bottom:6px;' +
+    'border-top:1px solid var(--di-border-input, #ddd);';
   const threshHeader = document.createElement('div');
   threshHeader.className = 'popover-header';
+  threshHeader.style.margin = '0';
   threshHeader.textContent = 'Set thresholds';
-  threshHeader.style.marginTop = '15px';
-  popover.appendChild(threshHeader);
+  threshHeaderRow.appendChild(threshHeader);
+
+  const autoTuneBtn = document.createElement('button');
+  autoTuneBtn.className = 'di-autotune-btn';
+  autoTuneBtn.title = "Auto-tune from this user's recent 180-day activity";
+  autoTuneBtn.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+    '<path d="M19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zm-7.5.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z"/>' +
+    '</svg>';
+  threshHeaderRow.appendChild(autoTuneBtn);
+  popover.appendChild(threshHeaderRow);
 
   // Mode Selector
   const modeSelect = document.createElement('select');
@@ -349,7 +423,11 @@ export function createSettingsPopover(
 
   const renderEditor = (mode: string): void => {
     editor.innerHTML = '';
-    const vals = settingsManager.getThresholds(mode as Metric);
+    const metricMode = mode as Metric;
+    // WYSIWYG: show whatever is currently active for this profile/metric
+    // (per-profile override if set, else global). Edits write back to the
+    // same layer, so the inputs and the rendered grass never diverge.
+    const vals = settingsManager.getThresholdsForView(targetUserId, metricMode);
     const inputColors = ['#9be9a8', '#40c463', '#30a14e', '#216e39'];
 
     vals.forEach((val, idx) => {
@@ -374,10 +452,17 @@ export function createSettingsPopover(
       input.style.borderRadius = '4px';
 
       input.onchange = () => {
-        const newVals = [...vals];
+        const newVals: Threshold4 = [vals[0], vals[1], vals[2], vals[3]];
         newVals[idx] = parseInt(input.value);
-        // Update Settings directly (Validation deferred to close)
-        settingsManager.setThresholds(mode as Metric, newVals);
+        if (settingsManager.hasProfileThresholds(targetUserId, metricMode)) {
+          settingsManager.setProfileThresholds(
+            targetUserId,
+            metricMode,
+            newVals,
+          );
+        } else {
+          settingsManager.setThresholds(metricMode, newVals);
+        }
         settingsChanged = true;
         vals[idx] = newVals[idx];
       };
@@ -391,26 +476,246 @@ export function createSettingsPopover(
   modeSelect.addEventListener('change', () => renderEditor(modeSelect.value));
   renderEditor(modeSelect.value); // Initial Render
 
-  // --- 2b. Snap-to-Edge Toggle ---
-  const snapRow = document.createElement('div');
-  snapRow.style.cssText =
+  autoTuneBtn.addEventListener('click', async () => {
+    const currentMetric = modeSelect.value as Metric;
+    autoTuneBtn.disabled = true;
+    try {
+      const samples = await fetchActiveDayCounts(
+        db,
+        targetUserId,
+        currentMetric,
+      );
+      const proposed = computeAutoThresholds(samples);
+      if (proposed === null) {
+        showToast({
+          type: 'warn',
+          message: `Not enough activity data for ${currentMetric} (need ≥${MIN_ACTIVE_DAYS} active days in last 180).`,
+        });
+        return;
+      }
+      const current = settingsManager.getThresholdsForView(
+        targetUserId,
+        currentMetric,
+      );
+      // Skip the modal entirely when the proposed values match what's
+      // already active — applying would be a no-op.
+      if (proposed.every((v, i) => v === current[i])) {
+        showToast({
+          type: 'info',
+          message: `${METRIC_LABEL[currentMetric]} thresholds already match the recent activity — nothing to change.`,
+        });
+        return;
+      }
+      showThresholdPreviewModal({
+        metric: currentMetric,
+        current,
+        proposed,
+        themeKey: settingsManager.getTheme(),
+        onApply: values => {
+          applyAndOfferUndo(currentMetric, current, values);
+        },
+      });
+    } finally {
+      autoTuneBtn.disabled = false;
+    }
+  });
+
+  /**
+   * Persists the new per-profile thresholds, refreshes the popover inputs,
+   * triggers a graph re-render *without closing the popover*, and shows an
+   * Undo toast that restores the prior state (either the previous override
+   * or the bare global fallback) if clicked within the toast duration.
+   */
+  function applyAndOfferUndo(
+    metric: Metric,
+    previousValues: Threshold4,
+    nextValues: Threshold4,
+  ): void {
+    const hadOverride = settingsManager.hasProfileThresholds(
+      targetUserId,
+      metric,
+    );
+
+    settingsManager.setProfileThresholds(targetUserId, metric, nextValues);
+    settingsManager.setProfileTuneTime(targetUserId, metric, Date.now());
+    renderEditor(modeSelect.value);
+    // Notify the host (grass-app) to re-render the graph immediately. The
+    // popover stays open; settingsChanged is intentionally NOT set so
+    // closing the popover later doesn't trigger a redundant re-render.
+    closeSettings();
+
+    showToast({
+      type: 'success',
+      message: `${METRIC_LABEL[metric]} thresholds tuned for this profile.`,
+      duration: 8000,
+      actions: [
+        {
+          label: 'Undo',
+          onClick: () => {
+            if (hadOverride) {
+              settingsManager.setProfileThresholds(
+                targetUserId,
+                metric,
+                previousValues,
+              );
+            } else {
+              settingsManager.clearProfileThreshold(targetUserId, metric);
+            }
+            // Suppress the auto-detect toast for the rest of this session
+            // — the user consciously rejected the tuning.
+            dismissSuggestion(targetUserId);
+            renderEditor(modeSelect.value);
+            closeSettings();
+          },
+        },
+      ],
+    });
+  }
+
+  // --- 2b. Auto-tune Schedule ---
+  const scheduleRow = document.createElement('div');
+  scheduleRow.style.cssText =
     'display:flex;align-items:center;gap:6px;margin-top:12px;';
-  const snapCheckbox = document.createElement('input');
-  snapCheckbox.type = 'checkbox';
-  snapCheckbox.id = 'di-snap-to-edge';
-  snapCheckbox.checked = settingsManager.getSnapToEdge();
-  snapCheckbox.style.cssText = 'margin:0;cursor:pointer;';
-  const snapLabel = document.createElement('label');
-  snapLabel.htmlFor = 'di-snap-to-edge';
-  snapLabel.textContent = 'Snap to edge when resizing';
-  snapLabel.style.cssText =
+  const schedCheckbox = document.createElement('input');
+  schedCheckbox.type = 'checkbox';
+  schedCheckbox.id = 'di-autotune-schedule';
+  schedCheckbox.style.cssText = 'margin:0;cursor:pointer;';
+  const schedLabelLeft = document.createElement('label');
+  schedLabelLeft.htmlFor = 'di-autotune-schedule';
+  schedLabelLeft.textContent = 'Auto-tune every';
+  schedLabelLeft.style.cssText =
     'font-size:11px;color:var(--di-text, #333);cursor:pointer;user-select:none;';
-  snapCheckbox.onchange = () => {
-    settingsManager.setSnapToEdge(snapCheckbox.checked);
+  const schedSelect = document.createElement('select');
+  // Intentionally NOT using `popover-select` — that class forces width:100%
+  // and a bottom margin which break this row's checkbox / label / dropdown
+  // alignment. Inline styles match the surrounding 11px text height.
+  schedSelect.style.cssText =
+    'font-size:11px;line-height:1;padding:2px 4px;margin:0;height:20px;' +
+    'border:1px solid var(--di-border-input, #ddd);border-radius:4px;' +
+    'background:var(--di-bg-tertiary, #f0f0f0);color:var(--di-text, #333);' +
+    'flex:0 0 auto;cursor:pointer;';
+  const intervalOptions: Array<[ScheduleInterval, string]> = [
+    ['monthly', 'Month'],
+    ['quarterly', 'Quarter'],
+    ['semiannual', 'Half year'],
+    ['yearly', 'Year'],
+  ];
+  for (const [value, label] of intervalOptions) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    schedSelect.appendChild(opt);
+  }
+
+  const initialSchedule = settingsManager.getAutoTuneSchedule();
+  schedCheckbox.checked = initialSchedule.enabled;
+  schedSelect.value = initialSchedule.interval;
+  schedSelect.disabled = !initialSchedule.enabled;
+
+  const persistSchedule = (): void => {
+    settingsManager.setAutoTuneSchedule({
+      enabled: schedCheckbox.checked,
+      interval: schedSelect.value as ScheduleInterval,
+    });
   };
-  snapRow.appendChild(snapCheckbox);
-  snapRow.appendChild(snapLabel);
-  popover.appendChild(snapRow);
+  schedCheckbox.onchange = () => {
+    schedSelect.disabled = !schedCheckbox.checked;
+    persistSchedule();
+  };
+  schedSelect.onchange = () => {
+    persistSchedule();
+  };
+
+  // Help icon — clarifies that each interval triggers on the 1st of the
+  // relevant period rather than counting forward from when the toggle was
+  // turned on. Custom tooltip (not native `title`) so it works on touch
+  // devices via tap.
+  const schedHelp = document.createElement('span');
+  schedHelp.textContent = '?';
+  schedHelp.setAttribute('role', 'button');
+  schedHelp.setAttribute('aria-label', 'Schedule interval reference');
+  schedHelp.setAttribute('tabindex', '0');
+  schedHelp.style.cssText =
+    'display:inline-flex;align-items:center;justify-content:center;' +
+    'width:14px;height:14px;border-radius:50%;' +
+    'background:var(--di-bg-tertiary, #f0f0f0);' +
+    'color:var(--di-text-muted, #888);' +
+    'font-size:10px;font-weight:600;cursor:help;' +
+    'border:1px solid var(--di-border-input, #ddd);' +
+    'flex:0 0 auto;user-select:none;';
+
+  const schedHelpTip = document.createElement('div');
+  schedHelpTip.style.cssText =
+    'position:fixed;display:none;z-index:10005;' +
+    'background:var(--di-bg, #fff);color:var(--di-text, #333);' +
+    'border:1px solid var(--di-border-input, #ddd);border-radius:6px;' +
+    'padding:8px 10px;font-size:11px;line-height:1.55;' +
+    'box-shadow:0 4px 12px var(--di-shadow, rgba(0,0,0,0.2));' +
+    'max-width:240px;';
+  schedHelpTip.innerHTML =
+    '<div><strong>Monthly</strong> · 1st of every month</div>' +
+    '<div><strong>Quarterly</strong> · 1st of Jan / Apr / Jul / Oct</div>' +
+    '<div><strong>Half year</strong> · 1st of Jan / Jul</div>' +
+    '<div><strong>Yearly</strong> · 1st of Jan</div>';
+  document.body.appendChild(schedHelpTip);
+
+  const positionSchedHelpTip = (): void => {
+    const r = schedHelp.getBoundingClientRect();
+    schedHelpTip.style.visibility = 'hidden';
+    schedHelpTip.style.display = 'block';
+    const tw = schedHelpTip.offsetWidth;
+    const vw = window.innerWidth;
+    let left = r.right - tw;
+    if (left < 8) left = 8;
+    if (left + tw > vw - 8) left = vw - tw - 8;
+    schedHelpTip.style.left = left + 'px';
+    schedHelpTip.style.top = r.bottom + 6 + 'px';
+    schedHelpTip.style.visibility = 'visible';
+  };
+  const showSchedHelpTip = (): void => {
+    positionSchedHelpTip();
+  };
+  const hideSchedHelpTip = (): void => {
+    schedHelpTip.style.display = 'none';
+  };
+
+  // Stop tooltip clicks from bubbling — otherwise the popover's
+  // "close on outside click" handler treats them as outside (the tooltip
+  // lives in document.body) and dismisses the popover with the tooltip.
+  schedHelpTip.addEventListener('click', e => {
+    e.stopPropagation();
+  });
+
+  schedHelp.addEventListener('mouseenter', showSchedHelpTip);
+  schedHelp.addEventListener('mouseleave', hideSchedHelpTip);
+  schedHelp.addEventListener('click', e => {
+    e.stopPropagation();
+    if (schedHelpTip.style.display === 'block') {
+      hideSchedHelpTip();
+    } else {
+      showSchedHelpTip();
+    }
+  });
+  schedHelp.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      showSchedHelpTip();
+    } else if (e.key === 'Escape') {
+      hideSchedHelpTip();
+    }
+  });
+  // Tap outside to dismiss (mobile + desktop click).
+  document.addEventListener('click', e => {
+    if (schedHelpTip.style.display !== 'block') return;
+    const t = e.target as Node;
+    if (t !== schedHelp && !schedHelpTip.contains(t)) hideSchedHelpTip();
+  });
+
+  scheduleRow.appendChild(schedCheckbox);
+  scheduleRow.appendChild(schedLabelLeft);
+  scheduleRow.appendChild(schedSelect);
+  scheduleRow.appendChild(schedHelp);
+  popover.appendChild(scheduleRow);
 
   // --- 3. Cache Info Section ---
   const cacheSection = document.createElement('div');
@@ -537,7 +842,23 @@ export function createSettingsPopover(
   };
 
   // Apply initial popover palette based on current grass theme
-  applyPopoverPalette([popover, grassFlyout], settingsManager.getTheme());
+  applyPopoverPalette(
+    [popover, grassFlyout, schedHelpTip],
+    settingsManager.getTheme(),
+  );
 
-  return {popover, close: handleClose};
+  return {
+    popover,
+    close: handleClose,
+    refresh: (mainMetric?: string) => {
+      if (
+        mainMetric &&
+        ['uploads', 'approvals', 'notes'].includes(mainMetric) &&
+        modeSelect.value !== mainMetric
+      ) {
+        modeSelect.value = mainMetric;
+      }
+      renderEditor(modeSelect.value);
+    },
+  };
 }
