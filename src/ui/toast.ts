@@ -12,11 +12,29 @@
 
 export type ToastType = 'success' | 'error' | 'warn' | 'info';
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface ToastOptions {
   type: ToastType;
   message: string;
   /** Override auto-dismiss duration in ms. Set 0 to disable auto-dismiss. */
   duration?: number;
+  /**
+   * Inline action buttons rendered between the message and the close (×).
+   * Clicking an action invokes `onClick` and dismisses the toast.
+   */
+  actions?: ToastAction[];
+  /**
+   * Fires when the toast is dismissed via the close (×) button or the
+   * auto-dismiss timer. NOT fired when an action button is clicked — the
+   * action's own `onClick` carries that intent. Useful for distinguishing
+   * "user explicitly walked away from this prompt" from "user took an
+   * action," e.g. session-level dismissal of recurring suggestions.
+   */
+  onClose?: () => void;
 }
 
 const DEFAULT_DURATIONS: Record<ToastType, number> = {
@@ -78,10 +96,35 @@ export function showToast(options: ToastOptions): void {
   msgSpan.textContent = message;
   el.appendChild(msgSpan);
 
+  let actionTriggered = false;
+  let onCloseFired = false;
+  const fireOnCloseOnce = (): void => {
+    if (actionTriggered || onCloseFired) return;
+    onCloseFired = true;
+    if (options.onClose) options.onClose();
+  };
+
+  if (options.actions && options.actions.length > 0) {
+    for (const action of options.actions) {
+      const btn = document.createElement('button');
+      btn.className = 'di-toast-action';
+      btn.textContent = action.label;
+      btn.addEventListener('click', () => {
+        actionTriggered = true;
+        action.onClick();
+        removeToast(el);
+      });
+      el.appendChild(btn);
+    }
+  }
+
   const closeBtn = document.createElement('button');
   closeBtn.className = 'di-toast-close';
   closeBtn.textContent = '\u00d7'; // ×
-  closeBtn.addEventListener('click', () => removeToast(el));
+  closeBtn.addEventListener('click', () => {
+    fireOnCloseOnce();
+    removeToast(el);
+  });
   el.appendChild(closeBtn);
 
   parent.appendChild(el);
@@ -96,6 +139,7 @@ export function showToast(options: ToastOptions): void {
   if (duration > 0) {
     setTimeout(() => {
       if (document.body.contains(el)) {
+        fireOnCloseOnce();
         removeToast(el);
       }
     }, duration);

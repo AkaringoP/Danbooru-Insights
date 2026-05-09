@@ -54,11 +54,32 @@ export interface Theme {
   grassOptions?: GrassOption[];
 }
 
+/**
+ * Four-element threshold tuple [L1, L2, L3, L4]. Always strictly increasing
+ * after validation. Locking the length at the type level removes a class of
+ * runtime errors (`vals[3]` becoming undefined) and lets the storage layer
+ * narrow length-4 invariant at compile time.
+ */
+export type Threshold4 = [number, number, number, number];
+
 /** Threshold values for each contribution metric. */
 export interface ThresholdMap {
-  uploads: number[];
-  approvals: number[];
-  notes: number[];
+  uploads: Threshold4;
+  approvals: Threshold4;
+  notes: Threshold4;
+}
+
+/** Cadence options for the auto-tune scheduler. All boundaries fall on the
+ *  1st of the relevant period. */
+export type ScheduleInterval =
+  | 'monthly' // 1st of every month
+  | 'quarterly' // 1st of Jan / Apr / Jul / Oct
+  | 'semiannual' // 1st of Jan / Jul
+  | 'yearly'; // 1st of Jan
+
+export interface AutoTuneSchedule {
+  enabled: boolean;
+  interval: ScheduleInterval;
 }
 
 /** Dark mode preference: auto follows Danbooru, or forced light/dark. */
@@ -70,6 +91,25 @@ export interface SettingsData {
   thresholds: ThresholdMap;
   /** Maps userId → last used metric mode. */
   rememberedModes: Record<string, string>;
+  /**
+   * Per-profile threshold overrides, keyed by viewed userId. Each entry may
+   * cover a subset of metrics — unset metrics fall through to the global
+   * `thresholds`. Set by the auto-tune button or saturation-detection prompt.
+   */
+  perProfileThresholds?: Record<string, Partial<ThresholdMap>>;
+  /**
+   * Auto-tune scheduler config (global toggle + cadence). When enabled, the
+   * grass renderer runs an auto-tune sweep on each profile visit if the
+   * current period boundary has not yet been handled for that profile.
+   */
+  autoTuneSchedule?: AutoTuneSchedule;
+  /**
+   * Per-profile, per-metric "last decided this period" timestamps (epoch
+   * ms). Updated whenever the user takes a definitive action on a tuning
+   * prompt (Apply / scheduler Dismiss) so the scheduler skips profiles
+   * already handled in the current period.
+   */
+  perProfileTuneTimes?: Record<string, Partial<Record<Metric, number>>>;
   /** Max post-count diff allowed before triggering an automatic sync. */
   syncThreshold?: number;
   /** Per-theme grass palette index (themeKey → 0-3). */

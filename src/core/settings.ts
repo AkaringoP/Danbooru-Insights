@@ -1,8 +1,23 @@
 import {CONFIG} from '../config';
-import type {DarkModePreference, Metric, SettingsData, Theme} from '../types';
+import type {
+  AutoTuneSchedule,
+  DarkModePreference,
+  Metric,
+  SettingsData,
+  Theme,
+  Threshold4,
+} from '../types';
 import {createLogger} from './logger';
 
 const log = createLogger('Settings');
+
+/** Runtime guard against malformed threshold storage (length != 4 or
+ *  non-array, e.g. user-edited localStorage). */
+function isThreshold4(v: unknown): v is Threshold4 {
+  return (
+    Array.isArray(v) && v.length === 4 && v.every(n => typeof n === 'number')
+  );
+}
 
 /**
  * Manages user settings and persistence using localStorage.
@@ -69,6 +84,12 @@ export class SettingsManager {
         rememberedModes: {
           ...(saved.rememberedModes || {}),
         },
+        perProfileThresholds: {
+          ...(saved.perProfileThresholds ?? {}),
+        },
+        perProfileTuneTimes: {
+          ...(saved.perProfileTuneTimes ?? {}),
+        },
       };
     } catch (e) {
       log.error('Error loading settings, using defaults', {error: e});
@@ -99,23 +120,23 @@ export class SettingsManager {
   }
 
   /**
-   * Gets thresholds for a specific metric.
-   * @param {string} metric The metric to retrieve thresholds for ('uploads', 'approvals', or 'notes').
-   * @return {!Array<number>} An array of 4 threshold integers.
+   * Gets thresholds for a specific metric. Falls through to the defaults
+   * (and a hard-coded backstop) when stored data is missing or corrupted —
+   * any non-array or wrong-length entry is treated as missing rather than
+   * propagated to the renderer.
    */
-  getThresholds(metric: Metric): number[] {
-    return (
-      this.settings.thresholds[metric] ||
-      this.defaults.thresholds[metric] || [1, 5, 10, 20]
-    );
+  getThresholds(metric: Metric): Threshold4 {
+    const stored = this.settings.thresholds[metric];
+    if (isThreshold4(stored)) return stored;
+    const fallback = this.defaults.thresholds[metric];
+    if (isThreshold4(fallback)) return fallback;
+    return [1, 5, 10, 20];
   }
 
   /**
    * Sets thresholds for a specific metric and saves them.
-   * @param {string} metric 'uploads', 'approvals', or 'notes'.
-   * @param {Array<number>} values Array of 4 threshold integers.
    */
-  setThresholds(metric: Metric, values: number[]): void {
+  setThresholds(metric: Metric, values: Threshold4): void {
     const newThresholds = {
       ...this.settings.thresholds,
       [metric]: values,
@@ -123,6 +144,105 @@ export class SettingsManager {
     this.save({
       thresholds: newThresholds,
     });
+  }
+
+  /**
+   * Resolves thresholds for rendering a specific profile's grass.
+   * `perProfileThresholds[userId][metric]` wins when present and well-formed
+   * (Array of length 4); otherwise falls back to the global default. The
+   * length check guards against hand-edited or otherwise malformed
+   * localStorage entries leaking into the cell-paint code.
+   */
+  getThresholdsForView(userId: string, metric: Metric): Threshold4 {
+    const stored = this.settings.perProfileThresholds?.[userId]?.[metric];
+    if (isThreshold4(stored)) return stored;
+    return this.getThresholds(metric);
+  }
+
+  /** True if a per-profile override exists for this userId and metric. */
+  hasProfileThresholds(userId: string, metric?: Metric): boolean {
+    const entry = this.settings.perProfileThresholds?.[userId];
+    if (!entry) return false;
+    if (!metric) return Object.keys(entry).length > 0;
+    return entry[metric] !== undefined;
+  }
+
+  /**
+   * Persists a per-profile threshold override for one metric. Other metrics
+   * for the same profile remain untouched (fall through to the global
+   * default until separately overridden).
+   */
+  setProfileThresholds(
+    userId: string,
+    metric: Metric,
+    values: Threshold4,
+  ): void {
+    const all = {...(this.settings.perProfileThresholds ?? {})};
+    all[userId] = {
+      ...(all[userId] ?? {}),
+      [metric]: values,
+    };
+    this.save({perProfileThresholds: all});
+  }
+
+  /** Default schedule when no user setting exists. */
+  private static readonly DEFAULT_SCHEDULE: AutoTuneSchedule = {
+    enabled: false,
+    interval: 'semiannual',
+  };
+
+  /** Returns the auto-tune scheduler config (enabled flag + interval). */
+  getAutoTuneSchedule(): AutoTuneSchedule {
+    const stored = this.settings.autoTuneSchedule;
+    if (stored && typeof stored.enabled === 'boolean' && stored.interval) {
+      return stored;
+    }
+    return SettingsManager.DEFAULT_SCHEDULE;
+  }
+
+  /** Persists the scheduler config. */
+  setAutoTuneSchedule(schedule: AutoTuneSchedule): void {
+    this.save({autoTuneSchedule: schedule});
+  }
+
+  /**
+   * Returns the last "decided this period" timestamp (epoch ms) for a
+   * (profile, metric) pair, or 0 if never recorded. Used by the scheduler
+   * to skip profiles already handled in the current period.
+   */
+  getProfileTuneTime(userId: string, metric: Metric): number {
+    const ts = this.settings.perProfileTuneTimes?.[userId]?.[metric];
+    return typeof ts === 'number' ? ts : 0;
+  }
+
+  /** Records a "decided this period" timestamp for a (profile, metric). */
+  setProfileTuneTime(userId: string, metric: Metric, timestamp: number): void {
+    const all = {...(this.settings.perProfileTuneTimes ?? {})};
+    all[userId] = {
+      ...(all[userId] ?? {}),
+      [metric]: timestamp,
+    };
+    this.save({perProfileTuneTimes: all});
+  }
+
+  /**
+   * Removes a per-profile override for one metric. If the entry has no
+   * remaining metrics, the userId key is dropped entirely. Used by the
+   * auto-tune Undo path to restore the "no override" state instead of
+   * writing back stale values that would mask the global default.
+   */
+  clearProfileThreshold(userId: string, metric: Metric): void {
+    const all = {...(this.settings.perProfileThresholds ?? {})};
+    const entry = all[userId];
+    if (!entry || entry[metric] === undefined) return;
+    const updated = {...entry};
+    delete updated[metric];
+    if (Object.keys(updated).length === 0) {
+      delete all[userId];
+    } else {
+      all[userId] = updated;
+    }
+    this.save({perProfileThresholds: all});
   }
 
   /**
