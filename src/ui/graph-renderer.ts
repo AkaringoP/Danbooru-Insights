@@ -57,6 +57,14 @@ export class GraphRenderer {
    *  Aborted at the start of each updateSummaryGrid() call so re-renders
    *  don't stack duplicate listeners on the same cells. */
   private hourlyTouchAbort: AbortController | null = null;
+  /** Pending post-paint handler-attachment timeout id. Threshold edits +
+   *  auto-tune Apply/Undo can trigger renderGraph() faster than the prior
+   *  render's 300ms timeout fires; without cancellation a stale timeout
+   *  re-runs `d3.selectAll('#cal-heatmap-scroll rect')` against an
+   *  already-destroyed selection, leaving the new cells without click /
+   *  mouseover handlers. Cleared at renderGraph entry and on each
+   *  reschedule so only the latest render's timeout ever runs. */
+  private postPaintTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -1349,6 +1357,10 @@ export class GraphRenderer {
     }
 
     const win = window as CalHeatmapAny;
+    if (this.postPaintTimeoutId !== null) {
+      clearTimeout(this.postPaintTimeoutId);
+      this.postPaintTimeoutId = null;
+    }
     if (win.cal && typeof win.cal.destroy === 'function') {
       try {
         win.cal.destroy();
@@ -2055,7 +2067,11 @@ export class GraphRenderer {
         this.updateSummaryGrid(hourlyData, metric);
 
         // Re-apply Styles and Interaction
-        setTimeout(() => {
+        if (this.postPaintTimeoutId !== null) {
+          clearTimeout(this.postPaintTimeoutId);
+        }
+        this.postPaintTimeoutId = setTimeout(() => {
+          this.postPaintTimeoutId = null;
           const tooltip = d3.select('#danbooru-grass-tooltip');
 
           // Helper: Smart Tooltip Positioning
