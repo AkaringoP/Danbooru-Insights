@@ -2137,6 +2137,16 @@ export class GraphRenderer {
                 onSecondTap: datum => {
                   const count = datum.v ?? 0;
                   const dateStr = new Date(datum.t).toISOString().split('T')[0];
+                  if (metric === 'approvals' && count > 0) {
+                    const node = tooltip.node() as HTMLElement | null;
+                    const rect = node?.getBoundingClientRect();
+                    const pageX = (rect?.left ?? 0) + window.scrollX;
+                    const pageY = (rect?.bottom ?? 0) + window.scrollY;
+                    const synthetic = {pageX, pageY} as MouseEvent;
+                    void this.showApprovalsDetail(dateStr, userIdVal, synthetic);
+                    tooltip.style('opacity', 0);
+                    return;
+                  }
                   const link = getUrl(dateStr, count);
                   if (link && link !== '#') window.open(link, '_blank');
                   tooltip.style('opacity', 0);
