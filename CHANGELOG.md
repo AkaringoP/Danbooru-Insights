@@ -4,6 +4,36 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.5.1 — Hotfixes: mobile approval tooltip + post-paint handler race
+
+### Fixed
+- **Mobile approvals tooltip tap now opens the post-list popover.** The
+  desktop click handler on a grass cell special-cased the `approvals`
+  metric to open `showApprovalsDetail` (paginated list of post IDs
+  approved that day), but the mobile two-step-tap path only routed
+  through `getUrl()`, which returns `'#'` for approvals — so the
+  tooltip tap closed silently with no popover. The mobile path now
+  mirrors the desktop branch, synthesizing `pageX` / `pageY` from the
+  tooltip's bounding rect so the popover positions next to the
+  tooltip the user just tapped (`graph-renderer.ts:onSecondTap`).
+- **Cells and legend swatches stay clickable after a threshold edit
+  / auto-tune Apply / Undo.** v9.5.0's `applyAndOfferUndo` flow can
+  re-render the grass while the settings popover is still open, and
+  fast Apply→Undo (or rapid threshold edits) can fire a second
+  `renderGraph` before the prior render's 300ms post-paint
+  `setTimeout` resolves. The stale timeout then ran
+  `d3.selectAll('#cal-heatmap-scroll rect')` against an
+  already-destroyed selection, leaving the freshly-painted cells
+  (and the legend tooltip handlers, since the legend divs survive
+  CalHeatmap.destroy() and a stale timeout would last-write-wins
+  overwrite them with stale closures) without working click /
+  mouseover handlers. Tracked the pending id on the renderer
+  instance and clear it both at `renderGraph` entry and on each
+  reschedule, so only the latest render's handler-attachment pass
+  ever runs.
+
+---
+
 ## v9.5.0 — Threshold auto-tune (per-profile)
 
 The grass-graph thresholds (Level 1–4) can now be auto-tuned from the
