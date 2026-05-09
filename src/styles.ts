@@ -98,7 +98,10 @@ export const GLOBAL_CSS = `
       width: 100vw;
       height: 100vh;
       height: 100dvh;
-      background: var(--di-overlay-bg, rgba(0, 0, 0, 0.4));
+      /* Opaque backdrop — the underlying Danbooru profile page must not
+         show through. Theme-aware fallback: dark variant uses the dashboard
+         background, light variant gets a solid white. */
+      background: var(--di-overlay-bg, var(--di-bg, #1a1a2e));
       z-index: 10000;
       display: none;
       justify-content: center;
@@ -119,7 +122,10 @@ export const GLOBAL_CSS = `
     #danbooru-grass-modal-window {
       width: 80%;
       max-width: 1000px;
-      height: 80%;
+      /* 100% height fills the overlay flex container fully — eliminates the
+         vertical gap that previously let the underlying page bleed through
+         above/below the modal on desktop. */
+      height: 100%;
       background: var(--di-bg-glass, rgba(255, 255, 255, 0.9));
       border-radius: 12px;
       box-shadow: 0 10px 30px var(--di-shadow, rgba(0, 0, 0, 0.2));
@@ -421,7 +427,9 @@ export const GLOBAL_CSS = `
         border-radius: 8px;
         width: 80%;
         max-width: 800px;
-        max-height: 90vh;
+        /* 100dvh handles iOS address-bar collapse; replaces 90vh which left
+           a gap that exposed the underlying profile page. */
+        max-height: 100dvh;
         position: relative;
         display: flex;
         flex-direction: column;
@@ -804,18 +812,6 @@ export const GLOBAL_CSS = `
         align-items: center !important;
         justify-content: center !important;
       }
-      /* Mobile-only fade-blur applied during pie-tab switches.
-         Legend (.danbooru-grass-legend-scroll) stays crisp — only the
-         chart wrapper / loading state blurs. */
-      .pie-content > * {
-        transition:
-          filter 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-          opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-      }
-      .pie-content.di-pie-blurring > :not(.danbooru-grass-legend-scroll) {
-        filter: blur(6px);
-        opacity: 0.5;
-      }
       .danbooru-grass-legend-scroll {
         margin-left: 0 !important;
         margin-top: 10px !important;
@@ -1081,6 +1077,21 @@ export const GLOBAL_CSS = `
     .di-toast-close:hover {
       color: #fff;
     }
+    .di-toast-action {
+      flex-shrink: 0;
+      background: rgba(255, 255, 255, 0.18);
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 9px;
+      border-radius: 3px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .di-toast-action:hover {
+      background: rgba(255, 255, 255, 0.32);
+    }
     @media (max-width: 480px) {
       .di-toast-container {
         left: 8px;
@@ -1088,6 +1099,183 @@ export const GLOBAL_CSS = `
         bottom: 8px;
         max-width: none;
       }
+    }
+
+    /* Threshold auto-tune button (settings popover header). */
+    .di-autotune-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      background: transparent;
+      border: 1px solid var(--di-border-input, #ddd);
+      border-radius: 4px;
+      color: var(--di-btn-text, #555);
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .di-autotune-btn:hover {
+      background: var(--di-bg-tertiary, #f0f0f0);
+      color: var(--di-link, #007bff);
+      border-color: var(--di-link, #007bff);
+    }
+    .di-autotune-btn[disabled] {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .di-autotune-btn svg {
+      width: 14px;
+      height: 14px;
+      display: block;
+    }
+
+    /* Threshold preview modal. */
+    .di-tt-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10010;
+      animation: di-tt-fade-in 0.12s ease-out;
+    }
+    @keyframes di-tt-fade-in {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+    .di-tt-modal {
+      background: var(--di-bg, #fff);
+      color: var(--di-text, #333);
+      border: 1px solid var(--di-border-input, #ddd);
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      padding: 18px 20px 14px;
+      min-width: 320px;
+      max-width: 90vw;
+    }
+    .di-tt-modal-header {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--di-text-heading, #444);
+      margin-bottom: 10px;
+    }
+    .di-tt-modal-body {
+      font-size: 12px;
+      margin-bottom: 16px;
+    }
+    .di-tt-modal-intro {
+      color: var(--di-text-muted, #888);
+      margin-bottom: 10px;
+    }
+    .di-tt-modal-table {
+      display: grid;
+      grid-template-columns: 18px 1fr auto auto auto;
+      gap: 4px 12px;
+      align-items: center;
+      padding: 8px 10px;
+      background: var(--di-bg-tertiary, #f6f6f8);
+      border: 1px solid var(--di-border-light, #eee);
+      border-radius: 6px;
+    }
+    .di-tt-modal-trow {
+      display: contents;
+      color: var(--di-text, #333);
+    }
+    .di-tt-modal-trow-head .di-tt-modal-tcol-val {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--di-text-muted, #888);
+      padding-bottom: 2px;
+      border-bottom: 1px solid var(--di-border-light, #eee);
+    }
+    .di-tt-modal-tcol-swatch {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .di-tt-modal-swatch {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.08) inset;
+    }
+    .di-tt-modal-tcol-label {
+      font-weight: 500;
+    }
+    .di-tt-modal-tcol-val {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      min-width: 32px;
+    }
+    .di-tt-modal-tcol-before {
+      color: var(--di-text-muted, #888);
+    }
+    .di-tt-modal-tcol-after {
+      font-weight: 700;
+      color: var(--di-text-heading, #222);
+    }
+    .di-tt-modal-tcol-arrow {
+      font-size: 12px;
+      width: 14px;
+      text-align: center;
+      color: var(--di-text-muted, #888);
+    }
+    .di-tt-modal-arrow-up   { color: #2d8a4e; }
+    .di-tt-modal-arrow-down { color: #c93c37; }
+    .di-tt-modal-trow-unchanged .di-tt-modal-tcol-after {
+      color: var(--di-text-muted, #888);
+      font-weight: 500;
+    }
+    .di-tt-modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .di-tt-modal-btn {
+      padding: 6px 16px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: 5px;
+      border: 1px solid var(--di-border-input, #ddd);
+      cursor: pointer;
+      line-height: 1;
+    }
+    /* Restate background/color/border on every state so Danbooru's
+       global button:hover (and similar) can't repaint our buttons mid
+       interaction. !important guards against host stylesheets that
+       outrank our class selector. */
+    .di-tt-modal-btn-secondary,
+    .di-tt-modal-btn-secondary:hover,
+    .di-tt-modal-btn-secondary:focus,
+    .di-tt-modal-btn-secondary:active {
+      background: transparent !important;
+      color: var(--di-btn-text, #555) !important;
+      border-color: var(--di-border-input, #ddd) !important;
+    }
+    .di-tt-modal-btn-secondary:hover {
+      background: var(--di-bg-tertiary, #f0f0f0) !important;
+    }
+    .di-tt-modal-btn-primary,
+    .di-tt-modal-btn-primary:hover,
+    .di-tt-modal-btn-primary:focus,
+    .di-tt-modal-btn-primary:active {
+      background: var(--di-link, #007bff) !important;
+      border-color: var(--di-link, #007bff) !important;
+      color: #ffffff !important;
+    }
+    .di-tt-modal-btn-primary:hover {
+      filter: brightness(1.1);
+    }
+    .di-tt-modal-btn-primary:focus-visible {
+      outline: 2px solid var(--di-link, #007bff);
+      outline-offset: 2px;
     }
   `;
 

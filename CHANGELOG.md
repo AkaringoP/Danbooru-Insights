@@ -4,6 +4,263 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.5.0 — Threshold auto-tune (per-profile)
+
+The grass-graph thresholds (Level 1–4) can now be auto-tuned from the
+viewed profile's recent 180 days of activity, with results stored as a
+**per-profile override** so that tuning one profile never breaks the
+visualization on another. The popover gets an auto-tune button, and the
+graph proactively suggests tuning via a toast when the active-day
+distribution looks saturated. No schema changes.
+
+### Added
+- **Auto-tune button in settings popover** (Set thresholds header,
+  sparkles icon). One click, single metric (whichever is selected in
+  the dropdown), reads the last 180 days of active-day counts
+  (`count > 0`) from IndexedDB, and computes thresholds as `L1=1`
+  (fixed) plus P40/P70/P90 of the sample with strict-increasing
+  correction. The user previews the proposed values vs. the current
+  ones in a modal before applying. Closing the modal (Cancel, ESC, or
+  backdrop click) now keeps the underlying settings popover open —
+  modal click events are scoped so they don't trigger the popover's
+  click-outside dismissal. Backed by
+  [src/core/threshold-tuner.ts](src/core/threshold-tuner.ts) + 23
+  unit tests.
+- **Auto-tune suggestion toast** after each grass render. Triggers only
+  when ≥90% of active days fall into the L1 or L4 bucket *and* a
+  simulation shows that proposed thresholds would reduce max-bucket
+  concentration by ≥20 percentage points. Skips when the profile
+  already has an override or was dismissed in the current session.
+  Inline `[Apply] [Dismiss]` buttons on the toast (new
+  `actions?: ToastAction[]` option on `showToast`).
+- **Per-profile threshold storage**: new optional
+  `SettingsData.perProfileThresholds: Record<userId, Partial<ThresholdMap>>`
+  with `getThresholdsForView(userId, metric)` taking precedence over the
+  global default at render time. Manual input edits in the popover stay
+  global (user's "baseline preference"); auto-tune and the suggestion
+  toast write per-profile.
+
+### Changed
+- `graph-renderer.ts` rendering paths now resolve thresholds via
+  `getThresholdsForView` (cell paint + legend tooltip) so per-profile
+  overrides actually take effect.
+- Settings popover threshold inputs are now WYSIWYG: they read the
+  active layer (`getThresholdsForView`) and write back to whichever
+  layer is active (`setProfileThresholds` if the current profile has
+  an override for that metric, else `setThresholds`). Validation runs
+  against the active layer. Auto-tune `Apply` re-renders the inputs
+  immediately so they reflect the just-saved per-profile values
+  instead of the previous global ones.
+- `ThresholdMap` is now a 4-tuple type (`Threshold4 = [number, number,
+  number, number]`) instead of `number[]`, locking the length-4
+  invariant at compile time across `computeAutoThresholds`,
+  `simulateDistribution`, `wouldTuningImprove`, `detectSaturation`,
+  and the popover/modal APIs. `getThresholds` and
+  `getThresholdsForView` now also runtime-validate stored entries
+  (`isThreshold4` guard — must be Array, length 4, all numbers) so
+  hand-edited or corrupt localStorage entries can't leak undefined
+  values into the cell-paint code at `t[3]`.
+- **Auto-tune scheduler** — opt-in cadence-based sweep that runs on each
+  profile visit and proposes refreshing per-profile thresholds when a new
+  period boundary has passed. New checkbox + dropdown row in the settings
+  popover ("Auto-tune every Month / Quarter / Half year / Year"). Default
+  is disabled with `Half year` selected. Boundaries are always the 1st of
+  the relevant period (no day picker). When triggered, a single prompt
+  toast lists the candidate metrics for the current profile (e.g.
+  `Scheduled auto-tune ready: Uploads, Approvals. [Apply] [Dismiss]`);
+  Apply tunes them in one batch and surfaces a combined Undo, Dismiss
+  marks the period as handled so it won't re-prompt until the next
+  boundary. Backed by `mostRecentBoundary` in `threshold-tuner.ts` (8
+  unit tests covering every interval) and per-(profile, metric) tune
+  timestamps stored under `SettingsData.perProfileTuneTimes` (8 unit
+  tests). Scheduler runs *before* the saturation prompt and short-circuits
+  it on the same render so the user is never double-prompted.
+- Auto-tune `Apply` (both the manual modal and the auto-detect toast)
+  now triggers the graph re-render *immediately* and keeps the settings
+  popover open. The follow-up success toast carries an `Undo` action
+  (8s window) that restores the prior state — either the previous
+  per-profile override (via `setProfileThresholds`) or the bare global
+  fallback (via the new `clearProfileThreshold` helper, which also
+  drops empty per-profile entries). Undo additionally calls
+  `dismissSuggestion` so the auto-detect toast won't immediately
+  re-prompt the user who just walked it back.
+- Threshold preview modal redesign: per-level Before/After grid with
+  swatch + arrow (↑ ↓ =) per row, monospace tabular numerals, and the
+  modal now picks up the active grass theme's light/dark palette via
+  `applyPopoverPalette` (previously stayed white on dark themes).
+- Settings popover now refreshes its threshold inputs every time it is
+  opened (`createSettingsPopover` exposes a new `refresh(metric?)`
+  method, called from the gear button's open path with the current
+  main metric). This (a) surfaces the toast-driven Apply path's
+  per-profile changes — previously the popover element was constructed
+  once and its inputs only updated on modeSelect change, so a
+  per-profile write that happened while the popover was closed stayed
+  invisible until the user manually toggled the dropdown — and (b)
+  aligns the popover's metric dropdown with whatever the user is
+  actually viewing in the main grass each time the popover opens
+  (previously frozen at first-render metric).
+
+### Polish (added during the same release window)
+- **Settings popover layout reshuffle**: the Snap-to-edge row moved from
+  the bottom of the threshold section up between the theme grid and the
+  "Set thresholds" header, with a horizontal divider above the threshold
+  section (mirroring the existing Cache Info divider). All
+  threshold-related controls (mode dropdown, Level 1–4 inputs,
+  auto-tune scheduler) are now visually grouped.
+- **Help (?) icon on the schedule row** — hover on desktop, tap on mobile,
+  keyboard-accessible (Enter / Space / Esc), themed via
+  `applyPopoverPalette` so light/dark grass themes carry through. Custom
+  tooltip (not native `title`) so it works on touch devices. Lists what
+  each interval boundary maps to (e.g. *Half year · 1st of Jan / Jul*).
+- **`ToastOptions.onClose`** — fires when the user closes a toast via the
+  × button or the auto-dismiss timer, NOT when an action button is
+  clicked (a `actionTriggered` flag short-circuits). The auto-tune
+  suggestion and scheduler prompts both wire `onClose` to
+  `dismissSuggestion(userId)` so X'ing out either flavor session-dismisses
+  both — refresh restores them. Keeps "X = silence me for now" distinct
+  from `Dismiss` (which marks the period itself as handled in the
+  scheduler case).
+- **Manual auto-tune button now skips the modal when proposed values
+  match the active thresholds** — applying would be a no-op, so the
+  button just shows an info toast (`<Metric> thresholds already match
+  the recent activity — nothing to change`) and returns.
+- **Schedule row alignment fix**: removed the `popover-select` class from
+  the schedule dropdown — it forces `width:100%` and a bottom margin
+  which broke the inline flex layout. Replaced with explicit inline
+  styles matching the surrounding 11px text height.
+- **Apply button hover regression**: Danbooru's global
+  `button:hover { background: white }` was outranking the modal's
+  primary-button background, painting white text on white background
+  on hover. Restated `background` / `color` / `border-color` on
+  `:hover` / `:focus` / `:active` with `!important` so host stylesheets
+  can't repaint our buttons mid-interaction. Cancel button protected
+  the same way.
+- **Modal click-isolation**: clicking Cancel / backdrop in the auto-tune
+  preview modal also dismissed the underlying settings popover because
+  the click bubbled to document, where the popover's "click outside"
+  handler caught it. Modal backdrop and card now `e.stopPropagation()`.
+
+### Migration
+- Existing users get an empty `perProfileThresholds` object on next
+  load (deep-merge in `SettingsManager.load`). The new
+  `autoTuneSchedule` and `perProfileTuneTimes` fields also start empty.
+  No action needed.
+- No IndexedDB schema change; current schema v12.
+
+---
+
+## v9.4.5 — Pie chart UX overhaul + dashboard isolation
+
+Mobile-focused polish pass on the User Analytics pie-chart widget plus
+three security/correctness fixes surfaced by code review, and a
+dashboard-isolation pass so the modal fully covers the underlying
+Danbooru profile page when open. The pie chart's mobile interaction model
+has been rebuilt around explicit tap detection, far-side tooltip
+placement, and a tag-cloud-style crossfade between tabs. No schema
+changes.
+
+### Security
+- **Pie tooltip / legend XSS hardening**: every interpolation site that
+  fed `tooltip.html(...)` or `legendDiv.innerHTML` (slice label, color,
+  thumbnail URL) now goes through `escapeHtml` / a `safeColor` whitelist
+  (`/^#[0-9a-fA-F]{3,8}$/`) / `safeThumbUrl` (donmai.us host whitelist).
+  Test coverage in `test/pie-escape.test.ts` (17 cases). Closes a
+  long-standing path where a malicious tag label or `details.thumb`
+  (merged via the async `DanbooruInsights:DataUpdated` event) could
+  break out of an attribute and execute on the Danbooru origin.
+
+### Correctness
+- **Pie percentages now sum to exactly 100%**: independent rounding per
+  slice could yield 33+33+33=99 or 16.67×6=102. New `computePercentages`
+  (largest-remainder method) is called once after `processedData` and
+  the resulting `pctByLabel` is shared by tooltip + legend so the two
+  displays also agree on precision. Test coverage in
+  `test/pie-percentages.test.ts`.
+- **`PieSlice.details` is now a discriminated union**: the previous
+  `details: any` (with an `eslint-disable` to match) let typos and
+  backend-schema drifts pass through to URL builders silently.
+  `kind: 'rating' | 'status' | 'tag'` with branch-specific fields, plus
+  a single `buildSearchQuery(details, ...)` helper that both
+  `handlePieClick` and the legend builder call (replacing the "Mirror
+  handlePieClick's logic" duplicated branch). Test coverage in
+  `test/pie-search-query.test.ts`. `window.open(url, '_blank',
+  'noopener,noreferrer')` applied as part of the same pass.
+
+### Dashboard isolation
+- **iOS-safe page scroll lock**
+  (`feat(modal): scroll-lock 유틸 + iOS-safe 페이지 잠금`):
+  `document.body.style.overflow = 'hidden'` alone is unreliable on iOS
+  Safari (rubber-band still leaks the page underneath). New
+  `src/core/scroll-lock.ts` puts `body { position: fixed;
+  top: -savedScrollY; width: 100%; overflow: hidden }` and matches
+  `html { overflow: hidden }` while a modal is open, restoring
+  everything (and `window.scrollTo(0, savedScrollY)`) on close.
+  UserAnalytics + TagAnalytics both call the helper. Refcount supports
+  nested locks. Test coverage in `test/scroll-lock.test.ts` (4 cases).
+- **Modal fully covers the underlying profile page**:
+  `#danbooru-grass-modal-overlay` background changed from
+  `rgba(0,0,0,0.4)` to opaque (`var(--di-overlay-bg, var(--di-bg,
+  #1a1a2e))`). `#danbooru-grass-modal-window` height is now 100% (was
+  80%, leaving a vertical bleed-through gap on desktop).
+  `#tag-analytics-modal > div` `max-height: 90vh → 100dvh` for iOS
+  address-bar safety.
+
+### Pie chart mobile UX
+- **Slice hover/3D clipping resolved**: chart wrapper grew from 180×180
+  to 220×220 (`PIE_SVG_SIZE` / `PIE_RADIUS` constants extracted).
+  Visible chart diameter still 140 px; the extra 40 px headroom absorbs
+  `arcHover` (1.2× outer radius) plus the `rotateX(40deg)` 3D
+  projection so popped slices no longer collide with the legend's
+  sticky header on mobile.
+- **Tap-completion semantics**: a single tap on a slice was previously
+  perceived as "tooltip + immediate navigate" because the synthetic
+  `click` browsers fire after a tap landed on the just-shown tooltip.
+  New `TapTracker` (`src/ui/two-step-tap.ts`) gates both slice → tooltip
+  and tooltip → navigate on completed taps (touchstart + touchend,
+  ≤15 px move, ≤600 ms), and the slice's d3-bound datum is captured at
+  touchstart instead of re-resolved via `document.elementFromPoint`
+  (which often returned the parent `<g>` on a 3D-rotated SVG, silently
+  dropping a large fraction of taps). `mouseover`/`mousemove`/`mouseout`
+  are now `if (isTouch) return;` guarded so the synthetic mouse cascade
+  doesn't overwrite the tooltip's position. Test coverage in
+  `test/tap-tracker.test.ts` (9 cases).
+- **Tooltip stays inside the card**: tooltip placement is no longer
+  "touch + 15 px offset and clamp" but a priority list of candidate
+  positions (4 touch-relative quadrants, then card-far-side anchors
+  with 5 vertical alignments). The first that fits inside `cardRect ∩
+  wrapperRect ∩ viewport` wins. Tooltip natural width is preserved —
+  only the position changes — and the `body { overflow-x: hidden }`
+  from the scroll lock is the safety net for the pathological
+  "tooltip wider than card" case. Test coverage in
+  `test/pie-tooltip-position.test.ts` (8 cases).
+- **Tooltip pointer-events sync**: a hidden (`opacity: 0`) tooltip used
+  to keep `pointer-events: auto` and its previous position, eating the
+  next tap on the slice underneath. Pointer-events is now toggled in
+  lockstep with opacity (`auto` while shown, `none` while hidden).
+- **Slice highlight resets after navigation**: `onSecondTap` now calls
+  `resetSlices()` after `handlePieClick` so coming back via
+  browser-back finds the chart in its default arc shape instead of a
+  frozen `arcHover` slice with no `activeDatum` to dismiss it.
+- **Tab transition crossfade**: the mobile-only `filter: blur(6px) +
+  opacity: 0.5 + 380 ms` effect is replaced with the same 350 ms
+  opacity crossfade pattern the tag-cloud widget uses. A `cloneNode`
+  snapshot of the current chart + legend overlays `pieContent` while
+  d3 re-renders the originals underneath, then fades out — desktop
+  and mobile share the same animation now.
+
+### Internal
+- New helpers: `src/core/scroll-lock.ts`,
+  `src/ui/two-step-tap.ts::TapTracker`,
+  `src/apps/user-analytics-pie-helpers.ts` (`pickFittingPosition`,
+  `computePercentages`, `safeColor`, `safeThumbUrl`,
+  `buildSearchQuery`),
+  `src/ui/two-step-tap.ts::TwoStepTapOptions.navigateOnSameTap`.
+- Tests: 27 files / 343+ cases (was 20 / ~280). All new cases run in
+  vitest's node environment with `vi.stubGlobal('document', ...)` for
+  DOM-touching code.
+
+---
+
 ## v9.4.4 — Zero-post empty-state handling
 
 Hotfix for a broken UX path on subjects with no posts. Opening the

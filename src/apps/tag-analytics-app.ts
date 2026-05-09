@@ -15,6 +15,7 @@ import type {
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {showToast} from '../ui/toast';
+import {lockBodyScroll, unlockBodyScroll} from '../core/scroll-lock';
 import type {
   TagAnalyticsMeta,
   DanbooruPost,
@@ -1708,7 +1709,7 @@ export class TagAnalyticsApp {
         );
       }
       modal.style.display = 'flex';
-      document.body.style.overflow = 'hidden';
+      lockBodyScroll();
       const closeBtn = document.getElementById('tag-analytics-close');
       if (closeBtn) closeBtn.focus();
     } else {
@@ -1719,7 +1720,7 @@ export class TagAnalyticsApp {
         return;
       }
       modal.style.display = 'none';
-      document.body.style.overflow = '';
+      unlockBodyScroll();
       this.chartRenderer.cleanup();
       // Remove any lingering area chart tooltips appended to body
       d3.select('body').selectAll('.tag-analytics-tooltip').remove();
