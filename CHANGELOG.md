@@ -149,6 +149,83 @@ distribution looks saturated. No schema changes.
 
 ---
 
+## v9.4.8 — Hotfix: Hourly Distribution tooltips on mobile
+
+The Hourly Distribution panel in the GrassApp summary widget had two
+mobile-only failures: the tooltip often didn't appear when a cell was
+tapped, and once it did appear, tapping a different cell wouldn't
+update or dismiss it. No schema changes.
+
+### Fix
+- **Hourly cells now drive their tooltip from real touch events**: the
+  per-cell handlers in `updateSummaryGrid` were `onmouseenter` /
+  `onmouseleave` only, which on iOS Safari + Chrome Android rely on
+  synthetic mouse events fired after a tap. Those fire unreliably and
+  often leave the cell stuck in a hover state, so subsequent taps on
+  other cells were ignored. Mirrored the pattern already used by the
+  CalHeatmap year grid: branch on `isTouchDevice()`, attach
+  `touchstart` / `touchmove` / `touchend` via a per-cell `TapTracker`
+  (15 px / 600 ms tap budget — drags still scroll), and route
+  recognised taps through a `createTwoStepTap` controller. The
+  controller manages the active-cell state and handles outside-tap
+  dismiss (document-level `touchstart` / `click`), so tapping another
+  cell moves the tooltip and tapping anywhere off the grid hides it.
+  Desktop hover behaviour is unchanged.
+- **Tooltip no longer clips above the viewport top**: extracted a
+  `positionTooltipAboveCell` helper that flips the tooltip below the
+  cell when there isn't room above, and clamps it horizontally inside
+  the viewport. Used by both the touch and desktop paths so the AM-row
+  cells (which sit near the top of the panel) render their tooltip
+  correctly when the panel is at the top of the page.
+
+---
+
+## v9.4.7 — Hotfix: Milestones expanded-state cut-off
+
+Follow-up to v9.4.6. The collapsed-state cut-off was fixed in v9.4.6, but
+users with many milestones (~20+ rows on mobile's 2-column layout) were
+still seeing the last row sliced in half once they clicked "Show More".
+
+### Fix
+- **Expanded milestone grid now sizes to actual content height**: the
+  expanded-state `max-height` was hardcoded to `2000px`, which on mobile
+  fits ~19 rows of ~100px cards before clipping the next row mid-card —
+  so a user with 38+ milestones (~20 rows) lost the last row right above
+  the "Monthly Activity" heading. The two `'2000px'` assignments in
+  `renderMilestonesWidget` (initial render when already expanded, and
+  inside the Show More click handler) now use
+  `milestoneContainer.scrollHeight + 'px'` instead, so the container
+  expands to exactly fit whatever the current milestone step (1k, 2.5k,
+  5k, repdigit, …) produces. The existing `transition: max-height 0.3s
+  ease` animates smoothly from collapsed (90px mobile / 110px desktop)
+  to the computed scrollHeight.
+
+---
+
+## v9.4.6 — Hotfix: User Analytics milestones display on mobile
+
+Two small but visible regressions in the User Analytics milestones widget
+on mobile. No schema changes.
+
+### Fixes
+- **NSFW milestone cards no longer collapse into a 45×45 box**: the mobile
+  CSS rule that resized the thumbnail wrapper (`#analytics-milestone-container > a > div:last-child`)
+  fell through to the text div whenever the thumbnail was omitted (NSFW
+  filter off + NSFW post), squeezing the card so the date wrapped onto two
+  lines and "Score:" was clipped. Scoped the rule to
+  `:last-child:not(:first-child)` so it only matches when an actual
+  sibling thumbnail exists.
+- **Collapsed milestone grid no longer cuts cards mid-row on mobile**: the
+  inline `max-height:110px` showed one full row plus ~25–30px of the next
+  row on mobile (cards are ~75–80px tall with the smaller padding/thumb),
+  so the next row's cards were sliced in half right above "Monthly
+  Activity". Moved collapse height onto a `.di-milestone-collapsed` class
+  and overrode it to `90px` inside the `(max-width: 768px)` block; the
+  Show More / Show Less toggle now flips the class alongside the existing
+  inline max-height.
+
+---
+
 ## v9.4.5 — Pie chart UX overhaul + dashboard isolation
 
 Mobile-focused polish pass on the User Analytics pie-chart widget plus

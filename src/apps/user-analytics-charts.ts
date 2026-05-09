@@ -1618,7 +1618,7 @@ export async function renderMilestonesWidget(
     }
 
     const containerId = 'analytics-milestone-container';
-    msHtml += `<div id="${containerId}" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap:10px; max-height:110px; overflow:hidden; transition: max-height 0.3s ease;">`;
+    msHtml += `<div id="${containerId}" class="di-milestone-collapsed" style="display:grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap:10px; max-height:110px; overflow:hidden; transition: max-height 0.3s ease;">`;
 
     milestones.forEach((m: MilestoneEntry) => {
       const p = m.post;
@@ -1717,16 +1717,21 @@ export async function renderMilestonesWidget(
       btn.style.display = 'block';
 
       if (isMilestoneExpanded) {
-        milestoneContainer.style.maxHeight = '2000px';
+        milestoneContainer.classList.remove('di-milestone-collapsed');
+        milestoneContainer.style.maxHeight =
+          milestoneContainer.scrollHeight + 'px';
         btn.textContent = 'Show Less';
       }
 
       btn.onclick = () => {
         isMilestoneExpanded = !isMilestoneExpanded;
         if (isMilestoneExpanded) {
-          milestoneContainer.style.maxHeight = '2000px';
+          milestoneContainer.classList.remove('di-milestone-collapsed');
+          milestoneContainer.style.maxHeight =
+            milestoneContainer.scrollHeight + 'px';
           btn.textContent = 'Show Less';
         } else {
+          milestoneContainer.classList.add('di-milestone-collapsed');
           milestoneContainer.style.maxHeight = '110px';
           btn.textContent = 'Show More';
         }
