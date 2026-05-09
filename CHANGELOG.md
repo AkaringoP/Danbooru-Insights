@@ -4,6 +4,26 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.5.2 — Legend tap targets on mobile
+
+### Fixed
+- **Grass legend swatches now respond reliably to taps on mobile.**
+  The five Less/More color swatches at the bottom-right of the grass
+  graph only had `mouseover` / `mouseout` handlers — on touch devices
+  the synthetic mouse events fired unreliably, and `mouseout` from
+  the next tap collapsed the tooltip immediately after it appeared.
+  Mirrored the v9.4.8 hourly-grid / v9.5.1 cell pattern: on
+  `isTouchDevice()` build a `createTwoStepTap` controller with
+  `navigateOnSameTap: false`, attach `TapTracker`-gated
+  `touchstart` / `touchmove` / `touchend` per swatch with an
+  `AbortController`-grouped signal so re-renders don't stack
+  listeners, and position the tooltip above the swatch via the
+  existing `positionTooltipAboveCell` helper. Hit area expanded to
+  ~24×24 px (`padding: 7px; box-sizing: content-box;`) — the visible
+  10×10 swatch is unchanged. Desktop hover behavior is untouched.
+
+---
+
 ## v9.5.1 — Hotfixes: mobile approval tooltip + post-paint handler race
 
 ### Fixed
