@@ -26,6 +26,14 @@ const METRIC_LABEL: Record<Metric, string> = {
 const LEVEL_COLORS = ['#9be9a8', '#40c463', '#30a14e', '#216e39'];
 
 /**
+ * Tuning anchor per level — the source of each row's "New" value.
+ * Mirrors the percentiles used in `computeAutoThresholds`
+ * ([src/core/threshold-tuner.ts](../core/threshold-tuner.ts)). Update both
+ * sides together if the percentile mapping ever changes.
+ */
+const LEVEL_TUNING_LABEL = ['≥1', 'P40', 'P70', 'P90'];
+
+/**
  * Shows the preview modal. Returns nothing — the modal manages its own
  * lifecycle (ESC, backdrop click, Apply, Cancel all dismiss it).
  */
@@ -79,7 +87,13 @@ export function showThresholdPreviewModal(args: ThresholdPreviewArgs): void {
 
     const label = document.createElement('div');
     label.className = 'di-tt-modal-tcol-label';
-    label.textContent = `Level ${i + 1}`;
+    const levelText = document.createElement('span');
+    levelText.textContent = `Level ${i + 1}`;
+    const tuneText = document.createElement('span');
+    tuneText.className = 'di-tt-modal-tcol-tune';
+    tuneText.textContent = ` (${LEVEL_TUNING_LABEL[i]})`;
+    label.appendChild(levelText);
+    label.appendChild(tuneText);
 
     const before = document.createElement('div');
     before.className = 'di-tt-modal-tcol-val di-tt-modal-tcol-before';
@@ -110,6 +124,12 @@ export function showThresholdPreviewModal(args: ThresholdPreviewArgs): void {
   }
 
   body.appendChild(table);
+
+  const foot = document.createElement('div');
+  foot.className = 'di-tt-modal-foot';
+  foot.textContent = 'Px = x-th percentile of active-day counts.';
+  body.appendChild(foot);
+
   card.appendChild(body);
 
   const actions = document.createElement('div');
