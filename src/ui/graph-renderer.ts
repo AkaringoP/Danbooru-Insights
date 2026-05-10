@@ -57,6 +57,24 @@ export class GraphRenderer {
    *  Aborted at the start of each updateSummaryGrid() call so re-renders
    *  don't stack duplicate listeners on the same cells. */
   private hourlyTouchAbort: AbortController | null = null;
+  /** Two-step tap controller for the grass legend swatches on touch
+   *  devices. Recreated each render cycle so it captures the latest
+   *  legendThresholds. Like hourlyTap, navigation-free
+   *  (`navigateOnSameTap: false`) — same-swatch re-tap is a no-op so
+   *  the range tooltip persists until the user taps outside. */
+  private legendTap: TwoStepTapController<number> | null = null;
+  /** AbortController grouping the touch listeners attached to legend
+   *  swatches. Aborted at the top of the legend-handler block so v9.5.0+
+   *  fast re-renders don't stack duplicate listeners. */
+  private legendTouchAbort: AbortController | null = null;
+  /** Pending post-paint handler-attachment timeout id. Threshold edits +
+   *  auto-tune Apply/Undo can trigger renderGraph() faster than the prior
+   *  render's 300ms timeout fires; without cancellation a stale timeout
+   *  re-runs `d3.selectAll('#cal-heatmap-scroll rect')` against an
+   *  already-destroyed selection, leaving the new cells without click /
+   *  mouseover handlers. Cleared at renderGraph entry and on each
+   *  reschedule so only the latest render's timeout ever runs. */
+  private postPaintTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -1349,6 +1367,10 @@ export class GraphRenderer {
     }
 
     const win = window as CalHeatmapAny;
+    if (this.postPaintTimeoutId !== null) {
+      clearTimeout(this.postPaintTimeoutId);
+      this.postPaintTimeoutId = null;
+    }
     if (win.cal && typeof win.cal.destroy === 'function') {
       try {
         win.cal.destroy();
@@ -2055,7 +2077,11 @@ export class GraphRenderer {
         this.updateSummaryGrid(hourlyData, metric);
 
         // Re-apply Styles and Interaction
-        setTimeout(() => {
+        if (this.postPaintTimeoutId !== null) {
+          clearTimeout(this.postPaintTimeoutId);
+        }
+        this.postPaintTimeoutId = setTimeout(() => {
+          this.postPaintTimeoutId = null;
           const tooltip = d3.select('#danbooru-grass-tooltip');
 
           // Helper: Smart Tooltip Positioning
@@ -2137,6 +2163,20 @@ export class GraphRenderer {
                 onSecondTap: datum => {
                   const count = datum.v ?? 0;
                   const dateStr = new Date(datum.t).toISOString().split('T')[0];
+                  if (metric === 'approvals' && count > 0) {
+                    const node = tooltip.node() as HTMLElement | null;
+                    const rect = node?.getBoundingClientRect();
+                    const pageX = (rect?.left ?? 0) + window.scrollX;
+                    const pageY = (rect?.bottom ?? 0) + window.scrollY;
+                    const synthetic = {pageX, pageY} as MouseEvent;
+                    void this.showApprovalsDetail(
+                      dateStr,
+                      userIdVal,
+                      synthetic,
+                    );
+                    tooltip.style('opacity', 0);
+                    return;
+                  }
                   const link = getUrl(dateStr, count);
                   if (link && link !== '#') window.open(link, '_blank');
                   tooltip.style('opacity', 0);
@@ -2254,18 +2294,99 @@ export class GraphRenderer {
             `${t[3]}+ (More)`,
           ];
 
+          // Tear down any prior legend wiring first — fast threshold
+          // edits trigger rapid re-renders, and stacked touch listeners
+          // would double-fire taps.
+          this.legendTouchAbort?.abort();
+          this.legendTouchAbort = null;
+          this.legendTap?.destroy();
+          this.legendTap = null;
+
           // Select the 6 manual colored divs in the legend
           const legendDivs = d3.selectAll('#danbooru-grass-legend > div');
 
-          legendDivs.each(function (_d, i) {
-            if (i >= 0 && i < legendThresholds.length) {
-              d3.select(this)
-                .on('mouseover', event => {
-                  updateTooltip(event, legendThresholds[i]);
-                })
-                .on('mouseout', () => tooltip.style('opacity', 0));
-            }
-          });
+          if (isTouch) {
+            // Expand hit area on touch — visual swatch stays 10×10 thanks
+            // to box-sizing: content-box. Total tap rect ≈ 24×24, well
+            // above the original 10×10 and within the legend's flex-end
+            // layout budget.
+            legendDivs.each(function () {
+              const el = this as HTMLElement;
+              el.style.padding = '7px';
+              el.style.boxSizing = 'content-box';
+            });
+
+            this.legendTouchAbort = new AbortController();
+            const legendSignal = this.legendTouchAbort.signal;
+            const tooltipEl = document.getElementById('danbooru-grass-tooltip');
+
+            this.legendTap = createTwoStepTap<number>({
+              insideElements: () => [
+                document.getElementById('danbooru-grass-legend'),
+                document.getElementById('danbooru-grass-tooltip'),
+              ],
+              onFirstTap: i => {
+                if (!tooltipEl) return;
+                tooltipEl.style.opacity = '1';
+                tooltipEl.innerHTML = legendThresholds[i];
+                const swatchEl = document.querySelectorAll(
+                  '#danbooru-grass-legend > div',
+                )[i] as HTMLElement | undefined;
+                if (swatchEl) {
+                  this.positionTooltipAboveCell(
+                    tooltipEl,
+                    swatchEl.getBoundingClientRect(),
+                  );
+                }
+              },
+              // Legend has no navigation — same-swatch re-tap is a no-op
+              // so the range tooltip persists until the user taps
+              // elsewhere or outside.
+              onSecondTap: () => {
+                if (tooltipEl) tooltipEl.style.opacity = '0';
+              },
+              onReset: () => {
+                if (tooltipEl) tooltipEl.style.opacity = '0';
+              },
+              navigateOnSameTap: false,
+            });
+
+            const tap = this.legendTap;
+            legendDivs.each(function (_d, i) {
+              if (i < legendThresholds.length) {
+                const el = this as HTMLElement;
+                const tracker = new TapTracker();
+                el.addEventListener(
+                  'touchstart',
+                  e => tracker.onTouchStart(e as TouchEvent),
+                  {passive: true, signal: legendSignal},
+                );
+                el.addEventListener(
+                  'touchmove',
+                  e => tracker.onTouchMove(e as TouchEvent),
+                  {passive: true, signal: legendSignal},
+                );
+                el.addEventListener(
+                  'touchend',
+                  e => {
+                    if (tracker.onTouchEnd(e as TouchEvent)) tap.tap(i);
+                  },
+                  {signal: legendSignal},
+                );
+              }
+            });
+          } else {
+            // Desktop: keep original hover behavior.
+            legendDivs.each(function (_d, i) {
+              if (i >= 0 && i < legendThresholds.length) {
+                d3.select(this)
+                  .on('mouseover', event => {
+                    updateTooltip(event, legendThresholds[i]);
+                  })
+                  .on('mouseout', () => tooltip.style('opacity', 0));
+              }
+            });
+          }
         }, 300); // Increased timeout significantly to ensure render is done
       })
       .catch((err: unknown) => {

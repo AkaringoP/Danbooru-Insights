@@ -4,6 +4,74 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.5.3 — Approvals year dropdown for users with later promotions
+
+### Fixed
+- **Approvals year selector** now correctly shows the year a user first
+  became an Approver, even after they've been promoted further (e.g.
+  Approver → Moderator). Previously,
+  `DataManager.fetchPromotionDate` queried
+  `/user_feedbacks.json?search[body_matches]=to+Approver&limit=1`
+  without an order parameter, which returns newest-first. For a user
+  whose most recent feedback is "promoted to a Moderator level account
+  from Approver", the body still tokenises as `to` + `Approver`, so the
+  query matched and returned that 2026 entry — hiding 2025 from the
+  Approvals dropdown despite real approval activity from late 2025.
+  Fix fetches `limit=20` and picks the oldest entry by `created_at`
+  client-side, which is unambiguously the first promotion to Approver.
+
+---
+
+## v9.5.2 — Legend tap targets on mobile
+
+### Fixed
+- **Grass legend swatches now respond reliably to taps on mobile.**
+  The five Less/More color swatches at the bottom-right of the grass
+  graph only had `mouseover` / `mouseout` handlers — on touch devices
+  the synthetic mouse events fired unreliably, and `mouseout` from
+  the next tap collapsed the tooltip immediately after it appeared.
+  Mirrored the v9.4.8 hourly-grid / v9.5.1 cell pattern: on
+  `isTouchDevice()` build a `createTwoStepTap` controller with
+  `navigateOnSameTap: false`, attach `TapTracker`-gated
+  `touchstart` / `touchmove` / `touchend` per swatch with an
+  `AbortController`-grouped signal so re-renders don't stack
+  listeners, and position the tooltip above the swatch via the
+  existing `positionTooltipAboveCell` helper. Hit area expanded to
+  ~24×24 px (`padding: 7px; box-sizing: content-box;`) — the visible
+  10×10 swatch is unchanged. Desktop hover behavior is untouched.
+
+---
+
+## v9.5.1 — Hotfixes: mobile approval tooltip + post-paint handler race
+
+### Fixed
+- **Mobile approvals tooltip tap now opens the post-list popover.** The
+  desktop click handler on a grass cell special-cased the `approvals`
+  metric to open `showApprovalsDetail` (paginated list of post IDs
+  approved that day), but the mobile two-step-tap path only routed
+  through `getUrl()`, which returns `'#'` for approvals — so the
+  tooltip tap closed silently with no popover. The mobile path now
+  mirrors the desktop branch, synthesizing `pageX` / `pageY` from the
+  tooltip's bounding rect so the popover positions next to the
+  tooltip the user just tapped (`graph-renderer.ts:onSecondTap`).
+- **Cells and legend swatches stay clickable after a threshold edit
+  / auto-tune Apply / Undo.** v9.5.0's `applyAndOfferUndo` flow can
+  re-render the grass while the settings popover is still open, and
+  fast Apply→Undo (or rapid threshold edits) can fire a second
+  `renderGraph` before the prior render's 300ms post-paint
+  `setTimeout` resolves. The stale timeout then ran
+  `d3.selectAll('#cal-heatmap-scroll rect')` against an
+  already-destroyed selection, leaving the freshly-painted cells
+  (and the legend tooltip handlers, since the legend divs survive
+  CalHeatmap.destroy() and a stale timeout would last-write-wins
+  overwrite them with stale closures) without working click /
+  mouseover handlers. Tracked the pending id on the renderer
+  instance and clear it both at `renderGraph` entry and on each
+  reschedule, so only the latest render's handler-attachment pass
+  ever runs.
+
+---
+
 ## v9.5.0 — Threshold auto-tune (per-profile)
 
 The grass-graph thresholds (Level 1–4) can now be auto-tuned from the

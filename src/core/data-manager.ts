@@ -875,21 +875,27 @@ export class DataManager {
    */
   async fetchPromotionDate(userName: string): Promise<string | null> {
     try {
-      // Cache Check (Simple in-memory or could use Settings)
-      // For now, let's just fetch. It's rare.
       const encodedName = encodeURIComponent(userName);
-      const url = `${this.baseUrl}/user_feedbacks.json?search[body_matches]=to+Approver&search[category]=neutral&search[hide_bans]=No&search[user_name]=${encodedName}&limit=1`;
+      // body_matches=to+Approver is a token AND search, so it also matches
+      // later transitions whose body mentions Approver (e.g. "to Moderator
+      // from Approver"). Fetch a small page and pick the oldest entry by
+      // created_at to get the actual first promotion to Approver.
+      const url = `${this.baseUrl}/user_feedbacks.json?search[body_matches]=to+Approver&search[category]=neutral&search[hide_bans]=No&search[user_name]=${encodedName}&limit=20`;
 
       const resp = await this.rateLimiter.fetch(url);
       if (!resp.ok) return null;
       const json: ApiItem[] = await resp.json();
 
-      if (Array.isArray(json) && json.length > 0) {
-        return json[0]['created_at']
-          ? String(json[0]['created_at']).slice(0, 10)
-          : null;
+      if (!Array.isArray(json) || json.length === 0) {
+        return null; // Not found (maybe invited differently or too old)
       }
-      return null; // Not found (maybe invited differently or too old)
+
+      const oldest = json
+        .filter(item => typeof item['created_at'] === 'string')
+        .map(item => String(item['created_at']))
+        .sort()[0];
+
+      return oldest ? oldest.slice(0, 10) : null;
     } catch (e: unknown) {
       log.warn('Failed to fetch promotion date', {error: e});
       return null;
