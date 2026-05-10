@@ -4,6 +4,24 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.5.3 — Approvals year dropdown for users with later promotions
+
+### Fixed
+- **Approvals year selector** now correctly shows the year a user first
+  became an Approver, even after they've been promoted further (e.g.
+  Approver → Moderator). Previously,
+  `DataManager.fetchPromotionDate` queried
+  `/user_feedbacks.json?search[body_matches]=to+Approver&limit=1`
+  without an order parameter, which returns newest-first. For a user
+  whose most recent feedback is "promoted to a Moderator level account
+  from Approver", the body still tokenises as `to` + `Approver`, so the
+  query matched and returned that 2026 entry — hiding 2025 from the
+  Approvals dropdown despite real approval activity from late 2025.
+  Fix fetches `limit=20` and picks the oldest entry by `created_at`
+  client-side, which is unambiguously the first promotion to Approver.
+
+---
+
 ## v9.5.2 — Legend tap targets on mobile
 
 ### Fixed
