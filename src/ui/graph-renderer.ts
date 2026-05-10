@@ -1407,7 +1407,13 @@ export class GraphRenderer {
         case 'approvals':
           return '#'; // Enable click for approvals (Handled by JS)
         case 'notes':
-          return `/posts?tags=noteupdater:${sanitizedName}+date:${date}`;
+          // /posts?tags=noteupdater:X+date:Y was the wrong slice — it
+          // intersected "posts whose notes X has ever edited" with "posts
+          // uploaded on Y", which excluded most actual edit days (users
+          // typically translate older posts). Mirror the .json fetch in
+          // data-manager.ts and route directly to /note_versions filtered
+          // by updater + created_at instead.
+          return `/note_versions?search[updater_name]=${sanitizedName}&search[created_at]=${date}`;
         default:
           return null;
       }

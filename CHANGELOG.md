@@ -4,7 +4,7 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
-## v9.5.4 — Auto-tune preview shows tuning anchor per level
+## v9.5.4 — Auto-tune preview anchors + Notes click target
 
 ### Changed
 - **Threshold auto-tune preview modal** now annotates each row with the
@@ -18,6 +18,19 @@ All notable changes to Danbooru Insights are documented here.
   their own activity. UI-only; tuning math
   ([src/core/threshold-tuner.ts](src/core/threshold-tuner.ts)) is
   unchanged.
+
+### Fixed
+- **Notes-metric grass-cell click** now navigates to `/note_versions`
+  filtered by updater + created_at, showing the actual note edits the
+  user made on that day. Previously the click target was
+  `/posts?tags=noteupdater:USER+date:DATE` — the intersection of
+  "posts whose notes user X has ever edited" with "posts uploaded on
+  date Y" — which excluded most edit days, because users typically
+  translate *older* posts on a given day. The new URL mirrors the
+  `/note_versions.json` fetch already used by `getMetricData` in
+  [src/core/data-manager.ts](src/core/data-manager.ts) (`search[updater_id]`
+  + `created_at`), so the page contents match the tooltip count
+  one-to-one.
 
 ---
 
