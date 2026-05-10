@@ -1406,14 +1406,20 @@ export class GraphRenderer {
           return `/posts?tags=user:${sanitizedName}+date:${date}`;
         case 'approvals':
           return '#'; // Enable click for approvals (Handled by JS)
-        case 'notes':
+        case 'notes': {
           // /posts?tags=noteupdater:X+date:Y was the wrong slice — it
           // intersected "posts whose notes X has ever edited" with "posts
           // uploaded on Y", which excluded most actual edit days (users
           // typically translate older posts). Mirror the .json fetch in
-          // data-manager.ts and route directly to /note_versions filtered
-          // by updater + created_at instead.
-          return `/note_versions?search[updater_name]=${sanitizedName}&search[created_at]=${date}`;
+          // data-manager.ts (search[updater_id]) and pass created_at as
+          // a Y..Y+1 range so the timestamp column resolves to "anywhere
+          // in that day" instead of an exact-midnight match (single-date
+          // string returned 0 results in practice).
+          const next = new Date(`${date}T00:00:00Z`);
+          next.setUTCDate(next.getUTCDate() + 1);
+          const nextDate = next.toISOString().slice(0, 10);
+          return `/note_versions?search[updater_id]=${userIdVal}&search[created_at]=${date}..${nextDate}`;
+        }
         default:
           return null;
       }
