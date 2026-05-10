@@ -127,9 +127,7 @@ export function showThresholdPreviewModal(args: ThresholdPreviewArgs): void {
 
   const foot = document.createElement('div');
   foot.className = 'di-tt-modal-foot';
-  foot.textContent =
-    "L2/L3/L4 cut off at the 40th/70th/90th percentile of this user's " +
-    'active-day counts. L1 = ≥1 event.';
+  foot.textContent = 'Px = x-th percentile of active-day counts.';
   body.appendChild(foot);
 
   card.appendChild(body);
