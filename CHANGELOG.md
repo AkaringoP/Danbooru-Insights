@@ -4,6 +4,23 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.5.4 — Auto-tune preview shows tuning anchor per level
+
+### Changed
+- **Threshold auto-tune preview modal** now annotates each row with the
+  source of its proposed value: `Level 1 (≥1)` for the fixed L1 cutoff,
+  `Level 2 (P40)` / `Level 3 (P70)` / `Level 4 (P90)` for the percentile-
+  driven levels. A small footer beneath the table explains "L2/L3/L4
+  cut off at the 40th/70th/90th percentile of this user's active-day
+  counts. L1 = ≥1 event." Helps when manually editing thresholds in
+  the popover afterward — the user can see whether the proposed value
+  came from a near-the-middle (P40) or far-tail (P90) percentile of
+  their own activity. UI-only; tuning math
+  ([src/core/threshold-tuner.ts](src/core/threshold-tuner.ts)) is
+  unchanged.
+
+---
+
 ## v9.5.3 — Approvals year dropdown for users with later promotions
 
 ### Fixed

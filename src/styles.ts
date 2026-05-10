@@ -1177,6 +1177,12 @@ export const GLOBAL_CSS = `
       color: var(--di-text-muted, #888);
       margin-bottom: 10px;
     }
+    .di-tt-modal-foot {
+      color: var(--di-text-muted, #888);
+      font-size: 11px;
+      line-height: 1.45;
+      margin-top: 10px;
+    }
     .di-tt-modal-table {
       display: grid;
       grid-template-columns: 18px 1fr auto auto auto;
@@ -1214,6 +1220,12 @@ export const GLOBAL_CSS = `
     }
     .di-tt-modal-tcol-label {
       font-weight: 500;
+    }
+    .di-tt-modal-tcol-tune {
+      font-weight: 400;
+      font-size: 11px;
+      color: var(--di-text-muted, #888);
+      font-variant-numeric: tabular-nums;
     }
     .di-tt-modal-tcol-val {
       font-family: ui-monospace, "SF Mono", Menlo, monospace;
