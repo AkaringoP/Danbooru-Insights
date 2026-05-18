@@ -14,6 +14,7 @@ import {
 import {createLogger} from '../core/logger';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
+import {getNsfwEnabled, setNsfwEnabled} from '../core/settings';
 import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
 import type {
@@ -1671,8 +1672,7 @@ export class TagAnalyticsApp {
    * Toggles blur/opacity on marked elements.
    */
   updateNsfwVisibility(): void {
-    const isNsfwEnabled =
-      localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
+    const isNsfwEnabled = getNsfwEnabled();
     const items = document.querySelectorAll('.di-nsfw-monitor');
 
     items.forEach(item => {
@@ -1975,13 +1975,9 @@ export class TagAnalyticsApp {
     // NSFW Logic
     const nsfwCheck = document.getElementById('tag-analytics-nsfw-toggle');
     if (nsfwCheck) {
-      (nsfwCheck as HTMLInputElement).checked =
-        localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
+      (nsfwCheck as HTMLInputElement).checked = getNsfwEnabled();
       nsfwCheck.onchange = e => {
-        localStorage.setItem(
-          'tag_analytics_nsfw_enabled',
-          (e.target as HTMLInputElement).checked.toString(),
-        );
+        setNsfwEnabled((e.target as HTMLInputElement).checked);
         this.updateNsfwVisibility();
       };
       // Apply initial state

@@ -2,7 +2,11 @@ import {CONFIG} from '../config';
 import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
-import {SettingsManager} from '../core/settings';
+import {
+  SettingsManager,
+  getNsfwEnabled,
+  setNsfwEnabled,
+} from '../core/settings';
 import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
 import {getLevelClass} from '../utils';
@@ -877,8 +881,7 @@ export class UserAnalyticsApp {
 
       // 1. Header (Flexbox)
       // NSFW State
-      const nsfwKey = 'danbooru_grass_nsfw_enabled';
-      let isNsfwEnabled = localStorage.getItem(nsfwKey) === 'true';
+      let isNsfwEnabled = getNsfwEnabled();
       let applyNsfwUpdate: (() => Promise<void>) | null = null;
 
       // 1. Header (Flexbox with Refresh Button)
@@ -919,7 +922,7 @@ export class UserAnalyticsApp {
         if (nsfwToggle) {
           nsfwToggle.onchange = e => {
             isNsfwEnabled = (e.target as HTMLInputElement).checked;
-            localStorage.setItem(nsfwKey, String(isNsfwEnabled));
+            setNsfwEnabled(isNsfwEnabled);
 
             // Delegate all NSFW updates to the combined callback wired up after widget init
             // Fire-and-forget: UI update triggered by toggle change.
