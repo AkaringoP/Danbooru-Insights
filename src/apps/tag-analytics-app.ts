@@ -1,7 +1,12 @@
 import * as d3 from 'd3';
 import {CONFIG} from '../config';
 import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
+import {fetchRemoteCount} from '../core/data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
+import {
+  calcPopoverPosition,
+  createClickOutsideHandler,
+} from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
@@ -1132,12 +1137,10 @@ export class TagAnalyticsApp {
 
         if (monthlyData.historyCutoff) {
           try {
-            const cutoffUrl = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:any+date:<${encodeURIComponent(monthlyData.historyCutoff)}`;
-            const r = await this.rateLimiter
-              .fetch(cutoffUrl)
-              .then((res: Response) => res.json());
-            referenceTotal =
-              (r && r.counts ? r.counts.posts : r ? r.posts : 0) || 0;
+            referenceTotal = await fetchRemoteCount(
+              this.rateLimiter,
+              `${tagName} status:any date:<${monthlyData.historyCutoff}`,
+            );
           } catch (e) {
             log.warn(
               'Failed to fetch cutoff total, falling back to meta.post_count',
@@ -1397,14 +1400,9 @@ export class TagAnalyticsApp {
     popover.style.color = 'var(--di-text, #333)';
     popover.style.width = '260px';
 
-    // Position logic
-    const rect = target.getBoundingClientRect();
-    const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-    const scrollLeft =
-      window.pageXOffset || document.documentElement.scrollLeft;
-
-    popover.style.top = `${rect.top + scrollTop}px`;
-    popover.style.left = `${rect.right + scrollLeft + 10}px`;
+    const {top, left} = calcPopoverPosition(target);
+    popover.style.top = `${top}px`;
+    popover.style.left = `${left}px`;
 
     popover.innerHTML = `
   <div class="di-section">
@@ -1450,13 +1448,14 @@ export class TagAnalyticsApp {
       });
     }
 
-    // Close on click outside
-    const closeHandler = (e: MouseEvent) => {
-      if (!popover.contains(e.target as Node) && e.target !== target) {
+    const closeHandler = createClickOutsideHandler(
+      popover,
+      () => {
         popover.remove();
         document.removeEventListener('click', closeHandler);
-      }
-    };
+      },
+      {ignore: target},
+    );
     setTimeout(() => document.addEventListener('click', closeHandler), 0);
 
     // Save Handler

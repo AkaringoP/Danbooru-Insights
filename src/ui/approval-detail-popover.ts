@@ -1,4 +1,5 @@
 import {attachPostHoverCard, hidePostHoverCard} from './post-hover-card';
+import {createClickOutsideHandler} from './popover-utils';
 import {createLogger} from '../core/logger';
 import type {Database} from '../core/database';
 import type {DanbooruPost} from '../types';
@@ -129,15 +130,12 @@ export async function showApprovalsDetail(
   pop.style.left = `${left}px`;
   pop.style.top = `${top}px`;
 
-  // Close on outside click
-  const closeHandler = (e: MouseEvent) => {
-    if (!pop!.contains(e.target as Node)) {
-      pop!.style.setProperty('display', 'none', 'important');
-      hidePostHoverCard();
-      document.removeEventListener('mousedown', closeHandler);
-    }
-  };
-  // Delay attachment to avoid immediate close from current click
+  const closeHandler = createClickOutsideHandler(pop!, () => {
+    pop!.style.setProperty('display', 'none', 'important');
+    hidePostHoverCard();
+    document.removeEventListener('mousedown', closeHandler);
+  });
+  // Delay attachment to avoid immediate close from current click.
   setTimeout(() => {
     document.addEventListener('mousedown', closeHandler);
   }, 100);

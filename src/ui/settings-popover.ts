@@ -1,5 +1,6 @@
 import {CONFIG} from '../config';
 import {DataManager} from '../core/data-manager';
+import {createClickOutsideHandler} from './popover-utils';
 import {showToast} from './toast';
 import {showThresholdPreviewModal} from './threshold-preview-modal';
 import {
@@ -159,19 +160,6 @@ export function createSettingsPopover(
   const popover = document.createElement('div');
   popover.id = 'danbooru-grass-settings-popover';
 
-  // Close on click outside
-  document.addEventListener('click', e => {
-    if (popover && popover.style.display === 'block') {
-      if (
-        !popover.contains(e.target as Node) &&
-        !settingsBtn.contains(e.target as Node) &&
-        !grassFlyout.contains(e.target as Node)
-      ) {
-        handleClose();
-      }
-    }
-  });
-
   // Reposition popover on page scroll to stay anchored to settings button
   const repositionPopover = () => {
     if (popover.style.display !== 'block') return;
@@ -260,6 +248,19 @@ export function createSettingsPopover(
   grassFlyout.style.cssText =
     'position:fixed;display:none;background:var(--di-bg, #fff);border:1px solid var(--di-border-input, #ddd);border-radius:8px;box-shadow:0 4px 12px var(--di-shadow, rgba(0,0,0,0.2));padding:8px;z-index:10001;flex-direction:column;gap:6px;';
   document.body.appendChild(grassFlyout);
+
+  // Close on click outside. Guarded by display:block so the listener stays
+  // attached for the page lifetime (popover is built once and toggled).
+  document.addEventListener(
+    'click',
+    createClickOutsideHandler(
+      popover,
+      () => {
+        if (popover.style.display === 'block') handleClose();
+      },
+      {ignore: [settingsBtn, grassFlyout]},
+    ),
+  );
 
   let currentFlyoutKey = '';
 
