@@ -16,6 +16,10 @@ import {renderScatterPlot} from './user-analytics-scatter';
 import {renderTagCloudWidget} from './tag-cloud-widget';
 import {renderCreatedTagsWidget} from './created-tags-widget';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
+import {
+  calcPopoverPosition,
+  createClickOutsideHandler,
+} from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
 import {showToast} from '../ui/toast';
 import {lockBodyScroll, unlockBodyScroll} from '../core/scroll-lock';
@@ -493,14 +497,9 @@ export class UserAnalyticsApp {
     popover.style.color = 'var(--di-text, #333)';
     popover.style.width = '220px';
 
-    // Position logic
-    const rect = target.getBoundingClientRect();
-    const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-    const scrollLeft =
-      window.pageXOffset || document.documentElement.scrollLeft;
-
-    popover.style.top = `${rect.top + scrollTop}px`;
-    popover.style.left = `${rect.right + scrollLeft + 10}px`;
+    const {top, left} = calcPopoverPosition(target);
+    popover.style.top = `${top}px`;
+    popover.style.left = `${left}px`;
 
     popover.innerHTML = `
       <div style="margin-bottom:8px; line-height:1.4;">
@@ -537,13 +536,14 @@ export class UserAnalyticsApp {
       });
     }
 
-    // Close on click outside
-    const closeHandler = (e: MouseEvent) => {
-      if (!popover.contains(e.target as Node) && e.target !== target) {
+    const closeHandler = createClickOutsideHandler(
+      popover,
+      () => {
         popover.remove();
         document.removeEventListener('click', closeHandler);
-      }
-    };
+      },
+      {ignore: target},
+    );
     setTimeout(() => document.addEventListener('click', closeHandler), 0);
 
     // Save Handler
