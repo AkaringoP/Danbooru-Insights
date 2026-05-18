@@ -41,6 +41,28 @@ interface HourlyStatEntry {
 export type ApiItem = Record<string, any>;
 
 /**
+ * Fetches the total post count for a given tag query via
+ * `/counts/posts.json`. Throws on HTTP error; returns 0 when the response
+ * shape is missing `counts.posts`.
+ *
+ * Standalone form for services that do not extend `DataManager` (e.g.
+ * `TagAnalyticsDataService`). Subclasses of `DataManager` should prefer
+ * the instance method `this.fetchRemoteCount(tags)` which delegates here.
+ */
+export async function fetchRemoteCount(
+  rateLimiter: RateLimitedFetch,
+  tags: string,
+): Promise<number> {
+  const url = `/counts/posts.json?tags=${encodeURIComponent(tags)}`;
+  const resp = await rateLimiter.fetch(url);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const json: ApiItem = await resp.json();
+  return json['counts'] && typeof json['counts']['posts'] === 'number'
+    ? json['counts']['posts']
+    : 0;
+}
+
+/**
  * Handles API requests and caching via Dexie.js.
  */
 export class DataManager {
@@ -966,12 +988,6 @@ export class DataManager {
    * @return {Promise<number>} Total count.
    */
   async fetchRemoteCount(tags: string): Promise<number> {
-    const url = `${this.baseUrl}/counts/posts.json?tags=${encodeURIComponent(tags)}`;
-    const resp = await this.rateLimiter.fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const json: ApiItem = await resp.json();
-    return json['counts'] && typeof json['counts']['posts'] === 'number'
-      ? json['counts']['posts']
-      : 0;
+    return fetchRemoteCount(this.rateLimiter, tags);
   }
 }

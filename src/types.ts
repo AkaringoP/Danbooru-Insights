@@ -490,20 +490,6 @@ export interface DanbooruRelatedTagResponse {
 }
 
 /**
- * Response from `/counts/posts.json`.
- *
- * Two shapes coexist: modern responses wrap counts in a `counts` object,
- * legacy responses use a flat `posts` field. Consumers always use the
- * `data.counts?.posts ?? data.posts ?? 0` fallback chain.
- */
-export interface DanbooruCountResponse {
-  counts?: {
-    posts: number;
-  };
-  posts?: number;
-}
-
-/**
  * Tag implication entry from `/tag_implications.json`.
  * Used by `isTopLevelTag()` — if any implication exists for a tag, it is
  * NOT considered top-level.

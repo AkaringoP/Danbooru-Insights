@@ -25,7 +25,6 @@ import type {
   PostRecord,
   DanbooruPost,
   DanbooruRelatedTag,
-  DanbooruCountResponse,
   DanbooruUserFeedback,
 } from '../types';
 
@@ -806,21 +805,10 @@ export class AnalyticsDataManager extends DataManager {
           tagQuery += ` date:>=${dateStr}`;
         }
 
-        const params = new URLSearchParams({tags: tagQuery});
-        const url = `/counts/posts.json?${params.toString()}`;
-
-        const resp = await this.rateLimiter.fetch(url);
-        let count = 0;
-        if (resp.ok) {
-          const data = await resp.json();
-          count =
-            (data && data.counts ? data.counts.posts : data ? data.posts : 0) ||
-            0;
-        }
-
+        const count = await this.fetchRemoteCount(tagQuery);
         return {
           name: status,
-          count: count,
+          count,
           label: status.charAt(0).toUpperCase() + status.slice(1),
         };
       } catch (e: unknown) {
@@ -882,24 +870,8 @@ export class AnalyticsDataManager extends DataManager {
           tagQuery += ` date:>=${dateStr}`;
         }
 
-        const params = new URLSearchParams({
-          tags: tagQuery,
-        });
-        const url = `/counts/posts.json?${params.toString()}`;
-
-        const resp = await this.rateLimiter.fetch(url);
-        if (!resp.ok) return {rating, count: 0, label: labelMap[rating]};
-
-        const data = await resp.json();
-        const count =
-          (data && data.counts ? data.counts.posts : data ? data.posts : 0) ||
-          0;
-
-        return {
-          rating: rating,
-          count: count,
-          label: labelMap[rating],
-        };
+        const count = await this.fetchRemoteCount(tagQuery);
+        return {rating, count, label: labelMap[rating]};
       } catch (e: unknown) {
         log.warn('Failed to fetch count for rating', {rating, error: e});
         return {rating, count: 0, label: labelMap[rating]};
@@ -1286,14 +1258,9 @@ export class AnalyticsDataManager extends DataManager {
             const tagName = obj.tagName;
             if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
             try {
-              const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
-              const countResp: DanbooruCountResponse = await this.rateLimiter
-                .fetch(countUrl)
-                .then(r => r.json());
-              const c =
-                countResp.counts && countResp.counts.posts
-                  ? countResp.counts.posts
-                  : 0;
+              const c = await this.fetchRemoteCount(
+                `user:${normalizedName} ${tagName}`,
+              );
               obj.count = c || obj._item?.tag.post_count || 0;
             } catch (_e: unknown) {
               log.debug('Failed to fetch user tag count', {error: _e});
@@ -1406,14 +1373,9 @@ export class AnalyticsDataManager extends DataManager {
             const tagName = obj.tagName;
             if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
             try {
-              const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`user:${normalizedName} ${tagName}`)}`;
-              const countResp: DanbooruCountResponse = await this.rateLimiter
-                .fetch(countUrl)
-                .then(r => r.json());
-              const c =
-                countResp.counts && countResp.counts.posts
-                  ? countResp.counts.posts
-                  : 0;
+              const c = await this.fetchRemoteCount(
+                `user:${normalizedName} ${tagName}`,
+              );
               obj.count = c || obj._item?.tag.post_count || 0;
             } catch (_e: unknown) {
               log.debug('Failed to fetch user tag count', {error: _e});
@@ -1583,15 +1545,9 @@ export class AnalyticsDataManager extends DataManager {
         if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
         try {
           // Use fav: for counting (more standard), ordfav: for sorting/linking
-          const countUrl = `/counts/posts.json?tags=${encodeURIComponent(`fav:${normalizedName} ${tagName}`)}`;
-          const countResp: DanbooruCountResponse = await this.rateLimiter
-            .fetch(countUrl)
-            .then(r => r.json());
-          const c =
-            countResp.counts && countResp.counts.posts
-              ? countResp.counts.posts
-              : 0;
-          obj.count = c;
+          obj.count = await this.fetchRemoteCount(
+            `fav:${normalizedName} ${tagName}`,
+          );
         } catch (e: unknown) {
           log.warn('Count fetch failed for fav copyright tag', {
             tagName: obj.tagName,
@@ -2159,21 +2115,11 @@ export class AnalyticsDataManager extends DataManager {
     }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
-    const fetchCount = async (tagQuery: string): Promise<number> => {
-      try {
-        const params = new URLSearchParams({tags: tagQuery});
-        const url = `/counts/posts.json?${params.toString()}`;
-        const resp = await this.rateLimiter.fetch(url);
-        if (!resp.ok) return 0;
-        const data = await resp.json();
-        return (
-          (data && data.counts ? data.counts.posts : data ? data.posts : 0) || 0
-        );
-      } catch (e) {
+    const fetchCount = (tagQuery: string): Promise<number> =>
+      this.fetchRemoteCount(tagQuery).catch(e => {
         log.warn('Count query failed for user stats', {tagQuery, error: e});
         return 0;
-      }
-    };
+      });
 
     const [gentags, tagcount] = await Promise.all([
       fetchCount(`user:${normalizedName} gentags:<10`),
@@ -2487,9 +2433,7 @@ export class AnalyticsDataManager extends DataManager {
         if (reportSubStatus)
           reportSubStatus(`Fetching Commentary: ${item.name}`);
         try {
-          const url = `/counts/posts.json?tags=${encodeURIComponent(item.query)}`;
-          const resp = await this.rateLimiter.fetch(url).then(r => r.json());
-          if (resp?.counts?.posts) results[item.idx].count = resp.counts.posts;
+          results[item.idx].count = await this.fetchRemoteCount(item.query);
         } catch (e: unknown) {
           log.debug('Failed to fetch commentary count', {error: e});
         }
@@ -2558,15 +2502,8 @@ export class AnalyticsDataManager extends DataManager {
       color: cat.color,
     }));
 
-    const fetchCount = async (query: string): Promise<number> => {
-      try {
-        const url = `/counts/posts.json?tags=${encodeURIComponent(query)}`;
-        const resp = await this.rateLimiter.fetch(url).then(r => r.json());
-        return (resp?.counts?.posts as number) ?? 0;
-      } catch {
-        return 0;
-      }
-    };
+    const fetchCount = (query: string): Promise<number> =>
+      this.fetchRemoteCount(query).catch(() => 0);
 
     await this.mapConcurrent(
       categories.map((cat, i) => ({...cat, idx: i})),
@@ -2732,25 +2669,13 @@ export class AnalyticsDataManager extends DataManager {
         try {
           if (item.subQueries) {
             const counts = await Promise.all(
-              item.subQueries.map(async (q: string) => {
-                try {
-                  const url = `/counts/posts.json?tags=${encodeURIComponent(q)}`;
-                  const resp = await this.rateLimiter
-                    .fetch(url)
-                    .then(r => r.json());
-                  return (resp?.counts?.posts as number) ?? 0;
-                } catch {
-                  return 0;
-                }
-              }),
+              item.subQueries.map((q: string) =>
+                this.fetchRemoteCount(q).catch(() => 0),
+              ),
             );
             results[item.idx].count = counts.reduce((sum, n) => sum + n, 0);
           } else if (item.query) {
-            const url = `/counts/posts.json?tags=${encodeURIComponent(item.query)}`;
-            const resp = await this.rateLimiter.fetch(url).then(r => r.json());
-            if (resp && resp.counts && typeof resp.counts.posts === 'number') {
-              results[item.idx].count = resp.counts.posts;
-            }
+            results[item.idx].count = await this.fetchRemoteCount(item.query);
           }
         } catch (e: unknown) {
           log.debug('Failed to fetch gender count', {error: e});
@@ -2813,14 +2738,9 @@ export class AnalyticsDataManager extends DataManager {
       const tag = obj.tagName;
       if (reportSubStatus) reportSubStatus(`Fetching Breasts: ${obj.name}`);
       try {
-        const uniqueTag = `user:${normalizedName} ${tag}`;
-        const url = `/counts/posts.json?tags=${encodeURIComponent(uniqueTag)}`;
-        const resp = await this.rateLimiter.fetch(url).then(r => r.json());
-        let count = 0;
-        if (resp && resp.counts && typeof resp.counts.posts === 'number') {
-          count = resp.counts.posts;
-        }
-        obj.count = count;
+        obj.count = await this.fetchRemoteCount(
+          `user:${normalizedName} ${tag}`,
+        );
       } catch (e: unknown) {
         log.debug('Failed to fetch breasts count', {error: e});
       }
@@ -2899,12 +2819,9 @@ export class AnalyticsDataManager extends DataManager {
     await this.mapConcurrent(results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Length: ${obj.name}`);
       try {
-        const uniqueTag = `user:${normalizedName} ${obj.originalTag}`;
-        const url = `/counts/posts.json?tags=${encodeURIComponent(uniqueTag)}`;
-        const resp = await this.rateLimiter.fetch(url).then(r => r.json());
-        if (resp && resp.counts && typeof resp.counts.posts === 'number') {
-          obj.count = resp.counts.posts;
-        }
+        obj.count = await this.fetchRemoteCount(
+          `user:${normalizedName} ${obj.originalTag}`,
+        );
       } catch (e: unknown) {
         log.debug('Failed to fetch count', {error: e});
       }
@@ -2979,12 +2896,9 @@ export class AnalyticsDataManager extends DataManager {
     await this.mapConcurrent(results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Color: ${obj.name}`);
       try {
-        const uniqueTag = `user:${normalizedName} ${obj.originalTag}`;
-        const url = `/counts/posts.json?tags=${encodeURIComponent(uniqueTag)}`;
-        const resp = await this.rateLimiter.fetch(url).then(r => r.json());
-        if (resp && resp.counts && typeof resp.counts.posts === 'number') {
-          obj.count = resp.counts.posts;
-        }
+        obj.count = await this.fetchRemoteCount(
+          `user:${normalizedName} ${obj.originalTag}`,
+        );
       } catch (e: unknown) {
         log.debug('Failed to fetch count', {error: e});
       }
@@ -3087,19 +3001,8 @@ export class AnalyticsDataManager extends DataManager {
     if (!userInfo.name) return 0;
     try {
       // Method A: Exact Search Count (API)
-      // Use tags=... order:score rating:x limit=1
       const normalizedName = userInfo.name.replace(/ /g, '_');
-      const countUrl = `/counts/posts.json?tags=user:${encodeURIComponent(normalizedName)}`;
-      const countData = await this.rateLimiter
-        .fetch(countUrl)
-        .then(r => r.json());
-      if (
-        countData &&
-        typeof countData.counts === 'object' &&
-        typeof countData.counts.posts === 'number'
-      ) {
-        return countData.counts.posts;
-      }
+      return await this.fetchRemoteCount(`user:${normalizedName}`);
     } catch (e: unknown) {
       log.warn('Counts API failed', {error: e});
     }
