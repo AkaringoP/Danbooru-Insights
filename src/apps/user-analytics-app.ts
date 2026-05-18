@@ -18,8 +18,11 @@ import {renderCreatedTagsWidget} from './created-tags-widget';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {createModal, type ModalHandle} from '../ui/modal';
 import {
+  applyPopoverChrome,
+  bindDashboardThemeSelect,
   calcPopoverPosition,
   createClickOutsideHandler,
+  DASHBOARD_THEME_SELECT_HTML,
 } from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
 import {showToast} from '../ui/toast';
@@ -452,21 +455,12 @@ export class UserAnalyticsApp {
     const popover = document.createElement('div');
     popover.id = 'danbooru-grass-sync-settings';
     // Sync dashboard theme (popover is appended to body, outside dashboard containers)
-    const effective = resolveEffectiveDashboardTheme(
-      settingsManager.getDarkMode(),
-    );
-    if (effective === 'dark') popover.setAttribute('data-di-theme', 'dark');
-    popover.style.position = 'absolute';
-    popover.style.zIndex = '10001';
-    popover.style.background = 'var(--di-bg, #fff)';
-    popover.style.border = '1px solid var(--di-border, #e1e4e8)';
-    popover.style.borderRadius = '6px';
-    popover.style.padding = '12px';
-    popover.style.boxShadow =
-      '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
-    popover.style.fontSize = '11px'; // Reduced by 20%
-    popover.style.color = 'var(--di-text, #333)';
-    popover.style.width = '220px';
+    if (
+      resolveEffectiveDashboardTheme(settingsManager.getDarkMode()) === 'dark'
+    ) {
+      popover.setAttribute('data-di-theme', 'dark');
+    }
+    applyPopoverChrome(popover, {width: '220px'});
 
     const {top, left} = calcPopoverPosition(target);
     popover.style.top = `${top}px`;
@@ -482,30 +476,19 @@ export class UserAnalyticsApp {
          <input type="number" id="sync-thresh-input" value="${currentVal}" min="0" style="width:60px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333);">
          <button id="sync-thresh-save" style="background:none; border:1px solid #28a745; color:#28a745; border-radius:4px; cursor:pointer; padding:2px 8px; font-size:11px;">✅ Save</button>
       </div>
-      <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--di-border-light, #eee);">
-        <strong>Dashboard Theme</strong>
-        <select id="dark-mode-select" style="width:100%; margin-top:4px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333); font-size:11px;">
-          <option value="auto">Auto (follow Danbooru)</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
-      </div>
+      ${DASHBOARD_THEME_SELECT_HTML}
     `;
 
     document.body.appendChild(popover);
 
-    // Set current dark mode selection
-    const darkModeSelect = popover.querySelector(
-      '#dark-mode-select',
-    ) as HTMLSelectElement;
-    if (darkModeSelect) {
-      darkModeSelect.value = settingsManager.getDarkMode();
-      darkModeSelect.addEventListener('change', () => {
-        const pref = darkModeSelect.value as 'auto' | 'light' | 'dark';
+    bindDashboardThemeSelect(
+      popover,
+      () => settingsManager.getDarkMode(),
+      pref => {
         settingsManager.setDarkMode(pref);
         applyDashboardTheme(settingsManager);
-      });
-    }
+      },
+    );
 
     const closeHandler = createClickOutsideHandler(
       popover,

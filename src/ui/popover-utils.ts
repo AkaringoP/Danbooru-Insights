@@ -75,3 +75,75 @@ export function createClickOutsideHandler(
     onClose();
   };
 }
+
+export interface PopoverChromeOptions {
+  /** CSS width for the popover. Default '220px'. */
+  width?: string;
+  /** CSS z-index. Default '10001'. */
+  zIndex?: string;
+}
+
+/**
+ * Applies the standard di-popover chrome (position, background, border,
+ * shadow, padding, font, color, width, z-index) directly on the element's
+ * style. The two existing popovers (showSyncSettingsPopover and
+ * showSettingsPopover) differed only in `width` and `zIndex`; those are
+ * the exposed knobs. Callers still own placement (top/left) via
+ * `calcPopoverPosition`.
+ */
+export function applyPopoverChrome(
+  popover: HTMLElement,
+  options: PopoverChromeOptions = {},
+): void {
+  popover.style.position = 'absolute';
+  popover.style.zIndex = options.zIndex ?? '10001';
+  popover.style.background = 'var(--di-bg, #fff)';
+  popover.style.border = '1px solid var(--di-border, #e1e4e8)';
+  popover.style.borderRadius = '6px';
+  popover.style.padding = '12px';
+  popover.style.boxShadow =
+    '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
+  popover.style.fontSize = '11px';
+  popover.style.color = 'var(--di-text, #333)';
+  popover.style.width = options.width ?? '220px';
+}
+
+/**
+ * Shared HTML fragment for the "Dashboard Theme" select block used by
+ * both settings popovers. Uses inline styles (rather than CSS classes
+ * scoped to a specific popover id) so it works as a standalone snippet
+ * inside any popover's innerHTML.
+ *
+ * Pair with `bindDashboardThemeSelect` to wire the change handler.
+ */
+export const DASHBOARD_THEME_SELECT_HTML = `
+  <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--di-border-light, #eee);">
+    <strong>Dashboard Theme</strong>
+    <select id="dark-mode-select" style="width:100%; margin-top:4px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333); font-size:11px;">
+      <option value="auto">Auto (follow Danbooru)</option>
+      <option value="light">Light</option>
+      <option value="dark">Dark</option>
+    </select>
+  </div>
+`;
+
+/**
+ * Wires the `#dark-mode-select` inside `popover` to read/write the user's
+ * dark-mode preference. Decoupled from SettingsManager and the theme
+ * applier so the helper does not have to import either: callers pass
+ * `getValue`/`setValue` closures.
+ */
+export function bindDashboardThemeSelect(
+  popover: HTMLElement,
+  getValue: () => string,
+  setValue: (pref: 'auto' | 'light' | 'dark') => void,
+): void {
+  const select = popover.querySelector(
+    '#dark-mode-select',
+  ) as HTMLSelectElement | null;
+  if (!select) return;
+  select.value = getValue();
+  select.addEventListener('change', () => {
+    setValue(select.value as 'auto' | 'light' | 'dark');
+  });
+}
