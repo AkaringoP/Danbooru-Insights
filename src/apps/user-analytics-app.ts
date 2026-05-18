@@ -1,5 +1,8 @@
 import {CONFIG} from '../config';
-import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
+import {
+  applyDashboardTheme,
+  resolveEffectiveDashboardTheme,
+} from '../ui/theme-palette';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {

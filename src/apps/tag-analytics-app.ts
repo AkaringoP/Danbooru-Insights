@@ -1,6 +1,9 @@
 import * as d3 from 'd3';
 import {CONFIG} from '../config';
-import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
+import {
+  applyDashboardTheme,
+  resolveEffectiveDashboardTheme,
+} from '../ui/theme-palette';
 import {fetchRemoteCount} from '../core/data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {createModal, type ModalHandle} from '../ui/modal';

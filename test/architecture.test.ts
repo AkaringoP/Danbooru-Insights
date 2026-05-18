@@ -90,6 +90,29 @@ describe('Architecture constraints', () => {
     ).toEqual([]);
   });
 
+  it('apps/ should not import from main', () => {
+    const appFiles = allFiles.filter(f => f.path.includes('/apps/'));
+    const violations: string[] = [];
+
+    for (const file of appFiles) {
+      const imports = extractImports(file.content);
+      for (const imp of imports) {
+        // Match '../main' or './main' but not '../main/...' (which would be
+        // a subdirectory, currently nonexistent but kept for safety).
+        if (imp === '../main' || imp === './main') {
+          violations.push(
+            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
+          );
+        }
+      }
+    }
+
+    expect(
+      violations,
+      'apps/ must not back-import from src/main.ts (the entry point). Shared helpers belong in core/ or ui/.',
+    ).toEqual([]);
+  });
+
   it('should not contain [key: string]: any index signatures', () => {
     const violations: string[] = [];
 
