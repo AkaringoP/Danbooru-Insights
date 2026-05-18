@@ -1,5 +1,6 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
+import {createBodyTooltip} from '../ui/popover-utils';
 import type {D3Any, TagCloudItem} from '../types';
 import {
   isTouchDevice,
@@ -137,27 +138,26 @@ export function renderTagCloudWidget(
   // On touch, the tooltip itself is the navigation target — pointer-events
   // and cursor reflect that. Aligned with pie chart and CalHeatmap UX:
   // tag tap toggles tooltip, tooltip tap navigates.
-  const cloudTooltip = document.createElement('div');
-  cloudTooltip.className = 'di-tag-cloud-mobile-tooltip';
-  cloudTooltip.style.cssText = `position:absolute;background:rgba(30,30,30,0.95);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;pointer-events:${isTouch ? 'auto' : 'none'};cursor:${isTouch ? 'pointer' : 'default'};opacity:0;z-index:99999;transition:opacity 0.15s;white-space:nowrap;`;
-  document.body.appendChild(cloudTooltip);
+  const cloudTooltip = createBodyTooltip('di-tag-cloud-mobile-tooltip');
+  cloudTooltip.style.background = 'rgba(30,30,30,0.95)';
+  cloudTooltip.style.color = '#fff';
+  cloudTooltip.style.padding = '8px 12px';
+  cloudTooltip.style.borderRadius = '6px';
+  cloudTooltip.style.fontSize = '12px';
+  cloudTooltip.style.pointerEvents = isTouch ? 'auto' : 'none';
+  cloudTooltip.style.cursor = isTouch ? 'pointer' : 'default';
+  cloudTooltip.style.zIndex = '99999';
+  cloudTooltip.style.transition = 'opacity 0.15s';
+  cloudTooltip.style.whiteSpace = 'nowrap';
 
   // Desktop hover tooltip
   const tooltip = d3
-    .select('body')
-    .selectAll<HTMLDivElement, unknown>('.di-tag-cloud-tooltip')
-    .data([0])
-    .join('div')
-    .attr('class', 'di-tag-cloud-tooltip')
-    .style('position', 'absolute')
+    .select<HTMLDivElement, unknown>(createBodyTooltip('di-tag-cloud-tooltip'))
     .style('background', 'rgba(30, 30, 30, 0.95)')
     .style('color', '#fff')
     .style('padding', '5px 10px')
     .style('border-radius', '6px')
     .style('font-size', '12px')
-    .style('pointer-events', 'none')
-    .style('z-index', '2147483647')
-    .style('opacity', '0')
     .style('white-space', 'nowrap');
 
   // Two-step tap controller for mobile. UX:

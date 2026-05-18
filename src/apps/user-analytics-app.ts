@@ -2,7 +2,11 @@ import {CONFIG} from '../config';
 import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
-import {SettingsManager} from '../core/settings';
+import {
+  SettingsManager,
+  getNsfwEnabled,
+  setNsfwEnabled,
+} from '../core/settings';
 import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
 import {getLevelClass} from '../utils';
@@ -16,13 +20,16 @@ import {renderScatterPlot} from './user-analytics-scatter';
 import {renderTagCloudWidget} from './tag-cloud-widget';
 import {renderCreatedTagsWidget} from './created-tags-widget';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
+import {createModal, type ModalHandle} from '../ui/modal';
 import {
+  applyPopoverChrome,
+  bindDashboardThemeSelect,
   calcPopoverPosition,
   createClickOutsideHandler,
+  DASHBOARD_THEME_SELECT_HTML,
 } from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
 import {showToast} from '../ui/toast';
-import {lockBodyScroll, unlockBodyScroll} from '../core/scroll-lock';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
 
@@ -42,6 +49,7 @@ export class UserAnalyticsApp {
   dataService: UserAnalyticsDataService;
   modalId: string;
   btnId: string;
+  modal: ModalHandle | null = null;
   isFullySynced: boolean;
   isRendering: boolean;
   /** Promise for the first updateHeaderStatus() call. Button click handlers
@@ -90,65 +98,35 @@ export class UserAnalyticsApp {
    * Creates the modal DOM structure (hidden by default).
    */
   createModal(): void {
-    if (document.getElementById(`${this.modalId}-overlay`)) return;
+    const overlayId = `${this.modalId}-overlay`;
+    const windowId = `${this.modalId}-window`;
+    const closeId = `${this.modalId}-close`;
+    const contentId = `${this.modalId}-content`;
 
-    const overlay = document.createElement('div');
-    overlay.id = `${this.modalId}-overlay`;
-
-    // Apply dashboard theme attribute
-    const effective = resolveEffectiveDashboardTheme(
-      this.settings.getDarkMode(),
-    );
-    if (effective === 'dark') overlay.setAttribute('data-di-theme', 'dark');
-
-    // Window Container
-    const windowDiv = document.createElement('div');
-    windowDiv.id = `${this.modalId}-window`;
-
-    // Close Button
-    const closeBtn = document.createElement('div');
-    closeBtn.id = `${this.modalId}-close`;
-    closeBtn.innerHTML = '&times;';
-    closeBtn.onclick = () => this.toggleModal(false);
-    windowDiv.appendChild(closeBtn);
-
-    // Content Area
-    const content = document.createElement('div');
-    content.id = `${this.modalId}-content`;
-    content.innerHTML = `
-      <h1 style="margin-top:0; color:var(--di-text, #333);">Analytics Dashboard</h1>
-      <p style="color:var(--di-text-secondary, #666);">Select a metric to view detailed reports.</p>
-      <!-- Placeholder for future charts -->
-    `;
-    windowDiv.appendChild(content);
-
-    overlay.appendChild(windowDiv);
-
-    // Close on click outside
-    overlay.addEventListener('click', e => {
-      if (e.target === overlay) {
-        this.toggleModal(false);
-      }
+    this.modal = createModal({
+      id: overlayId,
+      useFadeTransition: true,
+      resolveTheme: () =>
+        resolveEffectiveDashboardTheme(this.settings.getDarkMode()),
+      innerHtml: `
+        <div id="${windowId}">
+          <div id="${closeId}">&times;</div>
+          <div id="${contentId}">
+            <h1 style="margin-top:0; color:var(--di-text, #333);">Analytics Dashboard</h1>
+            <p style="color:var(--di-text-secondary, #666);">Select a metric to view detailed reports.</p>
+            <!-- Placeholder for future charts -->
+          </div>
+        </div>
+      `,
+      onAfterClose: () => {
+        void this.updateHeaderStatus();
+      },
     });
 
-    // Close on Escape key
-    document.addEventListener('keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && overlay.classList.contains('visible')) {
-        this.toggleModal(false);
-      }
-    });
-
-    // Close on browser back button (mobile-friendly)
-    window.addEventListener('popstate', () => {
-      if (
-        overlay.classList.contains('visible') &&
-        history.state?.diModalOpen !== this.modalId
-      ) {
-        this.toggleModal(false);
-      }
-    });
-
-    document.body.appendChild(overlay);
+    const closeBtn = document.getElementById(closeId);
+    if (closeBtn) {
+      closeBtn.onclick = () => this.toggleModal(false);
+    }
   }
 
   /**
@@ -481,21 +459,12 @@ export class UserAnalyticsApp {
     const popover = document.createElement('div');
     popover.id = 'danbooru-grass-sync-settings';
     // Sync dashboard theme (popover is appended to body, outside dashboard containers)
-    const effective = resolveEffectiveDashboardTheme(
-      settingsManager.getDarkMode(),
-    );
-    if (effective === 'dark') popover.setAttribute('data-di-theme', 'dark');
-    popover.style.position = 'absolute';
-    popover.style.zIndex = '10001';
-    popover.style.background = 'var(--di-bg, #fff)';
-    popover.style.border = '1px solid var(--di-border, #e1e4e8)';
-    popover.style.borderRadius = '6px';
-    popover.style.padding = '12px';
-    popover.style.boxShadow =
-      '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
-    popover.style.fontSize = '11px'; // Reduced by 20%
-    popover.style.color = 'var(--di-text, #333)';
-    popover.style.width = '220px';
+    if (
+      resolveEffectiveDashboardTheme(settingsManager.getDarkMode()) === 'dark'
+    ) {
+      popover.setAttribute('data-di-theme', 'dark');
+    }
+    applyPopoverChrome(popover, {width: '220px'});
 
     const {top, left} = calcPopoverPosition(target);
     popover.style.top = `${top}px`;
@@ -511,30 +480,19 @@ export class UserAnalyticsApp {
          <input type="number" id="sync-thresh-input" value="${currentVal}" min="0" style="width:60px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333);">
          <button id="sync-thresh-save" style="background:none; border:1px solid #28a745; color:#28a745; border-radius:4px; cursor:pointer; padding:2px 8px; font-size:11px;">✅ Save</button>
       </div>
-      <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--di-border-light, #eee);">
-        <strong>Dashboard Theme</strong>
-        <select id="dark-mode-select" style="width:100%; margin-top:4px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333); font-size:11px;">
-          <option value="auto">Auto (follow Danbooru)</option>
-          <option value="light">Light</option>
-          <option value="dark">Dark</option>
-        </select>
-      </div>
+      ${DASHBOARD_THEME_SELECT_HTML}
     `;
 
     document.body.appendChild(popover);
 
-    // Set current dark mode selection
-    const darkModeSelect = popover.querySelector(
-      '#dark-mode-select',
-    ) as HTMLSelectElement;
-    if (darkModeSelect) {
-      darkModeSelect.value = settingsManager.getDarkMode();
-      darkModeSelect.addEventListener('change', () => {
-        const pref = darkModeSelect.value as 'auto' | 'light' | 'dark';
+    bindDashboardThemeSelect(
+      popover,
+      () => settingsManager.getDarkMode(),
+      pref => {
         settingsManager.setDarkMode(pref);
         applyDashboardTheme(settingsManager);
-      });
-    }
+      },
+    );
 
     const closeHandler = createClickOutsideHandler(
       popover,
@@ -568,42 +526,11 @@ export class UserAnalyticsApp {
    * @param {boolean} show True to show, false to hide.
    */
   toggleModal(show: boolean) {
-    const overlay = document.getElementById(`${this.modalId}-overlay`);
-    if (!overlay) return;
-
+    if (!this.modal) return;
+    this.modal.toggle(show);
     if (show) {
-      // Push history state for back button support
-      if (history.state?.diModalOpen !== this.modalId) {
-        history.pushState({diModalOpen: this.modalId}, '', location.href);
-      }
-
-      overlay.style.display = 'flex';
-      // slight delay to allow display:flex to apply before opacity transition
-      requestAnimationFrame(() => {
-        overlay.classList.add('visible');
-      });
-      lockBodyScroll(); // Prevent background scrolling (iOS-safe)
-
-      // Check Logic: If synced, show dashboard. If not, auto-sync?
-      // User request: "Ask user if they want to fetch... if stop, resume later"
-      // We will perform this check in renderDashboard
-      // Fire-and-forget: modal toggling should not block on dashboard render.
+      // Fire-and-forget: dashboard render should not block the open animation.
       void this.renderDashboard();
-    } else {
-      // If history state still belongs to us, route through history.back()
-      // so the URL stays in sync. The popstate listener will re-enter this
-      // branch with state cleared and run the actual hide logic.
-      if (history.state?.diModalOpen === this.modalId) {
-        history.back();
-        return;
-      }
-
-      overlay.classList.remove('visible');
-      setTimeout(() => {
-        overlay.style.display = 'none';
-        unlockBodyScroll();
-        void this.updateHeaderStatus(); // Update menu status on close
-      }, 200); // Match transition duration
     }
   }
 
@@ -954,8 +881,7 @@ export class UserAnalyticsApp {
 
       // 1. Header (Flexbox)
       // NSFW State
-      const nsfwKey = 'danbooru_grass_nsfw_enabled';
-      let isNsfwEnabled = localStorage.getItem(nsfwKey) === 'true';
+      let isNsfwEnabled = getNsfwEnabled();
       let applyNsfwUpdate: (() => Promise<void>) | null = null;
 
       // 1. Header (Flexbox with Refresh Button)
@@ -996,7 +922,7 @@ export class UserAnalyticsApp {
         if (nsfwToggle) {
           nsfwToggle.onchange = e => {
             isNsfwEnabled = (e.target as HTMLInputElement).checked;
-            localStorage.setItem(nsfwKey, String(isNsfwEnabled));
+            setNsfwEnabled(isNsfwEnabled);
 
             // Delegate all NSFW updates to the combined callback wired up after widget init
             // Fire-and-forget: UI update triggered by toggle change.

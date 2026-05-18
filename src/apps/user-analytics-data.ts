@@ -1,5 +1,6 @@
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {perfLogger} from '../core/perf-logger';
+import {getNsfwEnabled} from '../core/settings';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
 
@@ -142,8 +143,7 @@ export class UserAnalyticsDataService {
     const user = context.targetUser!;
 
     // NSFW State for milestones
-    const nsfwKey = 'danbooru_grass_nsfw_enabled';
-    const isNsfwEnabled = localStorage.getItem(nsfwKey) === 'true';
+    const isNsfwEnabled = getNsfwEnabled();
 
     // 1. Fetch Summary Stats first (Local DB) to get starting date for optimizations
     const summaryStats = await perfLogger.wrap(

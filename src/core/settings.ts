@@ -396,3 +396,48 @@ export class SettingsManager {
     this.save({snapToEdge: enabled});
   }
 }
+
+// ---------------------------------------------------------------------------
+// NSFW preference (standalone localStorage key — not inside SettingsData JSON
+// because grass and tag-analytics paths share it; previously each path used
+// its own legacy key).
+// ---------------------------------------------------------------------------
+
+/** localStorage key for the unified NSFW-enabled flag. */
+export const NSFW_STORAGE_KEY = 'di.nsfw_enabled';
+
+/** Reads the user's NSFW preference. Defaults to false when unset. */
+export function getNsfwEnabled(): boolean {
+  return localStorage.getItem(NSFW_STORAGE_KEY) === 'true';
+}
+
+/** Persists the NSFW preference. */
+export function setNsfwEnabled(value: boolean): void {
+  localStorage.setItem(NSFW_STORAGE_KEY, String(value));
+}
+
+/**
+ * One-time migration of legacy NSFW keys to the unified `di.nsfw_enabled`
+ * key. Runs at app startup; idempotent (skips when the unified key is
+ * already populated). The two legacy keys are removed regardless so
+ * stale values do not linger.
+ *
+ * If both legacy keys were set with conflicting values, the grass key
+ * (`danbooru_grass_nsfw_enabled`) wins — it predated the tag-analytics
+ * one and is the more frequently used path.
+ */
+export function migrateNsfwKey(): void {
+  if (localStorage.getItem(NSFW_STORAGE_KEY) !== null) {
+    localStorage.removeItem('danbooru_grass_nsfw_enabled');
+    localStorage.removeItem('tag_analytics_nsfw_enabled');
+    return;
+  }
+  const legacy =
+    localStorage.getItem('danbooru_grass_nsfw_enabled') ??
+    localStorage.getItem('tag_analytics_nsfw_enabled');
+  if (legacy !== null) {
+    localStorage.setItem(NSFW_STORAGE_KEY, legacy);
+  }
+  localStorage.removeItem('danbooru_grass_nsfw_enabled');
+  localStorage.removeItem('tag_analytics_nsfw_enabled');
+}

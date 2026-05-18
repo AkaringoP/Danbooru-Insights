@@ -1,7 +1,7 @@
 import {CONFIG} from './config';
 import {injectGlobalStyles} from './styles';
 import {Database} from './core/database';
-import {SettingsManager} from './core/settings';
+import {SettingsManager, migrateNsfwKey} from './core/settings';
 import type {DarkModePreference} from './types';
 import {RateLimitedFetch} from './core/rate-limiter';
 import {TabCoordinator} from './core/tab-coordinator';
@@ -160,6 +160,9 @@ async function main(): Promise<void> {
 
   // Inject styles only on valid Danbooru pages
   injectGlobalStyles();
+
+  // One-time NSFW localStorage key migration (F-DUP-9). Idempotent.
+  migrateNsfwKey();
 
   // Shared Singletons
   const db = new Database();

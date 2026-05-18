@@ -1,5 +1,6 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
+import {createBodyTooltip} from '../ui/popover-utils';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
 
 const log = createLogger('TagAnalyticsCharts');
@@ -193,20 +194,12 @@ export class TagAnalyticsChartRenderer {
 
     // Tooltip (Global)
     const tooltip = d3
-      .select('body')
-      .selectAll('.tag-pie-tooltip')
-      .data([0])
-      .join('div')
-      .attr('class', 'tag-pie-tooltip')
-      .style('position', 'absolute')
+      .select(createBodyTooltip('tag-pie-tooltip'))
       .style('background', 'rgba(30, 30, 30, 0.9)')
       .style('color', '#fff')
       .style('padding', '5px 10px')
       .style('border-radius', '4px')
       .style('font-size', '11px')
-      .style('pointer-events', 'none')
-      .style('z-index', '2147483647')
-      .style('opacity', '0')
       .style('box-shadow', '0 2px 5px var(--di-shadow, rgba(0,0,0,0.2))');
 
     const totalValue = d3.sum(data, (d: D3Any) => d.count);
@@ -1022,23 +1015,15 @@ export class TagAnalyticsChartRenderer {
       .attr('stroke', '#fff')
       .attr('stroke-width', 2);
 
-    // Detailed Tooltip - Append to BODY to avoid clipping
-    // Remove existing if any
-    d3.select('body').selectAll('.tag-analytics-tooltip').remove();
-
+    // Detailed Tooltip - Append to BODY to avoid clipping.
     const tooltip = d3
-      .select('body')
-      .append('div')
-      .attr('class', 'tag-analytics-tooltip')
-      .style('position', 'absolute')
-      .style('z-index', '11000') // Corrected Z-Index (Higher than modal)
+      .select(createBodyTooltip('tag-analytics-tooltip'))
+      .style('z-index', '11000') // Lower than the default (above modal but not max).
       .style('background', 'rgba(0, 0, 0, 0.8)')
       .style('color', '#fff')
       .style('padding', '8px')
       .style('border-radius', '4px')
       .style('font-size', '12px')
-      .style('pointer-events', 'none')
-      .style('opacity', 0)
       .style('transition', 'opacity 0.2s');
 
     // Overlay recto to capture events

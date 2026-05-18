@@ -1,6 +1,7 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
+import {createBodyTooltip} from '../ui/popover-utils';
 
 const log = createLogger('UserAnalyticsCharts');
 import type {
@@ -513,26 +514,19 @@ export function renderPieWidget(
       .innerRadius(0)
       .outerRadius(radius * 1.2);
 
+    // pointer-events is toggled in sync with opacity (auto when shown,
+    // none when hidden) so a dismissed tooltip's stale rectangle never
+    // intercepts a slice tap from underneath. See showTooltip / hideTooltip
+    // below — the helper's `pointer-events: none` default matches the
+    // hidden state.
     const tooltip = d3
-      .select('body')
-      .selectAll('.danbooru-grass-pie-tooltip')
-      .data([0])
-      .join('div')
-      .attr('class', 'danbooru-grass-pie-tooltip')
-      .style('position', 'absolute')
+      .select(createBodyTooltip('danbooru-grass-pie-tooltip'))
       .style('background', 'rgba(30, 30, 30, 0.95)')
       .style('color', '#fff')
       .style('padding', '8px 12px')
       .style('border-radius', '6px')
       .style('font-size', '12px')
-      // pointer-events is toggled in sync with opacity (auto when shown,
-      // none when hidden) so a dismissed tooltip's stale rectangle never
-      // intercepts a slice tap from underneath. See showTooltip /
-      // hideTooltip below.
-      .style('pointer-events', 'none')
-      .style('cursor', isTouch ? 'pointer' : 'default')
-      .style('z-index', '2147483647')
-      .style('opacity', '0');
+      .style('cursor', isTouch ? 'pointer' : 'default');
 
     /**
      * Hide the tooltip and disable pointer-events so its stale bounding

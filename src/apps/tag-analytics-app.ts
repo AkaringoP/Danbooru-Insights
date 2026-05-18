@@ -3,13 +3,18 @@ import {CONFIG} from '../config';
 import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
 import {fetchRemoteCount} from '../core/data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
+import {createModal, type ModalHandle} from '../ui/modal';
 import {
+  applyPopoverChrome,
+  bindDashboardThemeSelect,
   calcPopoverPosition,
   createClickOutsideHandler,
+  DASHBOARD_THEME_SELECT_HTML,
 } from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
+import {getNsfwEnabled, setNsfwEnabled} from '../core/settings';
 import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
 import type {
@@ -20,7 +25,6 @@ import type {
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {showToast} from '../ui/toast';
-import {lockBodyScroll, unlockBodyScroll} from '../core/scroll-lock';
 import type {
   TagAnalyticsMeta,
   DanbooruPost,
@@ -72,6 +76,7 @@ export class TagAnalyticsApp {
   dataService: TagAnalyticsDataService;
   isFetching: boolean;
   chartRenderer: TagAnalyticsChartRenderer;
+  modal: ModalHandle | null = null;
 
   /**
    * Initializes the TagAnalyticsApp.
@@ -1384,21 +1389,12 @@ export class TagAnalyticsApp {
     const popover = document.createElement('div');
     popover.id = 'tag-analytics-settings-popover';
     // Sync dashboard theme (popover is appended to body, outside dashboard containers)
-    const effective = resolveEffectiveDashboardTheme(
-      this.settings.getDarkMode(),
-    );
-    if (effective === 'dark') popover.setAttribute('data-di-theme', 'dark');
-    popover.style.position = 'absolute';
-    popover.style.zIndex = '11001';
-    popover.style.background = 'var(--di-bg, #fff)';
-    popover.style.border = '1px solid var(--di-border, #e1e4e8)';
-    popover.style.borderRadius = '6px';
-    popover.style.padding = '12px';
-    popover.style.boxShadow =
-      '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
-    popover.style.fontSize = '11px';
-    popover.style.color = 'var(--di-text, #333)';
-    popover.style.width = '260px';
+    if (
+      resolveEffectiveDashboardTheme(this.settings.getDarkMode()) === 'dark'
+    ) {
+      popover.setAttribute('data-di-theme', 'dark');
+    }
+    applyPopoverChrome(popover, {width: '260px', zIndex: '11001'});
 
     const {top, left} = calcPopoverPosition(target);
     popover.style.top = `${top}px`;
@@ -1423,30 +1419,19 @@ export class TagAnalyticsApp {
      <button id="retention-save-btn" class="di-save-btn">✅ Save</button>
   </div>
 
-  <div class="di-section di-divider">
-    <strong>Dashboard Theme</strong>
-    <select id="dark-mode-select" style="width:100%; margin-top:4px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333); font-size:11px;">
-      <option value="auto">Auto (follow Danbooru)</option>
-      <option value="light">Light</option>
-      <option value="dark">Dark</option>
-    </select>
-  </div>
+  ${DASHBOARD_THEME_SELECT_HTML}
 `;
 
     document.body.appendChild(popover);
 
-    // Dark mode select handler
-    const darkModeSelect = popover.querySelector(
-      '#dark-mode-select',
-    ) as HTMLSelectElement;
-    if (darkModeSelect) {
-      darkModeSelect.value = this.settings.getDarkMode();
-      darkModeSelect.addEventListener('change', () => {
-        const pref = darkModeSelect.value as 'auto' | 'light' | 'dark';
+    bindDashboardThemeSelect(
+      popover,
+      () => this.settings.getDarkMode(),
+      pref => {
         this.settings.setDarkMode(pref);
         applyDashboardTheme(this.settings);
-      });
-    }
+      },
+    );
 
     const closeHandler = createClickOutsideHandler(
       popover,
@@ -1630,61 +1615,42 @@ export class TagAnalyticsApp {
    * Creates the modal overlay for the dashboard.
    */
   createModal(): void {
-    if (document.getElementById('tag-analytics-modal')) return;
-
-    const modal = document.createElement('div');
-    modal.id = 'tag-analytics-modal';
-
-    // Apply dashboard theme attribute
-    const effective = resolveEffectiveDashboardTheme(
-      this.settings.getDarkMode(),
-    );
-    if (effective === 'dark') modal.setAttribute('data-di-theme', 'dark');
-    modal.style.display = 'none';
-    modal.style.position = 'fixed';
-    modal.style.top = '0';
-    modal.style.left = '0';
-    modal.style.width = '100%';
-    modal.style.height = '100%';
-    modal.style.backgroundColor = 'rgba(0,0,0,0.5)';
-    modal.style.zIndex = '10000';
-    modal.style.justifyContent = 'center';
-    modal.style.alignItems = 'center';
-
-    modal.innerHTML = `
-          <div>
-              <button id="tag-analytics-close">&times;</button>
-              <div id="tag-analytics-content">
-                  <h2>Loading...</h2>
-              </div>
+    this.modal = createModal({
+      id: 'tag-analytics-modal',
+      resolveTheme: () =>
+        resolveEffectiveDashboardTheme(this.settings.getDarkMode()),
+      innerHtml: `
+        <div>
+          <button id="tag-analytics-close">&times;</button>
+          <div id="tag-analytics-content">
+            <h2>Loading...</h2>
           </div>
-      `;
+        </div>
+      `,
+      onBeforeClose: () => {
+        this.chartRenderer.cleanup();
+        // Remove any lingering area chart tooltips appended to body.
+        d3.select('body').selectAll('.tag-analytics-tooltip').remove();
+      },
+    });
 
-    document.body.appendChild(modal);
+    // Inline styles preserved from the prior hand-rolled createModal — the
+    // tag-analytics CSS only defines the height clamp, so position/backdrop
+    // come from here. (The grass modal uses richer CSS in styles.ts.)
+    const overlay = this.modal.overlay;
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.backgroundColor = 'rgba(0,0,0,0.5)';
+    overlay.style.zIndex = '10000';
+    overlay.style.justifyContent = 'center';
+    overlay.style.alignItems = 'center';
+    overlay.style.display = 'none';
 
-    // Close handlers
     const closeBtn = document.getElementById('tag-analytics-close');
     if (closeBtn) closeBtn.onclick = () => this.toggleModal(false);
-    modal.onclick = e => {
-      if (e.target === modal) this.toggleModal(false);
-    };
-
-    // Keyboard: close on Escape
-    document.addEventListener('keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && modal.style.display !== 'none') {
-        this.toggleModal(false);
-      }
-    });
-
-    // Close on browser back button (mobile-friendly)
-    window.addEventListener('popstate', () => {
-      if (
-        modal.style.display !== 'none' &&
-        history.state?.diModalOpen !== 'tag-analytics-modal'
-      ) {
-        this.toggleModal(false);
-      }
-    });
   }
 
   /**
@@ -1692,37 +1658,12 @@ export class TagAnalyticsApp {
    * @param {boolean} show Whether to show or hide the modal.
    */
   toggleModal(show: boolean): void {
-    if (!document.getElementById('tag-analytics-modal')) {
-      this.createModal();
-    }
-    const modal = document.getElementById('tag-analytics-modal');
-    if (!modal) return;
-
+    if (!this.modal) this.createModal();
+    if (!this.modal) return;
+    this.modal.toggle(show);
     if (show) {
-      // Push history state for back button support
-      if (history.state?.diModalOpen !== 'tag-analytics-modal') {
-        history.pushState(
-          {diModalOpen: 'tag-analytics-modal'},
-          '',
-          location.href,
-        );
-      }
-      modal.style.display = 'flex';
-      lockBodyScroll();
       const closeBtn = document.getElementById('tag-analytics-close');
       if (closeBtn) closeBtn.focus();
-    } else {
-      // If history state still belongs to us, route through history.back().
-      // The popstate listener will re-enter this branch with state cleared.
-      if (history.state?.diModalOpen === 'tag-analytics-modal') {
-        history.back();
-        return;
-      }
-      modal.style.display = 'none';
-      unlockBodyScroll();
-      this.chartRenderer.cleanup();
-      // Remove any lingering area chart tooltips appended to body
-      d3.select('body').selectAll('.tag-analytics-tooltip').remove();
     }
   }
 
@@ -1731,8 +1672,7 @@ export class TagAnalyticsApp {
    * Toggles blur/opacity on marked elements.
    */
   updateNsfwVisibility(): void {
-    const isNsfwEnabled =
-      localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
+    const isNsfwEnabled = getNsfwEnabled();
     const items = document.querySelectorAll('.di-nsfw-monitor');
 
     items.forEach(item => {
@@ -2035,13 +1975,9 @@ export class TagAnalyticsApp {
     // NSFW Logic
     const nsfwCheck = document.getElementById('tag-analytics-nsfw-toggle');
     if (nsfwCheck) {
-      (nsfwCheck as HTMLInputElement).checked =
-        localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
+      (nsfwCheck as HTMLInputElement).checked = getNsfwEnabled();
       nsfwCheck.onchange = e => {
-        localStorage.setItem(
-          'tag_analytics_nsfw_enabled',
-          (e.target as HTMLInputElement).checked.toString(),
-        );
+        setNsfwEnabled((e.target as HTMLInputElement).checked);
         this.updateNsfwVisibility();
       };
       // Apply initial state
