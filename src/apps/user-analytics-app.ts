@@ -20,7 +20,7 @@ import {
   renderHistoryChart,
 } from './user-analytics-charts';
 import {renderScatterPlot} from './user-analytics-scatter';
-import {renderTagCloudWidget} from './tag-cloud-widget';
+import {renderTagCloudWidget} from '../ui/tag-cloud-widget';
 import {renderCreatedTagsWidget} from './created-tags-widget';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {createModal, type ModalHandle} from '../ui/modal';
