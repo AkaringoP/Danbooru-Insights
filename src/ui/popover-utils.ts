@@ -147,3 +147,34 @@ export function bindDashboardThemeSelect(
     setValue(select.value as 'auto' | 'light' | 'dark');
   });
 }
+
+/**
+ * Idempotent body-attached tooltip element. Sets the four technical base
+ * styles (position:absolute, opacity:0, pointer-events:none, max z-index)
+ * that every existing d3 tooltip site assigns identically; visual styles
+ * (background/color/padding/etc.) stay caller-owned because they vary
+ * per chart family (pie vs area vs tag cloud).
+ *
+ * Reuses the existing element if one with `className` is already in the
+ * body — matches the d3 `selectAll(...).data([0]).join('div')` idempotency
+ * the original sites relied on, without coupling this module to d3.
+ */
+export function createBodyTooltip(className: string): HTMLDivElement {
+  const existing = document.body.querySelector<HTMLDivElement>(`.${className}`);
+  if (existing) return existing;
+  const tooltip = document.createElement('div');
+  tooltip.className = className;
+  tooltip.style.position = 'absolute';
+  tooltip.style.opacity = '0';
+  tooltip.style.pointerEvents = 'none';
+  tooltip.style.zIndex = '2147483647';
+  document.body.appendChild(tooltip);
+  return tooltip;
+}
+
+/** Removes any body-attached tooltips matching `className` (no-op if none). */
+export function removeBodyTooltip(className: string): void {
+  document.body
+    .querySelectorAll<HTMLElement>(`.${className}`)
+    .forEach(el => el.remove());
+}
