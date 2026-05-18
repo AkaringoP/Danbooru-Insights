@@ -1,5 +1,5 @@
 import {describe, it, expect} from 'vitest';
-import {computeFontSizes} from '../src/apps/tag-cloud-widget';
+import {computeFontSizes} from '../src/ui/tag-cloud-widget';
 import type {TagCloudItem} from '../src/types';
 
 describe('computeFontSizes', () => {

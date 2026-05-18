@@ -1,5 +1,8 @@
 import {CONFIG} from '../config';
-import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
+import {
+  applyDashboardTheme,
+  resolveEffectiveDashboardTheme,
+} from '../ui/theme-palette';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {
@@ -17,7 +20,7 @@ import {
   renderHistoryChart,
 } from './user-analytics-charts';
 import {renderScatterPlot} from './user-analytics-scatter';
-import {renderTagCloudWidget} from './tag-cloud-widget';
+import {renderTagCloudWidget} from '../ui/tag-cloud-widget';
 import {renderCreatedTagsWidget} from './created-tags-widget';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {createModal, type ModalHandle} from '../ui/modal';

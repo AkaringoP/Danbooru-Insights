@@ -1,12 +1,12 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
-import {createBodyTooltip} from '../ui/popover-utils';
+import {createBodyTooltip} from './popover-utils';
 import type {D3Any, TagCloudItem} from '../types';
 import {
   isTouchDevice,
   createTwoStepTap,
   type TwoStepTapController,
-} from '../ui/two-step-tap';
+} from './two-step-tap';
 
 const log = createLogger('TagCloud');
 
