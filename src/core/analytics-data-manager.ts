@@ -239,6 +239,20 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
+   * Cache prelude shared by every distribution-stat fetcher. Skips the cache
+   * read when forceRefresh is true or there is no uploaderId to key on.
+   */
+  private async tryGetCachedStats<T>(
+    cacheKey: string,
+    uploaderId: number | null,
+    forceRefresh: boolean,
+  ): Promise<T | null> {
+    if (forceRefresh || !uploaderId) return null;
+    const cached = await this.getStats(cacheKey, uploaderId);
+    return (cached as T | null) ?? null;
+  }
+
+  /**
    * Centrally selects the most appropriate thumbnail URL for a post.
    * Prioritizes high-quality WebP variants (720x720 or 360x360) for performance.
    * @param {Object} post The post data object from Danbooru API.
@@ -777,12 +791,10 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'status_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) {
-        return cached as {name: string; count: number; label: string}[];
-      }
-    }
+    const cached = await this.tryGetCachedStats<
+      {name: string; count: number; label: string}[]
+    >(cacheKey, uploaderId, forceRefresh);
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const statuses = [
@@ -843,12 +855,10 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'rating_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) {
-        return cached as {rating: string; count: number; label: string}[];
-      }
-    }
+    const cached = await this.tryGetCachedStats<
+      {rating: string; count: number; label: string}[]
+    >(cacheKey, uploaderId, forceRefresh);
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const ratings = ['g', 's', 'q', 'e'];
@@ -1218,10 +1228,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0'); // Need ID for cache key
     const cacheKey = 'character_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const url = `/related_tag.json?commit=Search&search[category]=4&search[order]=Frequency&search[query]=user:${encodeURIComponent(normalizedName)}`;
@@ -1322,10 +1334,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'copyright_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const url = `/related_tag.json?commit=Search&search[category]=3&search[order]=Frequency&search[query]=user:${encodeURIComponent(normalizedName)}`;
@@ -1464,10 +1478,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'fav_copyright_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const url = `/related_tag.json?commit=Search&search[category]=3&search[order]=Frequency&search[query]=ordfav:${encodeURIComponent(normalizedName)}`;
@@ -1636,17 +1652,13 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'top_posts_by_type';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) {
-        return cached as {
-          g: DanbooruPost | null;
-          s: DanbooruPost | null;
-          q: DanbooruPost | null;
-          e: DanbooruPost | null;
-        };
-      }
-    }
+    const cached = await this.tryGetCachedStats<{
+      g: DanbooruPost | null;
+      s: DanbooruPost | null;
+      q: DanbooruPost | null;
+      e: DanbooruPost | null;
+    }>(cacheKey, uploaderId, forceRefresh);
+    if (cached) return cached;
 
     // Helper for fetching 1 top post
     const fetchTop = async (
@@ -1697,12 +1709,11 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'recent_popular_posts';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) {
-        return cached as {sfw: DanbooruPost | null; nsfw: DanbooruPost | null};
-      }
-    }
+    const cached = await this.tryGetCachedStats<{
+      sfw: DanbooruPost | null;
+      nsfw: DanbooruPost | null;
+    }>(cacheKey, uploaderId, forceRefresh);
+    if (cached) return cached;
 
     const fetchTop = async (
       ratingTag: string,
@@ -2220,14 +2231,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'level_change_history';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) {
-        // Dates were JSON-stringified to strings when cached — revive them.
-        return (
-          cached as Array<Omit<LevelChangeEvent, 'date'> & {date: string}>
-        ).map(e => ({...e, date: new Date(e.date)}));
-      }
+    const cached = await this.tryGetCachedStats<
+      Array<Omit<LevelChangeEvent, 'date'> & {date: string}>
+    >(cacheKey, uploaderId, forceRefresh);
+    if (cached) {
+      // Dates were JSON-stringified to strings when cached — revive them.
+      return cached.map(e => ({...e, date: new Date(e.date)}));
     }
 
     // Known Danbooru levels ordered by rank (lowest → highest)
@@ -2389,10 +2398,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'commentary_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const categories = [
@@ -2459,10 +2470,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'translation_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const categories: Array<{
@@ -2585,10 +2598,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'gender_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
 
@@ -2704,10 +2719,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'breasts_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const breastTags = [
@@ -2781,10 +2798,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'hair_length_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const hairLengthTags = [
@@ -2859,10 +2878,12 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'hair_color_dist';
 
-    if (!forceRefresh && uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as DistributionItem[];
-    }
+    const cached = await this.tryGetCachedStats<DistributionItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const hairColorMap = [
