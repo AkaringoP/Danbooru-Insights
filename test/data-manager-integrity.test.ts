@@ -3,7 +3,7 @@
  *
  * Covers: remote/local count comparison, safe deletion boundaries,
  * year completion cache, 3-day safety buffer, user ID validation,
- * hourly stats delta merge, revalidateCurrentYearCache, and clearCache.
+ * hourly stats delta merge, and clearCache.
  */
 import {describe, it, expect, vi, beforeEach, afterEach} from 'vitest';
 import {DataManager} from '../src/core/data-manager';
@@ -605,124 +605,7 @@ describe('getMetricData — 3-day safety buffer', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. revalidateCurrentYearCache
-// ---------------------------------------------------------------------------
-
-describe('revalidateCurrentYearCache', () => {
-  beforeEach(() => {
-    // Mock localStorage
-    const storage: Record<string, string> = {};
-    vi.stubGlobal('localStorage', {
-      getItem: vi.fn((key: string) => storage[key] ?? null),
-      setItem: vi.fn((key: string, val: string) => {
-        storage[key] = val;
-      }),
-      removeItem: vi.fn((key: string) => {
-        delete storage[key];
-      }),
-    });
-  });
-
-  it('clears stale data when remote count mismatches local count', async () => {
-    const year = new Date().getFullYear();
-    const localRows = [
-      {id: `42_${year}-03-01`, userId: '42', date: `${year}-03-01`, count: 10},
-    ];
-    const uploadsTable = makeTable(localRows);
-    const approvalsTable = makeTable(); // empty — no mismatch
-    const completedYears = makeTable();
-
-    const db = makeDb({
-      uploads: uploadsTable,
-      approvals: approvalsTable,
-      completed_years: completedYears,
-    });
-
-    const rl = makeRateLimiter(async (url: string) => {
-      if (url.includes('/counts/posts.json') && url.includes('user:')) {
-        // Remote says 20 but local has 10 → mismatch
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({counts: {posts: 20}}),
-        };
-      }
-      if (url.includes('/counts/posts.json') && url.includes('approver:')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({counts: {posts: 0}}),
-        };
-      }
-      return {ok: true, status: 200, json: async () => []};
-    });
-
-    const dm = new DataManager(db, rl as never);
-    await dm.revalidateCurrentYearCache('42', 'test_user');
-
-    // Uploads table should have had deletion triggered
-    expect(uploadsTable._chain.delete).toHaveBeenCalled();
-    // Flag should be set
-    expect(localStorage.setItem).toHaveBeenCalledWith(
-      'di_cache_v924_migrated_42',
-      '1',
-    );
-  });
-
-  it('sets flag without deleting when counts match', async () => {
-    const uploadsTable = makeTable();
-    const approvalsTable = makeTable();
-
-    const db = makeDb({
-      uploads: uploadsTable,
-      approvals: approvalsTable,
-      completed_years: makeTable(),
-    });
-
-    const rl = makeRateLimiter(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({counts: {posts: 0}}),
-    }));
-
-    const dm = new DataManager(db, rl as never);
-    await dm.revalidateCurrentYearCache('42', 'test_user');
-
-    expect(uploadsTable._chain.delete).not.toHaveBeenCalled();
-    expect(localStorage.setItem).toHaveBeenCalledWith(
-      'di_cache_v924_migrated_42',
-      '1',
-    );
-  });
-
-  it('skips entirely when localStorage flag is already set', async () => {
-    (localStorage.getItem as ReturnType<typeof vi.fn>).mockReturnValue('1');
-
-    const db = makeDb();
-    const rl = makeRateLimiter();
-    const dm = new DataManager(db, rl as never);
-
-    await dm.revalidateCurrentYearCache('42', 'test_user');
-
-    // No fetch should happen
-    expect(rl.fetch).not.toHaveBeenCalled();
-  });
-
-  it('does NOT set flag when network request fails (allows retry)', async () => {
-    const db = makeDb();
-    const rl = makeRateLimiter(async () => {
-      throw new Error('Network error');
-    });
-
-    const dm = new DataManager(db, rl as never);
-    await dm.revalidateCurrentYearCache('42', 'test_user');
-
-    expect(localStorage.setItem).not.toHaveBeenCalled();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 7. clearCache
+// 6. clearCache
 // ---------------------------------------------------------------------------
 
 describe('clearCache', () => {

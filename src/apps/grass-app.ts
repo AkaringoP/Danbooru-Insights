@@ -69,15 +69,6 @@ export class GrassApp {
       return;
     }
 
-    // One-time cache revalidation (v9.2.4): check current-year data against
-    // remote counts to clear stale rows left by the pre-v9.2.3 page-skip bug.
-    const normalizedName = (targetUser.name || '').replace(/ /g, '_');
-    await dataManager
-      .revalidateCurrentYearCache(userId, normalizedName)
-      .catch((e: unknown) => {
-        log.warn('Cache revalidation failed, continuing normally', {error: e});
-      });
-
     let currentYear = new Date().getFullYear();
     let currentMetric: Metric = (this.settings.getLastMode(userId) ||
       'uploads') as Metric;
