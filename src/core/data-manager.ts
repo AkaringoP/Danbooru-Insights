@@ -280,7 +280,6 @@ export class DataManager {
 
       const table = this.db[storeName];
       const userIdVal = userInfo.id || userInfo.name;
-      // const idPrefix = `${userIdVal}_`; // unused
 
       // [New] Check Completion Cache
       const isYearCompleteCache = await this.checkYearCompletion(

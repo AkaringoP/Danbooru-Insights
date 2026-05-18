@@ -18,11 +18,10 @@ export function escapeHtml(text: string): string {
  * Checks whether a tag is top-level (not a sub-tag) by querying its implications.
  * A tag that has antecedent implications (i.e., it implies something else) is a sub-tag.
  *
- * NOTE: The TagAnalyticsApp path migrated to
+ * NOTE: The TagAnalyticsApp path uses
  * `TagAnalyticsDataService.getTopLevelFlags` for batched + cached lookups
- * (v10 perf work). This single-tag helper remains for the UserAnalytics
- * distribution path in `analytics-data-manager.ts` until that migration
- * lands as a follow-up.
+ * (v10 perf work). This single-tag helper is still used by the
+ * UserAnalytics distribution path in `analytics-data-manager.ts`.
  *
  * @param {RateLimitedFetch} rateLimiter
  * @param {string} tagName Exact tag name (underscored).
