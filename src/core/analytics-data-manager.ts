@@ -3679,8 +3679,6 @@ export class AnalyticsDataManager extends DataManager {
           localStorage.removeItem(syncKey);
         }
       }
-
-      // Server bubble data cleanup removed
     } catch (e: unknown) {
       log.warn('Stale data cleanup failed', {error: e});
     }
@@ -3796,15 +3794,12 @@ export class AnalyticsDataManager extends DataManager {
   async clearUserData(userInfo: TargetUser): Promise<void> {
     if (!userInfo.id) return;
     const uploaderId = parseInt(userInfo.id ?? '0'); // For tables using Integers (API direct)
-    // const userIdStr = String(userInfo.id); // Not used anymore for Analytics clean
 
     // 1. Delete posts (uploader_id is INT)
     await this.db.posts.where('uploader_id').equals(uploaderId).delete();
 
     // 2. Delete Pie Stats (userId is INT in updatePieStats)
     await this.db.piestats.where('userId').equals(uploaderId).delete();
-
-    // 3. Delete Bubble Data (User Specific only, preserve Server cache)
 
     // Clear metadata (Last Sync Time)
     const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;

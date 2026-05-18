@@ -528,21 +528,6 @@ export interface DanbooruUserFeedback {
   category?: string;
 }
 
-/** Approval entry from `/post_approvals.json`. */
-export interface DanbooruApproval {
-  id: number;
-  post_id: number;
-  user_id: number;
-  created_at: string;
-}
-
-/** Note version entry from `/note_versions.json`. */
-export interface DanbooruNoteVersion {
-  id?: number;
-  updater_id: number;
-  created_at: string;
-}
-
 // =========================================================================
 // End of Danbooru API Response Types
 // =========================================================================

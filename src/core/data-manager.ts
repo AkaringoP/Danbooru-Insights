@@ -280,7 +280,6 @@ export class DataManager {
 
       const table = this.db[storeName];
       const userIdVal = userInfo.id || userInfo.name;
-      // const idPrefix = `${userIdVal}_`; // unused
 
       // [New] Check Completion Cache
       const isYearCompleteCache = await this.checkYearCompletion(
@@ -974,112 +973,5 @@ export class DataManager {
     return json['counts'] && typeof json['counts']['posts'] === 'number'
       ? json['counts']['posts']
       : 0;
-  }
-
-  /**
-   * One-time cache revalidation for the current year.
-   *
-   * Mitigates stale data left by the v9.2.3 page-skip bug: compares the
-   * local row sum for the current year against the remote count and, on
-   * mismatch, deletes the affected rows so the next getMetricData() call
-   * performs a full refetch.
-   *
-   * Idempotent: stores a per-user flag in localStorage and skips on
-   * subsequent calls. If the remote fetch fails, the flag is NOT set so
-   * the check retries on the next page load.
-   */
-  async revalidateCurrentYearCache(
-    userId: string | number,
-    normalizedName: string,
-  ): Promise<void> {
-    const flagKey = `di_cache_v924_migrated_${userId}`;
-    try {
-      if (localStorage.getItem(flagKey) === '1') return;
-    } catch {
-      return; // localStorage unavailable — skip silently
-    }
-
-    const year = new Date().getFullYear();
-    const startDate = `${year}-01-01`;
-    const endDate = `${year}-12-31`;
-    let anyMismatch = false;
-
-    for (const metric of ['uploads', 'approvals', 'notes'] as const) {
-      try {
-        // Build the remote query tag
-        let queryTags: string;
-        if (metric === 'uploads') {
-          queryTags = `user:${normalizedName} date:${startDate}...${year + 1}-01-01`;
-        } else if (metric === 'approvals') {
-          queryTags = `approver:${normalizedName} date:${startDate}...${year + 1}-01-01`;
-        } else {
-          // Notes use user_id search; remote count isn't straightforward.
-          // Skip remote check for notes — uploads and approvals cover the
-          // most impactful page-skip scenarios.
-          continue;
-        }
-
-        const remoteCount = await this.fetchRemoteCount(queryTags);
-
-        // Local count
-        const table = this.db[metric];
-        let localCount = 0;
-        await table
-          .where('id')
-          .between(
-            `${userId}_${startDate}`,
-            `${userId}_${endDate}\uffff`,
-            true,
-            true,
-          )
-          .each((cur: ApiItem) => {
-            localCount += cur['count'] || 0;
-          });
-
-        if (remoteCount !== localCount) {
-          log.warn(
-            `v924 revalidation: ${metric} mismatch for ${year}, clearing`,
-            {remoteCount, localCount},
-          );
-
-          await table
-            .where('id')
-            .between(
-              `${userId}_${startDate}`,
-              `${userId}_${endDate}\uffff`,
-              true,
-              true,
-            )
-            .delete();
-
-          // Remove completed_years flag so full fetch is triggered
-          try {
-            await this.db.completed_years.delete(`${userId}_${metric}_${year}`);
-          } catch {
-            // Table or key may not exist — safe to ignore
-          }
-
-          anyMismatch = true;
-        }
-      } catch (e: unknown) {
-        // Remote fetch or IDB access failed — do NOT set the flag
-        // so the check retries on the next page load.
-        log.warn(`v924 revalidation: ${metric} check failed, will retry`, {
-          error: e,
-        });
-        return;
-      }
-    }
-
-    if (anyMismatch) {
-      log.info('v924 revalidation: cleared stale data, will refetch');
-    }
-
-    // Mark as done (even if no mismatch — the check itself succeeded)
-    try {
-      localStorage.setItem(flagKey, '1');
-    } catch {
-      // localStorage write failed — check will repeat, which is fine
-    }
   }
 }

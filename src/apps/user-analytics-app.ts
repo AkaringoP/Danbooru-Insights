@@ -341,8 +341,6 @@ export class UserAnalyticsApp {
 
       if (animInterval) clearInterval(animInterval);
 
-      // (Bubble Chart Data Collection removed)
-
       // Final Status (Green)
       if (shouldRender) {
         const finalStats = await this.dataManager.getSyncStats(

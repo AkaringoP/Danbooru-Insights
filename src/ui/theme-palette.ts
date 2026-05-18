@@ -100,11 +100,3 @@ export function getPalette(el?: Element): ThemePalette {
   }
   return palette;
 }
-
-/**
- * Convenience: returns true if the current Danbooru theme is dark.
- * Checks `data-current-user-theme` attribute on `<body>`.
- */
-export function isDarkMode(): boolean {
-  return document.body.getAttribute('data-current-user-theme') === 'dark';
-}
