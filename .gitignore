@@ -42,3 +42,9 @@ danbooruinsights-main.user.js
 # Created during Phase 0 of feature/db-strategy-upgrade. See PLAN.md
 # "성능 비교 전략" and TASK.md Tasks 0.2 ~ 4.2.
 bench/
+
+# Playwright runtime output (not snapshots — those live in test/e2e/snapshots/
+# and are committed). test-results/ holds per-run traces/videos/screenshots;
+# playwright-report/ is the HTML reporter output.
+test-results/
+playwright-report/

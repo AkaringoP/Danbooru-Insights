@@ -7,12 +7,15 @@
     "dev": "vite",
     "build": "npm run test && tsc && vite build",
     "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:update": "playwright test --update-snapshots",
     "lint": "gts lint",
     "clean": "gts clean",
     "compile": "tsc",
     "fix": "gts fix"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/d3": "^7.4.3",
     "@types/node": "^22.7.5",
     "cal-heatmap": "^4.2.4",
