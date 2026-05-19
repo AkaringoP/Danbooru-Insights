@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>UserAnalytics Dashboard Harness — DanbooruInsights e2e</title>
+    <!--
+      Isolated zero-uploads baseline for UserAnalyticsApp.renderDashboard
+      (src/apps/user-analytics-app.ts).
+
+      Why zero-uploads: it exercises the cleanest independent branch
+      (lines 751-774). The full-data path fans into nine widget renderers
+      backed by ~14 API endpoints and a Dexie seed — too brittle for a
+      pixel baseline. Per-widget visual coverage lives in T-18 (pie) and
+      T-19 (grass).
+
+      External globals are still loaded because the bundled module graph
+      transitively imports d3/Dexie even when the rendered branch does
+      not use them.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.7/dist/dexie.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cal-heatmap@4.2.4/dist/cal-heatmap.min.js"></script>
+  </head>
+  <body class="c-users a-show" data-current-user-id="42">
+    <script type="module">
+      try {
+        history.replaceState({}, '', '/users/42');
+
+        const {UserAnalyticsApp} = await import(
+          '/src/apps/user-analytics-app.ts'
+        );
+        const {SettingsManager} = await import('/src/core/settings.ts');
+        const {RateLimitedFetch} = await import('/src/core/rate-limiter.ts');
+        const {injectGlobalStyles} = await import('/src/styles.ts');
+
+        injectGlobalStyles();
+
+        // Stub Dexie surface — the zero-uploads branch never reaches the
+        // DB so an empty placeholder is sufficient.
+        const db = {};
+        const settings = new SettingsManager();
+        const context = {
+          targetUser: {
+            name: 'fixture_user',
+            normalizedName: 'fixture_user',
+            id: '42',
+            created_at: '2020-01-01T00:00:00Z',
+            joinDate: new Date('2020-01-01T00:00:00Z'),
+            level_string: 'Member',
+          },
+          isOwnProfile: false,
+        };
+
+        const rateLimiter = new RateLimitedFetch(1, [0, 0], 1);
+        const app = new UserAnalyticsApp(db, settings, context, rateLimiter);
+
+        // Pin the data-manager methods used on the zero-uploads path so
+        // the dashboard sees a "no posts ever" user without touching IDB
+        // or the network.
+        app.dataManager.getSyncStats = async () => ({
+          count: 0,
+          lastDate: null,
+        });
+        app.dataManager.getTotalPostCount = async () => 0;
+        app.updateHeaderStatus = async () => {};
+
+        // Build the modal so #${modalId}-content exists and is visible.
+        app.run();
+        const overlayId = `${app.modalId}-overlay`;
+        const overlay = document.getElementById(overlayId);
+        if (overlay) {
+          overlay.style.display = 'flex';
+          overlay.classList.add('visible');
+        }
+
+        await app.renderDashboard();
+
+        window.__diUserAnalyticsApp = app;
+      } catch (err) {
+        console.error('[harness] failed to mount user-analytics dashboard', err);
+        document.body.setAttribute('data-harness-error', String(err));
+      }
+      document.body.setAttribute(
+        'data-harness-ready',
+        'user-analytics-dashboard',
+      );
+    </script>
+  </body>
+</html>
