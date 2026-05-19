@@ -1,0 +1,17 @@
+{
+  "ratings": [
+    {"name": "g", "count": 3, "label": "General"},
+    {"name": "s", "count": 4, "label": "Sensitive"},
+    {"name": "q", "count": 2, "label": "Questionable"},
+    {"name": "e", "count": 1, "label": "Explicit"}
+  ],
+  "character_dist": [
+    {"name": "Hatsune Miku", "tagName": "hatsune_miku", "count": 5, "frequency": 0.5, "thumb": null, "isOther": false},
+    {"name": "Kagamine Rin", "tagName": "kagamine_rin", "count": 3, "frequency": 0.3, "thumb": null, "isOther": false},
+    {"name": "Megurine Luka", "tagName": "megurine_luka", "count": 2, "frequency": 0.2, "thumb": null, "isOther": false}
+  ],
+  "copyright_dist": [
+    {"name": "Vocaloid", "tagName": "vocaloid", "count": 8, "frequency": 0.8, "thumb": null, "isOther": false},
+    {"name": "Hatsune Miku (Series)", "tagName": "hatsune_miku_(series)", "count": 2, "frequency": 0.2, "thumb": null, "isOther": false}
+  ]
+}

@@ -16,6 +16,8 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     passWithNoTests: true,
-    exclude: ['build/**', 'dist/**', 'node_modules/**'],
+    // Exclude Playwright e2e specs — they use @playwright/test which is
+    // not vitest-compatible. Run those via `npm run test:e2e`.
+    exclude: ['build/**', 'dist/**', 'node_modules/**', 'test/e2e/**'],
   },
 });

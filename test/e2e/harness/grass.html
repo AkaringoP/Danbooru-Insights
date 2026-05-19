@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Grass Harness — DanbooruInsights e2e</title>
+    <!--
+      Minimal Danbooru profile DOM mock. body.classList is non-empty so
+      main.ts's "skip non-Danbooru pages" guard passes. The user-statistics
+      div is GrassApp's preferred mount point (see CONFIG.SELECTORS).
+
+      External globals (d3, CalHeatmap, Dexie) are loaded via CDN, matching
+      the production userscript's @require contract. Same versions as the
+      project's runtime requirements in CLAUDE.md.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.7/dist/dexie.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cal-heatmap@4.2.4/dist/cal-heatmap.min.js"></script>
+  </head>
+  <body class="c-users a-show" data-current-user-id="42">
+    <div id="page">
+      <h1>fixture_user</h1>
+      <div class="user-statistics">
+        <table>
+          <tbody>
+            <tr>
+              <th>Join Date</th>
+              <td>2020-01-01</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <script type="module">
+      // Stub minimal location so app routing thinks we are on /users/42.
+      // Tests can override via page.goto with the canonical URL too; this
+      // is the fallback when the harness page is opened directly.
+      history.replaceState({}, '', '/users/42');
+
+      // Lazy-import main so the harness still loads when imports throw
+      // (lets the smoke spec assert on the error rather than a blank page).
+      try {
+        await import('/src/main.ts');
+      } catch (err) {
+        console.error('[harness] failed to import main.ts', err);
+        document.body.setAttribute('data-harness-error', String(err));
+      }
+      document.body.setAttribute('data-harness-ready', 'grass');
+    </script>
+  </body>
+</html>
