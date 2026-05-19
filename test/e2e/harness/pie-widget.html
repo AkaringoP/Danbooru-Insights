@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Pie Widget Harness — DanbooruInsights e2e</title>
+    <!--
+      Isolated visual baseline for renderPieWidget (src/apps/user-analytics-charts.ts).
+      Mounts the pie widget directly with deterministic fixture data and
+      a stub data manager. D3 is loaded from CDN (real implementation)
+      because the screenshot needs the actual SVG pie geometry — that's
+      the part the decomposition in T-23 must not break.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.7/dist/dexie.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica,
+          Arial, sans-serif;
+        background: #ffffff;
+        padding: 20px;
+      }
+      #pie-host {
+        width: 600px;
+        min-height: 240px;
+        background: #fff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .di-pie-tab {
+        padding: 4px 10px;
+        font-size: 12px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-weight: 500;
+      }
+    </style>
+  </head>
+  <body class="c-users a-show" data-current-user-id="42">
+    <div id="pie-host"></div>
+    <script type="module">
+      try {
+        const {renderPieWidget} = await import(
+          '/src/apps/user-analytics-charts.ts'
+        );
+        const {injectGlobalStyles} = await import('/src/styles.ts');
+
+        injectGlobalStyles();
+
+        // Deterministic distribution data — three slices for the default
+        // copyright tab. Numbers chosen so each slice is large enough to
+        // be visually distinct at 140 px diameter.
+        const distributions = {
+          copyright: [
+            {
+              name: 'Vocaloid',
+              tagName: 'vocaloid',
+              count: 80,
+              frequency: 0.5,
+              thumb: null,
+              isOther: false,
+            },
+            {
+              name: 'Touhou',
+              tagName: 'touhou',
+              count: 48,
+              frequency: 0.3,
+              thumb: null,
+              isOther: false,
+            },
+            {
+              name: 'Original',
+              tagName: 'original',
+              count: 32,
+              frequency: 0.2,
+              thumb: null,
+              isOther: false,
+            },
+          ],
+        };
+
+        // Stub data manager — never invoked on the copyright path because
+        // the data is pre-loaded, but the type signature still needs it.
+        const stubFetch = async () => [];
+        const dataManager = {
+          getCharacterDistribution: stubFetch,
+          getCopyrightDistribution: stubFetch,
+          getFavCopyrightDistribution: stubFetch,
+          getStatusDistribution: stubFetch,
+          getRatingDistribution: stubFetch,
+          getBreastsDistribution: stubFetch,
+          getHairLengthDistribution: stubFetch,
+          getHairColorDistribution: stubFetch,
+          getGenderDistribution: stubFetch,
+          getCommentaryDistribution: stubFetch,
+          getTranslationDistribution: stubFetch,
+        };
+
+        const context = {
+          targetUser: {
+            name: 'fixture_user',
+            normalizedName: 'fixture_user',
+            id: '42',
+            created_at: '2020-01-01T00:00:00Z',
+            joinDate: new Date('2020-01-01T00:00:00Z'),
+            level_string: 'Member',
+          },
+        };
+
+        const host = document.getElementById('pie-host');
+        renderPieWidget(host, distributions, false, dataManager, context, null);
+
+        // Two RAFs: the widget batches render via requestAnimationFrame
+        // (renderPending gate), and the first call paints just the
+        // skeleton. Wait for one full paint cycle so the SVG is in the
+        // DOM before the screenshot fires.
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+        window.__diPieWidget = host;
+      } catch (err) {
+        console.error('[harness] failed to mount pie widget', err);
+        document.body.setAttribute('data-harness-error', String(err));
+      }
+      document.body.setAttribute('data-harness-ready', 'pie-widget');
+    </script>
+  </body>
+</html>

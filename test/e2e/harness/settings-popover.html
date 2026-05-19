@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Settings Popover Harness — DanbooruInsights e2e</title>
+    <!--
+      Isolated harness for createSettingsPopover (src/ui/settings-popover.ts).
+      Mounts the popover directly with a real SettingsManager + a stub db.
+      The auto-tune button is the only code path that touches the db, and
+      it requires a click — so the initial paint (which the screenshot
+      baseline captures) never hits a Dexie call.
+
+      Popover CSS is copy-pasted from src/ui/graph-renderer.ts's inline
+      template literal (lines ~1478-1544) because that's where it currently
+      lives. When the function is decomposed in T-21 / T-24 the CSS may
+      move to src/styles.ts; at that point this block should be replaced
+      with a single import of GLOBAL_CSS.
+    -->
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica,
+          Arial, sans-serif;
+        background: #f6f8fa;
+      }
+      #di-test-settings-btn {
+        position: fixed;
+        top: 16px;
+        left: 16px;
+        width: 24px;
+        height: 24px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        background: #fff;
+        cursor: pointer;
+      }
+
+      /* Settings Popover — mirrors src/ui/graph-renderer.ts injected CSS. */
+      #danbooru-grass-settings-popover {
+        position: fixed;
+        max-height: 70vh;
+        overflow-y: auto;
+        background: var(--di-bg, #fff);
+        color: var(--di-text, #333);
+        border: 1px solid var(--di-border-input, #ddd);
+        box-shadow: 0 4px 12px var(--di-shadow, rgba(0, 0, 0, 0.2));
+        border-radius: 8px;
+        padding: 12px;
+        z-index: 10000;
+        display: none;
+        width: 290px;
+        transform-origin: top left;
+      }
+      .theme-grid {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 8px;
+      }
+      .theme-icon {
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        position: relative;
+        cursor: pointer;
+        border: 2px solid transparent;
+        box-sizing: border-box;
+      }
+      .theme-icon.active {
+        border-color: var(--di-link, #007bff);
+      }
+      .theme-icon-inner {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+      }
+      .popover-header {
+        font-weight: 600;
+        font-size: 12px;
+        color: var(--di-text, #333);
+        margin-bottom: 8px;
+      }
+      .popover-select {
+        width: 100%;
+        margin-bottom: 10px;
+        padding: 4px;
+        border-radius: 4px;
+        border: 1px solid var(--di-border-input, #ddd);
+        background-color: var(--di-bg-tertiary, #f0f0f0);
+        font-size: 12px;
+      }
+      .threshold-row {
+        display: flex;
+        align-items: center;
+        margin-bottom: 6px;
+        font-size: 12px;
+      }
+      .threshold-input {
+        width: 60px;
+        margin-left: auto;
+        padding: 2px 4px;
+        border: 1px solid var(--di-border-input, #ddd);
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body class="c-users a-show" data-current-user-id="42">
+    <button id="di-test-settings-btn" aria-label="Settings"></button>
+    <script type="module">
+      try {
+        const {SettingsManager} = await import('/src/core/settings.ts');
+        const {createSettingsPopover} = await import(
+          '/src/ui/settings-popover.ts'
+        );
+
+        // Deterministic settings — clear any leftover state so successive
+        // runs produce identical screenshots.
+        localStorage.removeItem('danbooru_contrib_settings');
+
+        const sm = new SettingsManager();
+        sm.applyTheme('light');
+
+        const settingsBtn = document.getElementById('di-test-settings-btn');
+        const result = createSettingsPopover({
+          settingsManager: sm,
+          // Auto-tune path is not triggered before the screenshot, so a
+          // stub object is enough. Forwarded to fetchActiveDayCounts only.
+          db: /** @type {any} */ ({}),
+          metric: 'uploads',
+          settingsBtn,
+          targetUserId: '42',
+          closeSettings: () => {},
+          onRefresh: () => {},
+        });
+        document.body.appendChild(result.popover);
+
+        // Anchor popover beside the settings button for the screenshot.
+        result.popover.style.display = 'block';
+        result.popover.style.top = '48px';
+        result.popover.style.left = '16px';
+
+        // Expose hooks so the spec can drive state changes if needed.
+        window.__diSettingsPopover = result;
+      } catch (err) {
+        console.error('[harness] failed to mount settings-popover', err);
+        document.body.setAttribute('data-harness-error', String(err));
+      }
+      document.body.setAttribute('data-harness-ready', 'settings-popover');
+    </script>
+  </body>
+</html>
