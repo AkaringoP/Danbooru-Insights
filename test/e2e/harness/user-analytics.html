@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>UserAnalytics Harness — DanbooruInsights e2e</title>
+    <!--
+      Same external globals as grass.html. UserAnalyticsApp shares the
+      profile DOM (it also runs on /users/:id pages) and injects its own
+      modal/button, so the only required scaffolding is body classes and
+      the user-statistics table.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.7/dist/dexie.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cal-heatmap@4.2.4/dist/cal-heatmap.min.js"></script>
+  </head>
+  <body class="c-users a-show" data-current-user-id="42">
+    <div id="page">
+      <h1>fixture_user</h1>
+      <div class="user-statistics">
+        <table>
+          <tbody>
+            <tr>
+              <th>Join Date</th>
+              <td>2020-01-01</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <script type="module">
+      history.replaceState({}, '', '/users/42');
+      try {
+        await import('/src/main.ts');
+      } catch (err) {
+        console.error('[harness] failed to import main.ts', err);
+        document.body.setAttribute('data-harness-error', String(err));
+      }
+      document.body.setAttribute('data-harness-ready', 'user-analytics');
+    </script>
+  </body>
+</html>

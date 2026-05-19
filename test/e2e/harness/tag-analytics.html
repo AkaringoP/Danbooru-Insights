@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>TagAnalytics Harness — DanbooruInsights e2e</title>
+    <!--
+      Tag analytics runs on wiki and artist pages. body classes mimic
+      Danbooru's c-wiki-pages a-show. The 'View posts' link is the
+      fallback path detectCurrentTag() uses when data-artist-name is
+      absent, so we expose both signals.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.7/dist/dexie.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cal-heatmap@4.2.4/dist/cal-heatmap.min.js"></script>
+  </head>
+  <body class="c-wiki-pages a-show">
+    <div id="page">
+      <h1>hatsune_miku</h1>
+      <a href="/posts?tags=hatsune_miku">View posts</a>
+      <div id="tag-analytics-mount"></div>
+    </div>
+
+    <script type="module">
+      history.replaceState({}, '', '/wiki_pages/hatsune_miku');
+      try {
+        await import('/src/main.ts');
+      } catch (err) {
+        console.error('[harness] failed to import main.ts', err);
+        document.body.setAttribute('data-harness-error', String(err));
+      }
+      document.body.setAttribute('data-harness-ready', 'tag-analytics');
+    </script>
+  </body>
+</html>

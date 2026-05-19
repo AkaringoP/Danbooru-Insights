@@ -1,0 +1,68 @@
+{
+  "tagName": "hatsune_miku",
+  "updatedAt": 1716000000000,
+  "data": {
+    "name": "hatsune_miku",
+    "category": 4,
+    "post_count": 150000,
+    "created_at": "2008-04-04T00:00:00.000-04:00",
+    "updatedAt": 1716000000000,
+    "firstPost": {
+      "id": 100,
+      "created_at": "2008-04-04T12:00:00.000-04:00",
+      "uploader_id": 1,
+      "score": 5,
+      "rating": "s",
+      "tag_count_general": 8,
+      "tag_string_artist": "kei",
+      "tag_string_character": "hatsune_miku",
+      "tag_string_copyright": "vocaloid"
+    },
+    "hundredthPost": {
+      "id": 350,
+      "created_at": "2008-05-15T14:00:00.000-04:00",
+      "uploader_id": 12,
+      "score": 18,
+      "rating": "s",
+      "tag_count_general": 15,
+      "tag_string_artist": "anonymous",
+      "tag_string_character": "hatsune_miku",
+      "tag_string_copyright": "vocaloid"
+    },
+    "timeToHundred": 3628800000,
+    "historyData": [
+      {"date": "2008-04-01", "count": 1, "cumulative": 1},
+      {"date": "2008-05-01", "count": 99, "cumulative": 100},
+      {"date": "2008-06-01", "count": 250, "cumulative": 350},
+      {"date": "2024-01-01", "count": 500, "cumulative": 149000},
+      {"date": "2025-01-01", "count": 1000, "cumulative": 150000}
+    ],
+    "precalculatedMilestones": [
+      {
+        "milestone": 100,
+        "post": {
+          "id": 350,
+          "created_at": "2008-05-15T14:00:00.000-04:00",
+          "uploader_id": 12,
+          "score": 18,
+          "rating": "s",
+          "tag_count_general": 15
+        }
+      }
+    ],
+    "rankings": {
+      "uploader": {
+        "allTime": [
+          {"name": "fixture_user", "id": 42, "count": 1200, "level": "Gold"}
+        ],
+        "year": [
+          {"name": "fixture_user", "id": 42, "count": 150, "level": "Gold"}
+        ],
+        "first100": [
+          {"name": "early_uploader", "id": 1, "count": 8, "level": "Member"}
+        ]
+      }
+    }
+  },
+  "lastFullScanAt": 1715000000000
+}
