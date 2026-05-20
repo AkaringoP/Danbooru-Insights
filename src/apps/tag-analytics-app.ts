@@ -17,7 +17,13 @@ import {
 import {createLogger} from '../core/logger';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
-import {getNsfwEnabled, setNsfwEnabled} from '../core/settings';
+import {
+  getNsfwEnabled,
+  setNsfwEnabled,
+  getCountCacheTtlMs,
+  getCountCacheTtlMin,
+  setCountCacheTtlMin,
+} from '../core/settings';
 import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
 import type {
@@ -279,6 +285,10 @@ export class TagAnalyticsApp {
    * Cache-first path: load cache, update volatile data if fresh, render.
    * @returns null if served from cache (caller should return), otherwise delta info.
    */
+  // T-26 baseline: complexity 16. Cache miss × time-expired × diff-threshold
+  // × volatile-refresh × v9.6 count TTL × cache-write branches all live in
+  // this orchestrator. Splitting risks dropping render order guarantees.
+  // eslint-disable-next-line complexity
   private async _checkCache(): Promise<CacheCheckResult | null> {
     const tagName = this.tagName;
     const cachedData = await this.dataService.loadFromCache();
@@ -326,6 +336,34 @@ export class TagAnalyticsApp {
       cachedData.trendingPost = trendingPost ?? undefined;
       cachedData.trendingPostNSFW = trendingPostNSFW ?? undefined;
       cachedData.newPostCount = newPostCount24h;
+
+      // v9.6: refresh the deferred count overlays (statusCounts +
+      // ratingCounts) when the per-user count-cache TTL has elapsed
+      // since the last overlay refresh. Falls back to `updatedAt` for
+      // pre-v9.6 records that have no countsUpdatedAt stamp.
+      const countsTtlMs = getCountCacheTtlMs();
+      const countsAnchor =
+        cachedData.countsUpdatedAt ?? cachedData.updatedAt ?? 0;
+      const countsAge = Date.now() - countsAnchor;
+      if (countsAge > countsTtlMs) {
+        log.debug(
+          `Refreshing deferred counts: age ${(countsAge / 60000).toFixed(1)}m > ttl ${(countsTtlMs / 60000).toFixed(1)}m`,
+        );
+        const startDate =
+          cachedData.historyData && cachedData.historyData.length > 0
+            ? new Date(cachedData.historyData[0].date)
+                .toISOString()
+                .split('T')[0]
+            : null;
+        const [freshStatus, freshRating] = await Promise.all([
+          this.dataService.fetchStatusCounts(tagName),
+          this.dataService.fetchRatingCounts(tagName, startDate),
+        ]);
+        cachedData.statusCounts = freshStatus;
+        cachedData.ratingCounts = freshRating;
+        this.dataService.markCountsRefreshed();
+      }
+
       await this.dataService.saveToCache(cachedData);
     } catch (e) {
       log.warn('Failed to update volatile data for cache:', {error: e});
@@ -481,6 +519,9 @@ export class TagAnalyticsApp {
     meta.statusCounts = statusCounts;
     meta.commentaryCounts = commentaryCounts;
     meta.ratingCounts = localStatsAllTime.ratingCounts;
+    // v9.6: small-tag path produces statusCounts + ratingCounts from
+    // local aggregation in this turn, so stamp the overlay as fresh.
+    this.dataService.markCountsRefreshed();
     meta.precalculatedMilestones = milestones;
     meta.latestPost = latestPost ?? undefined;
     meta.newPostCount = newPostCount;
@@ -848,6 +889,11 @@ export class TagAnalyticsApp {
       this.dataService.fetchRatingCounts(tagName, minDateStr),
     );
     meta.ratingCounts = ratingCounts;
+    // v9.6: Phase 3 freshly populated both statusCounts (Phase 2) and
+    // ratingCounts (this Phase) — mark the overlay so saveToCache stamps
+    // countsUpdatedAt and the TTL refresh on the next open compares
+    // against this moment.
+    this.dataService.markCountsRefreshed();
 
     // --- Single render: all phases complete, fully-populated dashboard ---
     // (ranking SWR below may swap cached-for-fresh ranking entries later,
@@ -1392,6 +1438,7 @@ export class TagAnalyticsApp {
 
     const currentDays = this.dataService.getRetentionDays();
     const currentThreshold = this.dataService.getSyncThreshold();
+    const currentCountTtl = getCountCacheTtlMin();
 
     const popover = document.createElement('div');
     popover.id = 'tag-analytics-settings-popover';
@@ -1424,6 +1471,15 @@ export class TagAnalyticsApp {
   <div class="di-row">
      <input type="number" id="sync-threshold-input" value="${currentThreshold}" min="1" step="1">
      <button id="retention-save-btn" class="di-save-btn">✅ Save</button>
+  </div>
+
+  <div class="di-section di-divider">
+    <strong>Count Refresh (min)</strong><br>
+    Refresh post-count values older than this on dashboard open.
+  </div>
+  <div class="di-row">
+     <input type="number" id="count-ttl-input" value="${currentCountTtl}" min="1" step="1">
+     <button id="count-ttl-save-btn" class="di-save-btn">✅ Save</button>
   </div>
 
   ${DASHBOARD_THEME_SELECT_HTML}
@@ -1477,6 +1533,28 @@ export class TagAnalyticsApp {
         showToast({
           type: 'warn',
           message: 'Please enter valid positive numbers.',
+        });
+      }
+    };
+
+    // Count-cache TTL save (independent button — matches the pattern in
+    // UserAnalyticsApp's sync settings popover).
+    const countTtlSaveBtn = popover.querySelector('#count-ttl-save-btn');
+    (countTtlSaveBtn as HTMLElement).onclick = () => {
+      const input = popover.querySelector('#count-ttl-input');
+      const val = parseInt((input as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val >= 1) {
+        setCountCacheTtlMin(val);
+        popover.remove();
+        document.removeEventListener('click', closeHandler);
+        showToast({
+          type: 'success',
+          message: `Count refresh threshold set to ${val} min.`,
+        });
+      } else {
+        showToast({
+          type: 'warn',
+          message: 'Please enter a count-refresh threshold ≥ 1 minute.',
         });
       }
     };

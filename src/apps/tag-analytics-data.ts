@@ -314,6 +314,23 @@ export class TagAnalyticsDataService {
   private _pendingLastFullScanAt: number | null = null;
 
   /**
+   * v9.6: stash for `countsUpdatedAt`. Set by `markCountsRefreshed()`
+   * whenever statusCounts/ratingCounts are freshly fetched (initial
+   * Phase 3 or TTL refresh in `_checkCache`). Reset to null after save
+   * so volatile-data-only saves preserve the existing timestamp.
+   */
+  private _pendingCountsUpdatedAt: number | null = null;
+
+  /**
+   * v9.6: marks the count overlays (statusCounts + ratingCounts) as
+   * freshly fetched. The next `saveToCache` stamps the record's
+   * `countsUpdatedAt` with this moment.
+   */
+  markCountsRefreshed(): void {
+    this._pendingCountsUpdatedAt = Date.now();
+  }
+
+  /**
    * Per-session memo for `/tags.json` responses. A single analysis run
    * calls `fetchTagData` from up to four paths (run, _checkCache,
    * fetchInitialStats, and the backward-scan retry), each costing ~300ms.
@@ -349,6 +366,10 @@ export class TagAnalyticsDataService {
           return {
             ...cached.data,
             updatedAt: cached.updatedAt,
+            // Surface countsUpdatedAt from the cache record so the app
+            // layer can decide whether the deferred count overlays
+            // (statusCounts / ratingCounts) need a TTL refresh.
+            countsUpdatedAt: cached.countsUpdatedAt,
           };
         }
       }
@@ -366,24 +387,35 @@ export class TagAnalyticsDataService {
   async saveToCache(data: TagAnalyticsMeta): Promise<void> {
     if (!this.db || !this.db.tag_analytics) return;
     try {
-      // Preserve `lastFullScanAt` across saves: either the value stashed by
-      // `fetchMonthlyCounts` on first-visit full scan, or the existing
-      // value on the record (subsequent saves must not wipe it).
-      let lastFullScanAt: number | undefined;
-      if (this._pendingLastFullScanAt !== null) {
-        lastFullScanAt = this._pendingLastFullScanAt;
-      } else {
-        const existing = await this.db.tag_analytics.get(this.tagName);
-        lastFullScanAt = existing?.lastFullScanAt;
-      }
+      // Preserve `lastFullScanAt` and `countsUpdatedAt` across saves:
+      // the lifecycle stash (set by the most recent fresh fetch) wins,
+      // otherwise fall back to whatever the existing record holds so
+      // volatile-data-only saves don't wipe these metadata fields.
+      const needExisting =
+        this._pendingLastFullScanAt === null ||
+        this._pendingCountsUpdatedAt === null;
+      const existing = needExisting
+        ? await this.db.tag_analytics.get(this.tagName)
+        : null;
+
+      const lastFullScanAt: number | undefined =
+        this._pendingLastFullScanAt !== null
+          ? this._pendingLastFullScanAt
+          : existing?.lastFullScanAt;
+      const countsUpdatedAt: number | undefined =
+        this._pendingCountsUpdatedAt !== null
+          ? this._pendingCountsUpdatedAt
+          : existing?.countsUpdatedAt;
 
       await this.db.tag_analytics.put({
         tagName: this.tagName,
         updatedAt: Date.now(),
         data: data,
         lastFullScanAt,
+        countsUpdatedAt,
       });
       this._pendingLastFullScanAt = null;
+      this._pendingCountsUpdatedAt = null;
     } catch (e) {
       log.warn('Cache save failed', {error: e});
     }
