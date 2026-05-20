@@ -237,8 +237,12 @@ export class DataManager {
   }
 
   /**
-   * Fetches metric data for a specific year, leveraging caching and efficient fetching strategies.
-   * Supports 'uploads', 'approvals', and 'notes' metrics.
+   * Fetches metric data for a specific year, leveraging caching and
+   * efficient fetching strategies. Supports 'uploads', 'approvals', and
+   * 'notes' metrics. Orchestrator only — the five private helpers below
+   * (resolveMetricFetchConfig → runUploadsIntegrityCheck →
+   * loadCachedYearState → fetchAndPersistYear → loadYearResultFromCache)
+   * carry the actual logic.
    *
    * @param {Metric} metric - The metric type ('uploads' | 'approvals' | 'notes').
    * @param {TargetUser} userInfo - The target user's profile information.
@@ -253,157 +257,273 @@ export class DataManager {
     onProgress: ((count: number) => void) | null = null,
   ): Promise<MetricData> {
     try {
-      // Determine fetch configuration
-      let endpoint = '';
-      let storeName = '';
-      let dateKey = 'created_at';
-      let idKey = '';
-      const startDate = `${year}-01-01`;
-      const endDate = `${year + 1}-01-01`;
-
-      // Params common to all; typed as Record for dynamic key assignment
-      // /posts.json caps at 200/page; other endpoints allow up to 1000.
-      const params: Record<string, unknown> = {
-        limit: metric === 'uploads' ? 200 : 1000,
-      };
-
-      const normalizedName = (userInfo.name || '').replace(/ /g, '_');
-      // Hourly Stats: Initialize empty
-      let hourlyCounts = new Array<number>(24).fill(0);
-
-      switch (metric) {
-        case 'uploads':
-          endpoint = '/posts.json';
-          storeName = 'uploads';
-          dateKey = 'created_at';
-          idKey = 'uploader_id';
-          params['only'] = 'uploader_id,created_at';
-          break;
-        case 'approvals':
-          endpoint = '/post_approvals.json';
-          storeName = 'approvals';
-          dateKey = 'created_at';
-          idKey = 'user_id';
-          params['search[user_id]'] = userInfo.id;
-          params['only'] = 'id,post_id,created_at';
-          break;
-        case 'notes':
-          if (!userInfo.id) throw new Error('User ID required for Notes');
-          endpoint = '/note_versions.json';
-          storeName = 'notes';
-          dateKey = 'created_at';
-          idKey = 'updater_id';
-          params['search[updater_id]'] = userInfo.id;
-          params['only'] = 'updater_id,created_at';
-          break;
-        default:
-          return {} as MetricData;
-      }
-
-      const table = this.db[storeName];
+      const cfg = this.resolveMetricFetchConfig(metric, userInfo, year);
+      if (cfg === null) return {} as MetricData;
       const userIdVal = userInfo.id || userInfo.name;
-
-      // [New] Check Completion Cache
       const isYearCompleteCache = await this.checkYearCompletion(
         userIdVal,
         metric,
         year,
       );
 
-      // 0. Integrity Check (Past Years Only - Uploads Only)
-      // Fix for partial data persistence issues
-      let forceFullFetch = false;
+      const forceFullFetch = await this.runUploadsIntegrityCheck({
+        metric,
+        year,
+        normalizedName: cfg.normalizedName,
+        table: cfg.table,
+        userIdVal,
+        startDate: cfg.startDate,
+        isYearCompleteCache,
+      });
 
-      if (
-        !isYearCompleteCache &&
-        metric === 'uploads' &&
-        year < new Date().getFullYear()
-      ) {
-        try {
-          // normalizedName is already defined above
-          // Align Remote check to strict year (Dec 31st) to match Local check
-          const strictEndDate = `${year + 1}-01-01`;
-          const checkRange = `${startDate}...${strictEndDate}`;
-          const queryTags = `user:${normalizedName} date:${checkRange}`;
+      const state = await this.loadCachedYearState({
+        table: cfg.table,
+        userIdVal,
+        startDate: cfg.startDate,
+        year,
+        metric,
+        forceFullFetch,
+        isYearCompleteCache,
+      });
 
-          // A. Remote Count
-          const remoteCount = await this.fetchRemoteCount(queryTags);
-
-          // B. Local Count
-          // Align Local check to match Remote (wide) range
-          const matchedEndDate = `${year}-12-31`;
-
-          // Cursor iteration: sum counts without loading all records into memory
-          let localCount = 0;
-          await table
-            .where('id')
-            .between(
-              `${userIdVal}_${startDate}`,
-              `${userIdVal}_${matchedEndDate}\uffff`,
-              true,
-              true, // Inclusive to match Remote's "..." behavior on Jan 1st
-            )
-            .each((cur: ApiItem) => {
-              localCount += cur['count'] || 0;
-            });
-
-          // C. Compare (Strict)
-          if (remoteCount !== localCount) {
-            log.warn(`Data mismatch detected for ${year}, forcing full sync`, {
-              remoteCount,
-              localCount,
-            });
-
-            // Safe Deletion: Strictly perform deletion up to Dec 31st of the current year.
-            // Previously, using endDate (Jan 1st next year) + \uffff caused "2025-01-01" to be deleted
-            // because "2025-01-01" < "2025-01-01\uffff".
-            const deleteEndDate = `${year}-12-31`;
-
-            // Force fetch from start
-            await table
-              .where('id')
-              .between(
-                `${userIdVal}_${startDate}`,
-                `${userIdVal}_${deleteEndDate}\uffff`,
-                true,
-                true, // Inclusive: Delete up to Dec 31st fully.
-              )
-              .delete();
-
-            forceFullFetch = true; // Flag to skip "lastEntry" check below
-          } else {
-            // Data is good using 'lastEntry' Logic below
-          }
-        } catch (e: unknown) {
-          log.warn(
-            'Integrity check failed (Network/API), proceeding with cache',
-            {error: e},
-          );
-        }
+      if (!isYearCompleteCache) {
+        await this.fetchAndPersistYear({
+          cfg,
+          metric,
+          year,
+          userInfo,
+          userIdVal,
+          state,
+          forceFullFetch,
+          onProgress,
+        });
       }
 
-      // 1. Check for latest cached date for this user in this year
-      // We use the ID range to efficiently find the last entry for this user.
-      // ID format: "UserId_YYYY-MM-DD"
-      let fetchFromDate = null; // Default to null (Fetch ALL if no cache)
+      return this.loadYearResultFromCache({
+        table: cfg.table,
+        userIdVal,
+        startDate: cfg.startDate,
+        year,
+        metric,
+        isYearCompleteCache,
+        hourlyCounts: state.hourlyCounts,
+      });
+    } catch (e: unknown) {
+      log.error('Metric data fetch failed', {error: e});
+      throw e; // Propagate error to UI
+    }
+  }
 
-      // Query range for this specific year to see where we left off
-      let lastEntry: ApiItem | null = null;
-      let existingHourlyStats: Array<{hour: number; count: number}> = []; // Store existing hourly stats for delta merging
+  /**
+   * Resolve the per-metric API endpoint + IndexedDB store + base query
+   * params. The `/posts.json` endpoint caps at 200/page; the other two
+   * endpoints allow up to 1000. Throws for the `notes` metric when
+   * `userInfo.id` is missing (the .json endpoint requires it).
+   */
+  private resolveMetricFetchConfig(
+    metric: Metric,
+    userInfo: TargetUser,
+    year: number,
+  ): {
+    endpoint: string;
+    storeName: string;
+    dateKey: string;
+    idKey: string;
+    params: Record<string, unknown>;
+    normalizedName: string;
+    startDate: string;
+    endDate: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any;
+  } | null {
+    const startDate = `${year}-01-01`;
+    const endDate = `${year + 1}-01-01`;
+    const normalizedName = (userInfo.name || '').replace(/ /g, '_');
+    const params: Record<string, unknown> = {
+      limit: metric === 'uploads' ? 200 : 1000,
+    };
+    let endpoint = '';
+    let storeName = '';
+    const dateKey = 'created_at';
+    let idKey = '';
 
-      if (!forceFullFetch && !isYearCompleteCache) {
-        lastEntry = await table
-          .where('id')
-          .between(
-            `${userIdVal}_${startDate}`,
-            `${userIdVal}_${year}-12-31\uffff`,
-            true,
-            true,
-          )
-          .last();
+    switch (metric) {
+      case 'uploads':
+        endpoint = '/posts.json';
+        storeName = 'uploads';
+        idKey = 'uploader_id';
+        params['only'] = 'uploader_id,created_at';
+        break;
+      case 'approvals':
+        endpoint = '/post_approvals.json';
+        storeName = 'approvals';
+        idKey = 'user_id';
+        params['search[user_id]'] = userInfo.id;
+        params['only'] = 'id,post_id,created_at';
+        break;
+      case 'notes':
+        if (!userInfo.id) throw new Error('User ID required for Notes');
+        endpoint = '/note_versions.json';
+        storeName = 'notes';
+        idKey = 'updater_id';
+        params['search[updater_id]'] = userInfo.id;
+        params['only'] = 'updater_id,created_at';
+        break;
+      default:
+        // Unknown metric: signal "no config, return empty MetricData".
+        // Preserves the original getMetricData contract of swallowing
+        // unsupported metrics rather than throwing — older callers may
+        // pass synthetic metric strings during onboarding.
+        return null;
+    }
 
-        // Load existing hourly stats for delta merge
-        existingHourlyStats = await this.db.hourly_stats
+    return {
+      endpoint,
+      storeName,
+      dateKey,
+      idKey,
+      params,
+      normalizedName,
+      startDate,
+      endDate,
+      table: this.db[storeName],
+    };
+  }
+
+  /**
+   * Past-year uploads-only integrity check: compare the remote count
+   * (via `/counts/posts.json`) against the local Dexie sum. On mismatch,
+   * delete this year's local rows and return `true` to force a full
+   * refetch downstream. Bail silently (return false) on network errors
+   * — the cache is still usable, just possibly stale.
+   */
+  private async runUploadsIntegrityCheck(args: {
+    metric: Metric;
+    year: number;
+    normalizedName: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any;
+    userIdVal: string;
+    startDate: string;
+    isYearCompleteCache: boolean;
+  }): Promise<boolean> {
+    const {
+      metric,
+      year,
+      normalizedName,
+      table,
+      userIdVal,
+      startDate,
+      isYearCompleteCache,
+    } = args;
+    if (
+      isYearCompleteCache ||
+      metric !== 'uploads' ||
+      year >= new Date().getFullYear()
+    ) {
+      return false;
+    }
+
+    try {
+      // Align Remote check to strict year (Dec 31st) to match Local check
+      const strictEndDate = `${year + 1}-01-01`;
+      const checkRange = `${startDate}...${strictEndDate}`;
+      const queryTags = `user:${normalizedName} date:${checkRange}`;
+
+      const remoteCount = await this.fetchRemoteCount(queryTags);
+
+      // Align Local check to match Remote (wide) range. Cursor iteration:
+      // sum counts without loading all records into memory.
+      const matchedEndDate = `${year}-12-31`;
+      let localCount = 0;
+      await table
+        .where('id')
+        .between(
+          `${userIdVal}_${startDate}`,
+          `${userIdVal}_${matchedEndDate}\uffff`,
+          true,
+          true, // Inclusive to match Remote's "..." behavior on Jan 1st
+        )
+        .each((cur: ApiItem) => {
+          localCount += cur['count'] || 0;
+        });
+
+      if (remoteCount === localCount) return false;
+
+      log.warn(`Data mismatch detected for ${year}, forcing full sync`, {
+        remoteCount,
+        localCount,
+      });
+
+      // Safe Deletion: Strictly delete up to Dec 31st of this year.
+      // Using endDate (Jan 1st next year) + \uffff would also delete
+      // "YYYY+1-01-01" because "YYYY+1-01-01" < "YYYY+1-01-01\uffff".
+      const deleteEndDate = `${year}-12-31`;
+      await table
+        .where('id')
+        .between(
+          `${userIdVal}_${startDate}`,
+          `${userIdVal}_${deleteEndDate}\uffff`,
+          true,
+          true,
+        )
+        .delete();
+
+      return true;
+    } catch (e: unknown) {
+      log.warn('Integrity check failed (Network/API), proceeding with cache', {
+        error: e,
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Look up the last cached entry for this user/year and seed the
+   * hourly-counts array from Dexie so the fetch loop can do delta merges
+   * without double-counting. Skipped (returns the empty initial state)
+   * when forceFullFetch is set or the year is fully cached.
+   */
+  private async loadCachedYearState(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any;
+    userIdVal: string;
+    startDate: string;
+    year: number;
+    metric: Metric;
+    forceFullFetch: boolean;
+    isYearCompleteCache: boolean;
+  }): Promise<{
+    fetchFromDate: string | null;
+    lastEntry: ApiItem | null;
+    hourlyCounts: number[];
+  }> {
+    const {
+      table,
+      userIdVal,
+      startDate,
+      year,
+      metric,
+      forceFullFetch,
+      isYearCompleteCache,
+    } = args;
+    const hourlyCounts = new Array<number>(24).fill(0);
+    let lastEntry: ApiItem | null = null;
+    let fetchFromDate: string | null = null;
+
+    if (!forceFullFetch && !isYearCompleteCache) {
+      lastEntry = await table
+        .where('id')
+        .between(
+          `${userIdVal}_${startDate}`,
+          `${userIdVal}_${year}-12-31\uffff`,
+          true,
+          true,
+        )
+        .last();
+
+      const existingHourlyStats: Array<{hour: number; count: number}> =
+        await this.db.hourly_stats
           .where('id')
           .between(
             `${userIdVal}_${metric}_${year}_00`,
@@ -413,263 +533,282 @@ export class DataManager {
           )
           .toArray();
 
-        // Populate current hourlyCounts from DB
-        if (existingHourlyStats.length > 0) {
-          existingHourlyStats.forEach(stat => {
-            if (stat.hour >= 0 && stat.hour < 24) {
-              hourlyCounts[stat.hour] = stat.count;
-            }
-          });
-        }
-      }
-
-      if (lastEntry) {
-        const lastDate = new Date(lastEntry['date']);
-        const currentYear = new Date().getFullYear();
-
-        // Check if this is a past year and we effectively have data up to the end
-        const isYearComplete = year < currentYear;
-
-        if (isYearComplete) {
-          // If year is fully cached, DO NOT rollback 3 days.
-          // Set to endDate so the optimization check passes.
-          fetchFromDate = endDate;
-        } else {
-          // Normal Safety Buffer: Start fetching from 3 days prior
-          lastDate.setDate(lastDate.getDate() - 3);
-          const bufferDateStr = lastDate.toISOString().slice(0, 10);
-          // Ensure we don't go before the year start IF using range queries
-          // But for Approvals (no range), we just want the checkpoint.
-          // For now, keeping logical consistency:
-          // If fetching range-based, fetchFromDate needs to be valid.
-          fetchFromDate = bufferDateStr;
-        }
-      }
-
-      // Optimization: If cached up to Dec 31st of that year, and year is past, skip fetch.
-      // Optimization Heuristic REMOVED.
-      // Reason: It causes false positives when boundary data from the NEXT year (e.g., Jan 1st) exists.
-      // We strictly rely on 'isYearCompleteCache' now.
-      /*
-      if (fetchFromDate && fetchFromDate >= endDate && year < new Date().getFullYear()) {
-
-
-      } else {
-      */
-      {
-        // Set API Params & Fetch Strategy
-        let stopDate = null;
-        const fetchDirection = 'desc';
-
-        // hourlyCounts is already defined above
-
-        // [Strategy B] Server-Side Range Filtering (Uploads, Notes, Approvals)
-        // Use range query to strictly limit what the API returns.
-        const rangeStart = fetchFromDate || startDate;
-        // Narrow endDate when we have cached data for the current year:
-        // fetching to Jan 1 of NEXT year forces the API to scan months of
-        // empty range. Cap the scan around today.
-        //
-        // Symmetric ±3-day window around today:
-        //   - Backward: the existing `lastEntry - 3 days` rollback (see
-        //     above) catches mis-aligned rows near the cache boundary.
-        //   - Forward: +3 days catches (1) any future-dated posts (rare
-        //     but possible — backend queueing / clock skew / rating
-        //     review) and (2) any browser↔Danbooru timezone offset.
-        //     Danbooru's `date:A...B` is upper-bound-exclusive AND
-        //     evaluated in the user's configured TZ, while
-        //     `toISOString()` serializes in UTC — so when the Danbooru
-        //     TZ is ahead of UTC (e.g. KST = UTC+9), a +1 UTC cutoff
-        //     falls on the very day the user is uploading and silently
-        //     excludes today's posts. +3 days absorbs both concerns.
-        let effectiveEndDate = endDate;
-        if (lastEntry && year === new Date().getFullYear()) {
-          const cutoff = new Date();
-          cutoff.setDate(cutoff.getDate() + 3);
-          effectiveEndDate = cutoff.toISOString().slice(0, 10);
-        }
-        const fetchRange = `${rangeStart}...${effectiveEndDate}`;
-
-        if (metric === 'uploads') {
-          params['tags'] = `user:${normalizedName} date:${fetchRange}`;
-        } else if (metric === 'notes') {
-          params['search[created_at]'] = fetchRange;
-        } else if (metric === 'approvals') {
-          params['search[created_at]'] = fetchRange;
-        }
-
-        // Server limits the range, so we don't need client-side stopDate (redundant but harmless)
-        stopDate = null;
-
-        // 2. Fetch missing range
-        if (!isYearCompleteCache) {
-          // Delta fetch: we have cached data and are only fetching a small
-          // range (a few days to a few weeks). Use batch size 1 to avoid
-          // wasted parallel requests that return empty pages.
-          const isDeltaFetch = !!lastEntry && !forceFullFetch;
-          const items = await this.fetchAllPages(
-            endpoint,
-            params,
-            stopDate,
-            dateKey,
-            fetchDirection,
-            onProgress,
-            isDeltaFetch,
-          );
-
-          // 3. Aggregate
-          const dailyCounts: Record<
-            string,
-            {count: number; postList: number[]}
-          > = {};
-
-          items.forEach((item: ApiItem) => {
-            const rawDate = item[dateKey] || item['created_at'];
-            if (!rawDate) return;
-
-            // Validation: Strict User ID Check
-            if (
-              userInfo.id &&
-              item[idKey] &&
-              String(item[idKey]) !== String(userInfo.id)
-            ) {
-              log.warn('ID mismatch, skipping item', {
-                expected: userInfo.id,
-                got: item[idKey],
-                itemDate: rawDate,
-              });
-              return;
-            }
-
-            const dateStr = String(rawDate).slice(0, 10);
-            if (!dailyCounts[dateStr]) {
-              dailyCounts[dateStr] = {count: 0, postList: []};
-            }
-            dailyCounts[dateStr].count += 1;
-            if (item['post_id']) {
-              dailyCounts[dateStr].postList.push(item['post_id']);
-            }
-
-            // Hourly Aggregation
-            // Fix for Data Doubling:
-            // We strictly only add to hourly_stats if the data is NEWER than what we already have.
-            // Since existingHourlyStats (loaded from DB) already contains data up to lastEntry,
-            // adding counts from the overlapped buffer period would double-count them.
-            // Note: This effectively freezes the hourly distribution for the 'lastEntry' day (today)
-            // until the next day, but this is preferable to corrupting the data with duplication.
-            const isNewData =
-              !lastEntry || String(rawDate).slice(0, 10) > lastEntry['date'];
-
-            const itemDate = new Date(rawDate);
-            const hour = itemDate.getHours();
-            if (isNewData && !isNaN(hour) && hour >= 0 && hour < 24) {
-              hourlyCounts[hour]++;
-            }
-          });
-
-          // 4. Upsert into DB
-          const bulkData: DailyEntry[] = [];
-          const detailData: ApprovalDetailEntry[] = [];
-
-          Object.entries(dailyCounts).forEach(([date, entry]) => {
-            const id = `${userIdVal}_${date}`;
-            bulkData.push({
-              id,
-              userId: userIdVal,
-              date,
-              count: entry.count,
-            });
-
-            if (metric === 'approvals') {
-              detailData.push({
-                id,
-                userId: userIdVal,
-                post_list: entry.postList,
-              });
-            }
-          });
-
-          // [Fix] Hourly Stats are already initialized from DB and incremented with new data.
-          // We just need to save the current state of 'hourlyCounts' to the DB.
-          const hourlyBulk: HourlyStatEntry[] = [];
-          hourlyCounts.forEach((count, h) => {
-            hourlyBulk.push({
-              id: `${userIdVal}_${metric}_${year}_${String(h).padStart(2, '0')}`,
-              userId: userIdVal,
-              metric: metric,
-              year: year,
-              hour: h,
-              count: count,
-            });
-          });
-
-          // Wrap all writes in a single transaction for atomicity
-          await this.db.transaction(
-            'rw',
-            [table, this.db.approvals_detail, this.db.hourly_stats],
-            async () => {
-              if (bulkData.length > 0) {
-                await table.bulkPut(bulkData);
-              }
-              if (detailData.length > 0) {
-                await this.db.approvals_detail.bulkPut(detailData);
-              }
-              await this.db.hourly_stats.bulkPut(hourlyBulk);
-            },
-          );
-
-          // Mark as complete if it's a past year
-          if (year < new Date().getFullYear()) {
-            await this.markYearComplete(userIdVal, metric, year);
-          }
-        }
-      } // End else (fetch logic)
-
-      // 5. Return Full Year Data from Cache
-      const dataEndDate = `${year}-12-31`; // Strictly return data only for this year
-      const fullYearData: DailyEntry[] = await table
-        .where('id')
-        .between(
-          `${userIdVal}_${startDate}`,
-          `${userIdVal}_${dataEndDate}\uffff`,
-          true,
-          true,
-        )
-        .toArray();
-
-      const resultMap: Record<string, number> = {};
-      fullYearData.forEach(i => (resultMap[i.date] = i.count));
-
-      // If cached complete, we need to load hourly stats from DB as we skipped the fetch block
-      // (If not complete, we populated 'hourlyCounts' above during fetch/merge)
-      // CHECK: If isYearCompleteCache is true, we must load.
-      // If we fetched data (else block), hourlyCounts is already populated.
-      if (isYearCompleteCache) {
-        const cachedHourly: Array<{hour: number; count: number}> =
-          await this.db.hourly_stats
-            .where('id')
-            .between(
-              `${userIdVal}_${metric}_${year}_00`,
-              `${userIdVal}_${metric}_${year}_24`,
-              true,
-              false,
-            )
-            .toArray();
-
-        // Reset and fill
-        hourlyCounts = new Array<number>(24).fill(0);
-        cachedHourly.forEach(stat => {
+      if (existingHourlyStats.length > 0) {
+        existingHourlyStats.forEach(stat => {
           if (stat.hour >= 0 && stat.hour < 24) {
             hourlyCounts[stat.hour] = stat.count;
           }
         });
       }
-
-      return {daily: resultMap, hourly: hourlyCounts};
-    } catch (e: unknown) {
-      log.error('Metric data fetch failed', {error: e});
-      throw e; // Propagate error to UI
     }
+
+    if (lastEntry) {
+      // Past year that has data → set fetchFromDate to Jan 1 of next
+      // year to mark "no further fetch needed". Current year → apply
+      // the 3-day safety buffer to the last entry's date.
+      if (year < new Date().getFullYear()) {
+        fetchFromDate = `${year + 1}-01-01`;
+      } else {
+        const lastDate = new Date(lastEntry['date']);
+        lastDate.setDate(lastDate.getDate() - 3);
+        fetchFromDate = lastDate.toISOString().slice(0, 10);
+      }
+    }
+
+    return {fetchFromDate, lastEntry, hourlyCounts};
+  }
+
+  /**
+   * Build the server-side range query, run the paginated fetch, aggregate
+   * the raw items into daily counts + an hourly histogram (delta-merged
+   * with the existing hourlyCounts so days in the overlap window aren't
+   * double-counted), and atomically upsert daily/approvals_detail/
+   * hourly_stats. Marks the year complete on past-year fetches.
+   *
+   * Mutates `state.hourlyCounts` in place — the orchestrator's final
+   * cache read picks up the merged values.
+   */
+  private async fetchAndPersistYear(args: {
+    cfg: {
+      endpoint: string;
+      params: Record<string, unknown>;
+      dateKey: string;
+      idKey: string;
+      normalizedName: string;
+      startDate: string;
+      endDate: string;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      table: any;
+    };
+    metric: Metric;
+    year: number;
+    userInfo: TargetUser;
+    userIdVal: string;
+    state: {
+      fetchFromDate: string | null;
+      lastEntry: ApiItem | null;
+      hourlyCounts: number[];
+    };
+    forceFullFetch: boolean;
+    onProgress: ((count: number) => void) | null;
+  }): Promise<void> {
+    const {
+      cfg,
+      metric,
+      year,
+      userInfo,
+      userIdVal,
+      state,
+      forceFullFetch,
+      onProgress,
+    } = args;
+    const {
+      endpoint,
+      params,
+      dateKey,
+      idKey,
+      normalizedName,
+      startDate,
+      endDate,
+      table,
+    } = cfg;
+    const {fetchFromDate, lastEntry, hourlyCounts} = state;
+
+    // [Strategy B] Server-side range filtering. Narrow endDate when we
+    // have cached data for the current year — fetching to Jan 1 of NEXT
+    // year forces the API to scan months of empty range.
+    //
+    // Symmetric ±3-day window around today:
+    //   - Backward: the existing `lastEntry - 3 days` rollback (in
+    //     loadCachedYearState) catches mis-aligned rows near the cache
+    //     boundary.
+    //   - Forward: +3 days catches (1) any future-dated posts (rare
+    //     but possible — backend queueing / clock skew / rating
+    //     review) and (2) any browser↔Danbooru timezone offset.
+    //     Danbooru's `date:A...B` is upper-bound-exclusive AND
+    //     evaluated in the user's configured TZ, while
+    //     `toISOString()` serializes in UTC — so when the Danbooru TZ
+    //     is ahead of UTC (e.g. KST = UTC+9), a +1 UTC cutoff falls on
+    //     the very day the user is uploading and silently excludes
+    //     today's posts. +3 days absorbs both concerns.
+    const rangeStart = fetchFromDate || startDate;
+    let effectiveEndDate = endDate;
+    if (lastEntry && year === new Date().getFullYear()) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() + 3);
+      effectiveEndDate = cutoff.toISOString().slice(0, 10);
+    }
+    const fetchRange = `${rangeStart}...${effectiveEndDate}`;
+
+    if (metric === 'uploads') {
+      params['tags'] = `user:${normalizedName} date:${fetchRange}`;
+    } else if (metric === 'notes' || metric === 'approvals') {
+      params['search[created_at]'] = fetchRange;
+    }
+
+    // Delta fetch: we have cached data and are only fetching a small
+    // range. Use batch size 1 to avoid wasted parallel requests that
+    // return empty pages.
+    const isDeltaFetch = !!lastEntry && !forceFullFetch;
+    const items = await this.fetchAllPages(
+      endpoint,
+      params,
+      null,
+      dateKey,
+      'desc',
+      onProgress,
+      isDeltaFetch,
+    );
+
+    const dailyCounts: Record<string, {count: number; postList: number[]}> = {};
+
+    items.forEach((item: ApiItem) => {
+      const rawDate = item[dateKey] || item['created_at'];
+      if (!rawDate) return;
+
+      // Strict User ID Check
+      if (
+        userInfo.id &&
+        item[idKey] &&
+        String(item[idKey]) !== String(userInfo.id)
+      ) {
+        log.warn('ID mismatch, skipping item', {
+          expected: userInfo.id,
+          got: item[idKey],
+          itemDate: rawDate,
+        });
+        return;
+      }
+
+      const dateStr = String(rawDate).slice(0, 10);
+      if (!dailyCounts[dateStr]) {
+        dailyCounts[dateStr] = {count: 0, postList: []};
+      }
+      dailyCounts[dateStr].count += 1;
+      if (item['post_id']) {
+        dailyCounts[dateStr].postList.push(item['post_id']);
+      }
+
+      // Hourly aggregation: strictly only add to hourly_stats if the
+      // data is NEWER than what's in DB. Since existingHourlyStats
+      // already covers up to lastEntry, adding counts from the
+      // overlapped buffer period would double-count them. This freezes
+      // the hourly distribution for the lastEntry day (today) until the
+      // next day — preferable to corrupting the data with duplication.
+      const isNewData =
+        !lastEntry || String(rawDate).slice(0, 10) > lastEntry['date'];
+
+      const itemDate = new Date(rawDate);
+      const hour = itemDate.getHours();
+      if (isNewData && !isNaN(hour) && hour >= 0 && hour < 24) {
+        hourlyCounts[hour]++;
+      }
+    });
+
+    const bulkData: DailyEntry[] = [];
+    const detailData: ApprovalDetailEntry[] = [];
+
+    Object.entries(dailyCounts).forEach(([date, entry]) => {
+      const id = `${userIdVal}_${date}`;
+      bulkData.push({id, userId: userIdVal, date, count: entry.count});
+      if (metric === 'approvals') {
+        detailData.push({id, userId: userIdVal, post_list: entry.postList});
+      }
+    });
+
+    const hourlyBulk: HourlyStatEntry[] = [];
+    hourlyCounts.forEach((count, h) => {
+      hourlyBulk.push({
+        id: `${userIdVal}_${metric}_${year}_${String(h).padStart(2, '0')}`,
+        userId: userIdVal,
+        metric,
+        year,
+        hour: h,
+        count,
+      });
+    });
+
+    await this.db.transaction(
+      'rw',
+      [table, this.db.approvals_detail, this.db.hourly_stats],
+      async () => {
+        if (bulkData.length > 0) {
+          await table.bulkPut(bulkData);
+        }
+        if (detailData.length > 0) {
+          await this.db.approvals_detail.bulkPut(detailData);
+        }
+        await this.db.hourly_stats.bulkPut(hourlyBulk);
+      },
+    );
+
+    if (year < new Date().getFullYear()) {
+      await this.markYearComplete(userIdVal, metric, year);
+    }
+  }
+
+  /**
+   * Read the full year's daily counts back out of Dexie and assemble the
+   * result. When the year is fully cached we re-read hourly_stats from
+   * scratch (the fetch path never ran, so `hourlyCounts` is still the
+   * zero-filled initial array); otherwise we keep the in-memory hourly
+   * array that fetchAndPersistYear just updated in place.
+   */
+  private async loadYearResultFromCache(args: {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any;
+    userIdVal: string;
+    startDate: string;
+    year: number;
+    metric: Metric;
+    isYearCompleteCache: boolean;
+    hourlyCounts: number[];
+  }): Promise<MetricData> {
+    const {
+      table,
+      userIdVal,
+      startDate,
+      year,
+      metric,
+      isYearCompleteCache,
+      hourlyCounts,
+    } = args;
+
+    const dataEndDate = `${year}-12-31`;
+    const fullYearData: DailyEntry[] = await table
+      .where('id')
+      .between(
+        `${userIdVal}_${startDate}`,
+        `${userIdVal}_${dataEndDate}\uffff`,
+        true,
+        true,
+      )
+      .toArray();
+
+    const resultMap: Record<string, number> = {};
+    fullYearData.forEach(i => (resultMap[i.date] = i.count));
+
+    let hourly = hourlyCounts;
+    if (isYearCompleteCache) {
+      const cachedHourly: Array<{hour: number; count: number}> =
+        await this.db.hourly_stats
+          .where('id')
+          .between(
+            `${userIdVal}_${metric}_${year}_00`,
+            `${userIdVal}_${metric}_${year}_24`,
+            true,
+            false,
+          )
+          .toArray();
+      hourly = new Array<number>(24).fill(0);
+      cachedHourly.forEach(stat => {
+        if (stat.hour >= 0 && stat.hour < 24) {
+          hourly[stat.hour] = stat.count;
+        }
+      });
+    }
+
+    return {daily: resultMap, hourly};
   }
 
   /**
