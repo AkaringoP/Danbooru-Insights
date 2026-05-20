@@ -441,3 +441,47 @@ export function migrateNsfwKey(): void {
   localStorage.removeItem('danbooru_grass_nsfw_enabled');
   localStorage.removeItem('tag_analytics_nsfw_enabled');
 }
+
+// ---------------------------------------------------------------------------
+// Count-cache TTL preference (shared by UserAnalyticsApp and
+// TagAnalyticsApp). Controls how long /counts/posts.json-derived values
+// stored in piestats / tag_analytics may be served from cache before a
+// fresh fetch is triggered on dashboard open. Stored as integer minutes
+// so the settings popover input maps 1:1.
+// ---------------------------------------------------------------------------
+
+/** localStorage key for the count-cache TTL preference. */
+const COUNT_CACHE_TTL_MIN_KEY = 'di.count_cache_ttl_min';
+
+/** Default count-cache TTL when the preference is unset (minutes). */
+const DEFAULT_COUNT_CACHE_TTL_MIN = 10;
+
+/**
+ * Returns the user-configured count-cache TTL in minutes. Falls back to
+ * `DEFAULT_COUNT_CACHE_TTL_MIN` when unset or unparseable. Always >= 1
+ * so callers can multiply directly without zero-TTL surprises.
+ */
+export function getCountCacheTtlMin(): number {
+  const raw = localStorage.getItem(COUNT_CACHE_TTL_MIN_KEY);
+  if (raw === null) return DEFAULT_COUNT_CACHE_TTL_MIN;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return DEFAULT_COUNT_CACHE_TTL_MIN;
+  }
+  return parsed;
+}
+
+/** Convenience: TTL in milliseconds (the form caller pass to `getStats`). */
+export function getCountCacheTtlMs(): number {
+  return getCountCacheTtlMin() * 60_000;
+}
+
+/**
+ * Persists the count-cache TTL preference. Clamps to >= 1 minute so the
+ * preference never disables caching outright (callers can still pass
+ * `forceRefresh=true` for one-shot bypass).
+ */
+export function setCountCacheTtlMin(minutes: number): void {
+  const clamped = Math.max(1, Math.floor(minutes));
+  localStorage.setItem(COUNT_CACHE_TTL_MIN_KEY, String(clamped));
+}

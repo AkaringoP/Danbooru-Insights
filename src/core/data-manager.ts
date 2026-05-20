@@ -108,19 +108,34 @@ export class DataManager {
 
   /**
    * Retrieves cached statistics for a given user and key.
+   *
+   * When `maxAgeMs` is provided, records older than that age (relative to
+   * `record.updated_at`) are treated as cache misses and return null —
+   * callers then refetch and overwrite. This is the count-cache TTL path
+   * used by /counts/posts.json-derived distributions (v9.6); pre-v9.6
+   * callers pass nothing and get the original "trust cache until reset"
+   * behaviour.
+   *
    * @param {string} key The unique key for the stats (e.g., 'rating_dist').
    * @param {string|number} userId The user's ID.
-   * @return {Promise<unknown>} The cached data or null if not found.
+   * @param {number} [maxAgeMs] Optional age cap in milliseconds.
+   * @return {Promise<unknown>} The cached data or null if not found / expired.
    */
-  async getStats(key: string, userId: string | number): Promise<unknown> {
+  async getStats(
+    key: string,
+    userId: string | number,
+    maxAgeMs?: number,
+  ): Promise<unknown> {
     try {
       const record = await this.db.piestats.get({key, userId});
-      if (record) {
-        // Optional: Check expiration if we wanted strictly time-based,
-        // but user said "expire on full reset", so we effectively trust cache until reset.
-        return record.data;
+      if (!record) return null;
+      if (maxAgeMs !== undefined && record.updated_at) {
+        const age = Date.now() - new Date(record.updated_at).getTime();
+        // Negative ages (future-dated, clock skew) also miss so a corrupt
+        // timestamp does not pin a stale value forever.
+        if (age < 0 || age > maxAgeMs) return null;
       }
-      return null;
+      return record.data;
     } catch (e: unknown) {
       log.warn('Failed to load stats cache', {error: e});
       return null;
