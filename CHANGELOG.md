@@ -58,6 +58,20 @@ for widgets that need a minimum amount of data to be meaningful.
   invalidated via an embedded schema version
   (`IMPLICATIONS_CACHE_SCHEMA_VERSION = 2`) so pre-v9.6 entries are
   refetched automatically.
+- **Random / Recent / Most Popular post cards now filter to
+  `status:active`.** Without this, the Random Post pick could land on
+  a banned or deleted post and render as a blank thumbnail card
+  (reported by user). The same filter is applied to Top Posts (per
+  rating) and Recent Popular Posts so a banned high-score post no
+  longer occupies the top slot of either widget.
+
+### Changed
+- **Scatter Plot Score-tab grid density** is now adaptive. The Y-axis
+  step size picks the nicest round value (multiples of 1, 2, 2.5, 5,
+  10 × 10^N) closest to `maxVal / 6`, so users with a small score
+  range and users with a large score range both see ~6 grid sections
+  at consistent density. Previously the step was hard-tiered (50, 100,
+  500), which gave only 3 sections to typical-range users.
 
 ### Changed
 - `RateLimitedFetch` concurrency bumped 6 → 8 and rps 6 → 9 to absorb
