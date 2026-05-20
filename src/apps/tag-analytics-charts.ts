@@ -53,6 +53,10 @@ export class TagAnalyticsChartRenderer {
    * @param {string} type - The type of data to render ('status', 'rating', 'copyright', 'character', 'commentary').
    * @param {Object} tagData - The full tag data object containing counts and other metadata.
    */
+  // T-26 baseline: 258 LOC / complexity 22. D3 arc + label + tooltip +
+  // legend + click + percentile sub-flows in one method. Decomposition
+  // candidate; parallel to user-side renderPieWidget (T-23).
+  // eslint-disable-next-line max-lines-per-function, complexity
   renderPieChart(type: string, tagData: TagAnalyticsMeta): void {
     const container = document.getElementById('status-pie-chart');
     const legendContainer = document.getElementById('status-pie-legend');
@@ -367,6 +371,9 @@ export class TagAnalyticsChartRenderer {
    * @param {!Array<{milestone: number, post: ?Object}>} milestonePosts The list of milestone data.
    * @param {function(): void} onNsfwUpdate Callback to apply NSFW visibility after rendering.
    */
+  // T-26 baseline: complexity 18. Branches across milestone state
+  // (achieved/upcoming/locked) × NSFW visibility × post-availability.
+  // eslint-disable-next-line complexity
   renderMilestones(
     milestonePosts: MilestoneEntry[],
     onNsfwUpdate: () => void,
@@ -610,6 +617,9 @@ export class TagAnalyticsChartRenderer {
    * @param {string} tagName The tag name used for search URL construction.
    * @param {!Array<Object>=} milestones Optional milestones to overlay.
    */
+  // T-26 baseline: 227 LOC. D3 axis + bar + tooltip + milestone overlay in
+  // one method. Decomposition candidate; not in Phase 5c scope.
+  // eslint-disable-next-line max-lines-per-function
   renderBarChart(
     data: HistoryEntry[],
     selector: string,

@@ -859,6 +859,11 @@ export class DataManager {
    * @param {Function|null} [onProgress=null] Optional callback for reporting fetch progress (count).
    * @return {Promise<ApiItem[]>} List of all fetched items up to the stop condition.
    */
+  // T-26 baseline: complexity 30. Page loop × retry × stop-condition (date /
+  // cursor / empty) × ascending vs descending direction. Critical path used
+  // by every metric fetch. Depth-7 nesting in the stopDate inner loop has a
+  // separate per-line disable below.
+  // eslint-disable-next-line complexity
   async fetchAllPages(
     endpoint: string,
     params: Record<string, unknown>,
@@ -972,6 +977,11 @@ export class DataManager {
 
             if (itemDate) {
               let shouldStop = false;
+              // T-26 baseline: max-depth 7. The asc/desc direction split sits
+              // at the deepest level of the per-item stopDate inner loop;
+              // hoisting it out would require duplicating the loop or
+              // building a comparator just to satisfy the linter.
+              /* eslint-disable max-depth */
               if (direction === 'desc') {
                 // Descending: Stop if item is OLDER (smaller) than stopDate
                 if (itemDate < stopDate) shouldStop = true;
@@ -979,6 +989,7 @@ export class DataManager {
                 // Ascending: Stop if item is NEWER (larger) than stopDate
                 if (itemDate > stopDate) shouldStop = true;
               }
+              /* eslint-enable max-depth */
 
               if (shouldStop) {
                 finished = true;

@@ -185,6 +185,10 @@ function preprocessFrequencyTab(data: PieTabItem[]): PieTabItem[] {
  * Pure.
  */
 function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
+  // T-26 baseline: arrow complexity 22. Tab-specific normalization (status
+  // colors, rating labels, hair_color passthrough, tag fallbacks). Pure
+  // mapping; refactor would be splitting per tab — over-abstraction risk.
+  // eslint-disable-next-line complexity
   return data.map((d: PieTabItem, i: number) => {
     // Widen to a single shape — the union members from PieTabItem all
     // expose these fields optionally, but the type system doesn't narrow
@@ -1182,6 +1186,10 @@ function renderPieFrame(args: {
  * @param firstUploadDate The user's first upload date (needed for some distributions).
  * @returns Cleanup/update callbacks for NSFW toggle integration.
  */
+// T-26 baseline: 203 LOC (3 over budget after T-23). Body is mostly tab
+// table + orchestration; further split would invent helpers without real
+// payoff. Borderline — revisit if it grows.
+// eslint-disable-next-line max-lines-per-function
 export function renderPieWidget(
   container: HTMLElement,
   distributions: Record<string, PieTabItem[]>,
@@ -1436,6 +1444,10 @@ export function renderPieWidget(
  * @param context The chart context providing user information.
  * @returns NSFW update callbacks.
  */
+// T-26 baseline: 265 LOC. Recent / most / sfw / nsfw tab matrix + post
+// fetch + rotation + NSFW gating. Decomposition candidate; parallel to
+// the other large user-analytics widgets but not in Phase 5c scope.
+// eslint-disable-next-line max-lines-per-function
 export function renderTopPostsWidget(
   container: HTMLElement,
   topPosts: TopPostsByRating | null,
@@ -1472,6 +1484,8 @@ export function renderTopPostsWidget(
   let currentMostTab = 'g';
   let currentSfwTab = 'sfw';
 
+  // T-26 baseline: arrow complexity 16. Mode × tab × data-state matrix.
+  // eslint-disable-next-line complexity
   const renderTopPostContent = () => {
     const group = topPostGroups[currentWidgetMode];
     const tabKey =
@@ -1758,6 +1772,9 @@ export async function renderMilestonesWidget(
   let currentMilestoneStep: 'auto' | 'repdigit' | number = 'auto';
   let isMilestoneExpanded = false;
 
+  // T-26 baseline: arrow complexity 26. Step modes (auto/repdigit/N) ×
+  // expand state × per-milestone post hydration × NSFW gating.
+  // eslint-disable-next-line complexity
   const renderMilestones = async () => {
     const dm = new AnalyticsDataManager(db);
     const milestones = await dm.getMilestones(

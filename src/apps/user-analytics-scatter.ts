@@ -184,6 +184,10 @@ function createInitialScatterState(options: ScatterPlotOptions): ScatterState {
 // DOM construction (event handlers attached separately by wire* helpers)
 // ============================================================
 
+// T-26 baseline: 263 LOC. Pure DOM scaffolding for header + filters +
+// canvas wrapper. Decomposition would split per-section but adds noise
+// for a fundamentally flat structure.
+// eslint-disable-next-line max-lines-per-function
 function buildScatterDom(): ScatterDom {
   // Wrapper for Header + Widget
   const wrapper = document.createElement('div');
@@ -516,6 +520,9 @@ function buildScatterDom(): ScatterDom {
  * pass. Pure function: takes the current state + data + canvas dimensions
  * and returns a fresh scale object.
  */
+// T-26 baseline: complexity 20. Axis-domain / padding / step calculations
+// across log/linear modes and per-year filters. Pure, well-tested.
+// eslint-disable-next-line complexity
 function computeScatterScale(
   state: ScatterState,
   scatterData: ScatterDataPoint[],

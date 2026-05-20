@@ -78,6 +78,11 @@ export function computeFontSizes(
 /**
  * Renders a tag cloud widget with category tabs and crossfade transitions.
  */
+// T-26 baseline: 292 LOC. Tag layout + category tabs + tooltip + crossfade
+// + per-tag click routing all live in the widget body. Decomposition
+// candidate; parallel to other large widget functions. Not in Phase 5c
+// scope.
+// eslint-disable-next-line max-lines-per-function
 export function renderTagCloudWidget(
   container: HTMLElement,
   options: TagCloudOptions,

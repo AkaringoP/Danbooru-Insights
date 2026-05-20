@@ -472,6 +472,9 @@ export class AnalyticsDataManager extends DataManager {
    * cached posts at those target positions) and `getNextMilestone` (to find
    * the smallest target above the current total). Pure / no DB access.
    */
+  // T-26 baseline: complexity 24. Step modes auto/repdigit/N + spacing
+  // tables + total-magnitude branches. Stable, well-tested.
+  // eslint-disable-next-line complexity
   buildMilestoneTargets(
     total: number,
     customStep: 'auto' | 'repdigit' | number,
@@ -546,6 +549,9 @@ export class AnalyticsDataManager extends DataManager {
    * the placeholder card at the end of the milestones grid. Returns null if
    * the mode genuinely has no next value (it shouldn't, but kept defensive).
    */
+  // T-26 baseline: complexity 16. Mirrors buildMilestoneTargets' branching
+  // for the "what comes after `total`" question.
+  // eslint-disable-next-line complexity
   getNextMilestone(
     total: number,
     customStep: 'auto' | 'repdigit' | number,
@@ -1023,6 +1029,10 @@ export class AnalyticsDataManager extends DataManager {
    * @param onProgress Optional progress callback for UI updates.
    * @return Created tag items sorted by post count descending.
    */
+  // T-26 baseline: complexity 33. Multi-stage pipeline (page fetch ×
+  // implication batching × tag-status enrichment × NSFW filter × cache
+  // merge). Decomposition candidate.
+  // eslint-disable-next-line complexity
   async getCreatedTags(
     userInfo: TargetUser,
     onProgress?: (message: string) => void,
@@ -1973,6 +1983,9 @@ export class AnalyticsDataManager extends DataManager {
    * @param userInfo Target user
    * @param onProgress Optional progress callback (current, total)
    */
+  // T-26 baseline: complexity 24. Page loop × stale-detect × retry × bulk
+  // commit + dual progress reporting. Decomposition candidate.
+  // eslint-disable-next-line complexity
   async backfillPostMetadata(
     userInfo: TargetUser,
     onProgress?: (current: number, total: number) => void,
@@ -3296,6 +3309,11 @@ export class AnalyticsDataManager extends DataManager {
     const limit = 200; // API Limit
     const WORKER_DELAY = 400; // 5 workers * 1 req / 0.4s = 12.5 req/s (Max)
 
+    // T-26 baseline: arrow complexity 20. Worker body — retry/backoff +
+    // buffer commit ordering + sequential `no` assignment + completion
+    // detection. Already a T-25 extracted helper; further split would
+    // fragment the retry state.
+    // eslint-disable-next-line complexity
     return async (workerId: number) => {
       const workerLabel = `dbi:db:sync:full:worker.${workerId}`;
       const pageLabel = `dbi:db:sync:full:page.w${workerId}`;

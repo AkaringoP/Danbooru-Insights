@@ -1006,6 +1006,11 @@ export class GraphRenderer {
    * @param {string|number} userId The user's ID for settings.
    * @return {Promise<boolean>} Resolves to true if injection was successful.
    */
+  // T-26 baseline: complexity 19. Layout decisions span inline/below mode
+  // × snap-to-edge × measurer cache miss/hit × resize-observer wiring.
+  // Already heavily decomposed in T-24; further split would fragment the
+  // GrassLayout struct's mutation contract.
+  // eslint-disable-next-line complexity
   async injectSkeleton(
     dataManager: DataManager,
     userId: string | number,
@@ -1583,6 +1588,11 @@ export class GraphRenderer {
    * `this.db` / `this.populateSummaryGrid()` etc. without threading them
    * through args.
    */
+  // T-26 baseline: 203 LOC (3 over budget). Builds the footer row (settings
+  // button + collapsed-summary toggle + flyout popover + legend swatches +
+  // summary grid) as one DOM-construction sweep; the parts are coupled via
+  // event handlers on shared refs.
+  // eslint-disable-next-line max-lines-per-function
   private buildGrassFooter(args: {
     mainContainer: HTMLElement;
     metric: string;
@@ -2107,6 +2117,12 @@ export class GraphRenderer {
    * inline/below per-mode geometry and the active `savedWidth`/`savedX`
    * pair on mouseup, which `persistSettings` then writes to IndexedDB.
    */
+  // T-26 baseline: 320 LOC. resize-left / resize-right / move handlers
+  // share the mouse-event lifecycle and the GrassLayout struct closure
+  // (T-24 archive details). Splitting further would either duplicate the
+  // mousedown/mousemove/mouseup boilerplate or invent a comparator
+  // class — both worse than the current factory shape.
+  // eslint-disable-next-line max-lines-per-function
   private createGrassHandle(args: {
     type: 'resize' | 'move';
     side?: 'left' | 'right';
@@ -2176,6 +2192,10 @@ export class GraphRenderer {
           `;
     }
 
+    // T-26 baseline: arrow 254 LOC. The mousedown handler owns the entire
+    // drag session (snapshot start state + onMouseMove + onMouseUp + commit
+    // mode-switch). Inseparable from its closed-over startX/startY/etc.
+    // eslint-disable-next-line max-lines-per-function
     handle.onmousedown = e => {
       e.preventDefault();
       const startX = e.clientX;
@@ -2303,6 +2323,12 @@ export class GraphRenderer {
       const snapEnabled = this.settingsManager.getSnapToEdge();
       let snappedToNat = false;
 
+      // T-26 baseline: arrow complexity 33. Vertical-drag mode-switch
+      // (inline ↔ below) × horizontal snap-to-edge × wrapping detection ×
+      // bounds enforcement, all inside one move handler so the user sees
+      // a single continuous gesture. Decomposition would require sharing
+      // ~12 mutable closure variables across helpers.
+      // eslint-disable-next-line complexity
       const onMouseMove = (mE: MouseEvent): void => {
         const delta = mE.clientX - startX;
 
@@ -2531,6 +2557,10 @@ export class GraphRenderer {
     return handle;
   }
 
+  // T-26 baseline: complexity 18. Year-pick × metric routing × footer
+  // build × interaction wiring × auto-tune triggers. Already T-24 decomposed
+  // into pipeline helpers; remaining branches live in renderGraph itself.
+  // eslint-disable-next-line complexity
   async renderGraph(
     dataMap: MetricData | Record<string, number>,
     year: number,

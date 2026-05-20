@@ -28,6 +28,10 @@ export class ProfileContext {
    * @return {?TargetUser} User info or null if unavailable.
    * @private
    */
+  // T-26 baseline: complexity 38. DOM-scraping fallback chain across three
+  // page types (profile / user index / my-account) × per-field null-guards.
+  // Pulling each scrape branch into its own method would duplicate try/catch.
+  // eslint-disable-next-line complexity
   getTargetUserInfo(): TargetUser | null {
     let name = null;
     let id = null;
