@@ -72,6 +72,16 @@ for widgets that need a minimum amount of data to be meaningful.
   range and users with a large score range both see ~6 grid sections
   at consistent density. Previously the step was hard-tiered (50, 100,
   500), which gave only 3 sections to typical-range users.
+- **Status/Rating SWR revalidate now honours the count-cache TTL.**
+  Previously, opening the dashboard fired two background API calls
+  (status + rating distribution) on every open, regardless of cache
+  age or whether the user had uploaded anything. The SWR helper now
+  takes an optional `maxAgeMs` and skips the background revalidate
+  when the cache is younger than the TTL, matching the 9 other
+  count-driven distributions and the user's "Count Refresh (min)"
+  setting. Partial-sync trigger still refreshes everything as before
+  (via `refreshAllStats`), so a delta past the Partial Sync Threshold
+  still forces fresh counts even within the TTL window.
 
 ### Changed
 - `RateLimitedFetch` concurrency bumped 6 → 8 and rps 6 → 9 to absorb
