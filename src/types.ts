@@ -527,6 +527,14 @@ export interface TagAnalyticsReport {
    * accumulating over time). Absent on pre-v12 records.
    */
   lastFullScanAt?: number;
+  /**
+   * Timestamp (ms) of the last refresh of the count-only deferred overlays
+   * (statusCounts + ratingCounts). Decoupled from `updatedAt` because
+   * `_checkCache` bumps `updatedAt` on every cache hit when refreshing
+   * volatile post fields, but the count overlays only refresh when the
+   * v9.6 count-cache TTL elapses. Absent on pre-v9.6 records.
+   */
+  countsUpdatedAt?: number;
 }
 
 /**
@@ -557,6 +565,14 @@ export interface TagImplicationCacheRecord {
   isTopLevel: boolean;
   /** Fetch timestamp in ms since epoch. */
   fetchedAt: number;
+  /**
+   * Embedded schema version stamped at write time. Read sites compare
+   * against `IMPLICATIONS_CACHE_SCHEMA_VERSION` to detect contract drift
+   * (e.g. the URL changing between releases) without a Dexie version bump.
+   * Optional in the type because pre-v9.6 records on existing clones lack
+   * the field; absence is treated as a mismatch and forces a re-fetch.
+   */
+  schemaVersion?: number;
 }
 
 /** Complete tag analytics metadata. */
@@ -567,6 +583,13 @@ export interface TagAnalyticsMeta {
   post_count: number;
   created_at: string;
   updatedAt: number;
+  /**
+   * v9.6: timestamp (ms) of the last refresh of count-only overlays
+   * (statusCounts + ratingCounts). Surfaced from the cache record so the
+   * app layer can compare against the user-configured count-cache TTL
+   * and decide whether to re-run the deferred counts on cache hit.
+   */
+  countsUpdatedAt?: number;
   _isCached?: boolean;
   firstPost?: DanbooruPost;
   hundredthPost?: DanbooruPost;

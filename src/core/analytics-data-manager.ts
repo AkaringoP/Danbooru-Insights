@@ -9,6 +9,7 @@ import {
   evictOldestNonCurrentUser,
   requestPersistence,
 } from './quota-manager';
+import {getCountCacheTtlMs} from './settings';
 import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
@@ -241,14 +242,20 @@ export class AnalyticsDataManager extends DataManager {
   /**
    * Cache prelude shared by every distribution-stat fetcher. Skips the cache
    * read when forceRefresh is true or there is no uploaderId to key on.
+   *
+   * `maxAgeMs` (v9.6) lets count-driven distributions opt in to a TTL —
+   * piestats records older than that age return null so the caller
+   * refetches. Pass nothing to preserve the legacy "trust until reset"
+   * behaviour for non-count caches (top posts, milestones, etc.).
    */
   private async tryGetCachedStats<T>(
     cacheKey: string,
     uploaderId: number | null,
     forceRefresh: boolean,
+    maxAgeMs?: number,
   ): Promise<T | null> {
     if (forceRefresh || !uploaderId) return null;
-    const cached = await this.getStats(cacheKey, uploaderId);
+    const cached = await this.getStats(cacheKey, uploaderId, maxAgeMs);
     return (cached as T | null) ?? null;
   }
 
@@ -799,7 +806,7 @@ export class AnalyticsDataManager extends DataManager {
 
     const cached = await this.tryGetCachedStats<
       {name: string; count: number; label: string}[]
-    >(cacheKey, uploaderId, forceRefresh);
+    >(cacheKey, uploaderId, forceRefresh, getCountCacheTtlMs());
     if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
@@ -863,7 +870,7 @@ export class AnalyticsDataManager extends DataManager {
 
     const cached = await this.tryGetCachedStats<
       {rating: string; count: number; label: string}[]
-    >(cacheKey, uploaderId, forceRefresh);
+    >(cacheKey, uploaderId, forceRefresh, getCountCacheTtlMs());
     if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
@@ -1042,9 +1049,14 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'created_tags';
 
-    // Check cache
+    // Check cache (count-driven: refetch when the TTL elapses so per-tag
+    // counts surfaced in this widget don't lag behind Danbooru).
     if (uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
+      const cached = await this.getStats(
+        cacheKey,
+        uploaderId,
+        getCountCacheTtlMs(),
+      );
       if (cached) return cached as CreatedTagItem[];
     }
 
@@ -1242,6 +1254,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 
@@ -1348,6 +1361,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 
@@ -1492,6 +1506,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 
@@ -1512,7 +1527,7 @@ export class AnalyticsDataManager extends DataManager {
         2,
         async (item): Promise<DanbooruRelatedTag | null> => {
           const tagName = item.tag.name;
-          const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}`;
+          const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}&search[status]=active`;
           try {
             const imps = await this.rateLimiter
               .fetch(impUrl)
@@ -2415,6 +2430,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 
@@ -2487,6 +2503,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 
@@ -2615,6 +2632,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 
@@ -2736,6 +2754,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 
@@ -2815,6 +2834,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 
@@ -2895,6 +2915,7 @@ export class AnalyticsDataManager extends DataManager {
       cacheKey,
       uploaderId,
       forceRefresh,
+      getCountCacheTtlMs(),
     );
     if (cached) return cached;
 

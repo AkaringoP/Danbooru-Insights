@@ -18,6 +18,11 @@ export function escapeHtml(text: string): string {
  * Checks whether a tag is top-level (not a sub-tag) by querying its implications.
  * A tag that has antecedent implications (i.e., it implies something else) is a sub-tag.
  *
+ * Filters by `status=active` so deleted/declined/retired implications do not
+ * count — a tag that *used* to imply something but no longer does is still
+ * top-level. Without this filter, e.g. `ninjago` was being treated as a
+ * sub-tag because of a deleted `ninjago → the_lego_group` implication.
+ *
  * NOTE: The TagAnalyticsApp path uses
  * `TagAnalyticsDataService.getTopLevelFlags` for batched + cached lookups
  * (v10 perf work). This single-tag helper is still used by the
@@ -31,7 +36,7 @@ export async function isTopLevelTag(
   rateLimiter: RateLimitedFetch,
   tagName: string,
 ): Promise<boolean> {
-  const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}`;
+  const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}&search[status]=active`;
   try {
     const imps = await rateLimiter.fetch(impUrl).then(r => r.json());
     return !(Array.isArray(imps) && imps.length > 0);

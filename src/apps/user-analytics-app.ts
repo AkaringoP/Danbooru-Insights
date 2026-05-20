@@ -9,6 +9,8 @@ import {
   SettingsManager,
   getNsfwEnabled,
   setNsfwEnabled,
+  getCountCacheTtlMin,
+  setCountCacheTtlMin,
 } from '../core/settings';
 import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
@@ -1364,6 +1366,7 @@ export class UserAnalyticsApp {
 
     const settingsManager = new SettingsManager();
     const currentVal = settingsManager.getSyncThreshold();
+    const currentCountTtl = getCountCacheTtlMin();
 
     const popover = document.createElement('div');
     popover.id = 'danbooru-grass-sync-settings';
@@ -1389,6 +1392,14 @@ export class UserAnalyticsApp {
          <input type="number" id="sync-thresh-input" value="${currentVal}" min="0" style="width:60px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333);">
          <button id="sync-thresh-save" style="background:none; border:1px solid #28a745; color:#28a745; border-radius:4px; cursor:pointer; padding:2px 8px; font-size:11px;">✅ Save</button>
       </div>
+      <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--di-border-light, #eee); line-height:1.4;">
+        <strong>Count Refresh (min)</strong><br>
+        Refresh post-count values older than this on dashboard open.
+      </div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-top:4px;">
+         <input type="number" id="count-ttl-input" value="${currentCountTtl}" min="1" style="width:60px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333);">
+         <button id="count-ttl-save" style="background:none; border:1px solid #28a745; color:#28a745; border-radius:4px; cursor:pointer; padding:2px 8px; font-size:11px;">✅ Save</button>
+      </div>
       ${DASHBOARD_THEME_SELECT_HTML}
     `;
 
@@ -1413,7 +1424,7 @@ export class UserAnalyticsApp {
     );
     setTimeout(() => document.addEventListener('click', closeHandler), 0);
 
-    // Save Handler
+    // Save Handler — Partial Sync Threshold
     const saveBtn = popover.querySelector('#sync-thresh-save');
     (saveBtn as HTMLElement).onclick = () => {
       const input = popover.querySelector('#sync-thresh-input');
@@ -1426,6 +1437,25 @@ export class UserAnalyticsApp {
         void this.updateHeaderStatus();
       } else {
         showToast({type: 'warn', message: 'Please enter a valid number.'});
+      }
+    };
+
+    // Save Handler — Count Refresh TTL (minutes)
+    const countTtlSaveBtn = popover.querySelector('#count-ttl-save');
+    (countTtlSaveBtn as HTMLElement).onclick = () => {
+      const input = popover.querySelector('#count-ttl-input');
+      const val = parseInt((input as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val >= 1) {
+        setCountCacheTtlMin(val);
+        showToast({
+          type: 'success',
+          message: `Count refresh set to ${val} min.`,
+        });
+      } else {
+        showToast({
+          type: 'warn',
+          message: 'Please enter a number ≥ 1 minute.',
+        });
       }
     };
   }
