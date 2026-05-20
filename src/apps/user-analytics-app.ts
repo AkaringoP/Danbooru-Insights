@@ -14,6 +14,7 @@ import {
 } from '../core/settings';
 import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
+import type {ProgressState, ReportProgress} from './progress-tracker';
 import {getLevelClass} from '../utils';
 import {
   renderPieWidget,
@@ -52,15 +53,28 @@ type ValidatedProfileContext = ProfileContext & {
 // perfLogger total span, the isRendering flag, branch sequencing).
 // ---------------------------------------------------------------------------
 
-/** Paints the "Generating Report..." spinner card into the modal content. */
-function paintLoadingSpinner(content: HTMLElement): void {
+/**
+ * Paints the "Generating Report..." spinner card into the modal content.
+ * Returns a `ReportProgress` callback so the orchestrator (or just a
+ * caller that knows what's happening) can swap the headline/detail text
+ * as work progresses. The returned callback is a no-op if the spinner
+ * DOM has been replaced (e.g. by `renderDashboardWidgets`) — that's the
+ * usual "fetch settled, dashboard rendered" race and is safe.
+ */
+function paintLoadingSpinner(content: HTMLElement): ReportProgress {
   content.innerHTML = `
         <div id="analytics-loading-report" style="display:flex; flex-direction:column; align-items:center; justify-content:center; padding:100px 0; color:var(--di-text-secondary, #666);">
            <div class="di-spinner"></div>
-           <div style="font-size:1.2em; font-weight:600; margin-top: 20px;">Generating Report...</div>
-           <div style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px;">Analyzing contributions and trends</div>
+           <div id="analytics-loading-label" style="font-size:1.2em; font-weight:600; margin-top: 20px;">Generating Report...</div>
+           <div id="analytics-loading-detail" style="font-size:0.9em; color:var(--di-text-muted, #888); margin-top:10px; min-height:1.2em;">Analyzing contributions and trends</div>
         </div>
       `;
+  return (state: ProgressState) => {
+    const labelEl = document.getElementById('analytics-loading-label');
+    const detailEl = document.getElementById('analytics-loading-detail');
+    if (labelEl) labelEl.textContent = state.label;
+    if (detailEl) detailEl.textContent = state.detail ?? '';
+  };
 }
 
 /**
@@ -1651,8 +1665,11 @@ export class UserAnalyticsApp {
       const content = document.getElementById(`${this.modalId}-content`);
       if (!content) return;
 
-      // Show Loading State Immediately
-      paintLoadingSpinner(content);
+      // Show Loading State Immediately. The returned callback is the
+      // live updater for the spinner's headline + detail lines — wired
+      // into fetchDashboardData below so the user sees real phases as
+      // they happen instead of a static "Analyzing contributions" line.
+      let reportProgress = paintLoadingSpinner(content);
 
       // Pre-check (local sync stats + remote total) drives the path decision
       // below. Quick-sync is taken when total posts ≤ MAX_OPTIMIZED_POSTS and
@@ -1685,8 +1702,9 @@ export class UserAnalyticsApp {
         this.isFullySynced = true;
         void this.updateHeaderStatus();
         // Restore the generic "Generating Report..." spinner before heavy
-        // data fetch.
-        paintLoadingSpinner(content);
+        // data fetch. The Quick Sync inner UI replaced the DOM, so capture
+        // a fresh updater for the post-sync fetchDashboardData call.
+        reportProgress = paintLoadingSpinner(content);
       } else {
         perfMeta.path = 'syncSkipped';
       }
@@ -1700,7 +1718,12 @@ export class UserAnalyticsApp {
         : {syncStats: preStats, totalCount: preTotal};
       const dashboardData = await perfLogger.wrap(
         'dbi:net:fetchData:total',
-        () => this.dataService.fetchDashboardData(this.context, prefetched),
+        () =>
+          this.dataService.fetchDashboardData(
+            this.context,
+            prefetched,
+            reportProgress,
+          ),
       );
       // Only the values the main flow still touches — needsSync gate,
       // summaryStats.firstUploadDate (passed to pie widget), and the SWR

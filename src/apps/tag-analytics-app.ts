@@ -326,6 +326,7 @@ export class TagAnalyticsApp {
     // Cache is fresh — update volatile data and render
     cachedData._isCached = true;
     try {
+      this.injectAnalyticsButton(null, 50, 'Refreshing volatile data...');
       const newPostCount24h = await this.dataService.fetchNewPostCount(tagName);
       const [latestPost, trendingPost, trendingPostNSFW] = await Promise.all([
         this.dataService.fetchLatestPost(tagName),
@@ -348,6 +349,11 @@ export class TagAnalyticsApp {
       if (countsAge > countsTtlMs) {
         log.debug(
           `Refreshing deferred counts: age ${(countsAge / 60000).toFixed(1)}m > ttl ${(countsTtlMs / 60000).toFixed(1)}m`,
+        );
+        this.injectAnalyticsButton(
+          null,
+          80,
+          'Refreshing status and rating counts...',
         );
         const startDate =
           cachedData.historyData && cachedData.historyData.length > 0
@@ -884,6 +890,7 @@ export class TagAnalyticsApp {
     log.debug(
       `[Phase 3] Starting Deferred Counts (Rating) with startDate: ${minDateStr}`,
     );
+    this.injectAnalyticsButton(null, 95, 'Fetching rating counts... (95%)');
     const ratingCounts = await measure(
       'Rating Counts',
       this.dataService.fetchRatingCounts(tagName, minDateStr),
