@@ -3058,6 +3058,10 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Syncs all posts for the user using parallel buffered fetching.
+   * Orchestrator only — the three private helpers below
+   * (calculateResumeStartId → createSyncPageWorker → finalizeSyncMetadata)
+   * carry the actual logic.
+   *
    * @param {Object} userInfo The user's info object.
    * @param {Function} onProgress Callback for progress updates (current, total).
    * @return {Promise<void>}
@@ -3107,299 +3111,398 @@ export class AnalyticsDataManager extends DataManager {
       );
       perfStats.totalPosts = total;
 
-      // 2. Resume Check
-      // Strategy: overlapping sync (1 month back) to catch updates (score/tags)
-      perfLogger.start('dbi:db:sync:full:resumeCheck');
-      const newestArr = await this.db.posts
-        .where('uploader_id')
-        .equals(uploaderId)
-        .reverse()
-        .limit(1)
-        .toArray();
-      let startId = 0;
-
-      if (newestArr.length > 0) {
-        const newest = newestArr[0];
-        const newestDate = new Date(newest.created_at);
-        const cutOffDate = new Date(newestDate);
-        cutOffDate.setMonth(cutOffDate.getMonth() - 1);
-
-        // Find the first post that is OLDER than cutOffDate to determine startId
-        // Use .until() to stop iteration immediately after the first match
-        let cutOffFound = false;
-        await this.db.posts
-          .where('uploader_id')
-          .equals(uploaderId)
-          .reverse()
-          .until(() => cutOffFound)
-          .each((p: ApiItem) => {
-            if (new Date(p['created_at']) < cutOffDate) {
-              startId = p['id'];
-              cutOffFound = true;
-            }
-          });
-
-        // fallback: if history is shorter than 1 month, startId stays 0 (Full Sync)
-      }
-
-      // Initialize currentNo based on startId
-      // If startId is 0, we start counting from 0.
-      // If startId > 0, we start counting from the number of posts we have UP TO that point.
-      let currentNo = 0;
-      if (startId > 0) {
-        // Fix: Count ONLY this user's posts below startId
-        // Using filter() on the collection because composite index might not exist for (id, uploader_id)
-        currentNo = await this.db.posts
-          .where('uploader_id')
-          .equals(uploaderId)
-          .filter((p: ApiItem) => p['id'] <= startId)
-          .count();
-      }
+      // 2. Resume Check — find startId + seed currentNo for sequential
+      // `no` field assignment. See helper for the dropped early-return
+      // guard ("startId === 0 && currentNo >= total" was unreachable —
+      // currentNo only becomes positive when startId > 0).
+      const resume = await this.calculateResumeStartId(uploaderId);
+      const {startId} = resume;
+      let {currentNo} = resume;
       perfStats.startId = startId;
       perfStats.initialCurrentNo = currentNo;
-      perfLogger.end('dbi:db:sync:full:resumeCheck', {
+
+      // 3. Worker pool — claim pages, fetch with retry, commit in order.
+      let pageOffset = 1;
+      let hasMore = true;
+      const buffer = new Map<number, DanbooruPost[]>();
+      let nextExpectedPage = 1;
+      const MAX_CONCURRENCY = 5;
+
+      const worker = this.createSyncPageWorker({
+        userInfo,
+        uploaderId,
         startId,
-        initialCurrentNo: currentNo,
-        hasHistory: newestArr.length > 0,
+        getCurrentNo: () => currentNo,
+        bumpCurrentNo: () => ++currentNo,
+        total,
+        buffer,
+        getNextExpectedPage: () => nextExpectedPage,
+        bumpNextExpectedPage: () => ++nextExpectedPage,
+        claimPage: () => pageOffset++,
+        getHasMore: () => hasMore,
+        setHasMore: v => {
+          hasMore = v;
+        },
+        reportProgress,
+        perfStats,
       });
 
-      // FIX: If total is 0 (Failed to fetch), we CANNOT assume "Already Synced".
-      // We must assume "Unknown" and proceed to try and fetch new posts.
-      // IF total > 0 (Success), then we check if current >= total.
-      // BUT with the new overlapping logic, we almost ALWAYS want to sync at least the overlap.
-      // So we relax the "Already synced" check if we have a valid startId > 0 (meaning we have history).
-      // If startId > 0, we proceed to fetch updates.
-      // If startId == 0 and current == total, then maybe we are really done?
-      // Actually, user wants "Update". So if we calculated a startId, we should run.
-
-      if (startId === 0 && total > 0 && currentNo >= total) {
-        reportProgress(currentNo, total);
-        return;
-      }
-
-      // If total is 0, we simply run blindly until empty. That's fine.
-
-      // 3. Buffered Parallel Fetching Logic
-      const limit = 200; // API Limit
-
-      let pageOffset = 1;
-      // 3. Worker Pool Logic (Rolling Window)
-      const MAX_CONCURRENCY = 5;
-      const WORKER_DELAY = 400; // 5 workers * 1 req / 0.4s = 12.5 req/s (Max)
-
-      // Shared State
-      let hasMore = true;
-
-      // Ordered Commit State
-      const buffer = new Map<number, DanbooruPost[]>(); // page -> items
-      let nextExpectedPage = 1;
-
-      const worker = async (workerId: number) => {
-        const workerLabel = `dbi:db:sync:full:worker.${workerId}`;
-        const pageLabel = `dbi:db:sync:full:page.w${workerId}`;
-        const bulkPutLabel = `dbi:db:sync:full:bulkPut.w${workerId}`;
-        let pagesFetched = 0;
-        let pagesCommittedByWorker = 0;
-        perfLogger.start(workerLabel);
-
-        // Staggered Start: Prevent initial burst
-        if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 200));
-
-        try {
-          while (hasMore) {
-            // 1. Claim a page
-            const currentPage = pageOffset++;
-            perfLogger.start(pageLabel);
-            let pageFetchedCount = 0;
-            let pageAttempts = 0;
-
-            try {
-              const params: Record<string, string> = {
-                limit: String(limit),
-                page: String(currentPage),
-                tags: `user:${userInfo.name.replace(/ /g, '_')} order:id id:>${startId}`,
-                only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
-              };
-              const q = new URLSearchParams(params);
-              const url = `/posts.json?${q.toString()}`;
-
-              const pending = buffer.size;
-              reportProgress(
-                currentNo,
-                total,
-                `Fetching Page ${currentPage} (Pending: ${pending})...`,
-              );
-
-              // Retry Logic
-              let items: DanbooruPost[] | null = null;
-              let attempts = 0;
-              while (attempts < 3) {
-                try {
-                  const controller = new AbortController();
-                  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
-
-                  const fetchResp = await this.rateLimiter.fetch(url, {
-                    signal: controller.signal,
-                  });
-                  clearTimeout(timeoutId);
-                  if (!fetchResp.ok)
-                    throw new Error(`HTTP ${fetchResp.status}`);
-                  items = await fetchResp.json();
-                  break; // Success
-                } catch (err: unknown) {
-                  attempts++;
-                  const errMsg =
-                    err instanceof Error ? err.message : String(err);
-                  const isServerErr =
-                    errMsg.includes('500') ||
-                    errMsg.includes('502') ||
-                    errMsg.includes('503') ||
-                    errMsg.includes('504');
-                  workerLog.warn('Page fetch attempt failed', {
-                    workerId,
-                    page: currentPage,
-                    attempt: attempts,
-                    error: errMsg,
-                  });
-
-                  if (attempts >= 3 || !isServerErr) throw err; // Give up or fatal error
-
-                  // Backoff: 1s, 2s, 4s...
-                  await new Promise(r =>
-                    setTimeout(r, 1000 * Math.pow(2, attempts - 1)),
-                  );
-                }
-              }
-              pageAttempts = attempts + 1;
-
-              if (!items || items.length === 0) {
-                hasMore = false; // Signal end
-                return;
-              }
-              pageFetchedCount = items.length;
-              pagesFetched++;
-
-              // 2. Buffer the result
-              buffer.set(currentPage, items);
-
-              // 3. Ordered Commit Loop (Check if we can save)
-              while (buffer.has(nextExpectedPage)) {
-                const batchItems = buffer.get(nextExpectedPage);
-                buffer.delete(nextExpectedPage); // Remove from buffer
-
-                if (batchItems && batchItems.length > 0) {
-                  // Assign Sequential Numbers
-                  const bulkData = batchItems.map((p: DanbooruPost) => {
-                    const ds = p.down_score ?? 0;
-                    const us = p.up_score ?? 0;
-                    return {
-                      id: p.id,
-                      uploader_id: p.uploader_id,
-                      created_at: p.created_at,
-                      score: us + ds,
-                      up_score: us,
-                      down_score: ds,
-                      is_deleted: p.is_deleted ?? false,
-                      is_banned: p.is_banned ?? false,
-                      rating: p.rating,
-                      tag_count_general: p.tag_count_general ?? 0,
-                      variants: p.variants,
-                      preview_file_url: p.preview_file_url,
-                      no: ++currentNo,
-                    };
-                  });
-
-                  perfLogger.start(bulkPutLabel);
-                  await bulkPutSafe(this.db.posts, bulkData, () =>
-                    evictOldestNonCurrentUser(this.db, uploaderId),
-                  );
-                  perfLogger.end(bulkPutLabel, {
-                    workerId,
-                    page: nextExpectedPage,
-                    count: bulkData.length,
-                  });
-                  pagesCommittedByWorker++;
-                  perfStats.pagesCommitted++;
-
-                  // Update Progress
-                  // currentNo is now accurate (reset based on startId)
-                  reportProgress(
-                    currentNo,
-                    total > currentNo ? total : currentNo,
-                  );
-                }
-
-                nextExpectedPage++;
-              }
-            } catch (e: unknown) {
-              workerLog.error('Page failed, stopping sync', {
-                workerId,
-                page: currentPage,
-                error: e,
-              });
-              hasMore = false;
-            } finally {
-              perfLogger.end(pageLabel, {
-                workerId,
-                page: currentPage,
-                fetched: pageFetchedCount,
-                attempts: pageAttempts,
-              });
-            }
-
-            // Rate Limit Sleep
-            if (hasMore) {
-              await new Promise(r => setTimeout(r, WORKER_DELAY));
-            }
-          }
-        } finally {
-          perfLogger.end(workerLabel, {
-            workerId,
-            pagesFetched,
-            pagesCommittedByWorker,
-          });
-        }
-      };
-
-      // Ignite Workers
-      const workers = [];
+      const workers: Promise<void>[] = [];
       for (let i = 0; i < MAX_CONCURRENCY; i++) {
         workers.push(worker(i));
       }
-
       await Promise.all(workers);
 
-      // Save "Last Synced Date" metadata
-      const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
-      localStorage.setItem(lastSyncKey, new Date().toISOString());
+      await this.finalizeSyncMetadata({
+        userInfo,
+        uploaderId,
+        startId,
+        total,
+        reportProgress,
+      });
 
-      // Mark post metadata backfill complete for full (fresh) syncs.
-      // Incremental syncs only touch newer posts, so older posts may still
-      // lack the metadata — in that case the backfill mechanism handles them.
-      if (startId === 0) {
-        localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
-      }
-
-      // Auto-cleanup other users' stale data (older than 14 days)
-      await this.cleanupStaleData(userInfo.id);
-
-      // Signal UI: Processing Stats
-      reportProgress(total, total, 'PREPARING');
-
-      // Refresh all stats after sync
-      // If startId was 0, it was a Full Sync; otherwise it's a Partial Sync
-      await this.refreshAllStats(userInfo, startId === 0);
       perfStats.finalCurrentNo = currentNo;
-
-      // First successful sync = meaningful engagement signal. Ask the
-      // browser for persistent storage so this user's analytics survive
-      // Safari ITP / Chrome eviction heuristics. Idempotent across calls.
-      await requestPersistence();
     } finally {
       perfLogger.end('dbi:db:sync:full:total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
     }
+  }
+
+  /**
+   * Find the resume cutoff for this user's posts and seed `currentNo` so
+   * the worker's `no: ++currentNo` assignment continues from where the
+   * last sync left off.
+   *
+   * Strategy: 1-month overlap. Walk backwards from the newest post until
+   * we cross the `newest - 30 days` cutoff; that post's id is `startId`.
+   * Re-syncing the trailing month catches metadata updates (score/tags)
+   * without re-fetching everything.
+   *
+   * Fresh sync (no history): startId = 0, currentNo = 0, full pull.
+   * Resume sync (startId > 0): currentNo = "count of this user's posts
+   * with id ≤ startId", which keeps the sequential post numbers monotonic.
+   *
+   * Note: the original code had an unreachable `if (startId === 0 &&
+   * total > 0 && currentNo >= total) return` early-return guard —
+   * currentNo only becomes positive when startId > 0, so the guard
+   * literally never fires. T-25 dropped it.
+   */
+  private async calculateResumeStartId(
+    uploaderId: number,
+  ): Promise<{startId: number; currentNo: number}> {
+    perfLogger.start('dbi:db:sync:full:resumeCheck');
+    const newestArr = await this.db.posts
+      .where('uploader_id')
+      .equals(uploaderId)
+      .reverse()
+      .limit(1)
+      .toArray();
+    let startId = 0;
+
+    if (newestArr.length > 0) {
+      const newest = newestArr[0];
+      const newestDate = new Date(newest.created_at);
+      const cutOffDate = new Date(newestDate);
+      cutOffDate.setMonth(cutOffDate.getMonth() - 1);
+
+      // Find the first post that is OLDER than cutOffDate. .until() stops
+      // iteration immediately after the first match.
+      let cutOffFound = false;
+      await this.db.posts
+        .where('uploader_id')
+        .equals(uploaderId)
+        .reverse()
+        .until(() => cutOffFound)
+        .each((p: ApiItem) => {
+          if (new Date(p['created_at']) < cutOffDate) {
+            startId = p['id'];
+            cutOffFound = true;
+          }
+        });
+
+      // Fallback: if history is shorter than 1 month, startId stays 0
+      // (Full Sync).
+    }
+
+    let currentNo = 0;
+    if (startId > 0) {
+      // Count ONLY this user's posts at or below startId.
+      // Using .filter() on the collection because no composite index
+      // exists for (id, uploader_id).
+      currentNo = await this.db.posts
+        .where('uploader_id')
+        .equals(uploaderId)
+        .filter((p: ApiItem) => p['id'] <= startId)
+        .count();
+    }
+    perfLogger.end('dbi:db:sync:full:resumeCheck', {
+      startId,
+      initialCurrentNo: currentNo,
+      hasHistory: newestArr.length > 0,
+    });
+    return {startId, currentNo};
+  }
+
+  /**
+   * Build the worker function used by the syncAllPosts worker pool.
+   * Each worker:
+   *   1. claims the next page via `claimPage` (shared atomic counter),
+   *   2. fetches with up to 3 retries on 5xx,
+   *   3. buffers the result by page number,
+   *   4. drains the buffer in order — bulkPut'ing each batch with
+   *      `no: ++currentNo` sequential numbering.
+   *
+   * Ordered commit ensures the `no` field is monotonic across the whole
+   * sync even though pages may complete out of order.
+   *
+   * Workers stagger their start (200ms * workerId) so the initial burst
+   * doesn't all hit the API at once. WORKER_DELAY (400ms) keeps each
+   * worker at ~2.5 req/s; with 5 workers that's ~12.5 req/s peak —
+   * below Danbooru's rate limit.
+   */
+  private createSyncPageWorker(args: {
+    userInfo: TargetUser;
+    uploaderId: number;
+    startId: number;
+    getCurrentNo: () => number;
+    bumpCurrentNo: () => number;
+    total: number;
+    buffer: Map<number, DanbooruPost[]>;
+    getNextExpectedPage: () => number;
+    bumpNextExpectedPage: () => number;
+    claimPage: () => number;
+    getHasMore: () => boolean;
+    setHasMore: (v: boolean) => void;
+    reportProgress: (c: number, t: number, msg?: string) => void;
+    perfStats: {pagesCommitted: number};
+  }): (workerId: number) => Promise<void> {
+    const {
+      userInfo,
+      uploaderId,
+      startId,
+      getCurrentNo,
+      bumpCurrentNo,
+      total,
+      buffer,
+      getNextExpectedPage,
+      bumpNextExpectedPage,
+      claimPage,
+      getHasMore,
+      setHasMore,
+      reportProgress,
+      perfStats,
+    } = args;
+    const limit = 200; // API Limit
+    const WORKER_DELAY = 400; // 5 workers * 1 req / 0.4s = 12.5 req/s (Max)
+
+    return async (workerId: number) => {
+      const workerLabel = `dbi:db:sync:full:worker.${workerId}`;
+      const pageLabel = `dbi:db:sync:full:page.w${workerId}`;
+      const bulkPutLabel = `dbi:db:sync:full:bulkPut.w${workerId}`;
+      let pagesFetched = 0;
+      let pagesCommittedByWorker = 0;
+      perfLogger.start(workerLabel);
+
+      // Staggered Start: Prevent initial burst
+      if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 200));
+
+      try {
+        while (getHasMore()) {
+          // 1. Claim a page
+          const currentPage = claimPage();
+          perfLogger.start(pageLabel);
+          let pageFetchedCount = 0;
+          let pageAttempts = 0;
+
+          try {
+            const params: Record<string, string> = {
+              limit: String(limit),
+              page: String(currentPage),
+              tags: `user:${userInfo.name.replace(/ /g, '_')} order:id id:>${startId}`,
+              only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
+            };
+            const q = new URLSearchParams(params);
+            const url = `/posts.json?${q.toString()}`;
+
+            const pending = buffer.size;
+            reportProgress(
+              getCurrentNo(),
+              total,
+              `Fetching Page ${currentPage} (Pending: ${pending})...`,
+            );
+
+            // Retry Logic
+            let items: DanbooruPost[] | null = null;
+            let attempts = 0;
+            while (attempts < 3) {
+              try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
+
+                const fetchResp = await this.rateLimiter.fetch(url, {
+                  signal: controller.signal,
+                });
+                clearTimeout(timeoutId);
+                if (!fetchResp.ok) throw new Error(`HTTP ${fetchResp.status}`);
+                items = await fetchResp.json();
+                break; // Success
+              } catch (err: unknown) {
+                attempts++;
+                const errMsg = err instanceof Error ? err.message : String(err);
+                const isServerErr =
+                  errMsg.includes('500') ||
+                  errMsg.includes('502') ||
+                  errMsg.includes('503') ||
+                  errMsg.includes('504');
+                workerLog.warn('Page fetch attempt failed', {
+                  workerId,
+                  page: currentPage,
+                  attempt: attempts,
+                  error: errMsg,
+                });
+
+                if (attempts >= 3 || !isServerErr) throw err; // Give up or fatal error
+
+                // Backoff: 1s, 2s, 4s...
+                await new Promise(r =>
+                  setTimeout(r, 1000 * Math.pow(2, attempts - 1)),
+                );
+              }
+            }
+            pageAttempts = attempts + 1;
+
+            if (!items || items.length === 0) {
+              setHasMore(false); // Signal end
+              return;
+            }
+            pageFetchedCount = items.length;
+            pagesFetched++;
+
+            // 2. Buffer the result
+            buffer.set(currentPage, items);
+
+            // 3. Ordered Commit Loop (Check if we can save)
+            while (buffer.has(getNextExpectedPage())) {
+              const expected = getNextExpectedPage();
+              const batchItems = buffer.get(expected);
+              buffer.delete(expected); // Remove from buffer
+
+              if (batchItems && batchItems.length > 0) {
+                // Assign Sequential Numbers
+                const bulkData = batchItems.map((p: DanbooruPost) => {
+                  const ds = p.down_score ?? 0;
+                  const us = p.up_score ?? 0;
+                  return {
+                    id: p.id,
+                    uploader_id: p.uploader_id,
+                    created_at: p.created_at,
+                    score: us + ds,
+                    up_score: us,
+                    down_score: ds,
+                    is_deleted: p.is_deleted ?? false,
+                    is_banned: p.is_banned ?? false,
+                    rating: p.rating,
+                    tag_count_general: p.tag_count_general ?? 0,
+                    variants: p.variants,
+                    preview_file_url: p.preview_file_url,
+                    no: bumpCurrentNo(),
+                  };
+                });
+
+                perfLogger.start(bulkPutLabel);
+                await bulkPutSafe(this.db.posts, bulkData, () =>
+                  evictOldestNonCurrentUser(this.db, uploaderId),
+                );
+                perfLogger.end(bulkPutLabel, {
+                  workerId,
+                  page: expected,
+                  count: bulkData.length,
+                });
+                pagesCommittedByWorker++;
+                perfStats.pagesCommitted++;
+
+                // Update Progress — currentNo is monotonic via bumpCurrentNo
+                const current = getCurrentNo();
+                reportProgress(current, total > current ? total : current);
+              }
+
+              bumpNextExpectedPage();
+            }
+          } catch (e: unknown) {
+            workerLog.error('Page failed, stopping sync', {
+              workerId,
+              page: currentPage,
+              error: e,
+            });
+            setHasMore(false);
+          } finally {
+            perfLogger.end(pageLabel, {
+              workerId,
+              page: currentPage,
+              fetched: pageFetchedCount,
+              attempts: pageAttempts,
+            });
+          }
+
+          // Rate Limit Sleep
+          if (getHasMore()) {
+            await new Promise(r => setTimeout(r, WORKER_DELAY));
+          }
+        }
+      } finally {
+        perfLogger.end(workerLabel, {
+          workerId,
+          pagesFetched,
+          pagesCommittedByWorker,
+        });
+      }
+    };
+  }
+
+  /**
+   * Post-sync metadata: stamp last-sync date, mark post-metadata
+   * backfill complete for full (fresh) syncs, evict stale data from
+   * other users, refresh aggregated stats, and request persistent
+   * storage (first-time engagement signal). Idempotent across calls
+   * — safe to invoke per sync.
+   */
+  private async finalizeSyncMetadata(args: {
+    userInfo: TargetUser;
+    uploaderId: number;
+    startId: number;
+    total: number;
+    reportProgress: (c: number, t: number, msg?: string) => void;
+  }): Promise<void> {
+    const {userInfo, uploaderId, startId, total, reportProgress} = args;
+
+    // Save "Last Synced Date" metadata
+    const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
+    localStorage.setItem(lastSyncKey, new Date().toISOString());
+
+    // Mark post metadata backfill complete for full (fresh) syncs.
+    // Incremental syncs only touch newer posts, so older posts may still
+    // lack the metadata — in that case the backfill mechanism handles them.
+    if (startId === 0) {
+      localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
+    }
+
+    // Auto-cleanup other users' stale data (older than 14 days).
+    // userInfo.id is non-null by syncAllPosts's entry guard, but TS can't
+    // narrow across the method call.
+    await this.cleanupStaleData(userInfo.id!);
+
+    // Signal UI: Processing Stats
+    reportProgress(total, total, 'PREPARING');
+
+    // Refresh all stats after sync. If startId was 0, it was a Full Sync;
+    // otherwise it's a Partial Sync.
+    await this.refreshAllStats(userInfo, startId === 0);
+
+    // First successful sync = meaningful engagement signal. Ask the
+    // browser for persistent storage so this user's analytics survive
+    // Safari ITP / Chrome eviction heuristics. Idempotent across calls.
+    await requestPersistence();
   }
 
   /**
