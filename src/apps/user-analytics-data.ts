@@ -1,6 +1,6 @@
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {perfLogger} from '../core/perf-logger';
-import {getNsfwEnabled} from '../core/settings';
+import {getCountCacheTtlMs, getNsfwEnabled} from '../core/settings';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
 import {createPhaseTracker, type ReportProgress} from './progress-tracker';
@@ -34,13 +34,26 @@ interface SwrResult<T> {
 /**
  * Reads cached data from piestats, prepares (but does not start) a
  * background fetch if found, and blocks only on cache miss.
+ *
+ * `maxAgeMs` (v9.6.0) — when provided, suppresses the background revalidate
+ * if the cached record is younger than the threshold. Used for count-driven
+ * caches (`status_dist`, `rating_dist`) so the SWR pathway honours the same
+ * "Count Refresh (min)" TTL as the 9 tryGetCachedStats-based distributions.
+ * Without it, every dashboard open fires a background API call regardless
+ * of cache age — wasteful when nothing has changed since the last sync.
+ *
+ * Cache age and partial-sync trigger interact: a partial sync (via
+ * performPartialSync → refreshAllStats with forceRefresh=true) overwrites
+ * the cache with a fresh timestamp, so the next open finds age < TTL and
+ * skips revalidate.
  */
-async function swrStats<T>(
+export async function swrStats<T>(
   dataManager: AnalyticsDataManager,
   cacheKey: string,
   uploaderId: number,
   freshFetch: () => Promise<T>,
   label: string,
+  maxAgeMs?: number,
 ): Promise<SwrResult<T>> {
   // No uploader id → skip cache entirely, same behaviour as before.
   if (!uploaderId) {
@@ -48,10 +61,22 @@ async function swrStats<T>(
     return {data};
   }
 
+  // Fresh cache path: cache exists AND is within the TTL window. Return
+  // immediately, no revalidate. This is the new behaviour gating point.
+  if (maxAgeMs !== undefined) {
+    const fresh = (await dataManager.getStats(
+      cacheKey,
+      uploaderId,
+      maxAgeMs,
+    )) as T | null;
+    if (fresh !== null) return {data: fresh};
+  }
+
+  // Stale-but-cached path (or no TTL gate): return cached value now,
+  // schedule the revalidate for after paint.
   const cached = (await dataManager.getStats(cacheKey, uploaderId)) as T | null;
 
   if (cached !== null) {
-    // Deferred: caller must invoke startRevalidate() after render is visible.
     const startRevalidate = () =>
       perfLogger.wrap(`${label}.revalidate`, freshFetch).then(fresh => {
         // JSON compare is good enough: data here is serialisable (posts,
@@ -260,8 +285,10 @@ export class UserAnalyticsDataService {
         )
         .finally(() => tracker.step()),
       // Status + Rating previously fired 10 API calls on every open
-      // (6 status + 4 rating). Now cached with SWR — still fresh on the
-      // next open after any state change.
+      // (6 status + 4 rating). SWR-cached; v9.6.0 also passes the count
+      // cache TTL so a sub-TTL cache hit skips the background revalidate
+      // entirely — matches the 9 other count-driven distributions and
+      // honours the "Count Refresh (min)" setting consistently.
       swrStats(
         dataManager,
         'status_dist',
@@ -271,6 +298,7 @@ export class UserAnalyticsDataService {
           return dataManager.getStatusDistribution(user, firstUploadDate, true);
         },
         'dbi:net:fetchData:status',
+        getCountCacheTtlMs(),
       ).finally(() => tracker.step()),
       swrStats(
         dataManager,
@@ -281,6 +309,7 @@ export class UserAnalyticsDataService {
           return dataManager.getRatingDistribution(user, firstUploadDate, true);
         },
         'dbi:net:fetchData:rating',
+        getCountCacheTtlMs(),
       ).finally(() => tracker.step()),
       // SWR: return cached value now, revalidate in background. fresh fetch
       // uses forceRefresh=true so it bypasses the in-method cache and
