@@ -10,6 +10,14 @@ import {
   requestPersistence,
 } from './quota-manager';
 import {getCountCacheTtlMs} from './settings';
+import {
+  applyGeneralTagCloudFilter,
+  getGlobalTopGeneralTags,
+  getGlobalTotalPosts,
+  LIFT_THRESHOLD,
+  USER_COUNT_FLOOR,
+  type TagCloudFilterEntry,
+} from './global-tag-stats';
 import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
@@ -947,7 +955,11 @@ export class AnalyticsDataManager extends DataManager {
     // General: select by Cosine similarity (user-characteristic tags)
     // Others: select by Frequency (most common tags)
     const order = categoryId === 0 ? 'Cosine' : 'Frequency';
-    const url = `/related_tag.json?commit=Search&search[category]=${categoryId}&search[order]=${order}&search[query]=user:${encodeURIComponent(normalizedName)}`;
+    // General fetches a wider window (50) because the Lift filter below
+    // drops globally-common tags — top 30 by Cosine alone would otherwise
+    // leave the cloud sparse after filtering.
+    const limit = categoryId === 0 ? 50 : 30;
+    const url = `/related_tag.json?commit=Search&search[category]=${categoryId}&search[order]=${order}&search[query]=user:${encodeURIComponent(normalizedName)}&limit=${limit}`;
 
     try {
       const resp = await this.rateLimiter.fetch(url).then(r => r.json());
@@ -955,15 +967,37 @@ export class AnalyticsDataManager extends DataManager {
         return [];
 
       const queryPostCount: number = resp.post_count || 0;
+      let entries: TagCloudFilterEntry[] = (
+        resp.related_tags as DanbooruRelatedTag[]
+      ).map(item => ({
+        tagName: item.tag.name,
+        frequency: item.frequency,
+        userCount: Math.round(item.frequency * queryPostCount),
+      }));
 
-      // Select top 30, then sort by frequency for font size mapping
-      const items: TagCloudItem[] = resp.related_tags
+      if (categoryId === 0) {
+        const [globalTotal, topGlobalTags] = await Promise.all([
+          getGlobalTotalPosts(this.rateLimiter),
+          getGlobalTopGeneralTags(this.rateLimiter),
+        ]);
+        entries = applyGeneralTagCloudFilter(
+          entries,
+          topGlobalTags,
+          globalTotal,
+          LIFT_THRESHOLD,
+          USER_COUNT_FLOOR,
+        );
+      }
+
+      // Select top 30 (preserves Cosine/Frequency order from Danbooru),
+      // then sort by frequency for font-size mapping in the cloud.
+      const items: TagCloudItem[] = entries
         .slice(0, 30)
-        .map((item: DanbooruRelatedTag) => ({
-          name: item.tag.name.replace(/_/g, ' '),
-          tagName: item.tag.name,
-          frequency: item.frequency,
-          count: Math.round(item.frequency * queryPostCount),
+        .map(entry => ({
+          name: entry.tagName.replace(/_/g, ' '),
+          tagName: entry.tagName,
+          frequency: entry.frequency,
+          count: entry.userCount,
         }))
         .sort((a: TagCloudItem, b: TagCloudItem) => b.frequency - a.frequency);
 
