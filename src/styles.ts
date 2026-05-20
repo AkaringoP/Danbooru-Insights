@@ -321,6 +321,61 @@ const GLOBAL_CSS = `
         border-top: 1px solid var(--di-border-light, #eeeeee);
     }
 
+    /* -- Widget Locked Placeholder (v9.6.0) -- */
+    .di-widget-locked-card {
+        background: var(--di-bg, #fff);
+        border: 1px solid var(--di-border-light, #eeeeee);
+        border-radius: 8px;
+        padding: 28px 24px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        text-align: center;
+        color: var(--di-text, #333333);
+    }
+    .di-widget-locked-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 1em;
+        font-weight: 600;
+        color: var(--di-text-heading, var(--di-text, #333333));
+    }
+    .di-widget-locked-icon {
+        font-size: 1.1em;
+    }
+    .di-widget-locked-state {
+        margin-top: 4px;
+        font-size: 0.95em;
+        color: var(--di-text-secondary, #666666);
+    }
+    .di-widget-locked-progress {
+        width: 100%;
+        max-width: 320px;
+        height: 8px;
+        background: var(--di-bg-tertiary, #f0f0f0);
+        border-radius: 999px;
+        overflow: hidden;
+    }
+    .di-widget-locked-progress-fill {
+        height: 100%;
+        background: var(--di-accent, #4a90e2);
+        border-radius: 999px;
+        transition: width 0.3s ease;
+    }
+    .di-widget-locked-counter {
+        font-size: 0.85em;
+        font-variant-numeric: tabular-nums;
+        color: var(--di-text-secondary, #666666);
+    }
+    .di-widget-locked-message {
+        font-size: 0.8em;
+        color: var(--di-text-muted, #888888);
+        max-width: 380px;
+        line-height: 1.4;
+    }
+
     /* -- Created Tags Widget -- */
     .di-created-tags-table {
         width: 100%;

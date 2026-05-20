@@ -4,6 +4,76 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.6.0 — Counts refresh, loading progress, tag cloud signatures, widget gating
+
+This release bundles the v9.6 feature cycle: live count refresh with
+TTL-tunable freshness, real-time loading progress for both analytics
+apps, a more distinctive Tag Cloud General tab, and upload-count gating
+for widgets that need a minimum amount of data to be meaningful.
+
+### Added
+- **Tag Cloud signature filter** (General tab). The General tab used to
+  surface the same set of globally-common tags for every user (`1boy`,
+  `simple_background`, `long_sleeves`, `shirt` …) because Cosine-ordered
+  selection alone doesn't fully suppress high-volume globals. The cloud
+  now drops the 50 most-frequent General tags site-wide, *except* tags
+  that the user uses at a notably above-average rate (Lift ≥ 2.0 vs the
+  global rate, with a small-sample floor of 3 uses). Result: each user's
+  Tag Cloud highlights tags that are actually characteristic of their
+  work. Two new globally-shared 24h-cached lookups
+  (`/counts/posts.json?tags=status:any` for the global total,
+  `/related_tag.json?...&search[query]=status:any&limit=50` for the top
+  50) are added in [src/core/global-tag-stats.ts](src/core/global-tag-stats.ts);
+  the per-user `/related_tag.json` call now requests `limit=50` for
+  General to keep enough headroom after filtering.
+- **Widget upload-count gating** for two widgets where small data shows
+  noise instead of patterns:
+  - Tag Cloud unlocks at 100 uploads
+  - Score Distribution (scatter plot) unlocks at 300 uploads
+
+  Below the threshold, a reusable
+  [`renderWidgetLockedPlaceholder`](src/ui/widget-locked-placeholder.ts)
+  shows a progress bar (`current / required`) and a short explanation
+  in place of the widget. The data-layer fetch is skipped entirely when
+  gated — small users save one tag-cloud round trip plus the scatter
+  data preparation per dashboard open.
+- **Real-time loading progress** for both analytics apps. The spinner
+  now shows the live phase counter ("Loading dashboard · N/14") plus a
+  rotating substatus that reflects what the data layer is actually
+  doing (e.g. "Loading character distribution…", per-tag count fetch
+  progress). Replaces the static "Analyzing contributions" text.
+- **Count cache freshness window** (configurable). 11 count-driven
+  distributions plus Created Tags now honour a TTL (default 10 minutes,
+  user-settable from the analytics settings popovers). Previously the
+  piestats cache was "trust until reset" — distributions could go
+  arbitrarily stale between syncs.
+
+### Fixed
+- **Top-level tag detection now ignores deleted/declined/retired
+  implications.** `/tag_implications.json` queries previously omitted
+  `search[status]=active`, so historic implications counted toward
+  sub-tag judgement. Users with copyrights that *used to* imply a
+  parent tag (e.g. `ninjago → the_lego_group`, now status=deleted)
+  were incorrectly excluded from the copyright pie. Cache records are
+  invalidated via an embedded schema version
+  (`IMPLICATIONS_CACHE_SCHEMA_VERSION = 2`) so pre-v9.6 entries are
+  refetched automatically.
+
+### Changed
+- `RateLimitedFetch` concurrency bumped 6 → 8 and rps 6 → 9 to absorb
+  the new TTL-driven refresh fan-out without inflating wall-clock load
+  time. Stays under the Danbooru 10 req/s server cap.
+
+### Internals
+- `src/core/data-manager.ts:getStats` gains an optional `maxAgeMs` arg
+  for the count-cache TTL path. Legacy callers (no arg) keep the
+  trust-until-reset semantics.
+- `src/apps/tag-analytics-app.ts` overlay refresh: a new
+  schema-additive `countsUpdatedAt` field separates count-overlay
+  freshness from the 24h report cache.
+
+---
+
 ## v9.5.4 — Auto-tune preview anchors + Notes click target
 
 ### Changed

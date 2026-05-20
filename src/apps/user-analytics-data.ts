@@ -4,6 +4,7 @@ import {getNsfwEnabled} from '../core/settings';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
 import {createPhaseTracker, type ReportProgress} from './progress-tracker';
+import {SCATTER_MIN_UPLOADS, TAG_CLOUD_MIN_UPLOADS} from './widget-gates';
 
 /** Pre-fetched values from renderDashboard's pre-check phase. When provided,
  *  fetchDashboardData reuses them instead of calling the same APIs again. */
@@ -314,12 +315,16 @@ export class UserAnalyticsDataService {
         },
         'dbi:net:fetchData:milestones1k',
       ).finally(() => tracker.step()),
-      perfLogger
-        .wrap('dbi:net:fetchData:scatterData', () => {
-          sub('Loading scatter data…');
-          return dataManager.getScatterData(user);
-        })
-        .finally(() => tracker.step()),
+      // Skip the scatter fetch entirely when the upload-count gate
+      // (v9.6.0) will hide the widget anyway — the placeholder doesn't
+      // need scatter data.
+      (prefetched && prefetched.totalCount < SCATTER_MIN_UPLOADS
+        ? Promise.resolve([])
+        : perfLogger.wrap('dbi:net:fetchData:scatterData', () => {
+            sub('Loading scatter data…');
+            return dataManager.getScatterData(user);
+          })
+      ).finally(() => tracker.step()),
       swrStats(
         dataManager,
         'level_change_history',
@@ -336,12 +341,16 @@ export class UserAnalyticsDataService {
           return dataManager.getTimelineMilestones(user);
         })
         .finally(() => tracker.step()),
-      perfLogger
-        .wrap('dbi:net:fetchData:tagCloudGeneral', () => {
-          sub('Loading tag cloud…');
-          return dataManager.getTagCloudData(user, 0);
-        })
-        .finally(() => tracker.step()),
+      // Skip the tag-cloud fetch entirely when the upload-count gate
+      // (v9.6.0) will hide the widget anyway. Two cache + globals API
+      // calls saved per dashboard open for small users.
+      (prefetched && prefetched.totalCount < TAG_CLOUD_MIN_UPLOADS
+        ? Promise.resolve([])
+        : perfLogger.wrap('dbi:net:fetchData:tagCloudGeneral', () => {
+            sub('Loading tag cloud…');
+            return dataManager.getTagCloudData(user, 0);
+          })
+      ).finally(() => tracker.step()),
       perfLogger
         .wrap('dbi:net:fetchData:userStats', () => {
           sub('Loading user stats…');

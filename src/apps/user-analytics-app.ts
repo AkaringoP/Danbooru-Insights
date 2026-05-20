@@ -24,6 +24,8 @@ import {
 } from './user-analytics-charts';
 import {renderScatterPlot} from './user-analytics-scatter';
 import {renderTagCloudWidget} from '../ui/tag-cloud-widget';
+import {renderWidgetLockedPlaceholder} from '../ui/widget-locked-placeholder';
+import {TAG_CLOUD_MIN_UPLOADS, SCATTER_MIN_UPLOADS} from './widget-gates';
 import {renderCreatedTagsWidget} from './created-tags-widget';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {createModal, type ModalHandle} from '../ui/modal';
@@ -496,6 +498,7 @@ async function renderDashboardWidgets(
   app: UserAnalyticsApp,
   nsfw: NsfwBus,
   firstUploadDate: Date | null,
+  totalUploads: number,
 ): Promise<void> {
   const {
     distributions,
@@ -607,30 +610,54 @@ async function renderDashboardWidgets(
   );
   perfLogger.end('dbi:render:widget:createdTags');
 
-  // 6. Tag Cloud Widget
+  // 6. Tag Cloud Widget — gated by upload count (v9.6.0).
   const tagCloudContainer = document.createElement('div');
   tagCloudContainer.style.marginTop = '35px';
   parent.appendChild(tagCloudContainer);
   perfLogger.start('dbi:render:widget:tagCloud');
-  renderTagCloudWidget(tagCloudContainer, {
-    initialData: tagCloudGeneral,
-    fetchData: (catId: number) =>
-      app.dataManager.getTagCloudData(app.context.targetUser, catId),
-    userName: app.context.targetUser.normalizedName,
-    categories: [
-      {id: 0, label: 'General', color: '#0075f8'},
-      {id: 1, label: 'Artist', color: '#a00'},
-      {id: 3, label: 'Copy', color: '#a800aa'},
-      {id: 4, label: 'Char', color: '#00ab2c'},
-    ],
-  });
+  if (totalUploads < TAG_CLOUD_MIN_UPLOADS) {
+    renderWidgetLockedPlaceholder(tagCloudContainer, {
+      widgetTitle: 'Tag Cloud',
+      icon: '🏷️',
+      currentCount: totalUploads,
+      requiredCount: TAG_CLOUD_MIN_UPLOADS,
+      unlockMessage:
+        'Tag cloud unlocks at 100 uploads to ensure the analysis has enough data to be useful.',
+    });
+  } else {
+    renderTagCloudWidget(tagCloudContainer, {
+      initialData: tagCloudGeneral,
+      fetchData: (catId: number) =>
+        app.dataManager.getTagCloudData(app.context.targetUser, catId),
+      userName: app.context.targetUser.normalizedName,
+      categories: [
+        {id: 0, label: 'General', color: '#0075f8'},
+        {id: 1, label: 'Artist', color: '#a00'},
+        {id: 3, label: 'Copy', color: '#a800aa'},
+        {id: 4, label: 'Char', color: '#00ab2c'},
+      ],
+    });
+  }
   perfLogger.end('dbi:render:widget:tagCloud');
 
-  // 7. Scatter Plot Widget (note: scatter / backfill go through the
-  // dataManager instance that fetchDashboardData created — keep the
-  // original wiring to preserve identity-sensitive call paths).
-  if (scatterData.length > 0) {
-    perfLogger.start('dbi:render:widget:scatter');
+  // 7. Scatter Plot Widget — gated by upload count (v9.6.0).
+  // Scatter wiring goes through the dataManager instance that
+  // fetchDashboardData created — keep the original references to preserve
+  // identity-sensitive call paths.
+  perfLogger.start('dbi:render:widget:scatter');
+  if (totalUploads < SCATTER_MIN_UPLOADS) {
+    const scatterContainer = document.createElement('div');
+    scatterContainer.style.marginTop = '35px';
+    parent.appendChild(scatterContainer);
+    renderWidgetLockedPlaceholder(scatterContainer, {
+      widgetTitle: 'Score Distribution',
+      icon: '📊',
+      currentCount: totalUploads,
+      requiredCount: SCATTER_MIN_UPLOADS,
+      unlockMessage:
+        'Score distribution unlocks at 300 uploads so the scatter plot has enough points to reveal patterns.',
+    });
+  } else if (scatterData.length > 0) {
     renderScatterPlot(parent, scatterData, app.context, levelChanges, {
       userStats,
       needsBackfill,
@@ -644,10 +671,11 @@ async function renderDashboardWidgets(
       fetchPostDetails: (postId: number) =>
         dataManager.fetchPostDetails(postId),
     });
-    perfLogger.end('dbi:render:widget:scatter', {
-      points: scatterData.length,
-    });
   }
+  perfLogger.end('dbi:render:widget:scatter', {
+    points: scatterData.length,
+    gated: totalUploads < SCATTER_MIN_UPLOADS,
+  });
 
   // 8. Footer credit (always last)
   parent.insertAdjacentHTML('beforeend', dashboardFooterHtml());
@@ -1783,6 +1811,7 @@ export class UserAnalyticsApp {
         this,
         nsfw,
         firstUploadDate,
+        preTotal,
       );
 
       // Update header status (ensure it's green if ready)
