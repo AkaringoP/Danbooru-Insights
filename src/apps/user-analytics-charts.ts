@@ -83,6 +83,1095 @@ type TopPostsBySfw = {sfw: DanbooruPost | null; nsfw: DanbooruPost | null};
 const PIE_SVG_SIZE = 220;
 const PIE_RADIUS = 70;
 
+// ============================================================
+// PIE WIDGET — MODULE-LEVEL CONSTANTS
+// ============================================================
+
+/** Slice colors for the rating tab. */
+const RATING_COLORS: Record<string, string> = {
+  g: '#28a745',
+  s: '#fd7e14',
+  q: '#6f42c1',
+  e: '#dc3545',
+};
+/** Human-readable labels for the rating tab. */
+const RATING_LABELS: Record<string, string> = {
+  g: 'General',
+  s: 'Sensitive',
+  q: 'Questionable',
+  e: 'Explicit',
+};
+/** Default 16-color palette used when the source data does not provide a
+ *  custom color (hair_color does; status uses STATUS_COLORS instead). */
+const PIE_PALETTE = [
+  '#e91e63',
+  '#9c27b0',
+  '#673ab7',
+  '#3f51b5',
+  '#2196f3',
+  '#03a9f4',
+  '#00bcd4',
+  '#009688',
+  '#4caf50',
+  '#8bc34a',
+  '#cddc39',
+  '#ffeb3b',
+  '#ffc107',
+  '#ff9800',
+  '#ff5722',
+  '#795548',
+];
+/** Override colors for the status tab; overlaid by fetchDistributionForTab
+ *  before slices are processed. */
+const STATUS_COLORS: Record<string, string> = {
+  active: '#2da44e',
+  deleted: '#d73a49',
+  pending: '#0969da',
+  flagged: '#cf222e',
+  banned: '#6e7781',
+  appealed: '#bf3989',
+};
+/** Per-tab legend header. Falls back to 'DIST.' for unknown tabs. */
+const LEGEND_TITLES: Record<string, string> = {
+  copyright: 'COPYRIGHTS',
+  character: 'CHARACTERS',
+  fav_copyright: 'FAVORITE COPYRIGHTS',
+  status: 'STATUS',
+  rating: 'RATINGS',
+  hair_length: 'HAIR LENGTH',
+  hair_color: 'HAIR COLOR',
+  breasts: 'BREASTS',
+  gender: 'GENDER',
+  commentary: 'COMMENTARY',
+  translation: 'TRANSLATION',
+};
+/** Custom categorical order for the hair_length tab (count-based sort would
+ *  reorder buckets in non-intuitive ways). */
+const HAIR_LENGTH_ORDER = [
+  'Bald',
+  'Very Short Hair',
+  'Short Hair',
+  'Medium Hair',
+  'Long Hair',
+  'Very Long Hair',
+  'Absurdly Long Hair',
+];
+
+// ============================================================
+// PIE WIDGET — FILE-PRIVATE HELPERS
+// ============================================================
+
+/**
+ * Normalize a count-only distribution into the {frequency, value, label,
+ * details} shape used by the four "ratio" tabs (breasts, gender,
+ * commentary, translation). Pure — produces a new array.
+ */
+function preprocessFrequencyTab(data: PieTabItem[]): PieTabItem[] {
+  const total = data.reduce((acc: number, c: PieTabItem) => acc + c.count, 0);
+  return data.map((d: PieTabItem) => ({
+    ...d,
+    frequency: total > 0 ? d.count / total : 0,
+    value: total > 0 ? d.count / total : 0,
+    label: d.name,
+    details: {...d, thumb: null},
+  }));
+}
+
+/**
+ * Map a per-tab PieTabItem[] to the unified PieSlice[] shape consumed by
+ * D3 (value+label+color+details). Centralizes the per-tab branching:
+ * rating/status get hardcoded color+label tables, hair_color respects the
+ * upstream-supplied color, everything else falls back to PIE_PALETTE.
+ * Pure.
+ */
+function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
+  return data.map((d: PieTabItem, i: number) => {
+    // Widen to a single shape — the union members from PieTabItem all
+    // expose these fields optionally, but the type system doesn't narrow
+    // them per-tab here.
+    const item = d as {
+      name?: string;
+      rating?: string;
+      label?: string;
+      tagName?: string;
+      originalTag?: string;
+      isOther?: boolean;
+      color?: string;
+      frequency?: number;
+      thumb?: string | null;
+      count: number;
+    };
+
+    const tagDetails = (): PieDetails => ({
+      kind: 'tag',
+      tagName: item.tagName,
+      originalTag: item.originalTag,
+      isOther: item.isOther,
+      count: item.count,
+      thumb: item.thumb,
+      color: item.color,
+      frequency: item.frequency,
+      name: item.name,
+    });
+
+    if (
+      [
+        'rating',
+        'status',
+        'breasts',
+        'hair_length',
+        'hair_color',
+        'gender',
+        'commentary',
+        'translation',
+      ].includes(currentPieTab)
+    ) {
+      let details: PieDetails;
+      if (currentPieTab === 'rating') {
+        details = {
+          kind: 'rating',
+          rating: (item.rating ?? '') as 'g' | 's' | 'q' | 'e' | '',
+          count: item.count,
+          label: item.label,
+          thumb: item.thumb,
+        };
+      } else if (currentPieTab === 'status') {
+        details = {
+          kind: 'status',
+          name: item.name ?? '',
+          count: item.count,
+          label: item.label,
+          thumb: item.thumb,
+        };
+      } else {
+        details = tagDetails();
+      }
+      return {
+        value: item.count,
+        label:
+          currentPieTab === 'rating'
+            ? RATING_LABELS[item.rating as keyof typeof RATING_LABELS] ||
+              item.rating ||
+              ''
+            : item.label || item.name || '',
+        color:
+          currentPieTab === 'rating'
+            ? RATING_COLORS[item.rating as keyof typeof RATING_COLORS] || '#999'
+            : currentPieTab === 'hair_color' && item.color
+              ? item.color
+              : item.color ||
+                (item.isOther
+                  ? '#bdbdbd'
+                  : PIE_PALETTE[i % PIE_PALETTE.length]),
+        details,
+      };
+    } else {
+      let sliceColor = item.isOther
+        ? '#bdbdbd'
+        : PIE_PALETTE[i % PIE_PALETTE.length];
+      if (currentPieTab === 'hair_color' && item.color) {
+        sliceColor = item.color;
+      }
+      return {
+        value: item.frequency ?? 0,
+        label: item.name ?? '',
+        color: sliceColor,
+        details: tagDetails(),
+      };
+    }
+  });
+}
+
+/**
+ * Build the tooltip body HTML for a single pie slice (thumb + label +
+ * count/freq lines). Shared by the desktop mouseover handler and the
+ * mobile touch handler so they stay in sync byte-for-byte.
+ */
+function buildSliceTooltipHtml(args: {
+  details: PieDetails;
+  color: string;
+  label: string;
+  currentPieTab: string;
+  percentage: string;
+}): string {
+  const {details, color, label, currentPieTab, percentage} = args;
+  const safeThumb = safeThumbUrl(details.thumb);
+  const thumbHtml = safeThumb
+    ? `
+        <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
+          <img src="${escapeHtml(safeThumb)}" style="width: 100%; height: 100%; object-fit: cover;">
+        </div>`
+    : '';
+  const sliceColor = safeColor(color);
+  const safeLabel = escapeHtml(label);
+  const isOtherSlice = details.kind === 'tag' && !!details.isOther;
+
+  if (currentPieTab === 'rating') {
+    return `
+          <div style="display: flex; gap: 12px; align-items: start;">
+            ${thumbHtml}
+            <div>
+              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px;">${safeLabel}</div>
+              <div style="font-size: 11px; color: #ccc;">Count: <strong style="color:#fff;">${details.count.toLocaleString()}</strong></div>
+              <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${percentage}</strong></div>
+            </div>
+          </div>
+        `;
+  }
+  return `
+          <div style="display: flex; gap: 12px; align-items: start;">
+            ${thumbHtml}
+            <div style="max-width: 180px;">
+              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${safeLabel}</div>
+              <div style="font-size: 11px; color: #ccc;">Freq: <strong style="color:#fff;">${percentage}</strong></div>
+              ${!isOtherSlice ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
+            </div>
+          </div>
+        `;
+}
+
+/**
+ * One-time creation of the chart wrapper (sized for arcHover headroom +
+ * 3D rotateX perspective), inner SVG/g, the 3D shadow overlay, and the
+ * scrollable legend container with inline scrollbar styling. Returns the
+ * chart wrapper so the caller can grab the d3 selection from it.
+ *
+ * Firefox is special-cased — it breaks SVG pointer events under
+ * transform-style:preserve-3d, so we fall back to a flat hover scale.
+ */
+function buildChartScaffolding(
+  pieContent: HTMLElement,
+  isFirefox: boolean,
+): HTMLElement {
+  pieContent.innerHTML = '';
+
+  const chartWrapper = document.createElement('div');
+  chartWrapper.className = 'pie-chart-wrapper';
+  // Wrapper is sized larger than the visible chart (140px diameter at
+  // radius 70) to give arcHover (1.2× scale) and the 3D rotateX(40deg)
+  // perspective room to extend without bleeding into the legend or the
+  // mobile sticky-header. See PIE_SVG_SIZE / PIE_RADIUS above.
+  chartWrapper.style.width = `${PIE_SVG_SIZE}px`;
+  chartWrapper.style.height = `${PIE_SVG_SIZE}px`;
+  chartWrapper.style.cursor = 'pointer';
+
+  if (!isFirefox) {
+    // 3D tilt effect (Chrome/Safari/Edge only — Firefox breaks SVG pointer events)
+    chartWrapper.style.transformStyle = 'preserve-3d';
+    chartWrapper.style.transform = 'rotateX(40deg) rotateY(0deg)';
+    chartWrapper.style.transition =
+      'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+
+    const shadow = document.createElement('div');
+    shadow.style.position = 'absolute';
+    shadow.style.top = '50%';
+    shadow.style.left = '50%';
+    shadow.style.width = '140px';
+    shadow.style.height = '140px';
+    shadow.style.transform = 'translate(-50%, -50%) translateZ(-10px)';
+    shadow.style.borderRadius = '50%';
+    shadow.style.background = 'var(--di-shadow, rgba(0,0,0,0.2))';
+    shadow.style.filter = 'blur(5px)';
+    chartWrapper.appendChild(shadow);
+
+    chartWrapper.addEventListener('mouseenter', () => {
+      chartWrapper.style.transform = 'rotateX(0deg) scale(1.1)';
+      shadow.style.transform =
+        'translate(-50%, -50%) translateZ(-30px) scale(0.9)';
+      shadow.style.opacity = '0.5';
+    });
+    chartWrapper.addEventListener('mouseleave', () => {
+      chartWrapper.style.transform = 'rotateX(40deg)';
+      shadow.style.transform = 'translate(-50%, -50%) translateZ(-10px)';
+      shadow.style.opacity = '1';
+    });
+  } else {
+    // Firefox: simple hover scale (no 3D)
+    chartWrapper.style.transition = 'transform 0.3s ease';
+    chartWrapper.addEventListener('mouseenter', () => {
+      chartWrapper.style.transform = 'scale(1.05)';
+    });
+    chartWrapper.addEventListener('mouseleave', () => {
+      chartWrapper.style.transform = 'none';
+    });
+  }
+
+  pieContent.appendChild(chartWrapper);
+
+  d3.select(chartWrapper)
+    .append('svg')
+    .attr('width', PIE_SVG_SIZE)
+    .attr('height', PIE_SVG_SIZE)
+    .style('overflow', 'visible')
+    .append('g')
+    .attr('transform', `translate(${PIE_SVG_SIZE / 2},${PIE_SVG_SIZE / 2})`);
+
+  const legendDiv = document.createElement('div');
+  legendDiv.className = 'danbooru-grass-legend-scroll';
+  legendDiv.style.display = 'flex';
+  legendDiv.style.flexDirection = 'column';
+  legendDiv.style.marginLeft = '20px';
+  legendDiv.style.maxHeight = `${PIE_SVG_SIZE}px`;
+  legendDiv.style.overflowY = 'auto';
+  legendDiv.style.paddingRight = '5px';
+
+  const scrollbarStyle = document.createElement('style');
+  scrollbarStyle.innerHTML = `
+          .danbooru-grass-legend-scroll::-webkit-scrollbar { width: 6px; }
+          .danbooru-grass-legend-scroll::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }
+          .danbooru-grass-legend-scroll::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
+          .danbooru-grass-legend-scroll::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+       `;
+  legendDiv.appendChild(scrollbarStyle);
+  pieContent.appendChild(legendDiv);
+
+  return chartWrapper;
+}
+
+/**
+ * Bind the desktop D3 path join (enter/update with arc transition) and
+ * the mouseover/mousemove/mouseout/click handlers driving the hover
+ * tooltip. Touch devices are filtered out at the start of each handler
+ * because browsers synthesize mouseover/move/out after a touchend and
+ * those would clobber the touch-relative placement done by
+ * bindTouchPieInteractions.
+ */
+function bindDesktopPieInteractions(args: {
+  svg: D3Any;
+  validData: PieSlice[];
+  pie: D3Any;
+  arc: D3Any;
+  arcHover: D3Any;
+  tooltip: D3Any;
+  isTouch: boolean;
+  currentPieTab: string;
+  pctFor: (label: string) => string;
+  handlePieClick: (d: d3.PieArcDatum<PieSlice>) => void;
+}): void {
+  const {
+    svg,
+    validData,
+    pie,
+    arc,
+    arcHover,
+    tooltip,
+    isTouch,
+    currentPieTab,
+    pctFor,
+    handlePieClick,
+  } = args;
+  svg
+    .selectAll('path')
+    .data(pie(validData), (d: D3Any) => d.data.label)
+    .join(
+      (enter: D3Any) =>
+        enter
+          .append('path')
+          .attr('class', 'danbooru-grass-pie-path')
+          .attr('d', arc)
+          .attr('fill', (d: D3Any) => d.data.color)
+          .style('opacity', '0.9')
+          .style('cursor', 'pointer'),
+      (update: D3Any) =>
+        update
+          .attr('class', 'danbooru-grass-pie-path')
+          .attr('d', arc)
+          .call((update: D3Any) =>
+            update
+              .transition()
+              .duration(500)
+              .attr('fill', (d: D3Any) => d.data.color),
+          ),
+    )
+    .attr('stroke', 'var(--di-chart-bg, #fff)')
+    .style('stroke-width', '1px')
+    .on(
+      'mouseover',
+      function (
+        this: SVGPathElement,
+        event: MouseEvent,
+        d: d3.PieArcDatum<PieSlice>,
+      ) {
+        // Touch devices fire synthetic mouseover/mousemove/mouseout AFTER
+        // touchend at the touch position. Without this guard, the synthetic
+        // mouseover would overwrite handleSliceTouch's far-side tooltip
+        // placement with a touch-relative one — re-introducing the right-edge
+        // clipping the touch path was specifically built to avoid.
+        if (isTouch) return;
+        d3.select(this)
+          .transition()
+          .duration(200)
+          .attr(
+            'd',
+            (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
+          )
+          .style('opacity', '1')
+          .style('filter', 'drop-shadow(0px 0px 8px rgba(255,255,255,0.4))');
+
+        const html = buildSliceTooltipHtml({
+          details: d.data.details,
+          color: d.data.color,
+          label: d.data.label,
+          currentPieTab,
+          percentage: pctFor(d.data.label),
+        });
+
+        // Position before opacity — otherwise the tooltip flashes at the
+        // previous tap's coordinates for one paint frame (offsetWidth read
+        // by other code paths forces an intermediate render at the stale
+        // position). Including the cursor position here also covers the
+        // gap before the first mousemove event.
+        tooltip
+          .html(html)
+          .style('left', event.pageX + 15 + 'px')
+          .style('top', event.pageY + 15 + 'px')
+          .style('opacity', 1);
+      },
+    )
+    .on('mousemove', (event: MouseEvent) => {
+      if (isTouch) return;
+      tooltip
+        .style('left', event.pageX + 15 + 'px')
+        .style('top', event.pageY + 15 + 'px');
+    })
+    .on('mouseout', function (this: SVGPathElement) {
+      if (isTouch) return;
+      d3.select(this)
+        .transition()
+        .duration(200)
+        .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
+        .style('opacity', '0.9')
+        .style('filter', 'none');
+      tooltip.style('opacity', 0);
+    })
+    .on('click', (_event: MouseEvent, d: d3.PieArcDatum<PieSlice>) => {
+      if (isTouch) return;
+      handlePieClick(d);
+    });
+}
+
+/**
+ * Wire up the touch-only interaction model: tap slice → preview
+ * (highlight + tooltip), tap tooltip → navigate. Uses createTwoStepTap +
+ * TapTracker so synthetic click after touchend doesn't double-fire, and
+ * captures the slice datum at touchstart (elementFromPoint is unreliable
+ * on the 3D-rotated SVG and was silently no-op-ing many taps before
+ * datum capture was added).
+ */
+function bindTouchPieInteractions(args: {
+  container: HTMLElement;
+  chartWrapper: HTMLElement;
+  svg: D3Any;
+  arc: D3Any;
+  arcHover: D3Any;
+  tooltip: D3Any;
+  currentPieTab: string;
+  pctFor: (label: string) => string;
+  handlePieClick: (d: d3.PieArcDatum<PieSlice>) => void;
+  hideTooltip: () => void;
+}): void {
+  const {
+    container,
+    chartWrapper,
+    svg,
+    arc,
+    arcHover,
+    tooltip,
+    currentPieTab,
+    pctFor,
+    handlePieClick,
+    hideTooltip,
+  } = args;
+
+  // Reset all slices to normal appearance
+  const resetSlices = () => {
+    svg
+      .selectAll('path.danbooru-grass-pie-path')
+      .transition()
+      .duration(200)
+      .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
+      .style('opacity', '0.9')
+      .style('filter', 'none');
+  };
+
+  // Mobile interaction model: tap slice → preview (highlight + tooltip),
+  // tap tooltip → navigate. A second tap on the same slice is a no-op
+  // (preview persists) — navigateOnSameTap:false suppresses the shared
+  // util's default double-tap-to-navigate behavior, so the only path to
+  // navigation is the tooltip click below.
+  const pieTap: TwoStepTapController<d3.PieArcDatum<PieSlice>> =
+    createTwoStepTap({
+      insideElements: () => [
+        tooltip.node() as Element | null,
+        svg.node() as Element | null,
+      ],
+      onFirstTap: () => {
+        // Visual updates handled in handleSliceTouch (needs touch coordinates)
+      },
+      onSecondTap: datum => {
+        handlePieClick(datum);
+        hideTooltip();
+        // Same fix the tag-cloud widget needed: navigation opens the
+        // post search in a new tab, so when the user comes back via
+        // browser-back the SVG state is exactly what we left it as.
+        // Without resetSlices() the highlighted slice stays in its
+        // arcHover shape and the tap tracker has no datum, so no tap
+        // will dismiss it — the chart appears frozen until a different
+        // slice is touched.
+        resetSlices();
+      },
+      onReset: () => {
+        hideTooltip();
+        resetSlices();
+      },
+      navigateOnSameTap: false,
+    });
+
+  // Helper to handle a completed tap on a slice. The caller passes the
+  // datum captured at touchstart (the path d3 dispatched the event from)
+  // — this avoids elementFromPoint, which is unreliable on 3D-rotated
+  // SVG paths and was causing many taps to silently fail. The path
+  // element is looked up via d3 filter on the same datum identity.
+  const handleSliceTouch = (
+    event: TouchEvent,
+    datum: d3.PieArcDatum<PieSlice>,
+  ) => {
+    const touch = event.changedTouches[0] ?? event.touches[0];
+    if (!touch || !datum.data) return;
+    // Type args on selectAll are dropped because `svg` is typed as
+    // `D3Any` here — TS2347 rejects type arguments on calls whose
+    // callee is `any`. The .filter callback below carries the slice
+    // datum type explicitly, so the chain stays type-checked.
+    const target = svg
+      .selectAll('path.danbooru-grass-pie-path')
+      .filter((d: d3.PieArcDatum<PieSlice>) => d === datum)
+      .node();
+    if (!target) return;
+
+    // Reset all slices, then enlarge touched slice
+    resetSlices();
+    pieTap.tap(datum);
+
+    d3.select(target)
+      .transition()
+      .duration(200)
+      .attr(
+        'd',
+        (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
+      )
+      .style('opacity', '1');
+
+    // Show tooltip (same HTML building logic as mouseover)
+    const html = buildSliceTooltipHtml({
+      details: datum.data.details,
+      color: datum.data.color,
+      label: datum.data.label,
+      currentPieTab,
+      percentage: pctFor(datum.data.label),
+    });
+
+    // Update content but keep opacity at 0 — we'll flip to opacity 1
+    // only after the new position is set. Without this guard, the
+    // tooltip is briefly visible at the previous tap's coordinates
+    // because offsetWidth/offsetHeight reads below force a render
+    // before the new style.left / style.top take effect ("ghost flash").
+    tooltip.html(html);
+
+    // Pick the first candidate position that fits the tooltip's
+    // natural size entirely inside (card-horizontal × wrapper-vertical
+    // ∩ viewport). Tooltip width/height are NOT modified — the user
+    // explicitly rejected size reduction. Edge slices on narrow cards
+    // can't fit any of the four touch-relative quadrants, so we also
+    // try anchoring to the card's FAR side (opposite the touch) — this
+    // is the "flip across the chart" placement the user asked for. If
+    // even those fail, fall back to a viewport-clamped origin;
+    // horizontal page scroll is independently prevented by the body
+    // scroll lock so this fallback is safe.
+    const tooltipNode = tooltip.node() as HTMLElement | null;
+    const tw = tooltipNode?.offsetWidth ?? 0;
+    const th = tooltipNode?.offsetHeight ?? 0;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const margin = 8;
+    const cardRect = container.getBoundingClientRect();
+    const wrapperRect = chartWrapper.getBoundingClientRect();
+    const bounds = {
+      minLeft: Math.max(
+        cardRect.left + window.scrollX + margin,
+        window.scrollX + margin,
+      ),
+      maxRight: Math.min(
+        cardRect.right + window.scrollX - margin,
+        window.scrollX + vw - margin,
+      ),
+      minTop: Math.max(
+        wrapperRect.top + window.scrollY + margin,
+        window.scrollY + margin,
+      ),
+      maxBottom: Math.min(
+        wrapperRect.bottom + window.scrollY - margin,
+        window.scrollY + vh - margin,
+      ),
+    };
+    // Far side of the card relative to the touch — this is where the
+    // tooltip goes when no touch-relative quadrant has room.
+    const cardCenterDocX = cardRect.left + cardRect.width / 2 + window.scrollX;
+    const farSideLeft =
+      touch.pageX > cardCenterDocX ? bounds.minLeft : bounds.maxRight - tw;
+    const candidates = [
+      // Touch-relative quadrants (priority: away from modal edge).
+      {left: touch.pageX - tw - 15, top: touch.pageY - th - 15},
+      {left: touch.pageX + 15, top: touch.pageY - th - 15},
+      {left: touch.pageX - tw - 15, top: touch.pageY + 15},
+      {left: touch.pageX + 15, top: touch.pageY + 15},
+      // Far-side anchors — used when an edge slice prevents any of the
+      // four touch-relative candidates from fitting (typical: long
+      // copyright/character label on a narrow phone). All four place
+      // the tooltip at the card's opposite horizontal edge with
+      // varying vertical positions, picking the one closest to the
+      // touch.
+      {left: farSideLeft, top: touch.pageY - th / 2},
+      {left: farSideLeft, top: touch.pageY + 15},
+      {left: farSideLeft, top: touch.pageY - th - 15},
+      {left: farSideLeft, top: bounds.maxBottom - th},
+      {left: farSideLeft, top: bounds.minTop},
+    ];
+    const chosen = pickFittingPosition(candidates, tw, th, bounds) ?? {
+      // Last-resort fallback: align to far side horizontally, clamp
+      // vertically near the touch. Shouldn't trigger in practice now
+      // that far-side candidates explore the full vertical range.
+      left: Math.max(
+        bounds.minLeft,
+        Math.min(bounds.maxRight - tw, farSideLeft),
+      ),
+      top: Math.max(
+        bounds.minTop,
+        Math.min(bounds.maxBottom - th, touch.pageY + 15),
+      ),
+    };
+    tooltip
+      .style('left', chosen.left + 'px')
+      .style('top', chosen.top + 'px')
+      .style('opacity', 1)
+      .style('pointer-events', 'auto');
+  };
+
+  // Slice and tooltip both use TapTracker so the action only fires on
+  // a completed tap (touchstart + touchend on roughly the same spot).
+  // Why: showing the tooltip on `touchstart` would put it under the
+  // user's finger, and the synthetic `click` browsers fire after a
+  // tap would land on the tooltip and trigger navigation immediately
+  // — perceived as "one tap, two actions". With end-of-tap gating and
+  // no `tooltip.on('click')`, the synthetic click is harmless.
+  const sliceTapTracker = new TapTracker();
+  // Capture the slice datum at touchstart — we know exactly which path
+  // d3 dispatched the event from. Re-querying via elementFromPoint at
+  // touchend is unreliable on a 3D-rotated SVG (rotateX(40deg) moves
+  // hit-test boundaries off the visible pixels and elementFromPoint
+  // often returns the parent <svg> / <g> instead of the path), which
+  // made a large fraction of taps silently no-op.
+  let sliceTouchDatum: d3.PieArcDatum<PieSlice> | null = null;
+  // Same reason as above: drop the selectAll<...> type args because
+  // svg's static type is `D3Any`. The touchstart datum annotation
+  // below keeps the per-event type checked.
+  svg
+    .selectAll('path.danbooru-grass-pie-path')
+    .on('touchstart', (event: TouchEvent, datum: d3.PieArcDatum<PieSlice>) => {
+      sliceTapTracker.onTouchStart(event);
+      sliceTouchDatum = datum;
+    })
+    .on('touchmove', (event: TouchEvent) => {
+      sliceTapTracker.onTouchMove(event);
+    })
+    .on('touchend', (event: TouchEvent) => {
+      const isTap = sliceTapTracker.onTouchEnd(event);
+      const datum = sliceTouchDatum;
+      sliceTouchDatum = null;
+      if (isTap && datum) {
+        handleSliceTouch(event, datum);
+      }
+    });
+
+  const tooltipTapTracker = new TapTracker();
+  tooltip
+    .on('touchstart', (event: TouchEvent) => {
+      tooltipTapTracker.onTouchStart(event);
+    })
+    .on('touchmove', (event: TouchEvent) => {
+      tooltipTapTracker.onTouchMove(event);
+    })
+    .on('touchend', (event: TouchEvent) => {
+      if (tooltipTapTracker.onTouchEnd(event)) {
+        pieTap.navigateActive();
+      }
+    });
+}
+
+/**
+ * Render the scrollable legend list. Reads the legend container's
+ * existing <style> tag (preserving the scrollbar styling buildChartScaffolding
+ * injected) and replaces the rest of the inner HTML with a fresh title +
+ * one row per slice. Pure on processedData / pctFor.
+ */
+function renderPieLegend(args: {
+  legendDiv: Element;
+  processedData: PieSlice[];
+  currentPieTab: string;
+  pctFor: (label: string) => string;
+  normalizedName: string;
+}): void {
+  const {legendDiv, processedData, currentPieTab, pctFor, normalizedName} =
+    args;
+  const legendTitle = LEGEND_TITLES[currentPieTab] ?? 'DIST.';
+  const styleTag = legendDiv.querySelector('style')?.outerHTML ?? '';
+
+  const listHtml = processedData
+    .map(d => {
+      const pct = pctFor(d.label);
+      const isOtherSlice = d.details.kind === 'tag' && !!d.details.isOther;
+      let targetUrl = '#';
+
+      if (!isOtherSlice) {
+        const query = buildSearchQuery(
+          d.details,
+          d.label,
+          normalizedName,
+          currentPieTab,
+        );
+        if (query) {
+          targetUrl = `/posts?tags=${encodeURIComponent(query)}`;
+        }
+      }
+
+      const swatchColor = safeColor(d.color);
+      const safeLabel = escapeHtml(d.label);
+      const safeUrl = escapeHtml(targetUrl);
+      const countTitle = d.details.count
+        ? escapeHtml(d.details.count.toLocaleString())
+        : '';
+      return `
+               <div style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
+                  <div style="width:12px; height:12px; background:${swatchColor}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
+                  ${
+                    isOtherSlice
+                      ? `<div style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${safeLabel}">${safeLabel}</div>`
+                      : `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="di-hover-underline" style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${safeLabel}">${safeLabel}</a>`
+                  }
+                  <div style="font-weight:bold; color:var(--di-text, #333); margin-left:auto;" title="${countTitle}">${pct}</div>
+               </div>`;
+    })
+    .join('');
+
+  legendDiv.innerHTML =
+    styleTag +
+    `
+           <div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:var(--di-chart-bg, #fff); padding-bottom:4px; border-bottom:1px solid var(--di-border-light, #eee);">${legendTitle}</div>
+           ${listHtml}
+      `;
+}
+
+/**
+ * Per-tab dispatcher that fetches the distribution for `tabName` from
+ * AnalyticsDataManager and applies tab-specific post-processing (status
+ * color overlay; count→frequency conversion for the four ratio tabs).
+ */
+async function fetchDistributionForTab(
+  tabName: string,
+  dataManager: AnalyticsDataManager,
+  user: TargetUser,
+  firstUploadDate: Date | null,
+): Promise<PieTabItem[]> {
+  if (tabName === 'rating') {
+    return dataManager.getRatingDistribution(user, firstUploadDate);
+  }
+  if (tabName === 'status') {
+    const data = await dataManager.getStatusDistribution(user, firstUploadDate);
+    return data.map((d: PieTabItem) => ({
+      ...d,
+      color: STATUS_COLORS[d.name as keyof typeof STATUS_COLORS] || '#888',
+    }));
+  }
+  if (tabName === 'character') {
+    return dataManager.getCharacterDistribution(user);
+  }
+  if (tabName === 'copyright') {
+    return dataManager.getCopyrightDistribution(user);
+  }
+  if (tabName === 'fav_copyright') {
+    return dataManager.getFavCopyrightDistribution(user);
+  }
+  if (tabName === 'breasts') {
+    return preprocessFrequencyTab(
+      await dataManager.getBreastsDistribution(user),
+    );
+  }
+  if (tabName === 'gender') {
+    return preprocessFrequencyTab(
+      await dataManager.getGenderDistribution(user),
+    );
+  }
+  if (tabName === 'commentary') {
+    return preprocessFrequencyTab(
+      await dataManager.getCommentaryDistribution(user),
+    );
+  }
+  if (tabName === 'translation') {
+    return preprocessFrequencyTab(
+      await dataManager.getTranslationDistribution(user),
+    );
+  }
+  return [];
+}
+
+/**
+ * Crossfade snapshot animation for tab switches. Clones the current
+ * pieContent children into an absolutely-positioned overlay (so the
+ * originals can re-render in place via the d3 join), then fades the
+ * overlay out once loadTabFn resolves. Bails (drops the snapshot) if
+ * the user has switched to a different tab while the fetch was in
+ * flight.
+ */
+function runTabCrossfade(args: {
+  pieContent: HTMLElement;
+  mode: string;
+  loadTab: (mode: string) => Promise<void>;
+  getCurrentTab: () => string;
+}): void {
+  const {pieContent, mode, loadTab, getCurrentTab} = args;
+  // Crossfade — same pattern the tag-cloud widget uses (350 ms opacity
+  // transition between two overlapping wrappers). The current children
+  // (chart wrapper + legend) are cloneNode'd into an absolutely
+  // positioned snapshot that overlays the originals; the originals
+  // re-render in place via d3 join behind it; once the new data is
+  // ready, the snapshot fades to 0, revealing the freshly rendered
+  // content underneath. Keeping d3 references on the live chart
+  // wrapper means tooltip / hover bindings survive the transition.
+  const TRANSITION_MS = 350;
+  // Drop any in-flight snapshot from a previous rapid tab tap so we
+  // don't pile up overlays.
+  pieContent.querySelectorAll('.di-pie-snapshot').forEach(n => n.remove());
+  const piStyles = window.getComputedStyle(pieContent);
+  const snapshot = document.createElement('div');
+  snapshot.className = 'di-pie-snapshot';
+  // Fill the parent (pieContent) exactly — `position: absolute` +
+  // 0/0/100%/100% relative to a positioned ancestor avoids any
+  // bounding-rect math / containing-block ambiguity that broke
+  // earlier alignment attempts. Innerlay snapshot in pieContent
+  // (not the outer card) so it tracks pieContent's exact rect even
+  // if the dashboard layout shifts. Trade-off: loadTab's uncached
+  // path wipes pieContent.innerHTML, which removes the snapshot
+  // and skips the transition for first-time tab visits — that's
+  // fine because the user still sees a Loading message there.
+  snapshot.style.position = 'absolute';
+  snapshot.style.top = '0';
+  snapshot.style.left = '0';
+  snapshot.style.width = '100%';
+  snapshot.style.height = '100%';
+  snapshot.style.display = piStyles.display;
+  snapshot.style.flexDirection = piStyles.flexDirection;
+  snapshot.style.alignItems = piStyles.alignItems;
+  snapshot.style.justifyContent = piStyles.justifyContent;
+  // Preserve the parent's 3D context so the cloned chart wrapper
+  // keeps its rotateX(40deg) tilt during the fade.
+  snapshot.style.transformStyle = 'preserve-3d';
+  snapshot.style.perspective = piStyles.perspective;
+  snapshot.style.pointerEvents = 'none';
+  snapshot.style.transition = `opacity ${TRANSITION_MS}ms ease`;
+  snapshot.style.opacity = '1';
+  for (const child of Array.from(pieContent.children) as HTMLElement[]) {
+    snapshot.appendChild(child.cloneNode(true) as HTMLElement);
+  }
+  pieContent.style.position = 'relative';
+  pieContent.appendChild(snapshot);
+  // Force layout commit so the browser has a "before" frame
+  // (opacity:1) to interpolate from. Without this, when loadTab
+  // resolves synchronously (cached tab), the microtask + RAF can
+  // batch the opacity 1→0 change with the initial style and skip
+  // the transition entirely.
+  void snapshot.getBoundingClientRect();
+
+  void loadTab(mode).then(() => {
+    if (getCurrentTab() !== mode) {
+      // User switched again before this tab finished — drop the
+      // stale snapshot immediately so it doesn't sit on top of the
+      // newer transition's snapshot.
+      snapshot.remove();
+      return;
+    }
+    requestAnimationFrame(() => {
+      snapshot.style.opacity = '0';
+      setTimeout(() => snapshot.remove(), TRANSITION_MS);
+    });
+  });
+}
+
+/**
+ * Renders one frame of the pie chart based on the current tab. Handles the
+ * "no data / loading / empty" guards, the per-tab data shaping, the
+ * one-time chart scaffolding, the desktop+touch event bindings, and the
+ * legend. Called by `requestRender`, the tab-click handler, and the cache
+ * hit branch of `loadTab` inside renderPieWidget.
+ */
+function renderPieFrame(args: {
+  container: HTMLElement;
+  pieData: Record<string, PieTabItem[]>;
+  currentPieTab: string;
+  context: ChartContext;
+  handlePieClick: (d: d3.PieArcDatum<PieSlice>) => void;
+}): void {
+  const {container, pieData, currentPieTab, context, handlePieClick} = args;
+  const isTouch = isTouchDevice();
+  const contextUser = context.targetUser;
+  const data = pieData[currentPieTab];
+  const pieContent = container.querySelector('.pie-content') as HTMLElement;
+
+  if (!data) {
+    pieContent.innerHTML =
+      '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">Loading...</div>';
+    return;
+  }
+
+  if (data.length === 0) {
+    pieContent.innerHTML =
+      '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">No data available</div>';
+    return;
+  }
+
+  if (!contextUser.normalizedName && contextUser.name) {
+    contextUser.normalizedName = contextUser.name.replace(/ /g, '_');
+  }
+
+  // Hair length has a categorical sort order — count-based ordering
+  // (the default for every other tab) would reorder hair-length
+  // buckets in non-intuitive ways.
+  if (currentPieTab === 'hair_length') {
+    data.sort(
+      (a: PieTabItem, b: PieTabItem) =>
+        HAIR_LENGTH_ORDER.indexOf(a.name ?? '') -
+        HAIR_LENGTH_ORDER.indexOf(b.name ?? ''),
+    );
+  }
+
+  pieContent.style.display = 'flex';
+  pieContent.style.flexDirection = 'row';
+  pieContent.style.alignItems = 'center';
+  pieContent.style.justifyContent = 'space-around';
+
+  // Firefox: skip 3D perspective — breaks SVG pointer events
+  const isFirefox = navigator.userAgent.includes('Firefox');
+  if (!isFirefox) {
+    pieContent.style.perspective = '1000px';
+  }
+
+  const processedData = processSlices(data, currentPieTab);
+  const validData = processedData.filter(
+    (d: PieSlice) => Number.isFinite(d.value) && d.value > 0,
+  );
+  const totalValue = validData.reduce(
+    (acc: number, curr: PieSlice) => acc + curr.value,
+    0,
+  );
+
+  if (validData.length === 0 || totalValue === 0) {
+    pieContent.innerHTML =
+      '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">No data available (Total count is 0)</div>';
+    return;
+  }
+
+  // Largest-remainder percentages: ensures tooltip + legend agree and
+  // their sum is exactly 100% (avoids 33+33+33=99 / 16.67×6=102 displays).
+  // All tabs use 1 decimal for visual consistency between rating and others.
+  const pctStrings = computePercentages(
+    validData.map(s => s.value),
+    1,
+  );
+  const pctByLabel = new Map<string, string>(
+    validData.map((s, i) => [s.label, pctStrings[i]]),
+  );
+  const pctFor = (label: string) => pctByLabel.get(label) ?? '0.0%';
+
+  let chartWrapper = pieContent.querySelector(
+    '.pie-chart-wrapper',
+  ) as HTMLElement | null;
+
+  if (!chartWrapper) {
+    chartWrapper = buildChartScaffolding(pieContent, isFirefox);
+  }
+
+  const svg = d3.select(chartWrapper).select('svg g');
+  const pie = d3
+    .pie<PieSlice>()
+    .value(d => d.value)
+    .sort(null);
+  const arc = d3
+    .arc<d3.PieArcDatum<PieSlice>>()
+    .innerRadius(0)
+    .outerRadius(PIE_RADIUS);
+  const arcHover = d3
+    .arc<d3.PieArcDatum<PieSlice>>()
+    .innerRadius(0)
+    .outerRadius(PIE_RADIUS * 1.2);
+
+  // pointer-events is toggled in sync with opacity (auto when shown,
+  // none when hidden) so a dismissed tooltip's stale rectangle never
+  // intercepts a slice tap from underneath.
+  const tooltip = d3
+    .select(createBodyTooltip('danbooru-grass-pie-tooltip'))
+    .style('background', 'rgba(30, 30, 30, 0.95)')
+    .style('color', '#fff')
+    .style('padding', '8px 12px')
+    .style('border-radius', '6px')
+    .style('font-size', '12px')
+    .style('cursor', isTouch ? 'pointer' : 'default');
+
+  const hideTooltip = () => {
+    tooltip.style('opacity', 0).style('pointer-events', 'none');
+  };
+
+  bindDesktopPieInteractions({
+    svg,
+    validData,
+    pie,
+    arc,
+    arcHover,
+    tooltip,
+    isTouch,
+    currentPieTab,
+    pctFor,
+    handlePieClick,
+  });
+
+  if (isTouch) {
+    bindTouchPieInteractions({
+      container,
+      chartWrapper,
+      svg,
+      arc,
+      arcHover,
+      tooltip,
+      currentPieTab,
+      pctFor,
+      handlePieClick,
+      hideTooltip,
+    });
+  }
+
+  const legendDiv = pieContent.querySelector('.danbooru-grass-legend-scroll');
+  if (legendDiv) {
+    renderPieLegend({
+      legendDiv,
+      processedData,
+      currentPieTab,
+      pctFor,
+      normalizedName: contextUser.normalizedName ?? '',
+    });
+  }
+}
+
+// ============================================================
+// PIE WIDGET — MAIN
+// ============================================================
+
 /**
  * Renders the pie chart widget with tabs (status, rating, character, copyright, etc.).
  * @param container The element to render into.
@@ -107,21 +1196,12 @@ export function renderPieWidget(
   let renderPending = false;
   let isNsfwEnabled = initialNsfwEnabled;
 
-  // Pre-process special distributions (count-based → frequency/value)
+  // Pre-process special distributions (count-based → frequency/value).
+  // Same normalization that fetchDistributionForTab applies on the lazy
+  // path — kept here for tabs whose data was passed in upfront.
   for (const key of ['breasts', 'gender', 'commentary', 'translation']) {
     if (pieData[key]) {
-      const data = pieData[key];
-      const total = data.reduce(
-        (acc: number, c: PieTabItem) => acc + c.count,
-        0,
-      );
-      pieData[key] = data.map((d: PieTabItem) => ({
-        ...d,
-        frequency: total > 0 ? d.count / total : 0,
-        value: total > 0 ? d.count / total : 0,
-        label: d.name,
-        details: {...d, thumb: null},
-      }));
+      pieData[key] = preprocessFrequencyTab(pieData[key]);
     }
   }
 
@@ -203,766 +1283,19 @@ export function renderPieWidget(
     );
   };
 
-  /**
-   * Renders the Pie Chart content based on the current tab.
-   */
+  // Thin shim around the module-level renderPieFrame helper; binds the
+  // closure state (pieData / currentPieTab / context / handlePieClick) so
+  // callers (requestRender, loadTab, the tab-click handler) can keep
+  // calling renderPieContent() with no arguments and pick up the latest
+  // tab value at call time.
   const renderPieContent = () => {
-    const isTouch = isTouchDevice();
-    const contextUser = context.targetUser;
-    const data = pieData[currentPieTab];
-    const pieContent = container.querySelector('.pie-content') as HTMLElement;
-
-    if (!data) {
-      pieContent.innerHTML =
-        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">Loading...</div>';
-      return;
-    }
-
-    if (data.length === 0) {
-      pieContent.innerHTML =
-        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">No data available</div>';
-      return;
-    }
-
-    if (!contextUser.normalizedName && contextUser.name) {
-      contextUser.normalizedName = contextUser.name.replace(/ /g, '_');
-    }
-
-    // Sort: Hair Length has a specific order (custom sort)
-    if (currentPieTab === 'hair_length') {
-      const order = [
-        'Bald',
-        'Very Short Hair',
-        'Short Hair',
-        'Medium Hair',
-        'Long Hair',
-        'Very Long Hair',
-        'Absurdly Long Hair',
-      ];
-      data.sort(
-        (a: PieTabItem, b: PieTabItem) =>
-          order.indexOf(a.name ?? '') - order.indexOf(b.name ?? ''),
-      );
-    }
-
-    pieContent.style.display = 'flex';
-    pieContent.style.flexDirection = 'row';
-    pieContent.style.alignItems = 'center';
-    pieContent.style.justifyContent = 'space-around';
-
-    // Firefox: skip 3D perspective — breaks SVG pointer events
-    const isFirefox = navigator.userAgent.includes('Firefox');
-    if (!isFirefox) {
-      pieContent.style.perspective = '1000px';
-    }
-
-    const ratingColors: Record<string, string> = {
-      g: '#28a745',
-      s: '#fd7e14',
-      q: '#6f42c1',
-      e: '#dc3545',
-    };
-    const ratingLabels: Record<string, string> = {
-      g: 'General',
-      s: 'Sensitive',
-      q: 'Questionable',
-      e: 'Explicit',
-    };
-
-    const palette = [
-      '#e91e63',
-      '#9c27b0',
-      '#673ab7',
-      '#3f51b5',
-      '#2196f3',
-      '#03a9f4',
-      '#00bcd4',
-      '#009688',
-      '#4caf50',
-      '#8bc34a',
-      '#cddc39',
-      '#ffeb3b',
-      '#ffc107',
-      '#ff9800',
-      '#ff5722',
-      '#795548',
-    ];
-
-    const processedData: PieSlice[] = data.map((d: PieTabItem, i: number) => {
-      // Widen to a single shape — the union members from PieTabItem all
-      // expose these fields optionally, but the type system doesn't
-      // narrow them per-tab here.
-      const item = d as {
-        name?: string;
-        rating?: string;
-        label?: string;
-        tagName?: string;
-        originalTag?: string;
-        isOther?: boolean;
-        color?: string;
-        frequency?: number;
-        thumb?: string | null;
-        count: number;
-      };
-
-      const tagDetails = (): PieDetails => ({
-        kind: 'tag',
-        tagName: item.tagName,
-        originalTag: item.originalTag,
-        isOther: item.isOther,
-        count: item.count,
-        thumb: item.thumb,
-        color: item.color,
-        frequency: item.frequency,
-        name: item.name,
-      });
-
-      if (
-        [
-          'rating',
-          'status',
-          'breasts',
-          'hair_length',
-          'hair_color',
-          'gender',
-          'commentary',
-          'translation',
-        ].includes(currentPieTab)
-      ) {
-        let details: PieDetails;
-        if (currentPieTab === 'rating') {
-          details = {
-            kind: 'rating',
-            rating: (item.rating ?? '') as 'g' | 's' | 'q' | 'e' | '',
-            count: item.count,
-            label: item.label,
-            thumb: item.thumb,
-          };
-        } else if (currentPieTab === 'status') {
-          details = {
-            kind: 'status',
-            name: item.name ?? '',
-            count: item.count,
-            label: item.label,
-            thumb: item.thumb,
-          };
-        } else {
-          details = tagDetails();
-        }
-        return {
-          value: item.count,
-          label:
-            currentPieTab === 'rating'
-              ? ratingLabels[item.rating as keyof typeof ratingLabels] ||
-                item.rating ||
-                ''
-              : item.label || item.name || '',
-          color:
-            currentPieTab === 'rating'
-              ? ratingColors[item.rating as keyof typeof ratingColors] || '#999'
-              : currentPieTab === 'hair_color' && item.color
-                ? item.color
-                : item.color ||
-                  (item.isOther ? '#bdbdbd' : palette[i % palette.length]),
-          details,
-        };
-      } else {
-        let sliceColor = item.isOther ? '#bdbdbd' : palette[i % palette.length];
-        if (currentPieTab === 'hair_color' && item.color) {
-          sliceColor = item.color;
-        }
-        return {
-          value: item.frequency ?? 0,
-          label: item.name ?? '',
-          color: sliceColor,
-          details: tagDetails(),
-        };
-      }
+    renderPieFrame({
+      container,
+      pieData,
+      currentPieTab,
+      context,
+      handlePieClick,
     });
-
-    const validData = processedData.filter(
-      (d: PieSlice) => Number.isFinite(d.value) && d.value > 0,
-    );
-    const totalValue = validData.reduce(
-      (acc: number, curr: PieSlice) => acc + curr.value,
-      0,
-    );
-
-    if (validData.length === 0 || totalValue === 0) {
-      pieContent.innerHTML =
-        '<div style="color:var(--di-text-muted, #888); padding:30px; text-align:center;">No data available (Total count is 0)</div>';
-      return;
-    }
-
-    // Largest-remainder percentages: ensures tooltip + legend agree and
-    // their sum is exactly 100% (avoids 33+33+33=99 / 16.67×6=102 displays).
-    // All tabs use 1 decimal for visual consistency between rating and others.
-    const pctStrings = computePercentages(
-      validData.map(s => s.value),
-      1,
-    );
-    const pctByLabel = new Map<string, string>(
-      validData.map((s, i) => [s.label, pctStrings[i]]),
-    );
-    const pctFor = (label: string) => pctByLabel.get(label) ?? '0.0%';
-
-    // D3 Chart (Join Pattern)
-    let chartWrapper = pieContent.querySelector(
-      '.pie-chart-wrapper',
-    ) as HTMLElement;
-
-    if (!chartWrapper) {
-      pieContent.innerHTML = '';
-
-      chartWrapper = document.createElement('div');
-      chartWrapper.className = 'pie-chart-wrapper';
-      // Wrapper is sized larger than the visible chart (140px diameter at
-      // radius 70) to give arcHover (1.2× scale) and the 3D rotateX(40deg)
-      // perspective room to extend without bleeding into the legend or the
-      // mobile sticky-header. See PIE_SVG_SIZE / PIE_RADIUS below.
-      chartWrapper.style.width = `${PIE_SVG_SIZE}px`;
-      chartWrapper.style.height = `${PIE_SVG_SIZE}px`;
-      chartWrapper.style.cursor = 'pointer';
-
-      if (!isFirefox) {
-        // 3D tilt effect (Chrome/Safari/Edge only — Firefox breaks SVG pointer events)
-        chartWrapper.style.transformStyle = 'preserve-3d';
-        chartWrapper.style.transform = 'rotateX(40deg) rotateY(0deg)';
-        chartWrapper.style.transition =
-          'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
-
-        const shadow = document.createElement('div');
-        shadow.style.position = 'absolute';
-        shadow.style.top = '50%';
-        shadow.style.left = '50%';
-        shadow.style.width = '140px';
-        shadow.style.height = '140px';
-        shadow.style.transform = 'translate(-50%, -50%) translateZ(-10px)';
-        shadow.style.borderRadius = '50%';
-        shadow.style.background = 'var(--di-shadow, rgba(0,0,0,0.2))';
-        shadow.style.filter = 'blur(5px)';
-        chartWrapper.appendChild(shadow);
-
-        chartWrapper.addEventListener('mouseenter', () => {
-          chartWrapper.style.transform = 'rotateX(0deg) scale(1.1)';
-          shadow.style.transform =
-            'translate(-50%, -50%) translateZ(-30px) scale(0.9)';
-          shadow.style.opacity = '0.5';
-        });
-        chartWrapper.addEventListener('mouseleave', () => {
-          chartWrapper.style.transform = 'rotateX(40deg)';
-          shadow.style.transform = 'translate(-50%, -50%) translateZ(-10px)';
-          shadow.style.opacity = '1';
-        });
-      } else {
-        // Firefox: simple hover scale (no 3D)
-        chartWrapper.style.transition = 'transform 0.3s ease';
-        chartWrapper.addEventListener('mouseenter', () => {
-          chartWrapper.style.transform = 'scale(1.05)';
-        });
-        chartWrapper.addEventListener('mouseleave', () => {
-          chartWrapper.style.transform = 'none';
-        });
-      }
-
-      pieContent.appendChild(chartWrapper);
-
-      d3.select(chartWrapper)
-        .append('svg')
-        .attr('width', PIE_SVG_SIZE)
-        .attr('height', PIE_SVG_SIZE)
-        .style('overflow', 'visible')
-        .append('g')
-        .attr(
-          'transform',
-          `translate(${PIE_SVG_SIZE / 2},${PIE_SVG_SIZE / 2})`,
-        );
-
-      const legendDiv = document.createElement('div');
-      legendDiv.className = 'danbooru-grass-legend-scroll';
-      legendDiv.style.display = 'flex';
-      legendDiv.style.flexDirection = 'column';
-      legendDiv.style.marginLeft = '20px';
-      legendDiv.style.maxHeight = `${PIE_SVG_SIZE}px`;
-      legendDiv.style.overflowY = 'auto';
-      legendDiv.style.paddingRight = '5px';
-
-      const scrollbarStyle = document.createElement('style');
-      scrollbarStyle.innerHTML = `
-          .danbooru-grass-legend-scroll::-webkit-scrollbar { width: 6px; }
-          .danbooru-grass-legend-scroll::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 3px; }
-          .danbooru-grass-legend-scroll::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
-          .danbooru-grass-legend-scroll::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
-       `;
-      legendDiv.appendChild(scrollbarStyle);
-      pieContent.appendChild(legendDiv);
-    }
-
-    const radius = PIE_RADIUS;
-
-    const svg = d3.select(chartWrapper).select('svg g');
-    const pie = d3
-      .pie<PieSlice>()
-      .value(d => d.value)
-      .sort(null);
-    const arc = d3
-      .arc<d3.PieArcDatum<PieSlice>>()
-      .innerRadius(0)
-      .outerRadius(radius);
-    const arcHover = d3
-      .arc<d3.PieArcDatum<PieSlice>>()
-      .innerRadius(0)
-      .outerRadius(radius * 1.2);
-
-    // pointer-events is toggled in sync with opacity (auto when shown,
-    // none when hidden) so a dismissed tooltip's stale rectangle never
-    // intercepts a slice tap from underneath. See showTooltip / hideTooltip
-    // below — the helper's `pointer-events: none` default matches the
-    // hidden state.
-    const tooltip = d3
-      .select(createBodyTooltip('danbooru-grass-pie-tooltip'))
-      .style('background', 'rgba(30, 30, 30, 0.95)')
-      .style('color', '#fff')
-      .style('padding', '8px 12px')
-      .style('border-radius', '6px')
-      .style('font-size', '12px')
-      .style('cursor', isTouch ? 'pointer' : 'default');
-
-    /**
-     * Hide the tooltip and disable pointer-events so its stale bounding
-     * box stops eating taps directed at slices below it. Show paths set
-     * pointer-events back to 'auto' inline (desktop hover keeps 'none' so
-     * the cursor passes through to slices).
-     */
-    const hideTooltip = () => {
-      tooltip.style('opacity', 0).style('pointer-events', 'none');
-    };
-
-    svg
-      .selectAll('path')
-      .data(pie(validData), (d: D3Any) => d.data.label)
-      .join(
-        enter =>
-          enter
-            .append('path')
-            .attr('class', 'danbooru-grass-pie-path')
-            .attr('d', arc)
-            .attr('fill', d => d.data.color)
-            .style('opacity', '0.9')
-            .style('cursor', 'pointer'),
-        update =>
-          update
-            .attr('class', 'danbooru-grass-pie-path')
-            .attr('d', arc)
-            .call(update =>
-              update
-                .transition()
-                .duration(500)
-                .attr('fill', d => d.data.color),
-            ),
-      )
-      .attr('stroke', 'var(--di-chart-bg, #fff)')
-      .style('stroke-width', '1px')
-      .on('mouseover', function (event, d) {
-        // Touch devices fire synthetic mouseover/mousemove/mouseout AFTER
-        // touchend at the touch position. Without this guard, the synthetic
-        // mouseover would overwrite handleSliceTouch's far-side tooltip
-        // placement with a touch-relative one — re-introducing the right-edge
-        // clipping the touch path was specifically built to avoid.
-        if (isTouch) return;
-        d3.select(this)
-          .transition()
-          .duration(200)
-          .attr(
-            'd',
-            (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
-          )
-          .style('opacity', '1')
-          .style('filter', 'drop-shadow(0px 0px 8px rgba(255,255,255,0.4))');
-
-        let html = '';
-        const details = d.data.details;
-        const safeThumb = safeThumbUrl(details.thumb);
-        const thumbHtml = safeThumb
-          ? `
-        <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
-          <img src="${escapeHtml(safeThumb)}" style="width: 100%; height: 100%; object-fit: cover;">
-        </div>`
-          : '';
-        const sliceColor = safeColor(d.data.color);
-        const safeLabel = escapeHtml(d.data.label);
-        const isOtherSlice = details.kind === 'tag' && !!details.isOther;
-
-        if (currentPieTab === 'rating') {
-          html = `
-          <div style="display: flex; gap: 12px; align-items: start;">
-            ${thumbHtml}
-            <div>
-              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px;">${safeLabel}</div>
-              <div style="font-size: 11px; color: #ccc;">Count: <strong style="color:#fff;">${details.count.toLocaleString()}</strong></div>
-              <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${pctFor(d.data.label)}</strong></div>
-            </div>
-          </div>
-        `;
-        } else {
-          const percentage = pctFor(d.data.label);
-          html = `
-          <div style="display: flex; gap: 12px; align-items: start;">
-            ${thumbHtml}
-            <div style="max-width: 180px;">
-              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${safeLabel}</div>
-              <div style="font-size: 11px; color: #ccc;">Freq: <strong style="color:#fff;">${percentage}</strong></div>
-              ${!isOtherSlice ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
-            </div>
-          </div>
-        `;
-        }
-
-        // Position before opacity — otherwise the tooltip flashes at the
-        // previous tap's coordinates for one paint frame (offsetWidth read
-        // by other code paths forces an intermediate render at the stale
-        // position). Including the cursor position here also covers the
-        // gap before the first mousemove event.
-        tooltip
-          .html(html)
-          .style('left', event.pageX + 15 + 'px')
-          .style('top', event.pageY + 15 + 'px')
-          .style('opacity', 1);
-      })
-      .on('mousemove', event => {
-        if (isTouch) return;
-        tooltip
-          .style('left', event.pageX + 15 + 'px')
-          .style('top', event.pageY + 15 + 'px');
-      })
-      .on('mouseout', function () {
-        if (isTouch) return;
-        d3.select(this)
-          .transition()
-          .duration(200)
-          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
-          .style('opacity', '0.9')
-          .style('filter', 'none');
-        tooltip.style('opacity', 0);
-      })
-      .on('click', (_event, d) => {
-        if (isTouch) return;
-        handlePieClick(d);
-      });
-
-    if (isTouch) {
-      // Reset all slices to normal appearance
-      const resetSlices = () => {
-        svg
-          .selectAll('path.danbooru-grass-pie-path')
-          .transition()
-          .duration(200)
-          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
-          .style('opacity', '0.9')
-          .style('filter', 'none');
-      };
-
-      // Mobile interaction model: tap slice → preview (highlight + tooltip),
-      // tap tooltip → navigate. A second tap on the same slice is a no-op
-      // (preview persists) — navigateOnSameTap:false suppresses the shared
-      // util's default double-tap-to-navigate behavior, so the only path to
-      // navigation is the tooltip click below.
-      const pieTap: TwoStepTapController<d3.PieArcDatum<PieSlice>> =
-        createTwoStepTap({
-          insideElements: () => [
-            tooltip.node() as Element | null,
-            svg.node() as Element | null,
-          ],
-          onFirstTap: () => {
-            // Visual updates handled in handleSliceTouch (needs touch coordinates)
-          },
-          onSecondTap: datum => {
-            handlePieClick(datum);
-            hideTooltip();
-            // Same fix the tag-cloud widget needed: navigation opens the
-            // post search in a new tab, so when the user comes back via
-            // browser-back the SVG state is exactly what we left it as.
-            // Without resetSlices() the highlighted slice stays in its
-            // arcHover shape and the tap tracker has no datum, so no tap
-            // will dismiss it — the chart appears frozen until a different
-            // slice is touched.
-            resetSlices();
-          },
-          onReset: () => {
-            hideTooltip();
-            resetSlices();
-          },
-          navigateOnSameTap: false,
-        });
-
-      // Helper to handle a completed tap on a slice. The caller passes the
-      // datum captured at touchstart (the path d3 dispatched the event from)
-      // — this avoids elementFromPoint, which is unreliable on 3D-rotated
-      // SVG paths and was causing many taps to silently fail. The path
-      // element is looked up via d3 filter on the same datum identity.
-      const handleSliceTouch = (
-        event: TouchEvent,
-        datum: d3.PieArcDatum<PieSlice>,
-      ) => {
-        const touch = event.changedTouches[0] ?? event.touches[0];
-        if (!touch || !datum.data) return;
-        const target = svg
-          .selectAll<SVGPathElement, d3.PieArcDatum<PieSlice>>(
-            'path.danbooru-grass-pie-path',
-          )
-          .filter(d => d === datum)
-          .node();
-        if (!target) return;
-
-        // Reset all slices, then enlarge touched slice
-        resetSlices();
-        pieTap.tap(datum);
-
-        d3.select(target)
-          .transition()
-          .duration(200)
-          .attr(
-            'd',
-            (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
-          )
-          .style('opacity', '1');
-
-        // Show tooltip (same HTML building logic as mouseover)
-        let html = '';
-        const details = datum.data.details;
-        const safeThumb = safeThumbUrl(details.thumb);
-        const thumbHtml = safeThumb
-          ? `
-        <div style="width: 80px; height: 80px; border-radius: 4px; overflow: hidden; background: #333; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
-          <img src="${escapeHtml(safeThumb)}" style="width: 100%; height: 100%; object-fit: cover;">
-        </div>`
-          : '';
-        const sliceColor = safeColor(datum.data.color);
-        const safeLabel = escapeHtml(datum.data.label);
-        const isOtherSlice = details.kind === 'tag' && !!details.isOther;
-
-        if (currentPieTab === 'rating') {
-          html = `
-          <div style="display: flex; gap: 12px; align-items: start;">
-            ${thumbHtml}
-            <div>
-              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px;">${safeLabel}</div>
-              <div style="font-size: 11px; color: #ccc;">Count: <strong style="color:#fff;">${details.count.toLocaleString()}</strong></div>
-              <div style="font-size: 11px; color: #ccc;">Ratio: <strong style="color:#fff;">${pctFor(datum.data.label)}</strong></div>
-            </div>
-          </div>`;
-        } else {
-          const percentage = pctFor(datum.data.label);
-          html = `
-          <div style="display: flex; gap: 12px; align-items: start;">
-            ${thumbHtml}
-            <div style="max-width: 180px;">
-              <div style="font-weight: bold; color: ${sliceColor}; margin-bottom: 4px; font-size: 14px; word-wrap: break-word;">${safeLabel}</div>
-              <div style="font-size: 11px; color: #ccc;">Freq: <strong style="color:#fff;">${percentage}</strong></div>
-              ${!isOtherSlice ? `<div style="font-size: 11px; color: #ccc;">Posts: <strong style="color:#fff;">${details.count ? details.count.toLocaleString() : '?'}</strong></div>` : ''}
-            </div>
-          </div>`;
-        }
-
-        // Update content but keep opacity at 0 — we'll flip to opacity 1
-        // only after the new position is set. Without this guard, the
-        // tooltip is briefly visible at the previous tap's coordinates
-        // because offsetWidth/offsetHeight reads below force a render
-        // before the new style.left / style.top take effect ("ghost flash").
-        tooltip.html(html);
-
-        // Pick the first candidate position that fits the tooltip's
-        // natural size entirely inside (card-horizontal × wrapper-vertical
-        // ∩ viewport). Tooltip width/height are NOT modified — the user
-        // explicitly rejected size reduction. Edge slices on narrow cards
-        // can't fit any of the four touch-relative quadrants, so we also
-        // try anchoring to the card's FAR side (opposite the touch) — this
-        // is the "flip across the chart" placement the user asked for. If
-        // even those fail, fall back to a viewport-clamped origin;
-        // horizontal page scroll is independently prevented by the body
-        // scroll lock so this fallback is safe.
-        const tooltipNode = tooltip.node() as HTMLElement | null;
-        const tw = tooltipNode?.offsetWidth ?? 0;
-        const th = tooltipNode?.offsetHeight ?? 0;
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
-        const margin = 8;
-        const cardRect = container.getBoundingClientRect();
-        const wrapperRect = chartWrapper.getBoundingClientRect();
-        const bounds = {
-          minLeft: Math.max(
-            cardRect.left + window.scrollX + margin,
-            window.scrollX + margin,
-          ),
-          maxRight: Math.min(
-            cardRect.right + window.scrollX - margin,
-            window.scrollX + vw - margin,
-          ),
-          minTop: Math.max(
-            wrapperRect.top + window.scrollY + margin,
-            window.scrollY + margin,
-          ),
-          maxBottom: Math.min(
-            wrapperRect.bottom + window.scrollY - margin,
-            window.scrollY + vh - margin,
-          ),
-        };
-        // Far side of the card relative to the touch — this is where the
-        // tooltip goes when no touch-relative quadrant has room.
-        const cardCenterDocX =
-          cardRect.left + cardRect.width / 2 + window.scrollX;
-        const farSideLeft =
-          touch.pageX > cardCenterDocX ? bounds.minLeft : bounds.maxRight - tw;
-        const candidates = [
-          // Touch-relative quadrants (priority: away from modal edge).
-          {left: touch.pageX - tw - 15, top: touch.pageY - th - 15},
-          {left: touch.pageX + 15, top: touch.pageY - th - 15},
-          {left: touch.pageX - tw - 15, top: touch.pageY + 15},
-          {left: touch.pageX + 15, top: touch.pageY + 15},
-          // Far-side anchors — used when an edge slice prevents any of the
-          // four touch-relative candidates from fitting (typical: long
-          // copyright/character label on a narrow phone). All four place
-          // the tooltip at the card's opposite horizontal edge with
-          // varying vertical positions, picking the one closest to the
-          // touch.
-          {left: farSideLeft, top: touch.pageY - th / 2},
-          {left: farSideLeft, top: touch.pageY + 15},
-          {left: farSideLeft, top: touch.pageY - th - 15},
-          {left: farSideLeft, top: bounds.maxBottom - th},
-          {left: farSideLeft, top: bounds.minTop},
-        ];
-        const chosen = pickFittingPosition(candidates, tw, th, bounds) ?? {
-          // Last-resort fallback: align to far side horizontally, clamp
-          // vertically near the touch. Shouldn't trigger in practice now
-          // that far-side candidates explore the full vertical range.
-          left: Math.max(
-            bounds.minLeft,
-            Math.min(bounds.maxRight - tw, farSideLeft),
-          ),
-          top: Math.max(
-            bounds.minTop,
-            Math.min(bounds.maxBottom - th, touch.pageY + 15),
-          ),
-        };
-        tooltip
-          .style('left', chosen.left + 'px')
-          .style('top', chosen.top + 'px')
-          .style('opacity', 1)
-          .style('pointer-events', 'auto');
-      };
-
-      // Slice and tooltip both use TapTracker so the action only fires on
-      // a completed tap (touchstart + touchend on roughly the same spot).
-      // Why: showing the tooltip on `touchstart` would put it under the
-      // user's finger, and the synthetic `click` browsers fire after a
-      // tap would land on the tooltip and trigger navigation immediately
-      // — perceived as "one tap, two actions". With end-of-tap gating and
-      // no `tooltip.on('click')`, the synthetic click is harmless.
-      const sliceTapTracker = new TapTracker();
-      // Capture the slice datum at touchstart — we know exactly which path
-      // d3 dispatched the event from. Re-querying via elementFromPoint at
-      // touchend is unreliable on a 3D-rotated SVG (rotateX(40deg) moves
-      // hit-test boundaries off the visible pixels and elementFromPoint
-      // often returns the parent <svg> / <g> instead of the path), which
-      // made a large fraction of taps silently no-op.
-      let sliceTouchDatum: d3.PieArcDatum<PieSlice> | null = null;
-      svg
-        .selectAll<SVGPathElement, d3.PieArcDatum<PieSlice>>(
-          'path.danbooru-grass-pie-path',
-        )
-        .on('touchstart', (event, datum) => {
-          sliceTapTracker.onTouchStart(event as TouchEvent);
-          sliceTouchDatum = datum;
-        })
-        .on('touchmove', event => {
-          sliceTapTracker.onTouchMove(event as TouchEvent);
-        })
-        .on('touchend', event => {
-          const isTap = sliceTapTracker.onTouchEnd(event as TouchEvent);
-          const datum = sliceTouchDatum;
-          sliceTouchDatum = null;
-          if (isTap && datum) {
-            handleSliceTouch(event as TouchEvent, datum);
-          }
-        });
-
-      const tooltipTapTracker = new TapTracker();
-      tooltip
-        .on('touchstart', event => {
-          tooltipTapTracker.onTouchStart(event as TouchEvent);
-        })
-        .on('touchmove', event => {
-          tooltipTapTracker.onTouchMove(event as TouchEvent);
-        })
-        .on('touchend', event => {
-          if (tooltipTapTracker.onTouchEnd(event as TouchEvent)) {
-            pieTap.navigateActive();
-          }
-        });
-    }
-
-    const legendDiv = pieContent.querySelector('.danbooru-grass-legend-scroll');
-    if (legendDiv) {
-      let legendTitle = 'DIST.';
-      if (currentPieTab === 'copyright') legendTitle = 'COPYRIGHTS';
-      else if (currentPieTab === 'character') legendTitle = 'CHARACTERS';
-      else if (currentPieTab === 'fav_copyright')
-        legendTitle = 'FAVORITE COPYRIGHTS';
-      else if (currentPieTab === 'status') legendTitle = 'STATUS';
-      else if (currentPieTab === 'rating') legendTitle = 'RATINGS';
-      else if (currentPieTab === 'hair_length') legendTitle = 'HAIR LENGTH';
-      else if (currentPieTab === 'hair_color') legendTitle = 'HAIR COLOR';
-      else if (currentPieTab === 'breasts') legendTitle = 'BREASTS';
-      else if (currentPieTab === 'gender') legendTitle = 'GENDER';
-      else if (currentPieTab === 'commentary') legendTitle = 'COMMENTARY';
-      else if (currentPieTab === 'translation') legendTitle = 'TRANSLATION';
-
-      const styleTag = legendDiv.querySelector('style')?.outerHTML ?? '';
-
-      const listHtml = processedData
-        .map(d => {
-          const pct = pctFor(d.label);
-          const isOtherSlice = d.details.kind === 'tag' && !!d.details.isOther;
-          let targetUrl = '#';
-
-          if (!isOtherSlice) {
-            const query = buildSearchQuery(
-              d.details,
-              d.label,
-              contextUser.normalizedName ?? '',
-              currentPieTab,
-            );
-            if (query) {
-              targetUrl = `/posts?tags=${encodeURIComponent(query)}`;
-            }
-          }
-
-          const swatchColor = safeColor(d.color);
-          const safeLabel = escapeHtml(d.label);
-          const safeUrl = escapeHtml(targetUrl);
-          const countTitle = d.details.count
-            ? escapeHtml(d.details.count.toLocaleString())
-            : '';
-          return `
-               <div style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
-                  <div style="width:12px; height:12px; background:${swatchColor}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
-                  ${
-                    isOtherSlice
-                      ? `<div style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${safeLabel}">${safeLabel}</div>`
-                      : `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="di-hover-underline" style="color:var(--di-text-secondary, #666); width:90px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none;" title="${safeLabel}">${safeLabel}</a>`
-                  }
-                  <div style="font-weight:bold; color:var(--di-text, #333); margin-left:auto;" title="${countTitle}">${pct}</div>
-               </div>`;
-        })
-        .join('');
-
-      legendDiv.innerHTML =
-        styleTag +
-        `
-           <div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:var(--di-chart-bg, #fff); padding-bottom:4px; border-bottom:1px solid var(--di-border-light, #eee);">${legendTitle}</div>
-           ${listHtml}
-      `;
-    }
   };
 
   const updatePieTabs = () => {
@@ -1023,84 +1356,12 @@ export function renderPieWidget(
         '<div style="color:var(--di-chart-axis-secondary, #666);">Loading...</div>';
 
     try {
-      let data: PieTabItem[] = [];
-      const user = context.targetUser;
-      if (tabName === 'rating') {
-        data = await dataManager.getRatingDistribution(user, firstUploadDate);
-      } else if (tabName === 'status') {
-        data = await dataManager.getStatusDistribution(user, firstUploadDate);
-        const statusColors: Record<string, string> = {
-          active: '#2da44e',
-          deleted: '#d73a49',
-          pending: '#0969da',
-          flagged: '#cf222e',
-          banned: '#6e7781',
-          appealed: '#bf3989',
-        };
-        data = data.map((d: PieTabItem) => ({
-          ...d,
-          color: statusColors[d.name as keyof typeof statusColors] || '#888',
-        }));
-      } else if (tabName === 'character') {
-        data = await dataManager.getCharacterDistribution(user);
-      } else if (tabName === 'copyright') {
-        data = await dataManager.getCopyrightDistribution(user);
-      } else if (tabName === 'fav_copyright') {
-        data = await dataManager.getFavCopyrightDistribution(user);
-      } else if (tabName === 'breasts') {
-        data = await dataManager.getBreastsDistribution(user);
-        const total = data.reduce(
-          (acc: number, c: PieTabItem) => acc + c.count,
-          0,
-        );
-        data = data.map((d: PieTabItem) => ({
-          ...d,
-          frequency: total > 0 ? d.count / total : 0,
-          value: total > 0 ? d.count / total : 0,
-          label: d.name,
-          details: {...d, thumb: null},
-        }));
-      } else if (tabName === 'gender') {
-        data = await dataManager.getGenderDistribution(user);
-        const total = data.reduce(
-          (acc: number, c: PieTabItem) => acc + c.count,
-          0,
-        );
-        data = data.map((d: PieTabItem) => ({
-          ...d,
-          frequency: total > 0 ? d.count / total : 0,
-          value: total > 0 ? d.count / total : 0,
-          label: d.name,
-          details: {...d, thumb: null},
-        }));
-      } else if (tabName === 'commentary') {
-        data = await dataManager.getCommentaryDistribution(user);
-        const total = data.reduce(
-          (acc: number, c: PieTabItem) => acc + c.count,
-          0,
-        );
-        data = data.map((d: PieTabItem) => ({
-          ...d,
-          frequency: total > 0 ? d.count / total : 0,
-          value: total > 0 ? d.count / total : 0,
-          label: d.name,
-          details: {...d, thumb: null},
-        }));
-      } else if (tabName === 'translation') {
-        data = await dataManager.getTranslationDistribution(user);
-        const total = data.reduce(
-          (acc: number, c: PieTabItem) => acc + c.count,
-          0,
-        );
-        data = data.map((d: PieTabItem) => ({
-          ...d,
-          frequency: total > 0 ? d.count / total : 0,
-          value: total > 0 ? d.count / total : 0,
-          label: d.name,
-          details: {...d, thumb: null},
-        }));
-      }
-
+      const data = await fetchDistributionForTab(
+        tabName,
+        dataManager,
+        context.targetUser,
+        firstUploadDate,
+      );
       pieData[tabName] = data;
 
       if (currentPieTab === tabName) {
@@ -1129,72 +1390,11 @@ export function renderPieWidget(
           return;
         }
 
-        // Crossfade — same pattern the tag-cloud widget uses (350 ms opacity
-        // transition between two overlapping wrappers). The current children
-        // (chart wrapper + legend) are cloneNode'd into an absolutely
-        // positioned snapshot that overlays the originals; the originals
-        // re-render in place via d3 join behind it; once the new data is
-        // ready, the snapshot fades to 0, revealing the freshly rendered
-        // content underneath. Keeping d3 references on the live chart
-        // wrapper means tooltip / hover bindings survive the transition.
-        const TRANSITION_MS = 350;
-        // Drop any in-flight snapshot from a previous rapid tab tap so we
-        // don't pile up overlays.
-        pieContent
-          .querySelectorAll('.di-pie-snapshot')
-          .forEach(n => n.remove());
-        const piStyles = window.getComputedStyle(pieContent);
-        const snapshot = document.createElement('div');
-        snapshot.className = 'di-pie-snapshot';
-        // Fill the parent (pieContent) exactly — `position: absolute` +
-        // 0/0/100%/100% relative to a positioned ancestor avoids any
-        // bounding-rect math / containing-block ambiguity that broke
-        // earlier alignment attempts. Innerlay snapshot in pieContent
-        // (not the outer card) so it tracks pieContent's exact rect even
-        // if the dashboard layout shifts. Trade-off: loadTab's uncached
-        // path wipes pieContent.innerHTML, which removes the snapshot
-        // and skips the transition for first-time tab visits — that's
-        // fine because the user still sees a Loading message there.
-        snapshot.style.position = 'absolute';
-        snapshot.style.top = '0';
-        snapshot.style.left = '0';
-        snapshot.style.width = '100%';
-        snapshot.style.height = '100%';
-        snapshot.style.display = piStyles.display;
-        snapshot.style.flexDirection = piStyles.flexDirection;
-        snapshot.style.alignItems = piStyles.alignItems;
-        snapshot.style.justifyContent = piStyles.justifyContent;
-        // Preserve the parent's 3D context so the cloned chart wrapper
-        // keeps its rotateX(40deg) tilt during the fade.
-        snapshot.style.transformStyle = 'preserve-3d';
-        snapshot.style.perspective = piStyles.perspective;
-        snapshot.style.pointerEvents = 'none';
-        snapshot.style.transition = `opacity ${TRANSITION_MS}ms ease`;
-        snapshot.style.opacity = '1';
-        for (const child of Array.from(pieContent.children) as HTMLElement[]) {
-          snapshot.appendChild(child.cloneNode(true) as HTMLElement);
-        }
-        pieContent.style.position = 'relative';
-        pieContent.appendChild(snapshot);
-        // Force layout commit so the browser has a "before" frame
-        // (opacity:1) to interpolate from. Without this, when loadTab
-        // resolves synchronously (cached tab), the microtask + RAF can
-        // batch the opacity 1→0 change with the initial style and skip
-        // the transition entirely.
-        void snapshot.getBoundingClientRect();
-
-        void loadTab(mode).then(() => {
-          if (currentPieTab !== mode) {
-            // User switched again before this tab finished — drop the
-            // stale snapshot immediately so it doesn't sit on top of the
-            // newer transition's snapshot.
-            snapshot.remove();
-            return;
-          }
-          requestAnimationFrame(() => {
-            snapshot.style.opacity = '0';
-            setTimeout(() => snapshot.remove(), TRANSITION_MS);
-          });
+        runTabCrossfade({
+          pieContent,
+          mode,
+          loadTab,
+          getCurrentTab: () => currentPieTab,
         });
       }
     }
