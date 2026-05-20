@@ -22,7 +22,7 @@ export interface PrefetchedDashboardData {
  * against the (cheap, cached) distribution fetches, inflating render.total.
  * Deferring to post-render keeps the blocking path lean.
  */
-export interface SwrResult<T> {
+interface SwrResult<T> {
   data: T;
   /** Kicks off the background fetch. Returns the original Promise for error
    *  handling; resolves with fresh data iff it differs from `data`. */

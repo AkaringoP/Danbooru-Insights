@@ -604,6 +604,10 @@ export class TagAnalyticsApp {
   /**
    * Large tag path: multi-phase parallel fetch (quick stats → heavy stats → deferred counts).
    */
+  // T-26 baseline: 239 LOC / complexity 34. Multi-phase fetch with
+  // intermediate render checkpoints and 5+ failure branches. Decomposition
+  // candidate; not in Phase 5c scope.
+  // eslint-disable-next-line max-lines-per-function, complexity
   private async _fetchLargeTag(
     meta: TagAnalyticsMeta,
     initialStats: InitialStats,
@@ -1485,6 +1489,9 @@ export class TagAnalyticsApp {
    * @param {number=} progress The loading progress percentage.
    * @param {string=} statusText Optional text to display next to the button.
    */
+  // T-26 baseline: complexity 25. Branches across state (idle/loading/ready)
+  // × placement (header/inline) × progress reporting. Stable, low churn.
+  // eslint-disable-next-line complexity
   injectAnalyticsButton(
     tagData: TagAnalyticsMeta | null,
     progress?: number,

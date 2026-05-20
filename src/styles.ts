@@ -2,7 +2,7 @@
  * Centralized CSS styles for Danbooru Insights to prevent duplicate injection
  * and improve performance by utilizing CSS classes and pseudo-classes.
  */
-export const GLOBAL_CSS = `
+const GLOBAL_CSS = `
     /* -- Dark Mode: CSS Variables --
        Light values are provided as var() fallbacks in each rule.
        Dark overrides are scoped to OUR container elements only — NOT on

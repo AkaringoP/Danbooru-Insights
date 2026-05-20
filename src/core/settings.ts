@@ -404,7 +404,7 @@ export class SettingsManager {
 // ---------------------------------------------------------------------------
 
 /** localStorage key for the unified NSFW-enabled flag. */
-export const NSFW_STORAGE_KEY = 'di.nsfw_enabled';
+const NSFW_STORAGE_KEY = 'di.nsfw_enabled';
 
 /** Reads the user's NSFW preference. Defaults to false when unset. */
 export function getNsfwEnabled(): boolean {

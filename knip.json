@@ -1,0 +1,16 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/main.ts",
+    "eslint.config.js",
+    "scripts/bench-collect.ts",
+    "scripts/bench-compare.ts",
+    "test/**/*.test.ts",
+    "test/e2e/**/*.spec.ts"
+  ],
+  "project": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"],
+  "ignoreDependencies": [
+    "cal-heatmap",
+    "eslint"
+  ]
+}

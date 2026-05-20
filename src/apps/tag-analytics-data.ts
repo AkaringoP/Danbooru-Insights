@@ -688,6 +688,9 @@ export class TagAnalyticsDataService {
    *                                      Used to narrow the search range for recent tags.
    * @return {Promise<Object|null>} - Initial stats object or null on failure.
    */
+  // T-26 baseline: complexity 31. Cache/hint/cold-start branches × full vs
+  // delta paths × tag-category routing. Stable critical path.
+  // eslint-disable-next-line complexity
   async fetchInitialStats(
     tagName: string,
     cachedData?: TagAnalyticsMeta | null,
@@ -1392,6 +1395,9 @@ export class TagAnalyticsDataService {
    *   drift guard). `totalCount` enables the drift guard. `skipCache` forces
    *   a fresh network fetch for every month.
    */
+  // T-26 baseline: complexity 31. Per-month distance-based TTL × cache hit
+  // class × drift guard × fetch retry, all interleaved.
+  // eslint-disable-next-line complexity
   async fetchMonthlyCounts(
     tagName: string,
     startDate: Date | string,

@@ -63,7 +63,7 @@ export interface Theme {
 export type Threshold4 = [number, number, number, number];
 
 /** Threshold values for each contribution metric. */
-export interface ThresholdMap {
+interface ThresholdMap {
   uploads: Threshold4;
   approvals: Threshold4;
   notes: Threshold4;
@@ -215,9 +215,6 @@ export interface ScatterDataPoint {
   /** True if post is banned. Undefined if not yet backfilled. */
   ban?: boolean;
 }
-
-/** Danbooru rating code. */
-export type Rating = 'g' | 's' | 'q' | 'e';
 
 /** Daily count record for uploads/approvals/notes tables. */
 export interface DailyCountRecord {

@@ -153,6 +153,11 @@ function scheduleRevalidateAll(
  * caller is responsible for appending `parent` (the dashboardDiv) to the
  * modal content.
  */
+// T-26 baseline: 250 LOC / complexity 26 (T-22 archive flagged this; the
+// per-card builders — uploadCard / userHistoryCard / timeline event
+// collector — are the natural next split). Punted from Phase 5c because
+// the body decomposition target was met by other helpers.
+// eslint-disable-next-line max-lines-per-function, complexity
 function renderSummaryCards(
   parent: HTMLElement,
   data: DashboardData,
@@ -1128,6 +1133,9 @@ export class UserAnalyticsApp {
    * @param {HTMLElement} btn Optional button element to update UI.
    * @param {boolean} shouldRender Whether to re-render the dashboard after sync (default: true).
    */
+  // T-26 baseline: complexity 18. Global-sync coordination + UI button
+  // state machine + error UX. Decomposition candidate.
+  // eslint-disable-next-line complexity
   async performPartialSync(
     btn: HTMLElement | null = null,
     shouldRender: boolean = true,

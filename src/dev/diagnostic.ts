@@ -473,6 +473,10 @@ function buildSystemSection(panel: DiagPanel, db: IDBDatabase | null): void {
   }
 }
 
+// T-26 baseline: complexity 31. Diagnostic tooling — branches across every
+// per-metric Dexie store the grass dashboard touches. Isolated dev-only
+// module; not on the hot path.
+// eslint-disable-next-line complexity
 async function buildGrassSection(
   panel: DiagPanel,
   db: IDBDatabase,
@@ -719,6 +723,9 @@ async function buildUserAnalyticsSection(
   }
 }
 
+// T-26 baseline: complexity 17. Diagnostic tooling for tag_analytics +
+// tag_monthly_counts probes. Dev-only.
+// eslint-disable-next-line complexity
 async function buildTagAnalyticsSection(
   panel: DiagPanel,
   db: IDBDatabase,
@@ -809,6 +816,10 @@ async function buildTagAnalyticsSection(
 
 // ─── Main entry ──────────────────────────────────────────────────────
 
+// T-26 baseline: complexity 28. Top-level entry — branches across panel
+// creation × URL detection × per-section dispatch × DB open failures.
+// Dev-only.
+// eslint-disable-next-line complexity
 export async function showDiagnostic(): Promise<void> {
   // 1. Create panel first (even if everything else fails)
   let panel: DiagPanel;
