@@ -1725,9 +1725,11 @@ export class AnalyticsDataManager extends DataManager {
       extraQuery: string = '',
     ): Promise<DanbooruPost | null> => {
       try {
-        // Use tags=... order:score rating:x limit=1
+        // Use tags=... order:score rating:x status:active limit=1
+        // status:active excludes banned/deleted posts that would render as a
+        // blank thumbnail cell.
         const normalizedName = userInfo.name.replace(/ /g, '_');
-        const query = `user:${normalizedName} order:score rating:${ratingTag} ${extraQuery}`;
+        const query = `user:${normalizedName} order:score rating:${ratingTag} status:active ${extraQuery}`;
         const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const resp = await this.rateLimiter.fetch(url).then(r => r.json());
         if (Array.isArray(resp) && resp.length > 0) {
@@ -1779,7 +1781,9 @@ export class AnalyticsDataManager extends DataManager {
     ): Promise<DanbooruPost | null> => {
       try {
         const normalizedName = userInfo.name.replace(/ /g, '_');
-        const query = `user:${normalizedName} order:score ${ratingTag} age:<1w`;
+        // status:active excludes banned/deleted posts that would render as a
+        // blank thumbnail cell.
+        const query = `user:${normalizedName} order:score ${ratingTag} age:<1w status:active`;
         const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const resp = await this.rateLimiter.fetch(url).then(r => r.json());
         if (Array.isArray(resp) && resp.length > 0) {
@@ -1816,7 +1820,9 @@ export class AnalyticsDataManager extends DataManager {
     ): Promise<DanbooruPost | null> => {
       try {
         const normalizedName = userInfo.name.replace(/ /g, '_');
-        const query = `user:${normalizedName} ${ratingTag}`;
+        // status:active excludes banned/deleted posts — without it, random
+        // could land on a banned post and render an empty card (user report).
+        const query = `user:${normalizedName} ${ratingTag} status:active`;
         const url = `/posts/random.json?tags=${encodeURIComponent(query)}&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const resp = await this.rateLimiter.fetch(url).then(r => r.json());
         if (resp && resp.id) {
