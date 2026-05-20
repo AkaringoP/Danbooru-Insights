@@ -13,7 +13,8 @@
     "clean": "gts clean",
     "compile": "tsc",
     "fix": "gts fix",
-    "check:dead": "knip"
+    "check:dead": "knip",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
