@@ -557,6 +557,14 @@ export interface TagImplicationCacheRecord {
   isTopLevel: boolean;
   /** Fetch timestamp in ms since epoch. */
   fetchedAt: number;
+  /**
+   * Embedded schema version stamped at write time. Read sites compare
+   * against `IMPLICATIONS_CACHE_SCHEMA_VERSION` to detect contract drift
+   * (e.g. the URL changing between releases) without a Dexie version bump.
+   * Optional in the type because pre-v9.6 records on existing clones lack
+   * the field; absence is treated as a mismatch and forces a re-fetch.
+   */
+  schemaVersion?: number;
 }
 
 /** Complete tag analytics metadata. */

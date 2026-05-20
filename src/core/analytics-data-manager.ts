@@ -1512,7 +1512,7 @@ export class AnalyticsDataManager extends DataManager {
         2,
         async (item): Promise<DanbooruRelatedTag | null> => {
           const tagName = item.tag.name;
-          const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}`;
+          const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}&search[status]=active`;
           try {
             const imps = await this.rateLimiter
               .fetch(impUrl)

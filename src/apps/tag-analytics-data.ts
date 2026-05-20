@@ -117,6 +117,23 @@ export function isMonthlyCountValid(
 /** TTL for persisted implication lookups. tag_implications is near-immutable. */
 export const IMPLICATIONS_CACHE_TTL_MS = 180 * CACHE_DAY_MS;
 
+/**
+ * Embedded schema version for tag_implications_cache record values.
+ *
+ * Bump whenever the meaning of a cached `isTopLevel` flag changes (e.g.
+ * the URL contract for `/tag_implications.json` is altered). Records
+ * stamped with a different version are treated as cache misses on read
+ * and re-fetched with the current contract — no Dexie schema bump
+ * required because the version lives in the record body (schemaless).
+ *
+ * v1 (≤ v9.5): URL did not pass `search[status]=active`, so
+ *   deleted / declined / retired implications counted toward
+ *   "is sub-tag" — incorrectly excluding tags like `ninjago` whose
+ *   implication chain was later removed.
+ * v2 (v9.6+): URL includes `search[status]=active`.
+ */
+export const IMPLICATIONS_CACHE_SCHEMA_VERSION = 2;
+
 /** Max tag names per batched /tag_implications.json call (URL-length budget). */
 export const IMPLICATIONS_BATCH_CHUNK_SIZE = 50;
 
@@ -159,12 +176,17 @@ export function parseImplicationsResponse(
 
 /**
  * Checks whether a persistent implication cache record is still fresh.
+ * Records whose embedded `schemaVersion` does not match
+ * `IMPLICATIONS_CACHE_SCHEMA_VERSION` are invalid regardless of TTL —
+ * they carry a stale contract and must be re-fetched.
  * Exported for tests.
  */
 export function isImplicationCacheValid(
   fetchedAt: number,
   now: number,
+  schemaVersion: number | undefined,
 ): boolean {
+  if (schemaVersion !== IMPLICATIONS_CACHE_SCHEMA_VERSION) return false;
   const age = now - fetchedAt;
   return age >= 0 && age < IMPLICATIONS_CACHE_TTL_MS;
 }
@@ -432,7 +454,7 @@ export class TagAnalyticsDataService {
 
     for (let i = 0; i < tagNames.length; i += IMPLICATIONS_BATCH_CHUNK_SIZE) {
       const chunk = tagNames.slice(i, i + IMPLICATIONS_BATCH_CHUNK_SIZE);
-      const url = `/tag_implications.json?search[antecedent_name_comma]=${encodeURIComponent(chunk.join(','))}&limit=1000`;
+      const url = `/tag_implications.json?search[antecedent_name_comma]=${encodeURIComponent(chunk.join(','))}&search[status]=active&limit=1000`;
       try {
         const imps = await this.rateLimiter
           .fetch(url)
@@ -483,7 +505,7 @@ export class TagAnalyticsDataService {
       const now = Date.now();
       const records = await this.db.tag_implications_cache.bulkGet(missing);
       records.forEach((r, i) => {
-        if (r && isImplicationCacheValid(r.fetchedAt, now)) {
+        if (r && isImplicationCacheValid(r.fetchedAt, now, r.schemaVersion)) {
           result.set(missing[i], r.isTopLevel);
           topLevelSessionCache.set(missing[i], r.isTopLevel);
         }
@@ -514,7 +536,12 @@ export class TagAnalyticsDataService {
       const now = Date.now();
       const records: TagImplicationCacheRecord[] = [];
       entries.forEach((isTopLevel, tagName) => {
-        records.push({tagName, isTopLevel, fetchedAt: now});
+        records.push({
+          tagName,
+          isTopLevel,
+          fetchedAt: now,
+          schemaVersion: IMPLICATIONS_CACHE_SCHEMA_VERSION,
+        });
       });
       // No user context on tag pages — see `tag_monthly_counts` rationale above.
       await bulkPutSafe(this.db.tag_implications_cache, records, () =>

@@ -85,28 +85,71 @@ describe('parseImplicationsResponse', () => {
 describe('isImplicationCacheValid', () => {
   const NOW = 1_700_000_000_000;
 
-  it('accepts a freshly-written entry', async () => {
-    const {isImplicationCacheValid} =
+  it('accepts a freshly-written entry stamped with the current schema', async () => {
+    const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
       await import('../src/apps/tag-analytics-data');
-    expect(isImplicationCacheValid(NOW - 1000, NOW)).toBe(true);
+    expect(
+      isImplicationCacheValid(
+        NOW - 1000,
+        NOW,
+        IMPLICATIONS_CACHE_SCHEMA_VERSION,
+      ),
+    ).toBe(true);
   });
 
-  it('accepts an entry within 180 days', async () => {
-    const {isImplicationCacheValid} =
+  it('accepts an entry within 180 days stamped with the current schema', async () => {
+    const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
       await import('../src/apps/tag-analytics-data');
-    expect(isImplicationCacheValid(NOW - 179 * DAY_MS, NOW)).toBe(true);
+    expect(
+      isImplicationCacheValid(
+        NOW - 179 * DAY_MS,
+        NOW,
+        IMPLICATIONS_CACHE_SCHEMA_VERSION,
+      ),
+    ).toBe(true);
   });
 
   it('rejects an entry older than 180 days', async () => {
-    const {isImplicationCacheValid} =
+    const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
       await import('../src/apps/tag-analytics-data');
-    expect(isImplicationCacheValid(NOW - 181 * DAY_MS, NOW)).toBe(false);
+    expect(
+      isImplicationCacheValid(
+        NOW - 181 * DAY_MS,
+        NOW,
+        IMPLICATIONS_CACHE_SCHEMA_VERSION,
+      ),
+    ).toBe(false);
   });
 
   it('rejects a future-dated fetchedAt (clock skew defense)', async () => {
+    const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
+      await import('../src/apps/tag-analytics-data');
+    expect(
+      isImplicationCacheValid(
+        NOW + 1000,
+        NOW,
+        IMPLICATIONS_CACHE_SCHEMA_VERSION,
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects records missing schemaVersion (pre-v9.6 entries)', async () => {
     const {isImplicationCacheValid} =
       await import('../src/apps/tag-analytics-data');
-    expect(isImplicationCacheValid(NOW + 1000, NOW)).toBe(false);
+    // Within TTL window but no embedded schemaVersion → treated as stale.
+    expect(isImplicationCacheValid(NOW - 1000, NOW, undefined)).toBe(false);
+  });
+
+  it('rejects records with a mismatched schemaVersion (next contract bump)', async () => {
+    const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
+      await import('../src/apps/tag-analytics-data');
+    expect(
+      isImplicationCacheValid(
+        NOW - 1000,
+        NOW,
+        IMPLICATIONS_CACHE_SCHEMA_VERSION + 1,
+      ),
+    ).toBe(false);
   });
 });
 
