@@ -1394,3 +1394,80 @@ describe('getMetricData — hourly stats accumulation', () => {
     expect(result.hourly[5]).toBe(6);
   });
 });
+
+// ---------------------------------------------------------------------------
+// v9.6: getStats(key, userId, maxAgeMs?) — count-cache TTL behaviour
+// ---------------------------------------------------------------------------
+
+describe('getStats — maxAgeMs TTL guard (v9.6)', () => {
+  function buildDm(record: Record<string, unknown> | null) {
+    const piestats = makeTable();
+    piestats.get.mockResolvedValue(record as never);
+    const db = makeDb({piestats});
+    const rl = makeRateLimiter();
+    return new DataManager(db, rl as never);
+  }
+
+  it('returns the cached data when no maxAgeMs is supplied (legacy path)', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {tags: ['a', 'b']},
+      updated_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const result = await dm.getStats('copyright_dist', 42);
+    expect(result).toEqual({tags: ['a', 'b']});
+  });
+
+  it('returns the cached data when age is within maxAgeMs', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {ok: true},
+      // 5 minutes old
+      updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toEqual({ok: true});
+  });
+
+  it('returns null when age exceeds maxAgeMs', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {ok: true},
+      // 15 minutes old, TTL 10 min → expired
+      updated_at: new Date(Date.now() - 15 * 60_000).toISOString(),
+    });
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toBeNull();
+  });
+
+  it('returns null on a future-dated updated_at (clock skew)', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {ok: true},
+      updated_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when the record is missing entirely', async () => {
+    const dm = buildDm(null);
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toBeNull();
+  });
+
+  it('returns the cached data when updated_at is absent (legacy record, maxAgeMs ignored)', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {legacy: true},
+      // no updated_at field at all
+    });
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toEqual({legacy: true});
+  });
+});
