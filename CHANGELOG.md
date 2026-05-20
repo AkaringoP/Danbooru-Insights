@@ -64,6 +64,14 @@ for widgets that need a minimum amount of data to be meaningful.
   (reported by user). The same filter is applied to Top Posts (per
   rating) and Recent Popular Posts so a banned high-score post no
   longer occupies the top slot of either widget.
+- **Tag Cloud cache now honours TTL + sync invalidation.** The
+  `tag_cloud_*` piestats records were previously trust-until-reset,
+  so users who had cached results from before v9.6.0 kept seeing
+  pre-Lift-filter clouds (with `1girl`, `1boy`, etc.) indefinitely.
+  Cache reads now apply the same TTL as the count distributions
+  (default 10 min), and `refreshAllStats` force-refreshes all four
+  category tabs on partial / full sync — matching the staleness
+  contract documented elsewhere in v9.6.0.
 
 ### Changed
 - **Scatter Plot Score-tab grid density** is now adaptive. The Y-axis
