@@ -925,13 +925,21 @@ export class AnalyticsDataManager extends DataManager {
    * then sorts by frequency for font size mapping.
    * Results are cached in the piestats table with a `tag_cloud_` prefix.
    *
+   * Cache is TTL-gated by `getCountCacheTtlMs()` (default 10 min, same
+   * knob as count distributions). `refreshAllStats` passes
+   * `forceRefresh=true` so partial / full sync invalidates the cache —
+   * this matters most for the General tab's Lift filter, which would
+   * otherwise serve pre-filter results from before v9.6.0 indefinitely.
+   *
    * @param userInfo The target user.
    * @param categoryId Danbooru tag category (0=General, 1=Artist, 3=Copyright, 4=Character).
+   * @param forceRefresh Bypass cache and re-fetch.
    * @return Tag cloud items sorted by frequency descending.
    */
   async getTagCloudData(
     userInfo: TargetUser,
     categoryId: number,
+    forceRefresh: boolean = false,
   ): Promise<TagCloudItem[]> {
     if (!userInfo.name) return [];
 
@@ -945,11 +953,13 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = `tag_cloud_${catName}`;
 
-    // Check cache
-    if (uploaderId) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as TagCloudItem[];
-    }
+    const cached = await this.tryGetCachedStats<TagCloudItem[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+      getCountCacheTtlMs(),
+    );
+    if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
     // General: select by Cosine similarity (user-characteristic tags)
@@ -3866,6 +3876,24 @@ export class AnalyticsDataManager extends DataManager {
         ),
         perfLogger.wrap('dbi:db:refresh:milestonesNsfw', () =>
           this.getMilestones(userInfo, true, 1000, true),
+        ),
+        // Tag Cloud — without this, the General tab's Lift filter (added
+        // in v9.6.0) was serving pre-v9.6.0 unfiltered results from a
+        // long-lived cache. Refresh all four category tabs so each sync
+        // reflects the user's latest tag usage. 4 parallel /related_tag
+        // calls (general one is heavier because it also triggers the
+        // 24h-cached globals lookups).
+        perfLogger.wrap('dbi:db:refresh:tagCloudGeneral', () =>
+          this.getTagCloudData(userInfo, 0, true),
+        ),
+        perfLogger.wrap('dbi:db:refresh:tagCloudArtist', () =>
+          this.getTagCloudData(userInfo, 1, true),
+        ),
+        perfLogger.wrap('dbi:db:refresh:tagCloudCopyright', () =>
+          this.getTagCloudData(userInfo, 3, true),
+        ),
+        perfLogger.wrap('dbi:db:refresh:tagCloudCharacter', () =>
+          this.getTagCloudData(userInfo, 4, true),
         ),
         // Refresh Popular Posts only on Full Sync
         ...(isFullSync
