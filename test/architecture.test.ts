@@ -199,6 +199,123 @@ describe('Architecture constraints', () => {
     ).toEqual([]);
   });
 
+  // ─── T-27 — pattern guards against re-duplication of audit findings ───
+
+  it('legacy NSFW localStorage keys must only appear in core/settings.ts (T-11 migration code)', () => {
+    // F-DUP-9 recurrence guard. The migration code in core/settings.ts is
+    // the only place that should still reference the pre-T-11 keys; any
+    // other occurrence means new code is bypassing getNsfwEnabled() /
+    // setNsfwEnabled() and risks the same split-key problem that audit
+    // found between user-analytics and tag-analytics.
+    const LEGACY_KEYS = [
+      'danbooru_grass_nsfw_enabled',
+      'tag_analytics_nsfw_enabled',
+    ];
+    const violations: string[] = [];
+
+    for (const file of allFiles) {
+      // settings.ts owns the migration (idempotent, runs once at startup).
+      if (file.path.endsWith('/core/settings.ts')) continue;
+      const lines = file.content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        for (const key of LEGACY_KEYS) {
+          if (lines[i].includes(key)) {
+            violations.push(
+              `${path.relative(SRC_DIR, file.path)}:${i + 1}: ${lines[i].trim()}`,
+            );
+          }
+        }
+      }
+    }
+
+    expect(
+      violations,
+      'Legacy NSFW keys must only appear in core/settings.ts migration code. ' +
+        'Read/write the NSFW flag via getNsfwEnabled()/setNsfwEnabled().',
+    ).toEqual([]);
+  });
+
+  it('"/counts/posts.json" URL must be built by core/data-manager.ts fetchRemoteCount() helper', () => {
+    // F-DUP-5 recurrence guard. 25 sites duplicated the same
+    // `${baseUrl}/counts/posts.json?tags=${encodeURIComponent(...)}`
+    // pattern; T-05 consolidated them into fetchRemoteCount(). Any new
+    // raw URL string (outside JSDoc) means someone re-rolled the helper.
+    const violations: string[] = [];
+
+    for (const file of allFiles) {
+      const rel = path.relative(SRC_DIR, file.path);
+      // core/data-manager.ts owns the helper; dev/diagnostic.ts is
+      // app-independent by design (see dev/ isolation rule above).
+      if (
+        file.path.endsWith('/core/data-manager.ts') ||
+        file.path.includes('/dev/')
+      ) {
+        continue;
+      }
+      const lines = file.content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        // Skip pure-comment lines (line and block-comment continuation).
+        if (
+          trimmed.startsWith('//') ||
+          trimmed.startsWith('*') ||
+          trimmed.startsWith('/*')
+        ) {
+          continue;
+        }
+        if (lines[i].includes('/counts/posts.json')) {
+          violations.push(`${rel}:${i + 1}: ${trimmed}`);
+        }
+      }
+    }
+
+    expect(
+      violations,
+      'Use fetchRemoteCount(rateLimiter, tags) from core/data-manager.ts ' +
+        'instead of building /counts/posts.json URLs inline.',
+    ).toEqual([]);
+  });
+
+  it('popover position formula (getBoundingClientRect + pageYOffset/pageXOffset) belongs to ui/popover-utils.ts', () => {
+    // F-UNDER-4 recurrence guard. Four sites originally hand-rolled the
+    // "target.getBoundingClientRect() + window.pageYOffset" combo for
+    // popover anchoring; T-07 extracted calcPopoverPosition(). A new
+    // occurrence outside the allowlist means someone reinvented it.
+    //
+    // Allowlist rationale:
+    // - ui/popover-utils.ts — owns the helper.
+    // - ui/approval-detail-popover.ts — kept its own anchored-card math
+    //   because its anchor semantics differ from the generic helper
+    //   (T-07 archive explicitly did not unify it).
+    // - ui/graph-renderer.ts — heatmap cell tooltip positioning relative
+    //   to dynamic CalHeatmap cells; not a popover anchor.
+    const ALLOWLIST = [
+      '/ui/popover-utils.ts',
+      '/ui/approval-detail-popover.ts',
+      '/ui/graph-renderer.ts',
+    ];
+    const violations: string[] = [];
+
+    for (const file of allFiles) {
+      if (ALLOWLIST.some(p => file.path.endsWith(p))) continue;
+      const content = file.content;
+      const usesPageOffset = /\bpage[XY]Offset\b/.test(content);
+      const usesBoundingRect = /\bgetBoundingClientRect\s*\(/.test(content);
+      if (usesPageOffset && usesBoundingRect) {
+        violations.push(
+          `${path.relative(SRC_DIR, file.path)}: combines ` +
+            'getBoundingClientRect() with pageXOffset/pageYOffset',
+        );
+      }
+    }
+
+    expect(
+      violations,
+      'Use calcPopoverPosition(target) from ui/popover-utils.ts instead of ' +
+        'recomputing the page-offset + rect formula inline.',
+    ).toEqual([]);
+  });
+
   it('dev/ should not import from core/, ui/, or apps/', () => {
     const devFiles = allFiles.filter(f => f.path.includes('/dev/'));
     const violations: string[] = [];
