@@ -39,10 +39,10 @@ const STATS_KEY = 'di.perf.stats';
 const SAMPLE_BUFFER_SIZE = 100;
 
 /** Optional structured metadata attached to a log entry. */
-export type PerfMeta = Record<string, unknown>;
+type PerfMeta = Record<string, unknown>;
 
 /** Result of `stats(label)` — nearest-rank approximation of percentiles. */
-export interface PerfStats {
+interface PerfStats {
   count: number;
   p50: number;
   p95: number;

@@ -91,18 +91,3 @@ export async function interceptTagImplicationsApi(
     fulfillJson(route, implications),
   );
 }
-
-/**
- * Convenience wrapper that installs the default fixture interceptions for
- * the user analytics flow: posts list, counts, related tags, tag
- * implications. Specs can call this first and then override individual
- * endpoints with more specific responses as needed.
- */
-export async function interceptUserAnalyticsDefaults(
-  page: Page,
-): Promise<void> {
-  await interceptPostsApi(page, loadFixture('posts-sample') as unknown[]);
-  await interceptCountsApi(page, 10);
-  await interceptRelatedTagApi(page, []);
-  await interceptTagImplicationsApi(page, []);
-}

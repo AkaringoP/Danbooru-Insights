@@ -171,10 +171,3 @@ export function createBodyTooltip(className: string): HTMLDivElement {
   document.body.appendChild(tooltip);
   return tooltip;
 }
-
-/** Removes any body-attached tooltips matching `className` (no-op if none). */
-export function removeBodyTooltip(className: string): void {
-  document.body
-    .querySelectorAll<HTMLElement>(`.${className}`)
-    .forEach(el => el.remove());
-}

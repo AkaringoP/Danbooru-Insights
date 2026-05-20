@@ -29,7 +29,7 @@ declare const __DEBUG_ENABLED__: boolean;
 const DEBUG_KEY = 'di.debug.enabled';
 
 /** Optional structured metadata attached to a log entry. */
-export type LogMeta = Record<string, unknown>;
+type LogMeta = Record<string, unknown>;
 
 export interface Logger {
   error(message: string, meta?: LogMeta): void;

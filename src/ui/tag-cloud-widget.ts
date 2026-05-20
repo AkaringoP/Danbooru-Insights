@@ -11,7 +11,7 @@ import {
 const log = createLogger('TagCloud');
 
 /** Category configuration for a tag cloud tab. */
-export interface TagCloudCategory {
+interface TagCloudCategory {
   /** Danbooru category ID (0=General, 1=Artist, 3=Copyright, 4=Character). */
   id: number;
   /** Display label for the tab button. */
