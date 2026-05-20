@@ -20,9 +20,13 @@ yarn-error.log
 *.swp
 
 # Claude (tool config, not source code)
-CLAUDE.md
+# Note: CLAUDE.md and .claude/rules/ are intentionally tracked — they're the
+# project's instruction files for Claude Code sessions and benefit from being
+# available on mobile / other machines via GitHub. CLAUDE.ko.md and
+# .claude/settings.local.json stay local (user-specific config).
 CLAUDE.ko.md
-.claude/
+.claude/*
+!.claude/rules/
 
 # Claude session files (generated during AI-assisted work sessions)
 PLAN.md
