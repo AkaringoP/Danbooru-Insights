@@ -4,6 +4,19 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.6.1 — Sub-tag tooltip mobile placement fix
+
+### Fixed
+- **Sub-tag breakdown tooltip mobile placement.** On touch devices the
+  tooltip was anchored to the right edge of the legend row, which spilled
+  past the viewport edge — and because mobile disables horizontal
+  scrolling, the spilled portion was unreachable (e.g. `idolmaster`
+  truncated to `idolm…`). The touch branch now centres the tooltip
+  horizontally in the viewport and places it directly below the selected
+  row. Desktop placement (right-edge with vertical clamp) is unchanged.
+
+---
+
 ## v9.6.0 — Counts refresh, loading progress, tag cloud signatures, widget gating
 
 This release bundles the v9.6 feature cycle: live count refresh with
