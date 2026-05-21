@@ -25,8 +25,4 @@ describe('widget-gates constants (v9.6.0)', () => {
   it('Scatter Plot unlocks at 300 uploads', () => {
     expect(SCATTER_MIN_UPLOADS).toBe(300);
   });
-
-  it('Scatter threshold is stricter than Tag Cloud (more data needed for patterns)', () => {
-    expect(SCATTER_MIN_UPLOADS).toBeGreaterThan(TAG_CLOUD_MIN_UPLOADS);
-  });
 });

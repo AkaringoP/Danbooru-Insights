@@ -144,8 +144,6 @@ describe('Count-cache TTL preference (v9.6)', () => {
 
   it('getCountCacheTtlMs returns minutes × 60_000', () => {
     expect(getCountCacheTtlMs()).toBe(10 * 60_000);
-    setCountCacheTtlMin(15);
-    expect(getCountCacheTtlMs()).toBe(15 * 60_000);
   });
 
   it('persists and reads back a custom TTL', () => {

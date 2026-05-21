@@ -167,11 +167,3 @@ describe('IMPLICATIONS cache constants', () => {
     expect(IMPLICATIONS_BATCH_CHUNK_SIZE).toBeGreaterThanOrEqual(20);
   });
 });
-
-describe('resetTopLevelSessionCache', () => {
-  it('is callable (side-effect only; covered via integration)', async () => {
-    const {resetTopLevelSessionCache} =
-      await import('../src/apps/tag-analytics-data');
-    expect(() => resetTopLevelSessionCache()).not.toThrow();
-  });
-});

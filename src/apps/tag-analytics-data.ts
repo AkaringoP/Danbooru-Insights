@@ -144,11 +144,6 @@ export const IMPLICATIONS_BATCH_CHUNK_SIZE = 50;
  */
 const topLevelSessionCache = new Map<string, boolean>();
 
-/** Resets the session cache — exported for tests. */
-export function resetTopLevelSessionCache(): void {
-  topLevelSessionCache.clear();
-}
-
 /**
  * Parses a /tag_implications.json batch response into a `name → isTopLevel`
  * map for a given input chunk. Tags present in the chunk but not in the

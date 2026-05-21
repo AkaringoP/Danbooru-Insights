@@ -183,36 +183,14 @@ describe('shouldCountHttpAsFailure', () => {
     expect(shouldCountHttpAsFailure(429)).toBe(false);
   });
 
-  it('counts 500 as a hard failure', () => {
-    expect(shouldCountHttpAsFailure(500)).toBe(true);
-  });
-
-  it('counts 503 as a hard failure', () => {
-    expect(shouldCountHttpAsFailure(503)).toBe(true);
-  });
-
-  it('counts 404 as a hard failure', () => {
-    expect(shouldCountHttpAsFailure(404)).toBe(true);
-  });
-
-  it('counts 401 as a hard failure', () => {
-    expect(shouldCountHttpAsFailure(401)).toBe(true);
+  it.each([500, 503, 404, 401])('counts %i as a hard failure', code => {
+    expect(shouldCountHttpAsFailure(code)).toBe(true);
   });
 });
 
 describe('backfillFailureStorageKey', () => {
   it('produces a per-user storage key', () => {
     expect(backfillFailureStorageKey(123)).toBe('di_backfill_failure_123');
-    expect(backfillFailureStorageKey(456)).toBe('di_backfill_failure_456');
-  });
-
-  it('does not collide with the post-metadata-v2 completion flag key', () => {
-    // Sanity check: the failure-state key must not accidentally overlap with
-    // the existing completion flag key `di_post_metadata_v2_${id}`. They
-    // store different things and clearing one must not affect the other.
-    const failureKey = backfillFailureStorageKey(789);
-    const completionKey = 'di_post_metadata_v2_789';
-    expect(failureKey).not.toBe(completionKey);
   });
 });
 

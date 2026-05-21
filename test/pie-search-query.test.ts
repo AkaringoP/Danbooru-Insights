@@ -5,21 +5,12 @@ import type {PieDetails} from '../src/apps/user-analytics-data';
 const USER = 'akaringo';
 
 describe('buildSearchQuery — rating', () => {
-  it('returns user:NAME rating:g for kind=rating', () => {
-    const details: PieDetails = {kind: 'rating', rating: 'g', count: 10};
-    expect(buildSearchQuery(details, 'General', USER, 'rating')).toBe(
-      'user:akaringo rating:g',
+  it.each(['g', 's', 'q', 'e'] as const)('returns user:NAME rating:%s', r => {
+    const details: PieDetails = {kind: 'rating', rating: r, count: 1};
+    expect(buildSearchQuery(details, 'X', USER, 'rating')).toBe(
+      `user:akaringo rating:${r}`,
     );
   });
-
-  for (const r of ['g', 's', 'q', 'e'] as const) {
-    it(`handles each canonical rating letter (${r})`, () => {
-      const details: PieDetails = {kind: 'rating', rating: r, count: 1};
-      expect(buildSearchQuery(details, 'X', USER, 'rating')).toBe(
-        `user:akaringo rating:${r}`,
-      );
-    });
-  }
 
   it('returns null when rating is empty', () => {
     const details: PieDetails = {kind: 'rating', rating: '', count: 1};
