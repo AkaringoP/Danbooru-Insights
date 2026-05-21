@@ -130,6 +130,11 @@ export type PieDetails =
       color?: string;
       frequency?: number;
       name?: string;
+      /**
+       * Sub-tag breakdown for legend hover/tap (Copy / Fav_Copy / Char,
+       * v9.6.0+). Source: `DistributionItem.subTags` from the resolver.
+       */
+      subTags?: import('../types').SubTagBreakdownEntry[];
     };
 
 /** Processed pie chart slice used for D3 rendering. */
