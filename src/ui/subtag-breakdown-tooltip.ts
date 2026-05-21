@@ -22,9 +22,11 @@
  */
 import {
   calcPopoverPosition,
+  calcPopoverPositionBelowCentered,
   createBodyTooltip,
   createClickOutsideHandler,
 } from './popover-utils';
+import {isTouchDevice} from './two-step-tap';
 const TOOLTIP_CLASS = 'di-subtag-tooltip';
 const HIDE_GRACE_MS = 120; // window for cursor → tooltip transition
 
@@ -107,23 +109,43 @@ export function showSubtagTooltip(opts: SubtagTooltipOptions): void {
   const el = createBodyTooltip(TOOLTIP_CLASS);
   renderTooltipDom(el, opts.parentDisplayName, opts.items);
 
-  const {top, left} = calcPopoverPosition(opts.anchor);
-  el.style.top = `${top}px`;
-  el.style.left = `${left}px`;
-  el.style.opacity = '1';
-  el.style.pointerEvents = 'auto';
+  // Touch devices: place the tooltip directly below the selected row,
+  // horizontally centred in the viewport. The mobile page disables
+  // horizontal scrolling, so the default right-edge placement spills past
+  // the viewport and becomes unreachable. Vertical clamp is intentionally
+  // skipped — mobile vertical scroll is allowed, and the CSS max-height +
+  // overflow-y already handle very tall tooltips.
+  if (isTouchDevice()) {
+    el.style.opacity = '1';
+    el.style.pointerEvents = 'auto';
+    // First paint at opacity:1 so getBoundingClientRect reports the real
+    // width after CSS clamps (max-width: min(280px, calc(100vw - 16px))).
+    const measured = el.getBoundingClientRect();
+    const {top, left} = calcPopoverPositionBelowCentered(
+      opts.anchor,
+      measured.width,
+    );
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+  } else {
+    const {top, left} = calcPopoverPosition(opts.anchor);
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+    el.style.opacity = '1';
+    el.style.pointerEvents = 'auto';
 
-  // Vertical viewport clamp: if the rendered tooltip would spill past
-  // the bottom edge, shift it up by the overflow amount (but never above
-  // the top margin). max-height + overflow-y handle the absolute worst
-  // case; this just keeps the tooltip in view when there's headroom
-  // above the anchor (long sub lists on bottom-half copyright rows).
-  const rect = el.getBoundingClientRect();
-  const margin = 8;
-  const overflowBottom = rect.bottom + margin - window.innerHeight;
-  if (overflowBottom > 0) {
-    const minTopDoc = window.scrollY + margin;
-    el.style.top = `${Math.max(minTopDoc, top - overflowBottom)}px`;
+    // Vertical viewport clamp: if the rendered tooltip would spill past
+    // the bottom edge, shift it up by the overflow amount (but never above
+    // the top margin). max-height + overflow-y handle the absolute worst
+    // case; this just keeps the tooltip in view when there's headroom
+    // above the anchor (long sub lists on bottom-half copyright rows).
+    const rect = el.getBoundingClientRect();
+    const margin = 8;
+    const overflowBottom = rect.bottom + margin - window.innerHeight;
+    if (overflowBottom > 0) {
+      const minTopDoc = window.scrollY + margin;
+      el.style.top = `${Math.max(minTopDoc, top - overflowBottom)}px`;
+    }
   }
 
   // Mouse-leaving the tooltip schedules a hide. Mouse-entering cancels it.

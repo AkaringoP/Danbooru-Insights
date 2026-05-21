@@ -9,13 +9,14 @@
  *  - show → hide lifecycle (single-instance, idempotent hide)
  *  - buildSubtagTooltipItems URL prefix swap (user: vs ordfav:)
  */
-import {describe, it, expect, beforeEach, afterEach} from 'vitest';
+import {describe, it, expect, beforeEach, afterEach, vi} from 'vitest';
 import {
   hideSubtagTooltip,
   isSubtagTooltipVisible,
   showSubtagTooltip,
   type SubtagTooltipItem,
 } from '../src/ui/subtag-breakdown-tooltip';
+import * as twoStepTap from '../src/ui/two-step-tap';
 
 function makeAnchor(): HTMLElement {
   const el = document.createElement('div');
@@ -318,6 +319,143 @@ describe('onPointerEnter / onPointerLeave hooks (v9.8+)', () => {
     el.onmouseleave!.call(el, new MouseEvent('mouseleave'));
     // Still visible immediately after — the hide is scheduled, not synchronous.
     expect(isSubtagTooltipVisible()).toBe(true);
+  });
+});
+
+describe('placement: touch device branch (v10+)', () => {
+  let origInnerWidth: number;
+  let origGetRect: typeof Element.prototype.getBoundingClientRect;
+  let isTouchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    origInnerWidth = window.innerWidth;
+    origGetRect = Element.prototype.getBoundingClientRect;
+    isTouchSpy = vi.spyOn(twoStepTap, 'isTouchDevice').mockReturnValue(true);
+    Object.defineProperty(window, 'innerWidth', {
+      value: 390,
+      configurable: true,
+    });
+    // Stub getBoundingClientRect so the test asserts deterministic
+    // coordinates instead of jsdom's zero-rect default. Anchor is placed
+    // at (left=20, bottom=120); tooltip measures 220px wide.
+    Element.prototype.getBoundingClientRect = function () {
+      if (this instanceof HTMLElement && this.classList.contains('anchor')) {
+        return {
+          top: 100,
+          bottom: 120,
+          left: 20,
+          right: 140,
+          width: 120,
+          height: 20,
+          x: 20,
+          y: 100,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      if (
+        this instanceof HTMLElement &&
+        this.classList.contains('di-subtag-tooltip')
+      ) {
+        return {
+          top: 0,
+          bottom: 200,
+          left: 0,
+          right: 220,
+          width: 220,
+          height: 200,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      return origGetRect.call(this);
+    };
+  });
+
+  afterEach(() => {
+    isTouchSpy.mockRestore();
+    Object.defineProperty(window, 'innerWidth', {
+      value: origInnerWidth,
+      configurable: true,
+    });
+    Element.prototype.getBoundingClientRect = origGetRect;
+  });
+
+  it('places the tooltip below the anchor and horizontally centred', () => {
+    const anchor = makeAnchor();
+    anchor.classList.add('anchor');
+    showSubtagTooltip({
+      parentDisplayName: 'idolmaster',
+      items: items(),
+      anchor,
+    });
+    const el = document.querySelector<HTMLElement>('.di-subtag-tooltip')!;
+    // top = anchor.bottom(120) + scrollY(0) + 8gap = 128
+    expect(el.style.top).toBe('128px');
+    // left = scrollX(0) + max(8, (innerWidth(390) - width(220))/2) = 85
+    expect(el.style.left).toBe('85px');
+  });
+
+  it('clamps left to 8px when tooltip width exceeds viewport', () => {
+    Object.defineProperty(window, 'innerWidth', {
+      value: 200,
+      configurable: true,
+    });
+    const anchor = makeAnchor();
+    anchor.classList.add('anchor');
+    showSubtagTooltip({
+      parentDisplayName: 'idolmaster',
+      items: items(),
+      anchor,
+    });
+    const el = document.querySelector<HTMLElement>('.di-subtag-tooltip')!;
+    // centeredLeft = (200 - 220)/2 = -10, max(8, -10) = 8
+    expect(el.style.left).toBe('8px');
+  });
+});
+
+describe('placement: desktop branch', () => {
+  let origGetRect: typeof Element.prototype.getBoundingClientRect;
+  let isTouchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    isTouchSpy = vi.spyOn(twoStepTap, 'isTouchDevice').mockReturnValue(false);
+    origGetRect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
+      if (this instanceof HTMLElement && this.classList.contains('anchor')) {
+        return {
+          top: 100,
+          bottom: 120,
+          left: 20,
+          right: 140,
+          width: 120,
+          height: 20,
+          x: 20,
+          y: 100,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      return origGetRect.call(this);
+    };
+  });
+
+  afterEach(() => {
+    isTouchSpy.mockRestore();
+    Element.prototype.getBoundingClientRect = origGetRect;
+  });
+
+  it('keeps right-of-anchor placement (calcPopoverPosition formula)', () => {
+    const anchor = makeAnchor();
+    anchor.classList.add('anchor');
+    showSubtagTooltip({
+      parentDisplayName: 'idolmaster',
+      items: items(),
+      anchor,
+    });
+    const el = document.querySelector<HTMLElement>('.di-subtag-tooltip')!;
+    // top = anchor.top(100), left = anchor.right(140) + 10 = 150
+    expect(el.style.top).toBe('100px');
+    expect(el.style.left).toBe('150px');
   });
 });
 

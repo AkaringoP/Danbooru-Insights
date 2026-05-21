@@ -31,6 +31,33 @@ export function calcPopoverPosition(target: Element): {
   };
 }
 
+/**
+ * Document-coordinate position for a popover placed **below** `target`
+ * with an 8px gap, **horizontally centred** in the viewport. Used for
+ * touch / narrow-viewport layouts where the right-edge placement from
+ * `calcPopoverPosition` spills past the viewport edge (the page disables
+ * horizontal scrolling on mobile, so the spill is unreachable).
+ *
+ * `popoverWidth` is the popover's measured width (after CSS clamps) — the
+ * caller is expected to do an initial paint at opacity:0, then read
+ * `el.getBoundingClientRect().width` to pass it in. `left` is clamped to a
+ * minimum of 8px from the viewport's left edge so very wide popovers on
+ * very narrow screens still have a visible side margin.
+ */
+export function calcPopoverPositionBelowCentered(
+  target: Element,
+  popoverWidth: number,
+): {top: number; left: number} {
+  const rect = target.getBoundingClientRect();
+  const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+  const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+  const centeredLeft = (window.innerWidth - popoverWidth) / 2;
+  return {
+    top: rect.bottom + scrollTop + 8,
+    left: scrollLeft + Math.max(8, centeredLeft),
+  };
+}
+
 export interface ClickOutsideOptions {
   /**
    * Elements (in addition to `container`) whose clicks should NOT trigger

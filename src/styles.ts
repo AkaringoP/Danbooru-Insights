@@ -1356,7 +1356,11 @@ const GLOBAL_CSS = `
     .di-subtag-tooltip {
       position: absolute;
       min-width: 180px;
-      max-width: 280px;
+      /* Cap to 280px on roomy viewports, but shrink to viewport width
+       * minus 16px on narrow screens so mobile centred placement keeps
+       * an 8px gutter on each side (matches showSubtagTooltip's mobile
+       * branch which centres the measured width). */
+      max-width: min(280px, calc(100vw - 16px));
       /* Cap height so a long sub list (gundam: 10+ subs) doesn't flow
        * past the viewport and hide its trailing Others row. Scroll the
        * list region (di-subtag-tooltip-list) — the heading stays
