@@ -180,6 +180,22 @@ export interface DistributionItem {
   thumb: string | null;
   isOther: boolean;
   color?: string;
+  /**
+   * Sub-tag breakdown for legend hover/tap (v9.6.0+). Populated for Copy /
+   * Fav_Copy / Char distributions when the top-level tag has implications
+   * (sub-tags) that the user actually uses. Empty/undefined = no tooltip.
+   */
+  subTags?: SubTagBreakdownEntry[];
+}
+
+/** Single row in a sub-tag breakdown (DistributionItem.subTags). */
+export interface SubTagBreakdownEntry {
+  tagName: string;
+  count: number;
+  /** 0..1 — share of the parent's sub-tag user-count sum. */
+  share: number;
+  /** True for the trailing "Others" bucket; not clickable in UI. */
+  isOther: boolean;
 }
 
 /** Sync progress state for AnalyticsDataManager. */
@@ -561,8 +577,20 @@ export interface MonthlyCountRecord {
  * 180-day TTL is applied at read time.
  */
 export interface TagImplicationCacheRecord {
+  /**
+   * Two key shapes coexist in this table:
+   *  - `<tagName>` — antecedent-keyed (`isTopLevelTag` lookup, populated
+   *    by `fetchTopLevelTagsBatch`). The meaningful field is `isTopLevel`.
+   *  - `consequent:<parent>` — consequent-keyed (sub-tag breakdown,
+   *    populated by `fetchSubTagsForParents`, v9.6.0+). The meaningful
+   *    field is `subs`; `isTopLevel` is a `false` placeholder ignored on
+   *    read because callers query the two shapes by distinct key
+   *    prefixes (no cross-contamination).
+   */
   tagName: string;
   isTopLevel: boolean;
+  /** Present for consequent-keyed rows — list of sub-tag candidate names. */
+  subs?: string[];
   /** Fetch timestamp in ms since epoch. */
   fetchedAt: number;
   /**

@@ -26,6 +26,46 @@ for widgets that need a minimum amount of data to be meaningful.
   50) are added in [src/core/global-tag-stats.ts](src/core/global-tag-stats.ts);
   the per-user `/related_tag.json` call now requests `limit=50` for
   General to keep enough headroom after filtering.
+- **Sub-tag breakdown tooltip + sub-chart mode on Copy / Fav_Copy / Char
+  pie legend.** Hovering (desktop) or tapping (mobile) a top-level
+  copyright or character row in the pie chart legend now opens a
+  tooltip showing how the user's posts distribute across the parent's
+  sub-tags, *and simultaneously swaps the pie chart itself* to that
+  parent's sub-tag breakdown. For example, hovering `idolmaster` reveals
+  the per-franchise tooltip rows (`deremas 60%`, `milimas 30%`, `Others
+  10%`) while the pie redraws to match. Each tooltip row is a link to
+  `/posts?tags=user:NAME+sub_tag` in a new tab; hovering a tooltip row
+  on desktop also highlights the corresponding slice in the live chart.
+  Notable details:
+  - The sub-chart's `Others` slice merges two distinct sources: the
+    long tail trimmed at the 95% cumulative threshold, plus
+    "post-coverage Others" (`parent.count − Σ sub.count`) so the chart
+    matches the user's mental model of `top-N + Others`.
+  - Parents without sub-tags still drill in — the chart becomes a
+    single-slice view of the parent itself when the legend row is
+    hovered.
+  - Sub-chart counts use `/counts/posts.json` directly (e.g.
+    `user:NAME fate/grand_order`) rather than `related_tag` frequencies
+    so tooltip + chart percentages match exactly.
+  - Sub-tag candidates are batched through `/tag_implications.json`
+    with the `consequent_name_comma` filter and cached for 180 days
+    under a new `consequent:` key prefix on the existing
+    `tag_implications_cache` table — zero per-tag API calls on hover.
+  - The legend rectangle (not individual rows) is the boundary for
+    sub-chart mode: the cursor can slide between rows or onto the
+    body-attached tooltip without flickering back to the main pie.
+  - Chart transitions use a sequential fade (chartWrapper fades out,
+    data swaps while invisible, fades back in) — matches the
+    tag-cloud tab-switch crossfade pattern without the snapshot-overlay
+    alignment issues that an earlier symmetric crossfade exposed.
+  - The d3 join's update branch resets opacity + filter so the shared
+    `Others` slice can't carry stale state from an in-flight
+    highlight transition or a leftover `drop-shadow` on main-pie
+    return.
+  - The legend container's mouseenter/leave listeners are de-duped via
+    a `WeakMap` registry so tab switches (which reuse the same
+    `legendDiv` element) don't accumulate stale `scheduleExit` timers
+    across renders.
 - **Widget upload-count gating** for two widgets where small data shows
   noise instead of patterns:
   - Tag Cloud unlocks at 100 uploads

@@ -2,6 +2,13 @@ import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {createBodyTooltip} from '../ui/popover-utils';
+import {
+  cancelSubtagTooltipHide,
+  hideSubtagTooltip,
+  isSubtagTooltipVisible,
+  showSubtagTooltip,
+  type SubtagTooltipItem,
+} from '../ui/subtag-breakdown-tooltip';
 
 const log = createLogger('UserAnalyticsCharts');
 import type {
@@ -216,6 +223,11 @@ function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
       color: item.color,
       frequency: item.frequency,
       name: item.name,
+      // Carry sub-tag breakdown when present (Copy / Fav_Copy / Char tabs).
+      // PieTabItem is a union — DistributionItem carries subTags, plain
+      // tab item does not. Cast through DistributionItem since both
+      // optional fields resolve to the same type at runtime.
+      subTags: (item as DistributionItem).subTags,
     });
 
     if (
@@ -283,6 +295,147 @@ function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
         details: tagDetails(),
       };
     }
+  });
+}
+
+/**
+ * Toggle the chart wrapper's drop shadow. Used by sub-chart mode to hide
+ * the dark disk while displaying a partial-coverage sub-breakdown (the
+ * shadow bleeds through the gaps and around the edges of small slices,
+ * making them read as black-tinted). No-op on Firefox builds where
+ * `buildChartScaffolding` skips the shadow entirely.
+ */
+function setShadowVisibility(chartWrapper: HTMLElement, visible: boolean) {
+  const shadow = chartWrapper.querySelector<HTMLElement>('.di-pie-shadow');
+  if (shadow) shadow.style.opacity = visible ? '1' : '0';
+}
+
+/**
+ * Build the slice list for the "sub-chart" view that replaces the pie
+ * temporarily when a Copy/Fav_Copy/Char legend row is hovered. Pulls the
+ * parent's pre-computed `subTags` (see attachSubTagBreakdowns) and
+ * merges two Others sources into one row:
+ *   1. applySubTagBreakdown's 95%-bucket Others (sub-sum tail)
+ *   2. post-coverage Others = max(0, parent.count − Σ sub.count) — the
+ *      "parent only" posts. Zero when overlap inflates the sub sum past
+ *      the parent count (same post holds two sibling subs).
+ *
+ * When the parent has no sub data: `parentColor` provided → single
+ * full-circle slice for the parent itself (lets any legend row drill in);
+ * `parentColor` omitted → returns `[]`.
+ */
+export function buildSubChartSlices(
+  parent: DistributionItem,
+  parentColor?: string,
+): PieSlice[] {
+  const allSubs = parent.subTags ?? [];
+  const displaySubs = allSubs.filter(s => !s.isOther);
+  // Fallback to single-parent slice when there are no displayable subs
+  // — covers both "no subTags at all" and "only the applySubTagBreakdown
+  // Others bucket survives" (showing just an Others slice would be
+  // meaningless, the parent itself is more useful).
+  if (displaySubs.length === 0) {
+    if (!parentColor) return [];
+    const parentLabel = (parent.name || parent.tagName || '').replace(
+      /_/g,
+      ' ',
+    );
+    return [
+      {
+        value: Math.max(1, parent.count ?? 0),
+        label: parentLabel,
+        color: parentColor,
+        details: {
+          kind: 'tag',
+          tagName: parent.tagName,
+          name: parentLabel,
+          count: parent.count ?? 0,
+          isOther: false,
+          thumb: null,
+        },
+      },
+    ];
+  }
+
+  const applyOthers = allSubs.filter(s => s.isOther);
+  const subSum = displaySubs.reduce((acc, s) => acc + s.count, 0);
+  const applyOthersCount = applyOthers.reduce((acc, s) => acc + s.count, 0);
+  const parentCount = parent.count ?? 0;
+  const postCoverageOthers = Math.max(
+    0,
+    parentCount - subSum - applyOthersCount,
+  );
+  const totalOthers = applyOthersCount + postCoverageOthers;
+
+  const slices: PieSlice[] = displaySubs.map((s, i) => ({
+    value: s.count,
+    label: s.tagName.replace(/_/g, ' '),
+    color: PIE_PALETTE[i % PIE_PALETTE.length],
+    details: {
+      kind: 'tag',
+      tagName: s.tagName,
+      name: s.tagName.replace(/_/g, ' '),
+      count: s.count,
+      isOther: false,
+      thumb: null,
+    },
+  }));
+
+  if (totalOthers > 0) {
+    slices.push({
+      value: totalOthers,
+      label: 'Others',
+      color: '#bdbdbd',
+      details: {
+        kind: 'tag',
+        name: 'Others',
+        count: totalOthers,
+        isOther: true,
+        thumb: null,
+      },
+    });
+  }
+
+  return slices;
+}
+
+/**
+ * Convert sub-chart PieSlices into the SubtagTooltipItem rows the
+ * tooltip renders. Share is computed against the **parent's** count
+ * (not the sub-sum) so the tooltip and chart agree on every percentage:
+ * a parent like `ninjago` with one sub `dragons rising` (30 out of 212)
+ * shows "14% / 30" in both places, plus an "Others 86% / 182" row that
+ * matches the chart's grey slice.
+ *
+ * Falls back to sub-sum-base if parentCount is 0 — defensive only;
+ * buildSubChartSlices already guards against that case by returning [].
+ */
+export function subSlicesToTooltipItems(
+  slices: PieSlice[],
+  parentCount: number,
+  queryPrefix: string,
+): SubtagTooltipItem[] {
+  const base =
+    parentCount > 0 ? parentCount : slices.reduce((acc, s) => acc + s.value, 0);
+  // Others is non-clickable: the slice bundles both post-coverage Others
+  // (parent only) and the applySubTagBreakdown long tail (subs trimmed
+  // by the 95% threshold). No single Danbooru query covers both without
+  // enumerating every displayed sub as `-` exclusions, which bloats the
+  // URL past readability — so we ship no link rather than a partial one.
+  return slices.map(s => {
+    const details = s.details as {tagName?: string; isOther?: boolean};
+    const isOther = !!details.isOther;
+    const tagName = isOther ? 'Others' : (details.tagName ?? '');
+    return {
+      tagName,
+      displayName: isOther ? 'Others' : tagName.replace(/_/g, ' '),
+      count: s.value,
+      share: base > 0 ? s.value / base : 0,
+      href: isOther
+        ? ''
+        : `/posts?tags=${encodeURIComponent(`${queryPrefix} ${tagName}`)}`,
+      isOther,
+    };
   });
 }
 
@@ -367,6 +520,13 @@ function buildChartScaffolding(
       'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
 
     const shadow = document.createElement('div');
+    // class hook for sub-mode hide (Fix I) — the shadow sits behind the
+    // svg at translateZ(-10px) + blur(5px), so for sub-charts whose
+    // slices don't cover the full disk (ninjago: 1 sub + Others; honkai:
+    // 3 sub + tiny Others) the dark disk bleeds through the gaps and
+    // around the edges, making the slice colors read as "black-ish". We
+    // toggle it off during sub-chart mode and back on when exiting.
+    shadow.className = 'di-pie-shadow';
     shadow.style.position = 'absolute';
     shadow.style.top = '50%';
     shadow.style.left = '50%';
@@ -376,6 +536,7 @@ function buildChartScaffolding(
     shadow.style.borderRadius = '50%';
     shadow.style.background = 'var(--di-shadow, rgba(0,0,0,0.2))';
     shadow.style.filter = 'blur(5px)';
+    shadow.style.transition = 'opacity 0.15s ease-out';
     chartWrapper.appendChild(shadow);
 
     chartWrapper.addEventListener('mouseenter', () => {
@@ -476,16 +637,28 @@ function bindDesktopPieInteractions(args: {
           .attr('fill', (d: D3Any) => d.data.color)
           .style('opacity', '0.9')
           .style('cursor', 'pointer'),
+      // No fill transition on update — a previous 500ms tween interpolated
+      // through dark midpoints during sub-mode re-binds (e.g. blue → red
+      // through near-black), making fast hover changes flash black.
+      // opacity + filter are also reset because the shared 'Others' path
+      // can carry stale inline values from an in-flight
+      // subRowHighlight transition or a slice's own hover (whose
+      // mouseout never clears `filter: drop-shadow(...)`) — without
+      // resetting, the path renders dimmed or with a stale halo through
+      // the fade-in of a main-pie return.
       (update: D3Any) =>
         update
           .attr('class', 'danbooru-grass-pie-path')
           .attr('d', arc)
-          .call((update: D3Any) =>
-            update
-              .transition()
-              .duration(500)
-              .attr('fill', (d: D3Any) => d.data.color),
-          ),
+          .attr('fill', (d: D3Any) => d.data.color)
+          .style('opacity', '0.9')
+          .style('filter', null),
+      // Explicit exit (matches default but documents the contract):
+      // sub-mode rebinds the entire slice set per hover, so any path
+      // whose label isn't in the new data MUST go away — otherwise the
+      // svg accumulates ghost paths visible as faint slices behind the
+      // active ones.
+      (exit: D3Any) => exit.remove(),
     )
     .attr('stroke', 'var(--di-chart-bg, #fff)')
     .style('stroke-width', '1px')
@@ -823,14 +996,33 @@ function renderPieLegend(args: {
   currentPieTab: string;
   pctFor: (label: string) => string;
   normalizedName: string;
+  /** Optional hooks for sub-chart mode (Copy/Fav_Copy/Char). v9.7+. */
+  chartModeControl?: ChartModeControl;
 }): void {
-  const {legendDiv, processedData, currentPieTab, pctFor, normalizedName} =
-    args;
+  const {
+    legendDiv,
+    processedData,
+    currentPieTab,
+    pctFor,
+    normalizedName,
+    chartModeControl,
+  } = args;
   const legendTitle = LEGEND_TITLES[currentPieTab] ?? 'DIST.';
   const styleTag = legendDiv.querySelector('style')?.outerHTML ?? '';
 
+  // Tabs that get the sub-tag breakdown tooltip (v9.6.0+). Other tabs
+  // render legend without hover-tooltip wiring.
+  const subtagTooltipEnabled =
+    currentPieTab === 'copyright' ||
+    currentPieTab === 'fav_copyright' ||
+    currentPieTab === 'character';
+  const queryPrefix =
+    currentPieTab === 'fav_copyright'
+      ? `ordfav:${normalizedName}`
+      : `user:${normalizedName}`;
+
   const listHtml = processedData
-    .map(d => {
+    .map((d, idx) => {
       const pct = pctFor(d.label);
       const isOtherSlice = d.details.kind === 'tag' && !!d.details.isOther;
       let targetUrl = '#';
@@ -853,8 +1045,16 @@ function renderPieLegend(args: {
       const countTitle = d.details.count
         ? escapeHtml(d.details.count.toLocaleString())
         : '';
+      // Mark every interactive (non-Others) Copy/Fav_Copy/Char legend
+      // row for the post-render wire-up. Rows with subTags get the full
+      // tooltip + chart-mode treatment; rows without (e.g. `gundam` for
+      // a user with no franchise-specific sub-tagging) still trigger
+      // chart-mode in single-slice fallback (v9.7+).
+      const isInteractiveRow =
+        subtagTooltipEnabled && d.details.kind === 'tag' && !d.details.isOther;
+      const subtagAttr = isInteractiveRow ? ` data-di-subtag-idx="${idx}"` : '';
       return `
-               <div style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
+               <div${subtagAttr} style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
                   <div style="width:12px; height:12px; background:${swatchColor}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
                   ${
                     isOtherSlice
@@ -872,6 +1072,315 @@ function renderPieLegend(args: {
            <div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:var(--di-chart-bg, #fff); padding-bottom:4px; border-bottom:1px solid var(--di-border-light, #eee);">${legendTitle}</div>
            ${listHtml}
       `;
+
+  if (subtagTooltipEnabled) {
+    wireSubtagTooltipHandlers(
+      legendDiv,
+      processedData,
+      queryPrefix,
+      chartModeControl,
+    );
+  }
+}
+
+/**
+ * Tracks the container-level (mouseenter/mouseleave) listeners that
+ * wireSubtagTooltipHandlers attaches to each legend div, so the next
+ * call can remove them cleanly. Without this, tab switches (which reuse
+ * the same legendDiv element and only swap innerHTML) leave stale
+ * listeners from previous tabs attached — their `scheduleExit` timers
+ * fire 150ms after a cursor crosses legend → tooltip and yank the fresh
+ * tooltip the user was about to read. The tooltip module's own
+ * el.onmouseenter/leave is property-assigned (one slot, always latest)
+ * so the asymmetry is fully on legendDiv's side.
+ */
+interface LegendContainerListeners {
+  enter: () => void;
+  leave: () => void;
+}
+const legendContainerListenerRegistry = new WeakMap<
+  HTMLElement,
+  LegendContainerListeners
+>();
+
+/**
+ * Attaches desktop hover + mobile tap handlers to legend items that carry
+ * a sub-tag breakdown (data-di-subtag-idx). The tooltip itself is the
+ * single-instance singleton from `src/ui/subtag-breakdown-tooltip.ts`.
+ *
+ * Desktop: mouseenter on the legend row shows the tooltip; mouseleave
+ * schedules a hide with a 120ms grace period so users can move the
+ * cursor into the tooltip body to click a sub-tag. The tooltip's own
+ * mouseenter cancels that pending hide.
+ *
+ * Mobile: a touchend → click chain delivers a single click event after
+ * the touch ends. We catch the FIRST click on a legend item that has a
+ * breakdown — show the tooltip, preventDefault the anchor's navigation,
+ * and let createClickOutsideHandler dismiss it. A second tap on a
+ * tooltip row navigates (the row is an `<a target="_blank">`).
+ */
+function wireSubtagTooltipHandlers(
+  legendDiv: Element,
+  processedData: PieSlice[],
+  queryPrefix: string,
+  chartModeControl?: ChartModeControl,
+): void {
+  // Debounce gate (~120ms) shared across rows in this legend. Fast mouse
+  // swipes across multiple legend rows otherwise rebind the pie 3-4
+  // times in flight — visually choppy and leaves rendering artifacts
+  // (faint ghost slices from partly-painted exit transitions). Only the
+  // row the cursor finally rests on triggers an actual chart-mode enter.
+  const ENTER_DEBOUNCE_MS = 120;
+  // Grace window for the legend → tooltip cursor transit. Pending exits
+  // are armed by legend-container or tooltip-body mouseleave and cancelled
+  // by either's mouseenter. Without the grace, moving from a row onto the
+  // (body-attached) tooltip would briefly leave both, firing exit.
+  const EXIT_GRACE_MS = 150;
+  let pendingEnter: ReturnType<typeof setTimeout> | null = null;
+  let pendingExit: ReturnType<typeof setTimeout> | null = null;
+  const cancelPendingEnter = () => {
+    if (pendingEnter !== null) {
+      clearTimeout(pendingEnter);
+      pendingEnter = null;
+    }
+  };
+  const cancelPendingExit = () => {
+    if (pendingExit !== null) {
+      clearTimeout(pendingExit);
+      pendingExit = null;
+    }
+  };
+  // Schedules the actual chart-mode + tooltip exit. Single source of truth
+  // for "user is done with the legend's sub-chart hover" — fired either by
+  // legend container mouseleave or by tooltip body mouseleave (via the
+  // tooltip module's onPointerLeave hook). Sliding between legend rows or
+  // moving cursor row → tooltip body cancels it before it fires.
+  const scheduleExit = () => {
+    cancelPendingExit();
+    pendingExit = setTimeout(() => {
+      pendingExit = null;
+      hideSubtagTooltip();
+      chartModeControl?.exit();
+    }, EXIT_GRACE_MS);
+  };
+
+  // Container-scope listeners: the legend rectangle (not individual rows)
+  // is the boundary for chart-mode. Cursor moving between rows or over
+  // the gaps between them stays "inside" — chart sticks to whichever row
+  // was last hovered. Only leaving the rectangle entirely schedules exit.
+  // Old listeners are removed first via the registry (see registry JSDoc).
+  const legendEl = legendDiv as HTMLElement;
+  const prevListeners = legendContainerListenerRegistry.get(legendEl);
+  if (prevListeners) {
+    legendEl.removeEventListener('mouseenter', prevListeners.enter);
+    legendEl.removeEventListener('mouseleave', prevListeners.leave);
+  }
+  const enterHandler = () => cancelPendingExit();
+  const leaveHandler = () => {
+    cancelPendingEnter();
+    scheduleExit();
+  };
+  legendEl.addEventListener('mouseenter', enterHandler);
+  legendEl.addEventListener('mouseleave', leaveHandler);
+  legendContainerListenerRegistry.set(legendEl, {
+    enter: enterHandler,
+    leave: leaveHandler,
+  });
+
+  const rows = legendDiv.querySelectorAll<HTMLElement>('[data-di-subtag-idx]');
+  rows.forEach(row => {
+    const idx = parseInt(row.dataset['diSubtagIdx'] || '-1', 10);
+    if (idx < 0 || idx >= processedData.length) return;
+    const slice = processedData[idx];
+    if (slice.details.kind !== 'tag' || slice.details.isOther) return;
+    const parentName = slice.label;
+    const parentColor = slice.color;
+
+    // Anchor the tooltip to the legend row's right edge. (An earlier
+    // pass anchored to the inner tag-name span so the tooltip sat closer
+    // to the label, but that placement straddled the percentage column
+    // visually — the user preferred the cleaner right-edge anchor.)
+
+    // Recover the underlying DistributionItem the legend row was rendered
+    // from. processedData[idx].details carries the same {tagName, count,
+    // subTags} fields the sub-chart builder reads, plus the kind tag the
+    // type system needs.
+    const parentItem: DistributionItem = {
+      name: parentName,
+      tagName: slice.details.tagName ?? '',
+      count: slice.details.count ?? 0,
+      frequency: slice.details.frequency ?? 0,
+      thumb: slice.details.thumb ?? null,
+      isOther: false,
+      subTags: slice.details.subTags,
+    };
+
+    // Build the slice list once — chart and tooltip render the same set
+    // (v9.7+). Without this, the tooltip used applySubTagBreakdown's
+    // sub-sum-based shares and a parent like `ninjago` (sub `dragons
+    // rising` = 30 of parent 212) would read as "dragons rising 100%"
+    // while the chart sat on a big grey Others slice. Now both use
+    // buildSubChartSlices, base = parent.count.
+    //
+    // When parentItem has no subTags, buildSubChartSlices returns [] here
+    // (we don't pass parentColor — the tooltip stays hidden for such
+    // rows). The chart-mode enter call below DOES pass parentColor, so
+    // the chart still updates to a single-slice view.
+    const subSlices = buildSubChartSlices(parentItem);
+    const items = subSlicesToTooltipItems(
+      subSlices,
+      parentItem.count,
+      queryPrefix,
+    );
+    const hasBreakdown = items.length > 0;
+
+    let touchUsed = false;
+
+    const showTooltipAndChart = () => {
+      if (hasBreakdown) {
+        showSubtagTooltip({
+          parentDisplayName: parentName,
+          items,
+          anchor: row,
+          onShow: () => chartModeControl?.enter(parentItem, parentColor),
+          // onHide no longer drives chart-mode exit — the legend container
+          // (or tooltip body) mouseleave does, via scheduleExit. Replacing
+          // tooltip A with tooltip B still fires A's onHide, so we'd
+          // otherwise revert to the main pie between A and B. Keeping
+          // chart-mode exit on the container handler means A → B is a
+          // pure switch (no intermediate revert) and the row highlight
+          // still resets cleanly when the old tooltip tears down.
+          onHide: () => subRowHighlight.reset(),
+          onPointerEnter: cancelPendingExit,
+          onPointerLeave: scheduleExit,
+        });
+        // Wire T-51 row hover highlight after tooltip mounts (desktop only).
+        // The tooltip DOM is built inside showSubtagTooltip synchronously,
+        // so we can attach hover listeners on the same tick.
+        if (chartModeControl && !chartModeControl.isTouch) {
+          subRowHighlight.attach(items);
+        }
+      } else {
+        // No sub breakdown — chart-only mode (single slice = parent
+        // itself). Bypass the tooltip lifecycle; the legend container's
+        // mouseleave handler drives the exit. Hide any tooltip the
+        // previous breakdown row left visible — otherwise hovering
+        // gundam (has subs) then identity_v (no subs) keeps gundam's
+        // tooltip open beside identity_v's single-slice chart, which
+        // reads as a stale label.
+        hideSubtagTooltip();
+        chartModeControl?.enter(parentItem, parentColor);
+      }
+    };
+
+    // T-51: row hover highlight controller. Holds the most recently
+    // highlighted slice path so we can restore it on the next row enter
+    // or on tooltip hide. Desktop only — mobile skips the attach.
+    const subRowHighlight = (() => {
+      let highlightedTag: string | null = null;
+      const reset = () => {
+        if (!chartModeControl) return;
+        const svg = chartModeControl.svg;
+        const arc = chartModeControl.arc;
+        svg
+          .selectAll('path.danbooru-grass-pie-path')
+          .transition()
+          .duration(150)
+          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
+          .style('opacity', '0.9');
+        highlightedTag = null;
+      };
+      const highlight = (tagName: string) => {
+        if (!chartModeControl) return;
+        const target = chartModeControl.findSubSliceByTag(tagName);
+        if (!target) return;
+        const svg = chartModeControl.svg;
+        const arc = chartModeControl.arc;
+        const arcHover = chartModeControl.arcHover;
+        // Dim every slice, then enlarge the matched one.
+        svg
+          .selectAll('path.danbooru-grass-pie-path')
+          .transition()
+          .duration(150)
+          .attr('d', (td: unknown) => arc(td as d3.PieArcDatum<PieSlice>) ?? '')
+          .style('opacity', '0.35');
+        d3.select(target)
+          .transition()
+          .duration(150)
+          .attr(
+            'd',
+            (td: unknown) => arcHover(td as d3.PieArcDatum<PieSlice>) ?? '',
+          )
+          .style('opacity', '1');
+        highlightedTag = tagName;
+      };
+      const attach = (rowItems: SubtagTooltipItem[]) => {
+        // Hover-only DOM scan: find the tooltip element, walk its row
+        // anchors, wire them. Cheaper than weaving handlers into the
+        // tooltip module — the tooltip DOM is short-lived and rebuilt
+        // each show so there's nothing to leak.
+        const tooltipEl =
+          document.querySelector<HTMLElement>('.di-subtag-tooltip');
+        if (!tooltipEl) return;
+        const tooltipRows = tooltipEl.querySelectorAll<HTMLElement>(
+          '.di-subtag-tooltip-item',
+        );
+        tooltipRows.forEach((rowEl, i) => {
+          const item = rowItems[i];
+          if (!item || item.isOther) return;
+          rowEl.addEventListener('mouseenter', () => highlight(item.tagName));
+        });
+        tooltipEl.addEventListener('mouseleave', () => {
+          if (highlightedTag) reset();
+        });
+      };
+      return {attach, reset};
+    })();
+
+    row.addEventListener('mouseenter', () => {
+      if (touchUsed) return;
+      cancelPendingExit();
+      cancelPendingEnter();
+      if (hasBreakdown) cancelSubtagTooltipHide();
+      pendingEnter = setTimeout(() => {
+        pendingEnter = null;
+        showTooltipAndChart();
+      }, ENTER_DEBOUNCE_MS);
+    });
+    row.addEventListener('mouseleave', () => {
+      if (touchUsed) return;
+      // Per-row leave is a no-op for chart-mode and tooltip lifecycle —
+      // the legend container's mouseleave + tooltip pointer-leave hooks
+      // are the sole drivers of exit (so sliding between rows or across
+      // the gaps stays "in" sub-mode). Just cancel any pending enter
+      // from a debounce that hasn't fired yet.
+      cancelPendingEnter();
+    });
+
+    // Mobile: first tap shows tooltip (suppressing anchor navigation),
+    // second tap on a tooltip row navigates. Rows without a breakdown
+    // skip this entirely — the anchor's default navigation runs as
+    // normal on the first tap.
+    if (hasBreakdown) {
+      row.addEventListener(
+        'touchstart',
+        () => {
+          touchUsed = true;
+        },
+        {passive: true},
+      );
+
+      const anchorEl = row.querySelector<HTMLAnchorElement>('a[href]');
+      if (anchorEl) {
+        anchorEl.addEventListener('click', e => {
+          if (!touchUsed) return; // desktop click → let navigation happen
+          if (isSubtagTooltipVisible()) return; // tooltip open → tap navigates
+          e.preventDefault();
+          showTooltipAndChart();
+        });
+      }
+    }
+  });
 }
 
 /**
@@ -1016,14 +1525,33 @@ function runTabCrossfade(args: {
  * legend. Called by `requestRender`, the tab-click handler, and the cache
  * hit branch of `loadTab` inside renderPieWidget.
  */
+// T-26 baseline: 202 LOC after v9.7 sub-chart mode lifecycle (parentTag
+// token + setSubChartActive callback). Helper extraction would split the
+// chart-mode closures from `applyChartData`'s captured d3 refs — defer
+// until the sub-chart mode has a wider use-case demanding a refactor.
+// eslint-disable-next-line max-lines-per-function
 function renderPieFrame(args: {
   container: HTMLElement;
   pieData: Record<string, PieTabItem[]>;
   currentPieTab: string;
   context: ChartContext;
   handlePieClick: (d: d3.PieArcDatum<PieSlice>) => void;
+  /**
+   * Callback the chart calls when it enters / exits sub-chart hover
+   * mode. The outer renderPieWidget uses this to suppress the lazy
+   * thumb-update event's requestRender during a hover — otherwise the
+   * single-slice view snaps back to the full pie mid-interaction.
+   */
+  setSubChartActive?: (active: boolean) => void;
 }): void {
-  const {container, pieData, currentPieTab, context, handlePieClick} = args;
+  const {
+    container,
+    pieData,
+    currentPieTab,
+    context,
+    handlePieClick,
+    setSubChartActive,
+  } = args;
   const isTouch = isTouchDevice();
   const contextUser = context.targetUser;
   const data = pieData[currentPieTab];
@@ -1132,33 +1660,169 @@ function renderPieFrame(args: {
     tooltip.style('opacity', 0).style('pointer-events', 'none');
   };
 
-  bindDesktopPieInteractions({
-    svg,
-    validData,
-    pie,
-    arc,
-    arcHover,
-    tooltip,
-    isTouch,
-    currentPieTab,
-    pctFor,
-    handlePieClick,
-  });
-
-  if (isTouch) {
-    bindTouchPieInteractions({
-      container,
-      chartWrapper,
+  // Apply a slice array (default = the tab's own data, override = sub-chart
+  // breakdown of one parent) to the SVG. Re-runs the d3 join + handler
+  // bindings — .on() replaces existing handlers so nothing accumulates.
+  // Called once for the initial render and again on sub-mode enter/exit.
+  const applyChartData = (
+    slicesToShow: PieSlice[],
+    localPctFor: (label: string) => string,
+  ) => {
+    // Kill in-flight path transitions (e.g. subRowHighlight.reset()'s
+    // 150ms `d`/opacity tween fired by an old tooltip's onHide) so they
+    // don't overwrite our just-set attrs mid-frame.
+    svg.selectAll('path').interrupt();
+    bindDesktopPieInteractions({
       svg,
+      validData: slicesToShow,
+      pie,
       arc,
       arcHover,
       tooltip,
+      isTouch,
       currentPieTab,
-      pctFor,
+      pctFor: localPctFor,
       handlePieClick,
-      hideTooltip,
     });
-  }
+    if (isTouch) {
+      bindTouchPieInteractions({
+        container,
+        chartWrapper: chartWrapper as HTMLElement,
+        svg,
+        arc,
+        arcHover,
+        tooltip,
+        currentPieTab,
+        pctFor: localPctFor,
+        handlePieClick,
+        hideTooltip,
+      });
+    }
+  };
+
+  applyChartData(validData, pctFor);
+
+  // Sequential fade for sub-chart enter/exit. Fade chartWrapper out, swap
+  // data while invisible, fade back in. The single-frame blank at the
+  // midpoint (opacity ≈ 0) is imperceptible. We extend buildChartScaffolding's
+  // `transform 0.5s …` transition with opacity for the duration of the
+  // fade, and restore the baseline on completion so a subsequent hover-tilt
+  // isn't slowed by a lingering opacity ease.
+  const SUB_CHART_TRANSITION_MS = 350;
+  const FADE_HALF_MS = SUB_CHART_TRANSITION_MS / 2;
+  const baselineChartTransition = (chartWrapper as HTMLElement).style
+    .transition;
+  // Generation token: only the most-recent fade's cleanup restores the
+  // baseline transition, and intermediate setTimeouts bail to avoid
+  // applying stale data after a newer fade has taken over.
+  let crossfadeGen = 0;
+  const crossfadeChartTransition = (apply: () => void): void => {
+    const cw = chartWrapper as HTMLElement;
+    const myGen = ++crossfadeGen;
+    const extendedTransition = baselineChartTransition
+      ? `${baselineChartTransition}, opacity ${FADE_HALF_MS}ms ease`
+      : `opacity ${FADE_HALF_MS}ms ease`;
+    cw.style.transition = extendedTransition;
+    cw.style.opacity = '0';
+    setTimeout(() => {
+      if (myGen !== crossfadeGen) return; // newer fade took over
+      apply();
+      // Defer the fade-in opacity flip to the next frame so apply()'s
+      // d3 join (~15 path appends + forced layout) doesn't contend with
+      // the transition's first-frame setup — without the rAF the browser
+      // sometimes drops the first 1–2 frames of easing.
+      requestAnimationFrame(() => {
+        if (myGen !== crossfadeGen) return;
+        void cw.getBoundingClientRect(); // force commit before opacity flip
+        cw.style.opacity = '1';
+      });
+      setTimeout(() => {
+        if (myGen === crossfadeGen) {
+          cw.style.transition = baselineChartTransition;
+        }
+      }, FADE_HALF_MS);
+    }, FADE_HALF_MS);
+  };
+
+  // Sub-chart mode (v9.7+): legend hover on Copy/Fav_Copy/Char swaps the
+  // pie with the parent's sub-tag breakdown for as long as the subtag
+  // tooltip is open. Re-entered with a different parent simply re-applies
+  // — d3 join handles the diff. Returns slice mapping so T-51 (row hover
+  // highlight) can target the right path element by sub tagName.
+  // `parentTag` is the token the exit path uses to confirm it's reverting
+  // its OWN mode. Without it, a fast mouse glide (gundam → identity_v)
+  // would let the previous tooltip's late onHide call clobber the new
+  // mode after the timer fires — gundam.onHide.exit() would run AFTER
+  // identity_v has already taken over the chart, snapping back to the
+  // top-level pie. Exit calls now pass their owning parent's tag; if it
+  // no longer matches the active mode, the call is a no-op.
+  let subChartActive: {
+    tagToLabel: Map<string, string>;
+    parentTag: string | undefined;
+  } | null = null;
+  const enterSubChartMode = (
+    parent: DistributionItem,
+    parentColor?: string,
+  ): void => {
+    // parentColor lets buildSubChartSlices fall back to a single-slice
+    // view of the parent when its sub breakdown is empty — so any legend
+    // row triggers chart-mode, not just rows with subTags.
+    const subSlices = buildSubChartSlices(parent, parentColor);
+    if (subSlices.length === 0) return;
+    const subPctStrings = computePercentages(
+      subSlices.map(s => s.value),
+      1,
+    );
+    const subPctByLabel = new Map<string, string>(
+      subSlices.map((s, i) => [s.label, subPctStrings[i]]),
+    );
+    const subPctFor = (label: string) => subPctByLabel.get(label) ?? '0.0%';
+    subChartActive = {
+      tagToLabel: new Map(
+        subSlices
+          .filter(s => s.details.kind === 'tag' && !s.details.isOther)
+          .map(s => [
+            (s.details as {tagName?: string}).tagName ?? s.label,
+            s.label,
+          ]),
+      ),
+      parentTag: parent.tagName,
+    };
+    setSubChartActive?.(true);
+    crossfadeChartTransition(() => {
+      // Hide the chart's drop shadow while a sub-chart is showing — it
+      // bleeds through the gaps when slices don't fully cover the disk
+      // and washes the slice colors out to near-black.
+      setShadowVisibility(chartWrapper as HTMLElement, false);
+      applyChartData(subSlices, subPctFor);
+    });
+  };
+  const exitSubChartMode = (forParentTag?: string): void => {
+    if (!subChartActive) return;
+    // Guard against late callers: if a different parent now owns the
+    // chart mode, this exit was queued by an earlier hover and would
+    // otherwise revert the user-visible mode the new hover just set.
+    if (forParentTag && subChartActive.parentTag !== forParentTag) return;
+    subChartActive = null;
+    setSubChartActive?.(false);
+    crossfadeChartTransition(() => {
+      setShadowVisibility(chartWrapper as HTMLElement, true);
+      applyChartData(validData, pctFor);
+    });
+  };
+  // Slice path lookup by sub tagName — drives T-51 row hover highlight.
+  const findSubSliceByTag = (tagName: string): SVGPathElement | null => {
+    const label = subChartActive?.tagToLabel.get(tagName);
+    if (!label) return null;
+    return (
+      (svg
+        .selectAll('path.danbooru-grass-pie-path')
+        .filter(
+          (d: unknown) => (d as d3.PieArcDatum<PieSlice>).data.label === label,
+        )
+        .node() as SVGPathElement | null) ?? null
+    );
+  };
 
   const legendDiv = pieContent.querySelector('.danbooru-grass-legend-scroll');
   if (legendDiv) {
@@ -1168,8 +1832,39 @@ function renderPieFrame(args: {
       currentPieTab,
       pctFor,
       normalizedName: contextUser.normalizedName ?? '',
+      chartModeControl: {
+        enter: enterSubChartMode,
+        exit: exitSubChartMode,
+        findSubSliceByTag,
+        isTouch,
+        svg,
+        arc,
+        arcHover,
+      },
     });
   }
+}
+
+/**
+ * Hooks the legend wire-up uses to drive the v9.7 sub-chart mode + row
+ * hover highlight. Only the Copy / Fav_Copy / Char tabs supply this; the
+ * other tabs pass undefined and `wireSubtagTooltipHandlers` is never
+ * called for them.
+ */
+interface ChartModeControl {
+  enter: (parent: DistributionItem, parentColor?: string) => void;
+  /**
+   * `forParentTag`: if supplied, the exit is ignored unless the active
+   * sub-chart was entered for the same parent. Lets stale onHide
+   * callbacks fire safely after a quick hover takeover.
+   */
+  exit: (forParentTag?: string) => void;
+  /** Returns the SVG <path> for a sub tagName, or null. T-51 highlight. */
+  findSubSliceByTag: (tagName: string) => SVGPathElement | null;
+  isTouch: boolean;
+  svg: D3Any;
+  arc: D3Any;
+  arcHover: D3Any;
 }
 
 // ============================================================
@@ -1212,6 +1907,14 @@ export function renderPieWidget(
       pieData[key] = preprocessFrequencyTab(pieData[key]);
     }
   }
+
+  // Tracked by renderPieFrame via the setSubChartActive callback. Used
+  // to suppress `requestRender` while the user is hovering a sub-chart
+  // breakdown — otherwise a lazy thumbnail update event would re-run
+  // renderPieFrame, rebuild the chart from the tab's full data, and
+  // visibly snap the single-slice / sub-breakdown view back to the
+  // top-level pie mid-hover.
+  let subChartIsActive = false;
 
   const requestRender = () => {
     if (renderPending) return;
@@ -1261,6 +1964,11 @@ export function renderPieWidget(
       });
 
       if (currentPieTab === key) {
+        // Mutation above already lands on `pieData` (and the slices'
+        // details.thumb), so the next non-hover render will pick it up.
+        // Skip the render itself while the user is exploring a sub-chart
+        // so we don't snap the view back to the top-level pie mid-hover.
+        if (subChartIsActive) return;
         requestRender();
       }
     }
@@ -1303,6 +2011,9 @@ export function renderPieWidget(
       currentPieTab,
       context,
       handlePieClick,
+      setSubChartActive: active => {
+        subChartIsActive = active;
+      },
     });
   };
 

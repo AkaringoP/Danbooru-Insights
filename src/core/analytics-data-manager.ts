@@ -18,6 +18,7 @@ import {
   USER_COUNT_FLOOR,
   type TagCloudFilterEntry,
 } from './global-tag-stats';
+import {applySubTagBreakdown, fetchSubTagsForParents} from './sub-tag-resolver';
 import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
@@ -1303,7 +1304,12 @@ export class AnalyticsDataManager extends DataManager {
     if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
-    const url = `/related_tag.json?commit=Search&search[category]=4&search[order]=Frequency&search[query]=user:${encodeURIComponent(normalizedName)}`;
+    // limit=1000 (server caps at 500): the sub-tag breakdown wires
+    // user-having from this response, so the default 100-row cutoff was
+    // dropping subs the user actually has but use less often than the
+    // top-100 cutoff (e.g. fate/apocrypha at frequency 0.001). 500 rows
+    // covers the long tail without measurable cost (~50 KB response).
+    const url = `/related_tag.json?commit=Search&search[category]=4&search[order]=Frequency&search[query]=user:${encodeURIComponent(normalizedName)}&limit=1000`;
 
     try {
       const resp = await this.rateLimiter.fetch(url).then(r => r.json());
@@ -1329,25 +1335,30 @@ export class AnalyticsDataManager extends DataManager {
           _item: item,
         }));
 
-      // Fetch Counts Concurrent
-      await perfLogger.wrap(
-        'dbi:db:refresh:mapConcurrent',
-        () =>
-          this.mapConcurrent(top10, 3, async obj => {
-            const tagName = obj.tagName;
-            if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
-            try {
-              const c = await this.fetchRemoteCount(
-                `user:${normalizedName} ${tagName}`,
-              );
-              obj.count = c || obj._item?.tag.post_count || 0;
-            } catch (_e: unknown) {
-              log.debug('Failed to fetch user tag count', {error: _e});
-            }
-            delete obj._item;
-          }),
-        {distribution: 'character', n: top10.length, concurrency: 3},
-      );
+      // Parallel: per-tag count fetch + sub-tag breakdown discovery.
+      // Both mutate `top10` on disjoint fields.
+      await Promise.all([
+        perfLogger.wrap(
+          'dbi:db:refresh:mapConcurrent',
+          () =>
+            this.mapConcurrent(top10, 3, async obj => {
+              const tagName = obj.tagName;
+              if (reportSubStatus)
+                reportSubStatus(`Fetching Count: ${obj.name}`);
+              try {
+                const c = await this.fetchRemoteCount(
+                  `user:${normalizedName} ${tagName}`,
+                );
+                obj.count = c || obj._item?.tag.post_count || 0;
+              } catch (_e: unknown) {
+                log.debug('Failed to fetch user tag count', {error: _e});
+              }
+              delete obj._item;
+            }),
+          {distribution: 'character', n: top10.length, concurrency: 3},
+        ),
+        this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`),
+      ]);
 
       const sumFreq = top10.reduce(
         (acc: number, curr: {frequency: number}) => acc + curr.frequency,
@@ -1410,7 +1421,9 @@ export class AnalyticsDataManager extends DataManager {
     if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
-    const url = `/related_tag.json?commit=Search&search[category]=3&search[order]=Frequency&search[query]=user:${encodeURIComponent(normalizedName)}`;
+    // limit=1000: see comment in getCharacterDistribution — needed so the
+    // sub-tag breakdown's user-having signal isn't truncated at row 100.
+    const url = `/related_tag.json?commit=Search&search[category]=3&search[order]=Frequency&search[query]=user:${encodeURIComponent(normalizedName)}&limit=1000`;
 
     try {
       const resp = await this.rateLimiter.fetch(url).then(r => r.json());
@@ -1448,24 +1461,31 @@ export class AnalyticsDataManager extends DataManager {
           _item: item,
         }));
 
-      await perfLogger.wrap(
-        'dbi:db:refresh:mapConcurrent',
-        () =>
-          this.mapConcurrent(top10, 3, async obj => {
-            const tagName = obj.tagName;
-            if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
-            try {
-              const c = await this.fetchRemoteCount(
-                `user:${normalizedName} ${tagName}`,
-              );
-              obj.count = c || obj._item?.tag.post_count || 0;
-            } catch (_e: unknown) {
-              log.debug('Failed to fetch user tag count', {error: _e});
-            }
-            delete obj._item;
-          }),
-        {distribution: 'copyright', n: top10.length, concurrency: 3},
-      );
+      // Parallel: per-tag count fetch + sub-tag breakdown discovery.
+      // Both mutate `top10` in place on disjoint fields (count vs subTags)
+      // so the concurrency is safe.
+      await Promise.all([
+        perfLogger.wrap(
+          'dbi:db:refresh:mapConcurrent',
+          () =>
+            this.mapConcurrent(top10, 3, async obj => {
+              const tagName = obj.tagName;
+              if (reportSubStatus)
+                reportSubStatus(`Fetching Count: ${obj.name}`);
+              try {
+                const c = await this.fetchRemoteCount(
+                  `user:${normalizedName} ${tagName}`,
+                );
+                obj.count = c || obj._item?.tag.post_count || 0;
+              } catch (_e: unknown) {
+                log.debug('Failed to fetch user tag count', {error: _e});
+              }
+              delete obj._item;
+            }),
+          {distribution: 'copyright', n: top10.length, concurrency: 3},
+        ),
+        this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`),
+      ]);
 
       const sumFreq = top10.reduce(
         (acc: number, curr: {frequency: number}) => acc + curr.frequency,
@@ -1531,6 +1551,75 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
+   * Mutates `top10` in place to attach `subTags` breakdown rows where the
+   * user has sub-tag variants of a displayed parent. Pure data, no DOM —
+   * the UI layer reads `DistributionItem.subTags` to render the legend
+   * tooltip (v9.6.0+).
+   *
+   * Designed to be invoked concurrently with the per-tag count-fetch
+   * loop in each distribution method (Copy / Fav_Copy / Char). Sub-tag
+   * candidate fetch is batched and 180d-cached.
+   *
+   * Per-sub counts are fetched via `/counts/posts.json` with the caller's
+   * `countQueryPrefix` (`user:NAME` for Copy/Char, `fav:NAME` for Fav_Copy
+   * — the same prefix `getXDistribution` uses for the parent count). The
+   * accurate count avoids the rounding drift that the previous
+   * `frequency * resp.post_count` estimate produced (sub-tag totals could
+   * sit several percent below the parent's own count for no visible
+   * reason, because two different data sources were being mixed).
+   */
+  private async attachSubTagBreakdowns(
+    top10: DistributionItem[],
+    allUserTags: DanbooruRelatedTag[],
+    countQueryPrefix: string,
+  ): Promise<void> {
+    const topLevelNames = top10
+      .map(t => t.tagName)
+      .filter((n): n is string => typeof n === 'string' && n.length > 0);
+    if (topLevelNames.length === 0) return;
+
+    const subsByParent = await fetchSubTagsForParents(
+      this.rateLimiter,
+      this.db,
+      topLevelNames,
+    );
+
+    // Tags the user has at all (presence-only signal from /related_tag.json).
+    // Drives which sub candidates are worth a per-sub count fetch — we never
+    // spend a /counts/posts.json call on a sub the user has zero of.
+    const userTagNames = new Set<string>();
+    for (const item of allUserTags) {
+      if (item.frequency > 0) userTagNames.add(item.tag.name);
+    }
+
+    const subsToFetch = new Set<string>();
+    for (const subs of subsByParent.values()) {
+      for (const sub of subs) {
+        if (userTagNames.has(sub)) subsToFetch.add(sub);
+      }
+    }
+    if (subsToFetch.size === 0) return;
+
+    const userTagCounts = new Map<string, number>();
+    await this.mapConcurrent([...subsToFetch], 5, async sub => {
+      try {
+        const c = await this.fetchRemoteCount(`${countQueryPrefix} ${sub}`);
+        if (c > 0) userTagCounts.set(sub, c);
+      } catch (e: unknown) {
+        log.debug('Failed to fetch sub-tag count', {sub, error: e});
+      }
+    });
+
+    for (const item of top10) {
+      if (!item.tagName) continue;
+      const parentSubs = subsByParent.get(item.tagName);
+      if (!parentSubs || parentSubs.size === 0) continue;
+      const breakdown = applySubTagBreakdown(parentSubs, userTagCounts);
+      if (breakdown.length > 0) item.subTags = breakdown;
+    }
+  }
+
+  /**
    * Fetches Favorite Copyright distribution.
    * Uses ordfav:{user} to find favorites.
    * @param {Object} userInfo The user's info object.
@@ -1555,7 +1644,8 @@ export class AnalyticsDataManager extends DataManager {
     if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
-    const url = `/related_tag.json?commit=Search&search[category]=3&search[order]=Frequency&search[query]=ordfav:${encodeURIComponent(normalizedName)}`;
+    // limit=1000: see comment in getCharacterDistribution.
+    const url = `/related_tag.json?commit=Search&search[category]=3&search[order]=Frequency&search[query]=ordfav:${encodeURIComponent(normalizedName)}&limit=1000`;
 
     try {
       const resp = await this.rateLimiter.fetch(url).then(r => r.json());
@@ -1623,24 +1713,27 @@ export class AnalyticsDataManager extends DataManager {
           };
         });
 
-      // Fill Counts Concurrently
-      // We can re-use mapConcurrent to fill counts.
-      await this.mapConcurrent(top10, 3, async obj => {
-        const tagName = obj.tagName;
-        if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
-        try {
-          // Use fav: for counting (more standard), ordfav: for sorting/linking
-          obj.count = await this.fetchRemoteCount(
-            `fav:${normalizedName} ${tagName}`,
-          );
-        } catch (e: unknown) {
-          log.warn('Count fetch failed for fav copyright tag', {
-            tagName: obj.tagName,
-            error: e,
-          });
-        }
-        delete obj._item;
-      });
+      // Fill Counts + sub-tag breakdowns concurrently. Both mutate `top10`
+      // on disjoint fields.
+      await Promise.all([
+        this.mapConcurrent(top10, 3, async obj => {
+          const tagName = obj.tagName;
+          if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
+          try {
+            // Use fav: for counting (more standard), ordfav: for sorting/linking
+            obj.count = await this.fetchRemoteCount(
+              `fav:${normalizedName} ${tagName}`,
+            );
+          } catch (e: unknown) {
+            log.warn('Count fetch failed for fav copyright tag', {
+              tagName: obj.tagName,
+              error: e,
+            });
+          }
+          delete obj._item;
+        }),
+        this.attachSubTagBreakdowns(top10, tags, `fav:${normalizedName}`),
+      ]);
 
       const sumFreq = top10.reduce(
         (acc: number, curr: {frequency: number}) => acc + curr.frequency,
