@@ -37,6 +37,11 @@ checklist.md
 # Task archive (local-only translated TASK.md snapshots)
 .archive/
 
+# v10 design docs (Korean drafts kept local until translated to English for
+# push). Code references under src/ point here as a future-work pointer;
+# those links will resolve once the docs are translated and committed.
+docs/v10/
+
 # Local build-comparison artifact (manually-saved alternate-branch userscript
 # for side-by-side perf measurement; not source, not produced by the build).
 danbooruinsights-main.user.js
