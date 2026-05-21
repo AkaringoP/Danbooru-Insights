@@ -291,7 +291,7 @@ Tests opt out of `max-lines-per-function` only — vitest `describe`
 blocks legitimately wrap large case lists.
 
 Phase 5c had reduced the giant orchestrators to within budget, but
-thirty-eight other functions still violated one or more rules. Each
+thirty-seven other functions still violated one or more rules. Each
 received an inline `// T-26 baseline: ...` disable comment with a
 specific reason — either a decomposition candidate not in Phase 5c
 scope, or a structural constraint that makes splitting worse (closure-
@@ -383,7 +383,7 @@ initiative. The wins are elsewhere:
   key, count-URL helper) are mechanically enforced; previous violations
   re-emerging would fail the architecture test instead of waiting for
   the next manual audit.
-- **Thirty-eight legacy complexity violations** are tracked by greppable
+- **Thirty-seven legacy complexity violations** are tracked by greppable
   baseline comments; new violations are blocked at commit time.
 
 ---
@@ -445,8 +445,14 @@ They are tracked debt:
 
 - `renderTopPostsWidget` (265 LOC) — decomposition candidate, parallel
   to other large user-analytics widgets but not in Phase 5c scope.
-- `_fetchLargeTag` (239 LOC, complexity 34) — multi-phase fetch with
-  intermediate render checkpoints; decomposition candidate.
+- `fetchInitialStats` in
+  [`src/apps/tag-analytics-data.ts`](../src/apps/tag-analytics-data.ts)
+  (~160 LOC, complexity 31) — initial-stats fetch with cache /
+  hint / cold-start branches × full vs quick path; decomposition
+  candidate.
+- `fetchMonthlyCounts` in the same file (~210 LOC, complexity 31) —
+  per-month distance-based TTL × cache hit class × drift guard ×
+  fetch retry, all interleaved; decomposition candidate.
 - `getCreatedTags` (complexity 33) — multi-stage pipeline that could be
   split per stage.
 - A few more in [`test/architecture.test.ts`](../test/architecture.test.ts)

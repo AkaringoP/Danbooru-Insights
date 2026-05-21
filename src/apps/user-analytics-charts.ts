@@ -996,7 +996,7 @@ function renderPieLegend(args: {
   currentPieTab: string;
   pctFor: (label: string) => string;
   normalizedName: string;
-  /** Optional hooks for sub-chart mode (Copy/Fav_Copy/Char). v9.7+. */
+  /** Optional hooks for sub-chart mode (Copy/Fav_Copy/Char). v9.6+. */
   chartModeControl?: ChartModeControl;
 }): void {
   const {
@@ -1049,7 +1049,7 @@ function renderPieLegend(args: {
       // row for the post-render wire-up. Rows with subTags get the full
       // tooltip + chart-mode treatment; rows without (e.g. `gundam` for
       // a user with no franchise-specific sub-tagging) still trigger
-      // chart-mode in single-slice fallback (v9.7+).
+      // chart-mode in single-slice fallback (v9.6+).
       const isInteractiveRow =
         subtagTooltipEnabled && d.details.kind === 'tag' && !d.details.isOther;
       const subtagAttr = isInteractiveRow ? ` data-di-subtag-idx="${idx}"` : '';
@@ -1216,7 +1216,7 @@ function wireSubtagTooltipHandlers(
     };
 
     // Build the slice list once — chart and tooltip render the same set
-    // (v9.7+). Without this, the tooltip used applySubTagBreakdown's
+    // (v9.6+). Without this, the tooltip used applySubTagBreakdown's
     // sub-sum-based shares and a parent like `ninjago` (sub `dragons
     // rising` = 30 of parent 212) would read as "dragons rising 100%"
     // while the chart sat on a big grey Others slice. Now both use
@@ -1525,7 +1525,7 @@ function runTabCrossfade(args: {
  * legend. Called by `requestRender`, the tab-click handler, and the cache
  * hit branch of `loadTab` inside renderPieWidget.
  */
-// T-26 baseline: 202 LOC after v9.7 sub-chart mode lifecycle (parentTag
+// T-26 baseline: 202 LOC after v9.6 sub-chart mode lifecycle (parentTag
 // token + setSubChartActive callback). Helper extraction would split the
 // chart-mode closures from `applyChartData`'s captured d3 refs — defer
 // until the sub-chart mode has a wider use-case demanding a refactor.
@@ -1744,7 +1744,7 @@ function renderPieFrame(args: {
     }, FADE_HALF_MS);
   };
 
-  // Sub-chart mode (v9.7+): legend hover on Copy/Fav_Copy/Char swaps the
+  // Sub-chart mode (v9.6+): legend hover on Copy/Fav_Copy/Char swaps the
   // pie with the parent's sub-tag breakdown for as long as the subtag
   // tooltip is open. Re-entered with a different parent simply re-applies
   // — d3 join handles the diff. Returns slice mapping so T-51 (row hover
@@ -1846,7 +1846,7 @@ function renderPieFrame(args: {
 }
 
 /**
- * Hooks the legend wire-up uses to drive the v9.7 sub-chart mode + row
+ * Hooks the legend wire-up uses to drive the v9.6 sub-chart mode + row
  * hover highlight. Only the Copy / Fav_Copy / Char tabs supply this; the
  * other tabs pass undefined and `wireSubtagTooltipHandlers` is never
  * called for them.

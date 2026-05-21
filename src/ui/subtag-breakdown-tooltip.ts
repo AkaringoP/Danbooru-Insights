@@ -188,7 +188,7 @@ export function hideSubtagTooltip(): void {
  * (e.g. cursor moved back into the legend row) within ~120ms. Used by the
  * tooltip body's own `el.onmouseleave` to give the user a small window to
  * reverse course before the tooltip vanishes. No longer exported — the
- * v9.8 wire-up routes the legend container's exit through `hideSubtagTooltip`
+ * v9.6 wire-up routes the legend container's exit through `hideSubtagTooltip`
  * directly (its own scheduleExit timer drives the grace period).
  */
 function scheduleSubtagTooltipHide(): void {
