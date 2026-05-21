@@ -72,7 +72,9 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run dev` — Vite dev 서버 (HMR)
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트
+- `npm run test` — Vitest 단위 테스트 (현재 583 cases)
+- `npm run check:dead` — knip dead-code detection (Phase 6 gate)
+- `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 포함)
 
 ## 도메인 용어집
 | 용어 | 의미 |
@@ -100,9 +102,10 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 | 레이어 | 역할 | 예시 |
 |---|---|---|
-| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts` |
-| `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts` |
-| `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts` |
+| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts` |
+| `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts` |
+| `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
+| `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts` |
 | `src/` (루트) | Entry, 공유 types/utils/config | `main.ts`, `types.ts`, `utils.ts`, `config.ts`, `styles.ts`, `version.ts` |
 
 ## 주요 제약사항
@@ -116,6 +119,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 ## 외부 의존성 (`@require` / `externalGlobals`)
 - **d3.v7** — 차트와 시각화 (전역: `d3`)
+- **d3-cloud** — Tag Cloud 워드 클라우드 레이아웃 (전역: `d3.layout.cloud`, `@require` only — externalGlobals 에는 없음)
 - **cal-heatmap** — 캘린더 히트맵 (전역: `CalHeatmap`)
 - **Dexie.js** — IndexedDB 래퍼 (전역: `Dexie`)
 
@@ -125,9 +129,10 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - CSS 클래스 prefix: `di-` (Danbooru Insights)
 
 ## Rate Limiting (RateLimitedFetch)
-Token bucket 알고리즘 기반 3-queue 시스템:
-- **General Queue**: 6 concurrent requests, 6 req/sec, 50-150ms jitter
-- **Report Queue**: 격리됨, `/reports/` URL 에 3 초 cooldown
+Token bucket 알고리즘 기반 3-queue 시스템. 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
+- **General Queue**: 8 concurrent requests, 9 req/sec, 0-50ms jitter (v9.6 에서 6/6 → 8/9 으로 상향)
+- **Report Queue**: 격리됨, `/reports/` URL 에 3 초 cooldown (`CONFIG.REPORT_COOLDOWN_MS`)
+- **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 분할해 Danbooru 의 10 req/s 서버 상한 안에 유지
 
 ## Evaluator Rubric (작업 완료 선언 전 self-evaluation 용)
 7 개 gate 모두 통과해야 태스크 완료 보고 가능. 직접 실행해 — 가정 금지
@@ -154,12 +159,15 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [.claude/rules/sync-strategies.md](.claude/rules/sync-strategies.md) — Grass / User / Tag 동기화 알고리즘
 - [.claude/rules/perf-logging.md](.claude/rules/perf-logging.md) — perf-logger 사용법, enable/disable, label namespace
 - [test/architecture.test.ts](test/architecture.test.ts) — 아키텍처 규칙의 canonical source
+- [docs/audit-remediation.md](docs/audit-remediation.md) — v9.6 audit 6-phase 회고록 (Phase 1-6 helper / guardrail 의 도입 근거)
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
 ## Active Issues
 (현재 추적 중인 항목 없음 — 비자명한 작업 시작할 때 여기 항목 추가해서 미래 세션이 컨텍스트 상속하게 하기)
 
 ## 메모
-- `CONFIG.THEMES` 에 테마 추가 시 light/dark 섹션 코멘트 유지 (현재 10 개 테마)
+- `CONFIG.THEMES` 에 테마 추가 시 light/dark 섹션 코멘트 유지 (현재 12 개 테마 — Light 6: Light/Solarized Light/Sakura/Lavender/Ice/Aurora, Dark 6: Midnight/Solarized Dark/Dracula/Ocean/Monokai/Ember)
 - `getBestThumbnailUrl()` 우선순위: 720x720 webp > 360x360 webp > 기타 변형 > preview > file
 - `mapConcurrent()` 유틸은 병렬 API 호출 제어용 (count fetch, tag filtering 에서 사용)
+- `MAX_OPTIMIZED_POSTS = 1200` — Quick Sync / Small Tag 경로의 분기 임계값 ([src/config.ts](src/config.ts))
+- Count cache TTL (v9.6): `getCountCacheTtlMs()` 기본 10 분, 사용자가 settings popover 에서 조절 가능. `tryGetCachedStats<T>` 가 일관 사용
