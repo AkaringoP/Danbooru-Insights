@@ -3,7 +3,7 @@
  *
  * Covers: remote/local count comparison, safe deletion boundaries,
  * year completion cache, 3-day safety buffer, user ID validation,
- * hourly stats delta merge, revalidateCurrentYearCache, and clearCache.
+ * hourly stats delta merge, and clearCache.
  */
 import {describe, it, expect, vi, beforeEach, afterEach} from 'vitest';
 import {DataManager} from '../src/core/data-manager';
@@ -605,124 +605,7 @@ describe('getMetricData — 3-day safety buffer', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. revalidateCurrentYearCache
-// ---------------------------------------------------------------------------
-
-describe('revalidateCurrentYearCache', () => {
-  beforeEach(() => {
-    // Mock localStorage
-    const storage: Record<string, string> = {};
-    vi.stubGlobal('localStorage', {
-      getItem: vi.fn((key: string) => storage[key] ?? null),
-      setItem: vi.fn((key: string, val: string) => {
-        storage[key] = val;
-      }),
-      removeItem: vi.fn((key: string) => {
-        delete storage[key];
-      }),
-    });
-  });
-
-  it('clears stale data when remote count mismatches local count', async () => {
-    const year = new Date().getFullYear();
-    const localRows = [
-      {id: `42_${year}-03-01`, userId: '42', date: `${year}-03-01`, count: 10},
-    ];
-    const uploadsTable = makeTable(localRows);
-    const approvalsTable = makeTable(); // empty — no mismatch
-    const completedYears = makeTable();
-
-    const db = makeDb({
-      uploads: uploadsTable,
-      approvals: approvalsTable,
-      completed_years: completedYears,
-    });
-
-    const rl = makeRateLimiter(async (url: string) => {
-      if (url.includes('/counts/posts.json') && url.includes('user:')) {
-        // Remote says 20 but local has 10 → mismatch
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({counts: {posts: 20}}),
-        };
-      }
-      if (url.includes('/counts/posts.json') && url.includes('approver:')) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({counts: {posts: 0}}),
-        };
-      }
-      return {ok: true, status: 200, json: async () => []};
-    });
-
-    const dm = new DataManager(db, rl as never);
-    await dm.revalidateCurrentYearCache('42', 'test_user');
-
-    // Uploads table should have had deletion triggered
-    expect(uploadsTable._chain.delete).toHaveBeenCalled();
-    // Flag should be set
-    expect(localStorage.setItem).toHaveBeenCalledWith(
-      'di_cache_v924_migrated_42',
-      '1',
-    );
-  });
-
-  it('sets flag without deleting when counts match', async () => {
-    const uploadsTable = makeTable();
-    const approvalsTable = makeTable();
-
-    const db = makeDb({
-      uploads: uploadsTable,
-      approvals: approvalsTable,
-      completed_years: makeTable(),
-    });
-
-    const rl = makeRateLimiter(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({counts: {posts: 0}}),
-    }));
-
-    const dm = new DataManager(db, rl as never);
-    await dm.revalidateCurrentYearCache('42', 'test_user');
-
-    expect(uploadsTable._chain.delete).not.toHaveBeenCalled();
-    expect(localStorage.setItem).toHaveBeenCalledWith(
-      'di_cache_v924_migrated_42',
-      '1',
-    );
-  });
-
-  it('skips entirely when localStorage flag is already set', async () => {
-    (localStorage.getItem as ReturnType<typeof vi.fn>).mockReturnValue('1');
-
-    const db = makeDb();
-    const rl = makeRateLimiter();
-    const dm = new DataManager(db, rl as never);
-
-    await dm.revalidateCurrentYearCache('42', 'test_user');
-
-    // No fetch should happen
-    expect(rl.fetch).not.toHaveBeenCalled();
-  });
-
-  it('does NOT set flag when network request fails (allows retry)', async () => {
-    const db = makeDb();
-    const rl = makeRateLimiter(async () => {
-      throw new Error('Network error');
-    });
-
-    const dm = new DataManager(db, rl as never);
-    await dm.revalidateCurrentYearCache('42', 'test_user');
-
-    expect(localStorage.setItem).not.toHaveBeenCalled();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 7. clearCache
+// 6. clearCache
 // ---------------------------------------------------------------------------
 
 describe('clearCache', () => {
@@ -1003,5 +886,588 @@ describe('getMetricData — return value structure', () => {
       2023,
     );
     expect(result).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. getMetricData — metric routing (approvals & notes endpoints)
+// ---------------------------------------------------------------------------
+
+describe('getMetricData — metric routing', () => {
+  it('approvals: fetches /post_approvals.json with search[user_id]', async () => {
+    const approvalsTable = makeTable();
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      approvals: approvalsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    const fetchedUrls: string[] = [];
+    const rl = makeRateLimiter(async (url: string) => {
+      fetchedUrls.push(url);
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('approvals', makeUser({id: '42'}), 2023);
+
+    const approvalsFetch = fetchedUrls.find(u =>
+      u.includes('/post_approvals.json'),
+    );
+    expect(approvalsFetch).toBeDefined();
+    expect(approvalsFetch).toContain('search%5Buser_id%5D=42');
+    // Must NOT call /counts/posts.json for approvals
+    const countCalls = fetchedUrls.filter(u =>
+      u.includes('/counts/posts.json'),
+    );
+    expect(countCalls).toHaveLength(0);
+  });
+
+  it('notes: fetches /note_versions.json with search[updater_id]', async () => {
+    const notesTable = makeTable();
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      notes: notesTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    const fetchedUrls: string[] = [];
+    const rl = makeRateLimiter(async (url: string) => {
+      fetchedUrls.push(url);
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('notes', makeUser({id: '42'}), 2023);
+
+    const notesFetch = fetchedUrls.find(u => u.includes('/note_versions.json'));
+    expect(notesFetch).toBeDefined();
+    expect(notesFetch).toContain('search%5Bupdater_id%5D=42');
+    // Must NOT call /counts/posts.json for notes
+    const countCalls = fetchedUrls.filter(u =>
+      u.includes('/counts/posts.json'),
+    );
+    expect(countCalls).toHaveLength(0);
+  });
+
+  it('notes: throws when userInfo.id is missing', async () => {
+    const db = makeDb();
+    const rl = makeRateLimiter();
+    const dm = new DataManager(db, rl as never);
+
+    await expect(
+      dm.getMetricData('notes', makeUser({id: undefined}), 2023),
+    ).rejects.toThrow('User ID required for Notes');
+  });
+
+  it('approvals: writes detail rows to approvals_detail when post_id present', async () => {
+    const approvalsTable = makeTable();
+    const approvalsDetail = makeTable();
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+    const currentYear = new Date().getFullYear();
+
+    const db = makeDb({
+      approvals: approvalsTable,
+      approvals_detail: approvalsDetail,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    let pageHit = 0;
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/post_approvals.json')) {
+        pageHit++;
+        if (pageHit === 1) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                user_id: 42,
+                post_id: 101,
+                created_at: `${currentYear}-06-10T10:00:00Z`,
+              },
+            ],
+          };
+        }
+        return {ok: true, status: 200, json: async () => []};
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('approvals', makeUser({id: '42'}), currentYear);
+
+    // approvals_detail should have been written
+    expect(approvalsDetail.bulkPut).toHaveBeenCalled();
+    const detailCalls = approvalsDetail.bulkPut.mock.calls as unknown[][];
+    const detailRows = (detailCalls[0][0] as Array<{post_list: number[]}>)[0];
+    expect(detailRows.post_list).toContain(101);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. getMetricData — onProgress callback
+// ---------------------------------------------------------------------------
+
+describe('getMetricData — onProgress callback', () => {
+  it('invokes onProgress with monotonically increasing counts across pages', async () => {
+    const currentYear = new Date().getFullYear();
+    const uploadsTable = makeTable();
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    let pageCallCount = 0;
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/posts.json')) {
+        pageCallCount++;
+        if (pageCallCount === 1) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () =>
+              Array.from({length: 200}, (_, i) => ({
+                uploader_id: 42,
+                created_at: `${currentYear}-06-${String((i % 28) + 1).padStart(2, '0')}T10:00:00Z`,
+              })),
+          };
+        }
+        if (pageCallCount === 2) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-07-01T10:00:00Z`,
+              },
+            ],
+          };
+        }
+        return {ok: true, status: 200, json: async () => []};
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const progressValues: number[] = [];
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('uploads', makeUser(), currentYear, count => {
+      progressValues.push(count);
+    });
+
+    // Progress must have been called at least once
+    expect(progressValues.length).toBeGreaterThan(0);
+    // Values must be non-decreasing
+    for (let i = 1; i < progressValues.length; i++) {
+      expect(progressValues[i]).toBeGreaterThanOrEqual(progressValues[i - 1]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 14. getMetricData — bulkPut into the correct table
+// ---------------------------------------------------------------------------
+
+describe('getMetricData — bulkPut target table', () => {
+  it('writes aggregated daily rows to uploads table for metric=uploads', async () => {
+    const currentYear = new Date().getFullYear();
+    const uploadsTable = makeTable();
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    let pageHit = 0;
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/posts.json')) {
+        pageHit++;
+        if (pageHit === 1) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-08-05T09:00:00Z`,
+              },
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-08-05T15:00:00Z`,
+              },
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-08-06T12:00:00Z`,
+              },
+            ],
+          };
+        }
+        return {ok: true, status: 200, json: async () => []};
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('uploads', makeUser({id: '42'}), currentYear);
+
+    expect(uploadsTable.bulkPut).toHaveBeenCalled();
+    const bulkCalls1 = uploadsTable.bulkPut.mock.calls as unknown[][];
+    const writtenRows = bulkCalls1[0][0] as Array<{
+      date: string;
+      count: number;
+      userId: string;
+    }>;
+    const aug5 = writtenRows.find(r => r.date === `${currentYear}-08-05`);
+    const aug6 = writtenRows.find(r => r.date === `${currentYear}-08-06`);
+    // Two items on Aug 5 should be summed
+    expect(aug5?.count).toBe(2);
+    expect(aug6?.count).toBe(1);
+    expect(aug5?.userId).toBe('42');
+  });
+
+  it('writes to notes table (not uploads) for metric=notes', async () => {
+    const currentYear = new Date().getFullYear();
+    const notesTable = makeTable();
+    const uploadsTable = makeTable();
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      notes: notesTable,
+      uploads: uploadsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    let pageHit = 0;
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/note_versions.json')) {
+        pageHit++;
+        if (pageHit === 1) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                updater_id: 42,
+                created_at: `${currentYear}-09-01T10:00:00Z`,
+              },
+            ],
+          };
+        }
+        return {ok: true, status: 200, json: async () => []};
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('notes', makeUser({id: '42'}), currentYear);
+
+    expect(notesTable.bulkPut).toHaveBeenCalled();
+    expect(uploadsTable.bulkPut).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15. getMetricData — fetchRemoteCount=0 for past year (no-op path)
+// ---------------------------------------------------------------------------
+
+describe('getMetricData — fetchRemoteCount returns 0', () => {
+  it('does not delete rows when both remote and local counts are 0', async () => {
+    const uploadsTable = makeTable(); // empty local
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 0}}),
+        };
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    const result = await dm.getMetricData('uploads', makeUser(), 2023);
+
+    // Deletion should NOT fire when both counts are 0
+    expect(uploadsTable._chain.delete).not.toHaveBeenCalled();
+    // Function returns cleanly
+    expect(result).toHaveProperty('daily');
+    expect(result).toHaveProperty('hourly');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 16. getMetricData — multiple pages, same date summed
+// ---------------------------------------------------------------------------
+
+describe('getMetricData — multi-page aggregation', () => {
+  it('sums counts across two pages for the same date', async () => {
+    const currentYear = new Date().getFullYear();
+    const uploadsTable = makeTable();
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    // Return a full page (200) on page 1 and a partial page on page 2,
+    // both with the same date so they collapse in the aggregation map
+    let pageCallCount = 0;
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/posts.json')) {
+        pageCallCount++;
+        if (pageCallCount === 1) {
+          // 200 items (full page) — triggers a second batch
+          return {
+            ok: true,
+            status: 200,
+            json: async () =>
+              Array.from({length: 200}, () => ({
+                uploader_id: 42,
+                created_at: `${currentYear}-10-01T10:00:00Z`,
+              })),
+          };
+        }
+        if (pageCallCount <= 5) {
+          // Pages 2-5 in the same parallel batch each return 3 items
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-10-01T11:00:00Z`,
+              },
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-10-01T12:00:00Z`,
+              },
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-10-01T13:00:00Z`,
+              },
+            ],
+          };
+        }
+        return {ok: true, status: 200, json: async () => []};
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('uploads', makeUser({id: '42'}), currentYear);
+
+    expect(uploadsTable.bulkPut).toHaveBeenCalled();
+    const bulkCalls2 = uploadsTable.bulkPut.mock.calls as unknown[][];
+    const writtenRows = bulkCalls2[0][0] as Array<{
+      date: string;
+      count: number;
+    }>;
+    const oct1 = writtenRows.find(r => r.date === `${currentYear}-10-01`);
+    // Must have at least 200 (from page 1) plus the items from pages 2-5
+    expect(oct1?.count).toBeGreaterThanOrEqual(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 17. getMetricData — hourly accumulation
+// ---------------------------------------------------------------------------
+
+describe('getMetricData — hourly stats accumulation', () => {
+  it('accumulates multiple items in the same hour into the same index', async () => {
+    const currentYear = new Date().getFullYear();
+    const uploadsTable = makeTable();
+    const completedYears = makeTable();
+    const hourlyStats = makeTable();
+
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    // All items at 10:xx → local hour computed from UTC (deterministic in test)
+    const ts1 = `${currentYear}-11-10T10:00:00Z`;
+    const ts2 = `${currentYear}-11-10T10:30:00Z`;
+    const ts3 = `${currentYear}-11-10T10:45:00Z`;
+    // Different hour
+    const ts4 = `${currentYear}-11-10T15:00:00Z`;
+    const hourOf10 = new Date(ts1).getHours();
+    const hourOf15 = new Date(ts4).getHours();
+
+    let pageHit = 0;
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/posts.json')) {
+        pageHit++;
+        if (pageHit === 1) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              {uploader_id: 42, created_at: ts1},
+              {uploader_id: 42, created_at: ts2},
+              {uploader_id: 42, created_at: ts3},
+              {uploader_id: 42, created_at: ts4},
+            ],
+          };
+        }
+        return {ok: true, status: 200, json: async () => []};
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const dm = new DataManager(db, rl as never);
+    await dm.getMetricData('uploads', makeUser({id: '42'}), currentYear);
+
+    expect(hourlyStats.bulkPut).toHaveBeenCalled();
+    const hourlyCalls = hourlyStats.bulkPut.mock.calls as unknown[][];
+    const hourlyRows = hourlyCalls[0][0] as Array<{
+      hour: number;
+      count: number;
+    }>;
+    const slot10 = hourlyRows.find(r => r.hour === hourOf10);
+    const slot15 = hourlyRows.find(r => r.hour === hourOf15);
+    // 3 items at the same hour
+    expect(slot10?.count).toBe(3);
+    // 1 item at the other hour
+    expect(slot15?.count).toBe(1);
+  });
+
+  it('loads existing hourly stats from DB when year is already complete', async () => {
+    const completedYears = makeTable();
+    completedYears.get.mockResolvedValue({id: '42_uploads_2022'} as never);
+
+    const existingHourly = Array.from({length: 24}, (_, h) => ({
+      id: `42_uploads_2022_${String(h).padStart(2, '0')}`,
+      userId: '42',
+      metric: 'uploads',
+      year: 2022,
+      hour: h,
+      count: h + 1, // count = hour+1 for easy verification
+    }));
+    const hourlyStats = makeTable(existingHourly);
+    const uploadsTable = makeTable();
+
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: completedYears,
+      hourly_stats: hourlyStats,
+    });
+
+    const rl = makeRateLimiter();
+    const dm = new DataManager(db, rl as never);
+    const result = await dm.getMetricData('uploads', makeUser(), 2022);
+
+    // Result hourly array should reflect the cached DB values
+    expect(result.hourly).toHaveLength(24);
+    // Hour 0 should have count=1, hour 5 should have count=6, etc.
+    expect(result.hourly[0]).toBe(1);
+    expect(result.hourly[5]).toBe(6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v9.6: getStats(key, userId, maxAgeMs?) — count-cache TTL behaviour
+// ---------------------------------------------------------------------------
+
+describe('getStats — maxAgeMs TTL guard (v9.6)', () => {
+  function buildDm(record: Record<string, unknown> | null) {
+    const piestats = makeTable();
+    piestats.get.mockResolvedValue(record as never);
+    const db = makeDb({piestats});
+    const rl = makeRateLimiter();
+    return new DataManager(db, rl as never);
+  }
+
+  it('returns the cached data when no maxAgeMs is supplied (legacy path)', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {tags: ['a', 'b']},
+      updated_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const result = await dm.getStats('copyright_dist', 42);
+    expect(result).toEqual({tags: ['a', 'b']});
+  });
+
+  it('returns the cached data when age is within maxAgeMs', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {ok: true},
+      // 5 minutes old
+      updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+    });
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toEqual({ok: true});
+  });
+
+  it('returns null when age exceeds maxAgeMs', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {ok: true},
+      // 15 minutes old, TTL 10 min → expired
+      updated_at: new Date(Date.now() - 15 * 60_000).toISOString(),
+    });
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toBeNull();
+  });
+
+  it('returns null on a future-dated updated_at (clock skew)', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {ok: true},
+      updated_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toBeNull();
+  });
+
+  it('returns null when the record is missing entirely', async () => {
+    const dm = buildDm(null);
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toBeNull();
+  });
+
+  it('returns the cached data when updated_at is absent (legacy record, maxAgeMs ignored)', async () => {
+    const dm = buildDm({
+      key: 'copyright_dist',
+      userId: 42,
+      data: {legacy: true},
+      // no updated_at field at all
+    });
+    const result = await dm.getStats('copyright_dist', 42, 10 * 60_000);
+    expect(result).toEqual({legacy: true});
   });
 });

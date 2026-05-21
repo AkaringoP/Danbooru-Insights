@@ -1,5 +1,10 @@
 import {describe, it, expect, vi, beforeEach} from 'vitest';
-import {SettingsManager} from '../src/core/settings';
+import {
+  SettingsManager,
+  getCountCacheTtlMin,
+  getCountCacheTtlMs,
+  setCountCacheTtlMin,
+} from '../src/core/settings';
 
 const localStorageMock = (() => {
   let store: Record<string, string> = {};
@@ -125,5 +130,48 @@ describe('SettingsManager', () => {
       sm.setSyncThreshold(10);
       expect(sm.getSyncThreshold()).toBe(10);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v9.6 count-cache TTL preference (shared by both analytics popovers)
+// ---------------------------------------------------------------------------
+
+describe('Count-cache TTL preference (v9.6)', () => {
+  it('defaults to 10 minutes when unset', () => {
+    expect(getCountCacheTtlMin()).toBe(10);
+  });
+
+  it('getCountCacheTtlMs returns minutes × 60_000', () => {
+    expect(getCountCacheTtlMs()).toBe(10 * 60_000);
+  });
+
+  it('persists and reads back a custom TTL', () => {
+    setCountCacheTtlMin(30);
+    expect(getCountCacheTtlMin()).toBe(30);
+  });
+
+  it('clamps writes below 1 minute up to 1', () => {
+    setCountCacheTtlMin(0);
+    expect(getCountCacheTtlMin()).toBe(1);
+    setCountCacheTtlMin(-5);
+    expect(getCountCacheTtlMin()).toBe(1);
+  });
+
+  it('floors fractional minutes (Math.floor)', () => {
+    setCountCacheTtlMin(7.9);
+    expect(getCountCacheTtlMin()).toBe(7);
+  });
+
+  it('falls back to default when stored value is non-numeric', () => {
+    // Bypass the setter (which would clamp) to simulate a corrupt prefs blob.
+    localStorageMock.setItem('di.count_cache_ttl_min', 'banana');
+    expect(getCountCacheTtlMin()).toBe(10);
+  });
+
+  it('falls back to default when stored value is below 1', () => {
+    // Direct write to test the read-side guard; the setter would clamp first.
+    localStorageMock.setItem('di.count_cache_ttl_min', '0');
+    expect(getCountCacheTtlMin()).toBe(10);
   });
 });

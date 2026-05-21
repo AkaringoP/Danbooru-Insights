@@ -1,5 +1,6 @@
 import {CONFIG} from '../config';
 import {DataManager} from '../core/data-manager';
+import {createClickOutsideHandler} from './popover-utils';
 import {showToast} from './toast';
 import {showThresholdPreviewModal} from './threshold-preview-modal';
 import {
@@ -103,96 +104,32 @@ export interface SettingsPopoverResult {
   refresh: (metric?: string) => void;
 }
 
+// ---------------------------------------------------------------------------
+// Section builders (private). Each appends its DOM block to `popover` and
+// returns refs that other sections / the public result API need to read
+// after construction. The popover layout order (Theme → Snap → Thresholds →
+// Auto-tune → Cache Info) is encoded by call order in createSettingsPopover.
+// ---------------------------------------------------------------------------
+
 /**
- * Creates the settings popover element with theme picker, thresholds editor,
- * and cache info section.
- * @param {SettingsPopoverOptions} options Construction options.
- * @return {SettingsPopoverResult} The popover element and its close function.
+ * Section 1 + 1b: Color Themes grid and Grass Color Flyout.
+ *
+ * The grid lives inside the popover; the flyout (per-theme grass-color
+ * variant picker) is attached to document.body so it can position freely.
+ * Theme clicks repaint the popover palette by mutating the *shared*
+ * `paletteTargets` array — `buildAutoTuneSection` later pushes its own
+ * help-tooltip into the same array, and the click handler picks up the
+ * extended list automatically.
+ *
+ * @return The grass flyout element (caller pushes it into paletteTargets).
  */
-export function createSettingsPopover(
-  options: SettingsPopoverOptions,
-): SettingsPopoverResult {
-  const {
-    settingsManager,
-    db,
-    metric,
-    settingsBtn,
-    targetUserId,
-    closeSettings,
-    onRefresh,
-  } = options;
-
-  let settingsChanged = false;
-
-  const validateThresholds = (): {valid: boolean; msg?: string} => {
-    const modes: Metric[] = ['uploads', 'approvals', 'notes'];
-    for (const m of modes) {
-      const vals = settingsManager.getThresholdsForView(targetUserId, m);
-      for (let i = 0; i < vals.length - 1; i++) {
-        if (vals[i] >= vals[i + 1]) {
-          return {
-            valid: false,
-            msg: `Invalid in [${m}]: Level ${i + 1} (${vals[i]}) must be smaller than Level ${i + 2} (${vals[i + 1]})`,
-          };
-        }
-      }
-    }
-    return {valid: true};
-  };
-
-  const handleClose = (): void => {
-    const check = validateThresholds();
-    if (!check.valid) {
-      showToast({type: 'warn', message: check.msg ?? 'Invalid settings.'});
-      return;
-    }
-    popover.style.display = 'none';
-    const gf = document.getElementById('danbooru-grass-flyout');
-    if (gf) gf.style.display = 'none';
-    if (settingsChanged) {
-      settingsChanged = false;
-      closeSettings();
-    }
-  };
-
-  // Build popover element
-  const popover = document.createElement('div');
-  popover.id = 'danbooru-grass-settings-popover';
-
-  // Close on click outside
-  document.addEventListener('click', e => {
-    if (popover && popover.style.display === 'block') {
-      if (
-        !popover.contains(e.target as Node) &&
-        !settingsBtn.contains(e.target as Node) &&
-        !grassFlyout.contains(e.target as Node)
-      ) {
-        handleClose();
-      }
-    }
-  });
-
-  // Reposition popover on page scroll to stay anchored to settings button
-  const repositionPopover = () => {
-    if (popover.style.display !== 'block') return;
-    const btnRect = settingsBtn.getBoundingClientRect();
-    popover.style.left = btnRect.left + 'px';
-    popover.style.top = btnRect.bottom + 4 + 'px';
-  };
-  window.addEventListener(
-    'scroll',
-    e => {
-      if (
-        popover.style.display === 'block' &&
-        !popover.contains(e.target as Node)
-      ) {
-        repositionPopover();
-      }
-    },
-    true,
-  );
-
-  // --- 1. Color Themes Section ---
+function buildThemeSection(
+  popover: HTMLElement,
+  settingsManager: SettingsManager,
+  settingsBtn: HTMLElement,
+  handleClose: () => void,
+  paletteTargets: HTMLElement[],
+): {grassFlyout: HTMLElement} {
   const themeHeaderRow = document.createElement('div');
   themeHeaderRow.style.cssText =
     'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;';
@@ -223,38 +160,8 @@ export function createSettingsPopover(
 
   const currentTheme = settingsManager.getTheme();
 
-  Object.entries(CONFIG.THEMES).forEach(([key, theme]) => {
-    const icon = document.createElement('div');
-    icon.className = 'theme-icon';
-    if (key === currentTheme) icon.classList.add('active'); // Highlight active theme
-    icon.title = theme.name;
-    icon.style.background = theme.bg;
-
-    // Inner Circle (Empty Cell Color)
-    const inner = document.createElement('div');
-    inner.className = 'theme-icon-inner';
-    inner.style.background = theme.empty;
-    icon.appendChild(inner);
-
-    icon.onclick = () => {
-      const wasActive = icon.classList.contains('active');
-      if (!wasActive) {
-        settingsManager.applyTheme(key);
-        document
-          .querySelectorAll('.theme-icon')
-          .forEach(el => el.classList.remove('active'));
-        icon.classList.add('active');
-        // Update popover palette to match the selected grass theme
-        applyPopoverPalette([popover, grassFlyout, schedHelpTip], key);
-      }
-      // Toggle grass flyout (show on click of active theme, or on first apply)
-      toggleGrassFlyout(icon, key);
-    };
-    grid.appendChild(icon);
-  });
-  popover.appendChild(grid);
-
-  // --- 1b. Grass Color Flyout ---
+  // Grass Color Flyout — created here (rather than after the grid loop)
+  // so theme-icon onclick closures can reference it.
   const grassFlyout = document.createElement('div');
   grassFlyout.id = 'danbooru-grass-flyout';
   grassFlyout.style.cssText =
@@ -349,7 +256,53 @@ export function createSettingsPopover(
     });
   };
 
-  // Close flyout when clicking outside
+  Object.entries(CONFIG.THEMES).forEach(([key, theme]) => {
+    const icon = document.createElement('div');
+    icon.className = 'theme-icon';
+    if (key === currentTheme) icon.classList.add('active'); // Highlight active theme
+    icon.title = theme.name;
+    icon.style.background = theme.bg;
+
+    // Inner Circle (Empty Cell Color)
+    const inner = document.createElement('div');
+    inner.className = 'theme-icon-inner';
+    inner.style.background = theme.empty;
+    icon.appendChild(inner);
+
+    icon.onclick = () => {
+      const wasActive = icon.classList.contains('active');
+      if (!wasActive) {
+        settingsManager.applyTheme(key);
+        document
+          .querySelectorAll('.theme-icon')
+          .forEach(el => el.classList.remove('active'));
+        icon.classList.add('active');
+        // Update popover palette to match the selected grass theme. The
+        // array reference is shared with the caller, so later-pushed refs
+        // (e.g. the auto-tune help tooltip) are picked up automatically.
+        applyPopoverPalette(paletteTargets, key);
+      }
+      // Toggle grass flyout (show on click of active theme, or on first apply)
+      toggleGrassFlyout(icon, key);
+    };
+    grid.appendChild(icon);
+  });
+  popover.appendChild(grid);
+
+  // Close on click outside. Guarded by display:block so the listener stays
+  // attached for the page lifetime (popover is built once and toggled).
+  document.addEventListener(
+    'click',
+    createClickOutsideHandler(
+      popover,
+      () => {
+        if (popover.style.display === 'block') handleClose();
+      },
+      {ignore: [settingsBtn, grassFlyout]},
+    ),
+  );
+
+  // Close flyout when clicking inside the popover but outside the theme grid
   popover.addEventListener('click', e => {
     const target = e.target as HTMLElement;
     if (!grassFlyout.contains(target) && !target.closest('.theme-icon')) {
@@ -357,9 +310,17 @@ export function createSettingsPopover(
     }
   });
 
-  // --- 1c. Snap-to-Edge Toggle (lives between the theme grid and the
-  // thresholds section per user preference — the threshold-related
-  // controls below stay grouped together). ---
+  return {grassFlyout};
+}
+
+/**
+ * Section 1c: Snap-to-Edge toggle. Self-contained — only reads/writes the
+ * `snapToEdge` SettingsManager flag, no cross-section dependencies.
+ */
+function buildSnapToggle(
+  popover: HTMLElement,
+  settingsManager: SettingsManager,
+): void {
   const snapRow = document.createElement('div');
   snapRow.style.cssText =
     'display:flex;align-items:center;gap:6px;margin-top:12px;';
@@ -379,8 +340,46 @@ export function createSettingsPopover(
   snapRow.appendChild(snapCheckbox);
   snapRow.appendChild(snapLabel);
   popover.appendChild(snapRow);
+}
 
-  // --- 2. Thresholds Section ---
+/**
+ * Section 2: Thresholds editor (mode select, per-level number inputs, and
+ * the auto-tune button + apply/undo flow).
+ *
+ * `markSettingsChanged()` is called by input change handlers so the close
+ * flow knows whether to fire the host's onSettingsChanged callback.
+ *
+ * Returns refs the public API needs:
+ * - `modeSelect` / `renderEditor` are consumed by `refresh(mainMetric?)`
+ * - `validateThresholds` is consumed by `handleClose`
+ */
+function buildThresholdsSection(
+  popover: HTMLElement,
+  options: SettingsPopoverOptions,
+  markSettingsChanged: () => void,
+): {
+  modeSelect: HTMLSelectElement;
+  renderEditor: (mode: string) => void;
+  validateThresholds: () => {valid: boolean; msg?: string};
+} {
+  const {settingsManager, db, metric, targetUserId, closeSettings} = options;
+
+  const validateThresholds = (): {valid: boolean; msg?: string} => {
+    const modes: Metric[] = ['uploads', 'approvals', 'notes'];
+    for (const m of modes) {
+      const vals = settingsManager.getThresholdsForView(targetUserId, m);
+      for (let i = 0; i < vals.length - 1; i++) {
+        if (vals[i] >= vals[i + 1]) {
+          return {
+            valid: false,
+            msg: `Invalid in [${m}]: Level ${i + 1} (${vals[i]}) must be smaller than Level ${i + 2} (${vals[i + 1]})`,
+          };
+        }
+      }
+    }
+    return {valid: true};
+  };
+
   // Divider above visually separates the general UI options (snap-to-edge)
   // from the threshold-related controls below.
   const threshHeaderRow = document.createElement('div');
@@ -463,7 +462,7 @@ export function createSettingsPopover(
         } else {
           settingsManager.setThresholds(metricMode, newVals);
         }
-        settingsChanged = true;
+        markSettingsChanged();
         vals[idx] = newVals[idx];
       };
 
@@ -572,7 +571,20 @@ export function createSettingsPopover(
     });
   }
 
-  // --- 2b. Auto-tune Schedule ---
+  return {modeSelect, renderEditor, validateThresholds};
+}
+
+/**
+ * Section 2b: Auto-tune schedule (enable/disable toggle, interval select,
+ * and help tooltip explaining the 1st-of-period semantics).
+ *
+ * @return The body-attached help tooltip element; caller pushes it into
+ *   `paletteTargets` so theme changes recolor it.
+ */
+function buildAutoTuneSection(
+  popover: HTMLElement,
+  settingsManager: SettingsManager,
+): {schedHelpTip: HTMLElement} {
   const scheduleRow = document.createElement('div');
   scheduleRow.style.cssText =
     'display:flex;align-items:center;gap:6px;margin-top:12px;';
@@ -717,7 +729,18 @@ export function createSettingsPopover(
   scheduleRow.appendChild(schedHelp);
   popover.appendChild(scheduleRow);
 
-  // --- 3. Cache Info Section ---
+  return {schedHelpTip};
+}
+
+/**
+ * Section 3: Cache Info expandable panel (live stats polling) + purge
+ * button. Polling stops automatically when the popover is hidden.
+ */
+function buildCacheInfoSection(
+  popover: HTMLElement,
+  db: Database,
+  onRefresh: () => void,
+): void {
   const cacheSection = document.createElement('div');
   cacheSection.style.marginTop = '15px';
   cacheSection.style.borderTop = '1px solid var(--di-border-input, #ddd)';
@@ -840,12 +863,97 @@ export function createSettingsPopover(
       onRefresh();
     }
   };
+}
+
+/**
+ * Creates the settings popover element with theme picker, thresholds editor,
+ * and cache info section.
+ * @param {SettingsPopoverOptions} options Construction options.
+ * @return {SettingsPopoverResult} The popover element and its close function.
+ */
+export function createSettingsPopover(
+  options: SettingsPopoverOptions,
+): SettingsPopoverResult {
+  const {settingsManager, settingsBtn, closeSettings} = options;
+
+  // Build popover element
+  const popover = document.createElement('div');
+  popover.id = 'danbooru-grass-settings-popover';
+
+  // Reposition popover on page scroll to stay anchored to settings button
+  const repositionPopover = () => {
+    if (popover.style.display !== 'block') return;
+    const btnRect = settingsBtn.getBoundingClientRect();
+    popover.style.left = btnRect.left + 'px';
+    popover.style.top = btnRect.bottom + 4 + 'px';
+  };
+  window.addEventListener(
+    'scroll',
+    e => {
+      if (
+        popover.style.display === 'block' &&
+        !popover.contains(e.target as Node)
+      ) {
+        repositionPopover();
+      }
+    },
+    true,
+  );
+
+  // settingsChanged is owned by createSettingsPopover (handleClose reads it,
+  // the threshold inputs flip it via the markSettingsChanged callback).
+  let settingsChanged = false;
+
+  // validateThresholds is built by buildThresholdsSection; forward-ref'd so
+  // handleClose can capture a stable closure. Always-valid until section 2
+  // builds — which happens synchronously below before any user interaction.
+  let validateThresholds: () => {valid: boolean; msg?: string} = () => ({
+    valid: true,
+  });
+
+  const handleClose = (): void => {
+    const check = validateThresholds();
+    if (!check.valid) {
+      showToast({type: 'warn', message: check.msg ?? 'Invalid settings.'});
+      return;
+    }
+    popover.style.display = 'none';
+    const gf = document.getElementById('danbooru-grass-flyout');
+    if (gf) gf.style.display = 'none';
+    if (settingsChanged) {
+      settingsChanged = false;
+      closeSettings();
+    }
+  };
+
+  // Section builders run in DOM order. paletteTargets is a shared ref —
+  // section 1's theme-icon click handler reads from it at click time, so
+  // pushes from section 2b take effect on the next click without rewiring.
+  const paletteTargets: HTMLElement[] = [popover];
+
+  const {grassFlyout} = buildThemeSection(
+    popover,
+    settingsManager,
+    settingsBtn,
+    handleClose,
+    paletteTargets,
+  );
+  paletteTargets.push(grassFlyout);
+
+  buildSnapToggle(popover, settingsManager);
+
+  const thresholdsAPI = buildThresholdsSection(popover, options, () => {
+    settingsChanged = true;
+  });
+  validateThresholds = thresholdsAPI.validateThresholds;
+
+  const {schedHelpTip} = buildAutoTuneSection(popover, settingsManager);
+  paletteTargets.push(schedHelpTip);
+
+  buildCacheInfoSection(popover, options.db, options.onRefresh);
 
   // Apply initial popover palette based on current grass theme
-  applyPopoverPalette(
-    [popover, grassFlyout, schedHelpTip],
-    settingsManager.getTheme(),
-  );
+  applyPopoverPalette(paletteTargets, settingsManager.getTheme());
 
   return {
     popover,
@@ -854,11 +962,11 @@ export function createSettingsPopover(
       if (
         mainMetric &&
         ['uploads', 'approvals', 'notes'].includes(mainMetric) &&
-        modeSelect.value !== mainMetric
+        thresholdsAPI.modeSelect.value !== mainMetric
       ) {
-        modeSelect.value = mainMetric;
+        thresholdsAPI.modeSelect.value = mainMetric;
       }
-      renderEditor(modeSelect.value);
+      thresholdsAPI.renderEditor(thresholdsAPI.modeSelect.value);
     },
   };
 }

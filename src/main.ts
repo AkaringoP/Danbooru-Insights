@@ -1,8 +1,8 @@
 import {CONFIG} from './config';
 import {injectGlobalStyles} from './styles';
 import {Database} from './core/database';
-import {SettingsManager} from './core/settings';
-import type {DarkModePreference} from './types';
+import {SettingsManager, migrateNsfwKey} from './core/settings';
+import {applyDashboardTheme} from './ui/theme-palette';
 import {RateLimitedFetch} from './core/rate-limiter';
 import {TabCoordinator} from './core/tab-coordinator';
 import {ProfileContext} from './core/profile-context';
@@ -56,49 +56,6 @@ export function detectCurrentTag(): string | null {
   }
 
   return null;
-}
-
-/* --- Dashboard Theme Helpers --- */
-
-/** All top-level container IDs that receive the dashboard theme attribute. */
-const DASHBOARD_CONTAINERS = [
-  'danbooru-grass-modal-overlay',
-  'tag-analytics-modal',
-  'scatter-popover-ui',
-  'danbooru-grass-sync-settings',
-  'tag-analytics-settings-popover',
-  'di-post-hover-card',
-];
-
-/**
- * Resolves the effective dashboard theme from the user preference
- * and Danbooru's current page theme (for 'auto' mode).
- */
-export function resolveEffectiveDashboardTheme(
-  pref: DarkModePreference,
-): 'light' | 'dark' {
-  if (pref === 'light' || pref === 'dark') return pref;
-  return document.body.getAttribute('data-current-user-theme') === 'dark'
-    ? 'dark'
-    : 'light';
-}
-
-/**
- * Sets or removes `data-di-theme="dark"` on all existing dashboard containers.
- * Called when the dashboard theme setting changes or on Danbooru theme change (auto).
- */
-export function applyDashboardTheme(settings: SettingsManager): void {
-  const effective = resolveEffectiveDashboardTheme(settings.getDarkMode());
-  for (const id of DASHBOARD_CONTAINERS) {
-    const el = document.getElementById(id);
-    if (el) {
-      if (effective === 'dark') {
-        el.setAttribute('data-di-theme', 'dark');
-      } else {
-        el.removeAttribute('data-di-theme');
-      }
-    }
-  }
 }
 
 /**
@@ -160,6 +117,9 @@ async function main(): Promise<void> {
 
   // Inject styles only on valid Danbooru pages
   injectGlobalStyles();
+
+  // One-time NSFW localStorage key migration (F-DUP-9). Idempotent.
+  migrateNsfwKey();
 
   // Shared Singletons
   const db = new Database();

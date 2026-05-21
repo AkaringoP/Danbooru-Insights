@@ -55,6 +55,27 @@ export default defineConfig([
           ignoreRestSiblings: true,
         },
       ],
+      // T-26 — guardrails against the same kind of mega-functions Phase 5c
+      // just decomposed. Tuned so the post-Phase-5c codebase passes; new
+      // violations must be split, not suppressed (per CLAUDE.md
+      // "fix the root cause — do not whitelist").
+      'max-lines-per-function': [
+        'error',
+        {max: 200, skipBlankLines: true, skipComments: true},
+      ],
+      'max-depth': ['error', 6],
+      complexity: ['error', 15],
+      'max-nested-callbacks': ['error', 4],
+    },
+  },
+  // Tests opt out of the function-size rule: vitest `describe` blocks and
+  // Playwright `test.describe` groups legitimately wrap large fixture
+  // tables, mock setups, and case lists. The complexity / depth /
+  // nested-callback rules still apply.
+  {
+    files: ['test/**/*.ts', 'test/**/*.tsx'],
+    rules: {
+      'max-lines-per-function': 'off',
     },
   },
 ]);

@@ -33,7 +33,12 @@ export const CONFIG: {
   CACHE_EXPIRY_MS: DAY_MS,
   /** Duration (ms) to pause all requests after receiving a 429 response. */
   BACKOFF_DURATION_MS: 5000,
-  RATE_LIMITER: {concurrency: 6, jitter: [0, 50], rps: 6},
+  // Danbooru enforces a server-side global cap of 10 read req/sec across
+  // all endpoints and accounts sharing an IP. We use 9 to leave a 1 req/sec
+  // safety margin; TabCoordinator divides this further when multiple tabs
+  // are open. Bumped from 6 → 9 in v9.6 to keep the new count-cache TTL
+  // refresh path (≈70 piestats requests) under ~10 s on stale-refresh.
+  RATE_LIMITER: {concurrency: 8, jitter: [0, 50], rps: 9},
   TAB_COORDINATOR: {
     channelName: 'di-rate-coord',
     heartbeatInterval: 5000,

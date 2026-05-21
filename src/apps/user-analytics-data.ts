@@ -1,7 +1,10 @@
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {perfLogger} from '../core/perf-logger';
+import {getCountCacheTtlMs, getNsfwEnabled} from '../core/settings';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
+import {createPhaseTracker, type ReportProgress} from './progress-tracker';
+import {SCATTER_MIN_UPLOADS, TAG_CLOUD_MIN_UPLOADS} from './widget-gates';
 
 /** Pre-fetched values from renderDashboard's pre-check phase. When provided,
  *  fetchDashboardData reuses them instead of calling the same APIs again. */
@@ -21,7 +24,7 @@ export interface PrefetchedDashboardData {
  * against the (cheap, cached) distribution fetches, inflating render.total.
  * Deferring to post-render keeps the blocking path lean.
  */
-export interface SwrResult<T> {
+interface SwrResult<T> {
   data: T;
   /** Kicks off the background fetch. Returns the original Promise for error
    *  handling; resolves with fresh data iff it differs from `data`. */
@@ -31,13 +34,26 @@ export interface SwrResult<T> {
 /**
  * Reads cached data from piestats, prepares (but does not start) a
  * background fetch if found, and blocks only on cache miss.
+ *
+ * `maxAgeMs` (v9.6.0) — when provided, suppresses the background revalidate
+ * if the cached record is younger than the threshold. Used for count-driven
+ * caches (`status_dist`, `rating_dist`) so the SWR pathway honours the same
+ * "Count Refresh (min)" TTL as the 9 tryGetCachedStats-based distributions.
+ * Without it, every dashboard open fires a background API call regardless
+ * of cache age — wasteful when nothing has changed since the last sync.
+ *
+ * Cache age and partial-sync trigger interact: a partial sync (via
+ * performPartialSync → refreshAllStats with forceRefresh=true) overwrites
+ * the cache with a fresh timestamp, so the next open finds age < TTL and
+ * skips revalidate.
  */
-async function swrStats<T>(
+export async function swrStats<T>(
   dataManager: AnalyticsDataManager,
   cacheKey: string,
   uploaderId: number,
   freshFetch: () => Promise<T>,
   label: string,
+  maxAgeMs?: number,
 ): Promise<SwrResult<T>> {
   // No uploader id → skip cache entirely, same behaviour as before.
   if (!uploaderId) {
@@ -45,10 +61,22 @@ async function swrStats<T>(
     return {data};
   }
 
+  // Fresh cache path: cache exists AND is within the TTL window. Return
+  // immediately, no revalidate. This is the new behaviour gating point.
+  if (maxAgeMs !== undefined) {
+    const fresh = (await dataManager.getStats(
+      cacheKey,
+      uploaderId,
+      maxAgeMs,
+    )) as T | null;
+    if (fresh !== null) return {data: fresh};
+  }
+
+  // Stale-but-cached path (or no TTL gate): return cached value now,
+  // schedule the revalidate for after paint.
   const cached = (await dataManager.getStats(cacheKey, uploaderId)) as T | null;
 
   if (cached !== null) {
-    // Deferred: caller must invoke startRevalidate() after render is visible.
     const startRevalidate = () =>
       perfLogger.wrap(`${label}.revalidate`, freshFetch).then(fresh => {
         // JSON compare is good enough: data here is serialisable (posts,
@@ -102,6 +130,11 @@ export type PieDetails =
       color?: string;
       frequency?: number;
       name?: string;
+      /**
+       * Sub-tag breakdown for legend hover/tap (Copy / Fav_Copy / Char,
+       * v9.6.0+). Source: `DistributionItem.subTags` from the resolver.
+       */
+      subTags?: import('../types').SubTagBreakdownEntry[];
     };
 
 /** Processed pie chart slice used for D3 rendering. */
@@ -129,11 +162,22 @@ export class UserAnalyticsDataService {
    * @param prefetched Optional results from renderDashboard's pre-check phase.
    *   When provided, syncStats/totalCount are reused instead of re-fetched
    *   (saves one DB scan + one API call, ~400-900ms depending on user size).
+   * @param onProgress Optional progress sink. Called as phases enter and
+   *   as their data-layer reportSubStatus emitters fire. Wired by
+   *   `renderDashboard` to update the loading spinner text live.
    * @return All data needed for the dashboard.
    */
+  // T-26 baseline: 210 LOC (10 over budget). Each of the 14 parallel
+  // top-level tasks needs a perfLogger.wrap + sub-status emit +
+  // tracker.step finalizer; splitting per-phase would either fragment
+  // the Promise.all shape that downstream destructures or invent a
+  // helper layer that hides the obvious one-to-one mapping. Borderline
+  // — revisit if it grows further.
+  // eslint-disable-next-line max-lines-per-function
   async fetchDashboardData(
     context: ProfileContext,
     prefetched?: PrefetchedDashboardData,
+    onProgress?: ReportProgress,
   ) {
     const dataManager = new AnalyticsDataManager(this.db);
     // context.targetUser is guaranteed non-null when called from UserAnalyticsApp
@@ -142,10 +186,20 @@ export class UserAnalyticsDataService {
     const user = context.targetUser!;
 
     // NSFW State for milestones
-    const nsfwKey = 'danbooru_grass_nsfw_enabled';
-    const isNsfwEnabled = localStorage.getItem(nsfwKey) === 'true';
+    const isNsfwEnabled = getNsfwEnabled();
+
+    // Progress reporter (no-op when caller did not wire onProgress).
+    const progress = onProgress ?? (() => {});
+    // 14 parallel top-level tasks below (counted manually to match the
+    // Promise.all shape). The label flickers between this tracker's
+    // counter and the distribution-method substatus strings — that's
+    // intentional, last-wins gives the user a sense of multiple things
+    // in flight without needing nested counters.
+    const tracker = createPhaseTracker('Loading dashboard', 14, progress);
+    const sub = tracker.subStatus;
 
     // 1. Fetch Summary Stats first (Local DB) to get starting date for optimizations
+    sub('Loading summary stats…');
     const summaryStats = await perfLogger.wrap(
       'dbi:net:fetchData:summaryStats',
       () => dataManager.getSummaryStats(user),
@@ -179,71 +233,89 @@ export class UserAnalyticsDataService {
       userStats,
       needsBackfill,
     ] = await Promise.all([
-      prefetched
+      (prefetched
         ? Promise.resolve(prefetched.syncStats)
-        : perfLogger.wrap('dbi:net:fetchData:syncStats', () =>
-            dataManager.getSyncStats(user),
-          ),
-      prefetched
+        : perfLogger.wrap('dbi:net:fetchData:syncStats', () => {
+            sub('Loading sync stats…');
+            return dataManager.getSyncStats(user);
+          })
+      ).finally(() => tracker.step()),
+      (prefetched
         ? Promise.resolve(prefetched.totalCount)
-        : perfLogger.wrap('dbi:net:fetchData:totalCount', () =>
-            dataManager.getTotalPostCount(user),
-          ),
+        : perfLogger.wrap('dbi:net:fetchData:totalCount', () => {
+            sub('Loading total post count…');
+            return dataManager.getTotalPostCount(user);
+          })
+      ).finally(() => tracker.step()),
       // Distributions that were already cache-first before this work:
       // they hit piestats immediately and need no SWR (their cache is
       // only warmed on explicit sync, which is the existing behaviour).
-      perfLogger.wrap('dbi:net:fetchData:distributions', () =>
-        Promise.all([
-          dataManager.getCharacterDistribution(user),
-          dataManager.getCopyrightDistribution(user),
-          dataManager.getFavCopyrightDistribution(user),
-          dataManager.getBreastsDistribution(user),
-          dataManager.getHairLengthDistribution(user),
-          dataManager.getHairColorDistribution(user),
-          dataManager.getGenderDistribution(user),
-          dataManager.getCommentaryDistribution(user),
-          dataManager.getTranslationDistribution(user),
-        ]).then(
-          ([
-            char,
-            copy,
-            favCopy,
-            breasts,
-            hairL,
-            hairC,
-            gender,
-            commentary,
-            translation,
-          ]) => ({
-            character: char,
-            copyright: copy,
-            fav_copyright: favCopy,
-            breasts,
-            hair_length: hairL,
-            hair_color: hairC,
-            gender,
-            commentary,
-            translation,
-          }),
-        ),
-      ),
+      // `sub` is passed to each method so per-tag count fetches appear
+      // in the spinner detail line.
+      perfLogger
+        .wrap('dbi:net:fetchData:distributions', () =>
+          Promise.all([
+            dataManager.getCharacterDistribution(user, false, sub),
+            dataManager.getCopyrightDistribution(user, false, sub),
+            dataManager.getFavCopyrightDistribution(user, false, sub),
+            dataManager.getBreastsDistribution(user, false, sub),
+            dataManager.getHairLengthDistribution(user, false, sub),
+            dataManager.getHairColorDistribution(user, false, sub),
+            dataManager.getGenderDistribution(user, false, sub),
+            dataManager.getCommentaryDistribution(user, false, sub),
+            dataManager.getTranslationDistribution(user, false, sub),
+          ]).then(
+            ([
+              char,
+              copy,
+              favCopy,
+              breasts,
+              hairL,
+              hairC,
+              gender,
+              commentary,
+              translation,
+            ]) => ({
+              character: char,
+              copyright: copy,
+              fav_copyright: favCopy,
+              breasts,
+              hair_length: hairL,
+              hair_color: hairC,
+              gender,
+              commentary,
+              translation,
+            }),
+          ),
+        )
+        .finally(() => tracker.step()),
       // Status + Rating previously fired 10 API calls on every open
-      // (6 status + 4 rating). Now cached with SWR — still fresh on the
-      // next open after any state change.
+      // (6 status + 4 rating). SWR-cached; v9.6.0 also passes the count
+      // cache TTL so a sub-TTL cache hit skips the background revalidate
+      // entirely — matches the 9 other count-driven distributions and
+      // honours the "Count Refresh (min)" setting consistently.
       swrStats(
         dataManager,
         'status_dist',
         uploaderId,
-        () => dataManager.getStatusDistribution(user, firstUploadDate, true),
+        () => {
+          sub('Loading status counts…');
+          return dataManager.getStatusDistribution(user, firstUploadDate, true);
+        },
         'dbi:net:fetchData:status',
-      ),
+        getCountCacheTtlMs(),
+      ).finally(() => tracker.step()),
       swrStats(
         dataManager,
         'rating_dist',
         uploaderId,
-        () => dataManager.getRatingDistribution(user, firstUploadDate, true),
+        () => {
+          sub('Loading rating counts…');
+          return dataManager.getRatingDistribution(user, firstUploadDate, true);
+        },
         'dbi:net:fetchData:rating',
-      ),
+        getCountCacheTtlMs(),
+      ).finally(() => tracker.step()),
       // SWR: return cached value now, revalidate in background. fresh fetch
       // uses forceRefresh=true so it bypasses the in-method cache and
       // overwrites piestats via saveStats.
@@ -251,46 +323,86 @@ export class UserAnalyticsDataService {
         dataManager,
         'top_posts_by_type',
         uploaderId,
-        () => dataManager.getTopPostsByType(user, true),
+        () => {
+          sub('Loading top posts by rating…');
+          return dataManager.getTopPostsByType(user, true);
+        },
         'dbi:net:fetchData:topPosts',
-      ),
+      ).finally(() => tracker.step()),
       swrStats(
         dataManager,
         'recent_popular_posts',
         uploaderId,
-        () => dataManager.getRecentPopularPosts(user, true),
+        () => {
+          sub('Loading recent popular posts…');
+          return dataManager.getRecentPopularPosts(user, true);
+        },
         'dbi:net:fetchData:recentPopular',
-      ),
+      ).finally(() => tracker.step()),
       swrStats(
         dataManager,
         `milestones_1000_${isNsfwEnabled ? '1' : '0'}`,
         uploaderId,
-        () => dataManager.getMilestones(user, isNsfwEnabled, 1000, true),
+        () => {
+          sub('Loading milestones…');
+          return dataManager.getMilestones(user, isNsfwEnabled, 1000, true);
+        },
         'dbi:net:fetchData:milestones1k',
-      ),
-      perfLogger.wrap('dbi:net:fetchData:scatterData', () =>
-        dataManager.getScatterData(user),
-      ),
+      ).finally(() => tracker.step()),
+      // Skip the scatter fetch entirely when the upload-count gate
+      // (v9.6.0) will hide the widget anyway — the placeholder doesn't
+      // need scatter data.
+      (prefetched && prefetched.totalCount < SCATTER_MIN_UPLOADS
+        ? Promise.resolve([])
+        : perfLogger.wrap('dbi:net:fetchData:scatterData', () => {
+            sub('Loading scatter data…');
+            return dataManager.getScatterData(user);
+          })
+      ).finally(() => tracker.step()),
       swrStats(
         dataManager,
         'level_change_history',
         uploaderId,
-        () => dataManager.getLevelChangeHistory(user, true),
+        () => {
+          sub('Loading level change history…');
+          return dataManager.getLevelChangeHistory(user, true);
+        },
         'dbi:net:fetchData:levelChanges',
-      ),
-      perfLogger.wrap('dbi:net:fetchData:timelineMilestones', () =>
-        dataManager.getTimelineMilestones(user),
-      ),
-      perfLogger.wrap('dbi:net:fetchData:tagCloudGeneral', () =>
-        dataManager.getTagCloudData(user, 0),
-      ),
-      perfLogger.wrap('dbi:net:fetchData:userStats', () =>
-        dataManager.getUserStats(user),
-      ),
-      perfLogger.wrap('dbi:net:fetchData:needsBackfill', () =>
-        dataManager.needsPostMetadataBackfill(user),
-      ),
+      ).finally(() => tracker.step()),
+      perfLogger
+        .wrap('dbi:net:fetchData:timelineMilestones', () => {
+          sub('Loading timeline milestones…');
+          return dataManager.getTimelineMilestones(user);
+        })
+        .finally(() => tracker.step()),
+      // Skip the tag-cloud fetch entirely when the upload-count gate
+      // (v9.6.0) will hide the widget anyway. Two cache + globals API
+      // calls saved per dashboard open for small users.
+      (prefetched && prefetched.totalCount < TAG_CLOUD_MIN_UPLOADS
+        ? Promise.resolve([])
+        : perfLogger.wrap('dbi:net:fetchData:tagCloudGeneral', () => {
+            sub('Loading tag cloud…');
+            return dataManager.getTagCloudData(user, 0);
+          })
+      ).finally(() => tracker.step()),
+      perfLogger
+        .wrap('dbi:net:fetchData:userStats', () => {
+          sub('Loading user stats…');
+          return dataManager.getUserStats(user);
+        })
+        .finally(() => tracker.step()),
+      perfLogger
+        .wrap('dbi:net:fetchData:needsBackfill', () => {
+          sub('Checking post metadata backfill…');
+          return dataManager.needsPostMetadataBackfill(user);
+        })
+        .finally(() => tracker.step()),
     ]);
+
+    // All 14 phases settled — mark the tracker fully done so the
+    // headline reads "Loading dashboard · 14/14" right before the
+    // dashboard widgets replace the spinner DOM.
+    tracker.finish();
 
     // Recombine status + rating (SWR'd) with the other nine (cache-first).
     const distributions = {

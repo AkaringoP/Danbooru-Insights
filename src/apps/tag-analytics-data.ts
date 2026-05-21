@@ -1,4 +1,5 @@
 import {CONFIG, DAY_MS} from '../config';
+import {fetchRemoteCount} from '../core/data-manager';
 import {createLogger} from '../core/logger';
 import {bulkPutSafe, evictOldestNonCurrentUser} from '../core/quota-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
@@ -9,7 +10,6 @@ import type {
   DanbooruUser,
   DanbooruRelatedTag,
   DanbooruRelatedTagResponse,
-  DanbooruCountResponse,
   DanbooruTagImplication,
   HistoryEntry,
   MilestoneEntry,
@@ -117,6 +117,23 @@ export function isMonthlyCountValid(
 /** TTL for persisted implication lookups. tag_implications is near-immutable. */
 export const IMPLICATIONS_CACHE_TTL_MS = 180 * CACHE_DAY_MS;
 
+/**
+ * Embedded schema version for tag_implications_cache record values.
+ *
+ * Bump whenever the meaning of a cached `isTopLevel` flag changes (e.g.
+ * the URL contract for `/tag_implications.json` is altered). Records
+ * stamped with a different version are treated as cache misses on read
+ * and re-fetched with the current contract — no Dexie schema bump
+ * required because the version lives in the record body (schemaless).
+ *
+ * v1 (≤ v9.5): URL did not pass `search[status]=active`, so
+ *   deleted / declined / retired implications counted toward
+ *   "is sub-tag" — incorrectly excluding tags like `ninjago` whose
+ *   implication chain was later removed.
+ * v2 (v9.6+): URL includes `search[status]=active`.
+ */
+export const IMPLICATIONS_CACHE_SCHEMA_VERSION = 2;
+
 /** Max tag names per batched /tag_implications.json call (URL-length budget). */
 export const IMPLICATIONS_BATCH_CHUNK_SIZE = 50;
 
@@ -126,11 +143,6 @@ export const IMPLICATIONS_BATCH_CHUNK_SIZE = 50;
  * repeat lookups within a session cost zero I/O.
  */
 const topLevelSessionCache = new Map<string, boolean>();
-
-/** Resets the session cache — exported for tests. */
-export function resetTopLevelSessionCache(): void {
-  topLevelSessionCache.clear();
-}
 
 /**
  * Parses a /tag_implications.json batch response into a `name → isTopLevel`
@@ -159,12 +171,17 @@ export function parseImplicationsResponse(
 
 /**
  * Checks whether a persistent implication cache record is still fresh.
+ * Records whose embedded `schemaVersion` does not match
+ * `IMPLICATIONS_CACHE_SCHEMA_VERSION` are invalid regardless of TTL —
+ * they carry a stale contract and must be re-fetched.
  * Exported for tests.
  */
 export function isImplicationCacheValid(
   fetchedAt: number,
   now: number,
+  schemaVersion: number | undefined,
 ): boolean {
+  if (schemaVersion !== IMPLICATIONS_CACHE_SCHEMA_VERSION) return false;
   const age = now - fetchedAt;
   return age >= 0 && age < IMPLICATIONS_CACHE_TTL_MS;
 }
@@ -292,6 +309,23 @@ export class TagAnalyticsDataService {
   private _pendingLastFullScanAt: number | null = null;
 
   /**
+   * v9.6: stash for `countsUpdatedAt`. Set by `markCountsRefreshed()`
+   * whenever statusCounts/ratingCounts are freshly fetched (initial
+   * Phase 3 or TTL refresh in `_checkCache`). Reset to null after save
+   * so volatile-data-only saves preserve the existing timestamp.
+   */
+  private _pendingCountsUpdatedAt: number | null = null;
+
+  /**
+   * v9.6: marks the count overlays (statusCounts + ratingCounts) as
+   * freshly fetched. The next `saveToCache` stamps the record's
+   * `countsUpdatedAt` with this moment.
+   */
+  markCountsRefreshed(): void {
+    this._pendingCountsUpdatedAt = Date.now();
+  }
+
+  /**
    * Per-session memo for `/tags.json` responses. A single analysis run
    * calls `fetchTagData` from up to four paths (run, _checkCache,
    * fetchInitialStats, and the backward-scan retry), each costing ~300ms.
@@ -327,6 +361,10 @@ export class TagAnalyticsDataService {
           return {
             ...cached.data,
             updatedAt: cached.updatedAt,
+            // Surface countsUpdatedAt from the cache record so the app
+            // layer can decide whether the deferred count overlays
+            // (statusCounts / ratingCounts) need a TTL refresh.
+            countsUpdatedAt: cached.countsUpdatedAt,
           };
         }
       }
@@ -344,24 +382,35 @@ export class TagAnalyticsDataService {
   async saveToCache(data: TagAnalyticsMeta): Promise<void> {
     if (!this.db || !this.db.tag_analytics) return;
     try {
-      // Preserve `lastFullScanAt` across saves: either the value stashed by
-      // `fetchMonthlyCounts` on first-visit full scan, or the existing
-      // value on the record (subsequent saves must not wipe it).
-      let lastFullScanAt: number | undefined;
-      if (this._pendingLastFullScanAt !== null) {
-        lastFullScanAt = this._pendingLastFullScanAt;
-      } else {
-        const existing = await this.db.tag_analytics.get(this.tagName);
-        lastFullScanAt = existing?.lastFullScanAt;
-      }
+      // Preserve `lastFullScanAt` and `countsUpdatedAt` across saves:
+      // the lifecycle stash (set by the most recent fresh fetch) wins,
+      // otherwise fall back to whatever the existing record holds so
+      // volatile-data-only saves don't wipe these metadata fields.
+      const needExisting =
+        this._pendingLastFullScanAt === null ||
+        this._pendingCountsUpdatedAt === null;
+      const existing = needExisting
+        ? await this.db.tag_analytics.get(this.tagName)
+        : null;
+
+      const lastFullScanAt: number | undefined =
+        this._pendingLastFullScanAt !== null
+          ? this._pendingLastFullScanAt
+          : existing?.lastFullScanAt;
+      const countsUpdatedAt: number | undefined =
+        this._pendingCountsUpdatedAt !== null
+          ? this._pendingCountsUpdatedAt
+          : existing?.countsUpdatedAt;
 
       await this.db.tag_analytics.put({
         tagName: this.tagName,
         updatedAt: Date.now(),
         data: data,
         lastFullScanAt,
+        countsUpdatedAt,
       });
       this._pendingLastFullScanAt = null;
+      this._pendingCountsUpdatedAt = null;
     } catch (e) {
       log.warn('Cache save failed', {error: e});
     }
@@ -432,7 +481,7 @@ export class TagAnalyticsDataService {
 
     for (let i = 0; i < tagNames.length; i += IMPLICATIONS_BATCH_CHUNK_SIZE) {
       const chunk = tagNames.slice(i, i + IMPLICATIONS_BATCH_CHUNK_SIZE);
-      const url = `/tag_implications.json?search[antecedent_name_comma]=${encodeURIComponent(chunk.join(','))}&limit=1000`;
+      const url = `/tag_implications.json?search[antecedent_name_comma]=${encodeURIComponent(chunk.join(','))}&search[status]=active&limit=1000`;
       try {
         const imps = await this.rateLimiter
           .fetch(url)
@@ -483,7 +532,7 @@ export class TagAnalyticsDataService {
       const now = Date.now();
       const records = await this.db.tag_implications_cache.bulkGet(missing);
       records.forEach((r, i) => {
-        if (r && isImplicationCacheValid(r.fetchedAt, now)) {
+        if (r && isImplicationCacheValid(r.fetchedAt, now, r.schemaVersion)) {
           result.set(missing[i], r.isTopLevel);
           topLevelSessionCache.set(missing[i], r.isTopLevel);
         }
@@ -514,7 +563,12 @@ export class TagAnalyticsDataService {
       const now = Date.now();
       const records: TagImplicationCacheRecord[] = [];
       entries.forEach((isTopLevel, tagName) => {
-        records.push({tagName, isTopLevel, fetchedAt: now});
+        records.push({
+          tagName,
+          isTopLevel,
+          fetchedAt: now,
+          schemaVersion: IMPLICATIONS_CACHE_SCHEMA_VERSION,
+        });
       });
       // No user context on tag pages — see `tag_monthly_counts` rationale above.
       await bulkPutSafe(this.db.tag_implications_cache, records, () =>
@@ -688,6 +742,9 @@ export class TagAnalyticsDataService {
    *                                      Used to narrow the search range for recent tags.
    * @return {Promise<Object|null>} - Initial stats object or null on failure.
    */
+  // T-26 baseline: complexity 31. Cache/hint/cold-start branches × full vs
+  // delta paths × tag-category routing. Stable critical path.
+  // eslint-disable-next-line complexity
   async fetchInitialStats(
     tagName: string,
     cachedData?: TagAnalyticsMeta | null,
@@ -845,42 +902,27 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Fetches the count of new posts within the last 24 hours.
-   * @param {string} tagName - The tag to analyze.
-   * @return {Promise<number>} - Count of posts created in the last 24 hours.
+   * Fetches `/counts/posts.json` for the given tag query with one bounded
+   * retry on transient failure. Returns 0 if both attempts fail.
+   *
+   * @param tagQuery Unencoded tag query string (e.g. `"foo has:commentary"`).
+   * @param retries Number of retries after the first attempt (default 1).
    */
-  async fetchCountWithRetry(url: string, retries: number = 1): Promise<number> {
+  async fetchCountWithRetry(
+    tagQuery: string,
+    retries: number = 1,
+  ): Promise<number> {
     for (let i = 0; i <= retries; i++) {
       try {
-        const resp = await this.rateLimiter.fetch(url);
-        if (!resp.ok) {
-          throw new Error(`HTTP ${resp.status}`);
-        }
-
-        const data = await resp.json();
-
-        const count =
-          data && data.counts && typeof data.counts === 'object'
-            ? data.counts.posts
-            : data
-              ? data.posts
-              : undefined;
-
-        if (count !== undefined && count !== null) {
-          return count;
-        }
-
-        // If undefined, it's a "bad" response for our purpose, treat as error to trigger retry
-        throw new Error('Invalid count data');
+        return await fetchRemoteCount(this.rateLimiter, tagQuery);
       } catch (e) {
         if (i === retries) {
           log.warn(`Failed to fetch count after ${retries + 1} attempts`, {
-            url,
+            tagQuery,
             error: e,
           });
-          return 0; // Default to 0 after all retries
+          return 0;
         }
-        // Wait a bit before retry (e.g., 500ms)
         await new Promise(r => setTimeout(r, 500));
       }
     }
@@ -896,9 +938,9 @@ export class TagAnalyticsDataService {
     tagName: string,
   ): Promise<Record<string, number>> {
     const queries: Record<string, string> = {
-      total: `tags=${encodeURIComponent(tagName)}+has:commentary`,
-      translated: `tags=${encodeURIComponent(tagName)}+has:commentary+commentary`,
-      requested: `tags=${encodeURIComponent(tagName)}+has:commentary+commentary_request`,
+      total: `${tagName} has:commentary`,
+      translated: `${tagName} has:commentary commentary`,
+      requested: `${tagName} has:commentary commentary_request`,
     };
 
     const results: Record<string, number> = {};
@@ -906,9 +948,7 @@ export class TagAnalyticsDataService {
     const keys = Object.keys(queries);
     await Promise.all(
       keys.map(async key => {
-        const query = queries[key];
-        const url = `/counts/posts.json?${query}`;
-        results[key] = await this.fetchCountWithRetry(url);
+        results[key] = await this.fetchCountWithRetry(queries[key]);
       }),
     );
 
@@ -939,8 +979,9 @@ export class TagAnalyticsDataService {
     const results: Record<string, number> = {};
 
     const tasks = statuses.map(async status => {
-      const url = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:${status}`;
-      results[status] = await this.fetchCountWithRetry(url);
+      results[status] = await this.fetchCountWithRetry(
+        `${tagName} status:${status}`,
+      );
     });
 
     await Promise.all(tasks);
@@ -970,12 +1011,11 @@ export class TagAnalyticsDataService {
     const results: Record<string, number> = {};
 
     const tasks = ratings.map(async rating => {
-      let qs = `tags=${encodeURIComponent(tagName)}+rating:${rating}`;
+      let tagQuery = `${tagName} rating:${rating}`;
       if (startDate) {
-        qs += `+date:>=${startDate}`;
+        tagQuery += ` date:>=${startDate}`;
       }
-      const url = `/counts/posts.json?${qs}`;
-      results[rating] = await this.fetchCountWithRetry(url);
+      results[rating] = await this.fetchCountWithRetry(tagQuery);
     });
 
     await Promise.all(tasks);
@@ -1076,18 +1116,10 @@ export class TagAnalyticsDataService {
       await Promise.all(
         fetchable.map(async slice => {
           try {
-            const query = `${tagName} ${slice.key}`;
-            const cUrl = `/counts/posts.json?tags=${encodeURIComponent(query)}`;
-            const cResp = await this.rateLimiter
-              .fetch(cUrl)
-              .then((r: Response) => r.json());
-            const exact =
-              (cResp && cResp.counts
-                ? cResp.counts.posts
-                : cResp
-                  ? cResp.posts
-                  : 0) || 0;
-            resolved[slice.key] = exact;
+            resolved[slice.key] = await fetchRemoteCount(
+              this.rateLimiter,
+              `${tagName} ${slice.key}`,
+            );
           } catch (e) {
             log.debug('SWR exact count fetch failed, keeping approx', {
               tag: slice.key,
@@ -1143,16 +1175,12 @@ export class TagAnalyticsDataService {
       const nMonth = nextDate.getMonth() + 1;
 
       const dateRange = `${year}-${String(month).padStart(2, '0')}-01...${nYear}-${String(nMonth).padStart(2, '0')}-01`;
-      const url = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+date:${dateRange}`;
 
       try {
-        const data = await this.rateLimiter
-          .fetch(url)
-          .then((r: Response) => r.json());
-        const count =
-          data.counts && typeof data.counts === 'object'
-            ? data.counts.posts || 0
-            : data.counts || 0;
+        const count = await fetchRemoteCount(
+          this.rateLimiter,
+          `${tagName} date:${dateRange}`,
+        );
 
         if (count > 0) {
           history.unshift({
@@ -1297,15 +1325,8 @@ export class TagAnalyticsDataService {
   }
 
   async fetchNewPostCount(tagName: string): Promise<number> {
-    // Query for posts created in the last 24 hours (age:..1d)
-    const url = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+age:..1d`;
     try {
-      const resp = await this.rateLimiter
-        .fetch(url)
-        .then((r: Response) => r.json());
-      return (
-        (resp && resp.counts ? resp.counts.posts : resp ? resp.posts : 0) || 0
-      );
+      return await fetchRemoteCount(this.rateLimiter, `${tagName} age:..1d`);
     } catch (e) {
       log.warn('Failed to fetch new post count', {error: e});
       return 0;
@@ -1428,6 +1449,9 @@ export class TagAnalyticsDataService {
    *   drift guard). `totalCount` enables the drift guard. `skipCache` forces
    *   a fresh network fetch for every month.
    */
+  // T-26 baseline: complexity 31. Per-month distance-based TTL × cache hit
+  // class × drift guard × fetch retry, all interleaved.
+  // eslint-disable-next-line complexity
   async fetchMonthlyCounts(
     tagName: string,
     startDate: Date | string,
@@ -1563,29 +1587,17 @@ export class TagAnalyticsDataService {
     // Network fetch for missing/expired months
     // -------------------------------------------------------------------
     const fetchedResults = await Promise.all(
-      fetchTasks.map(task => {
-        const params = new URLSearchParams({
-          tags: `${tagName} status:any date:${task.queryDate}`,
-        });
-        const url = `/counts/posts.json?${params.toString()}`;
-
-        return this.rateLimiter
-          .fetch(url)
-          .then((r: Response) => r.json())
-          .then((data: DanbooruCountResponse) => {
-            const count =
-              (data && data.counts
-                ? data.counts.posts
-                : data
-                  ? data.posts
-                  : 0) || 0;
-            return {
-              date: task.dateStr,
-              yearMonth: task.yearMonth,
-              count,
-              ok: true as const,
-            };
-          })
+      fetchTasks.map(task =>
+        fetchRemoteCount(
+          this.rateLimiter,
+          `${tagName} status:any date:${task.queryDate}`,
+        )
+          .then(count => ({
+            date: task.dateStr,
+            yearMonth: task.yearMonth,
+            count,
+            ok: true as const,
+          }))
           .catch((e: unknown) => {
             log.warn(`Failed month ${task.dateStr}`, {error: e});
             return {
@@ -1594,8 +1606,8 @@ export class TagAnalyticsDataService {
               count: 0,
               ok: false as const,
             };
-          });
-      }),
+          }),
+      ),
     );
 
     // -------------------------------------------------------------------

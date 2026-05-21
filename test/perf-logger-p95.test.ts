@@ -100,7 +100,6 @@ describe('PerfLogger p95 + ring buffer (P5)', () => {
       const label = 'di:test:pair';
       perfLogger.mark(label);
       const delta = perfLogger.measure(label);
-      expect(delta).toBeDefined();
       expect(delta).toBeGreaterThanOrEqual(0);
     });
 
@@ -149,18 +148,6 @@ describe('PerfLogger p95 + ring buffer (P5)', () => {
       expect(slowIdx).toBeGreaterThan(-1);
       expect(fastIdx).toBeGreaterThan(-1);
       expect(slowIdx).toBeLessThan(fastIdx);
-    });
-
-    it('reports "no samples" when buffer is empty', () => {
-      storage.setItem('di.perf.stats', '1');
-      const logSpy = console.log as unknown as ReturnType<typeof vi.fn>;
-      logSpy.mockClear();
-      perfLogger.dumpStats();
-      // dumpStats may have nothing to report if no events were recorded
-      // for this freshly-constructed singleton state. The singleton is
-      // shared across tests, so existing samples may exist. Accept either
-      // case but ensure no exception.
-      expect(logSpy).toHaveBeenCalled();
     });
   });
 });

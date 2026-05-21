@@ -396,3 +396,92 @@ export class SettingsManager {
     this.save({snapToEdge: enabled});
   }
 }
+
+// ---------------------------------------------------------------------------
+// NSFW preference (standalone localStorage key — not inside SettingsData JSON
+// because grass and tag-analytics paths share it; previously each path used
+// its own legacy key).
+// ---------------------------------------------------------------------------
+
+/** localStorage key for the unified NSFW-enabled flag. */
+const NSFW_STORAGE_KEY = 'di.nsfw_enabled';
+
+/** Reads the user's NSFW preference. Defaults to false when unset. */
+export function getNsfwEnabled(): boolean {
+  return localStorage.getItem(NSFW_STORAGE_KEY) === 'true';
+}
+
+/** Persists the NSFW preference. */
+export function setNsfwEnabled(value: boolean): void {
+  localStorage.setItem(NSFW_STORAGE_KEY, String(value));
+}
+
+/**
+ * One-time migration of legacy NSFW keys to the unified `di.nsfw_enabled`
+ * key. Runs at app startup; idempotent (skips when the unified key is
+ * already populated). The two legacy keys are removed regardless so
+ * stale values do not linger.
+ *
+ * If both legacy keys were set with conflicting values, the grass key
+ * (`danbooru_grass_nsfw_enabled`) wins — it predated the tag-analytics
+ * one and is the more frequently used path.
+ */
+export function migrateNsfwKey(): void {
+  if (localStorage.getItem(NSFW_STORAGE_KEY) !== null) {
+    localStorage.removeItem('danbooru_grass_nsfw_enabled');
+    localStorage.removeItem('tag_analytics_nsfw_enabled');
+    return;
+  }
+  const legacy =
+    localStorage.getItem('danbooru_grass_nsfw_enabled') ??
+    localStorage.getItem('tag_analytics_nsfw_enabled');
+  if (legacy !== null) {
+    localStorage.setItem(NSFW_STORAGE_KEY, legacy);
+  }
+  localStorage.removeItem('danbooru_grass_nsfw_enabled');
+  localStorage.removeItem('tag_analytics_nsfw_enabled');
+}
+
+// ---------------------------------------------------------------------------
+// Count-cache TTL preference (shared by UserAnalyticsApp and
+// TagAnalyticsApp). Controls how long /counts/posts.json-derived values
+// stored in piestats / tag_analytics may be served from cache before a
+// fresh fetch is triggered on dashboard open. Stored as integer minutes
+// so the settings popover input maps 1:1.
+// ---------------------------------------------------------------------------
+
+/** localStorage key for the count-cache TTL preference. */
+const COUNT_CACHE_TTL_MIN_KEY = 'di.count_cache_ttl_min';
+
+/** Default count-cache TTL when the preference is unset (minutes). */
+const DEFAULT_COUNT_CACHE_TTL_MIN = 10;
+
+/**
+ * Returns the user-configured count-cache TTL in minutes. Falls back to
+ * `DEFAULT_COUNT_CACHE_TTL_MIN` when unset or unparseable. Always >= 1
+ * so callers can multiply directly without zero-TTL surprises.
+ */
+export function getCountCacheTtlMin(): number {
+  const raw = localStorage.getItem(COUNT_CACHE_TTL_MIN_KEY);
+  if (raw === null) return DEFAULT_COUNT_CACHE_TTL_MIN;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return DEFAULT_COUNT_CACHE_TTL_MIN;
+  }
+  return parsed;
+}
+
+/** Convenience: TTL in milliseconds (the form caller pass to `getStats`). */
+export function getCountCacheTtlMs(): number {
+  return getCountCacheTtlMin() * 60_000;
+}
+
+/**
+ * Persists the count-cache TTL preference. Clamps to >= 1 minute so the
+ * preference never disables caching outright (callers can still pass
+ * `forceRefresh=true` for one-shot bypass).
+ */
+export function setCountCacheTtlMin(minutes: number): void {
+  const clamped = Math.max(1, Math.floor(minutes));
+  localStorage.setItem(COUNT_CACHE_TTL_MIN_KEY, String(clamped));
+}

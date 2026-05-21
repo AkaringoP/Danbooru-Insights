@@ -10,9 +10,9 @@
  *   showToast({ type: 'error', message: 'Sync failed.', duration: 8000 });
  */
 
-export type ToastType = 'success' | 'error' | 'warn' | 'info';
+type ToastType = 'success' | 'error' | 'warn' | 'info';
 
-export interface ToastAction {
+interface ToastAction {
   label: string;
   onClick: () => void;
 }

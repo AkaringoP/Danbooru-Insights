@@ -1,5 +1,6 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
+import {createBodyTooltip} from '../ui/popover-utils';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
 
 const log = createLogger('TagAnalyticsCharts');
@@ -52,6 +53,10 @@ export class TagAnalyticsChartRenderer {
    * @param {string} type - The type of data to render ('status', 'rating', 'copyright', 'character', 'commentary').
    * @param {Object} tagData - The full tag data object containing counts and other metadata.
    */
+  // T-26 baseline: 258 LOC / complexity 22. D3 arc + label + tooltip +
+  // legend + click + percentile sub-flows in one method. Decomposition
+  // candidate; parallel to user-side renderPieWidget (T-23).
+  // eslint-disable-next-line max-lines-per-function, complexity
   renderPieChart(type: string, tagData: TagAnalyticsMeta): void {
     const container = document.getElementById('status-pie-chart');
     const legendContainer = document.getElementById('status-pie-legend');
@@ -193,20 +198,12 @@ export class TagAnalyticsChartRenderer {
 
     // Tooltip (Global)
     const tooltip = d3
-      .select('body')
-      .selectAll('.tag-pie-tooltip')
-      .data([0])
-      .join('div')
-      .attr('class', 'tag-pie-tooltip')
-      .style('position', 'absolute')
+      .select(createBodyTooltip('tag-pie-tooltip'))
       .style('background', 'rgba(30, 30, 30, 0.9)')
       .style('color', '#fff')
       .style('padding', '5px 10px')
       .style('border-radius', '4px')
       .style('font-size', '11px')
-      .style('pointer-events', 'none')
-      .style('z-index', '2147483647')
-      .style('opacity', '0')
       .style('box-shadow', '0 2px 5px var(--di-shadow, rgba(0,0,0,0.2))');
 
     const totalValue = d3.sum(data, (d: D3Any) => d.count);
@@ -374,6 +371,9 @@ export class TagAnalyticsChartRenderer {
    * @param {!Array<{milestone: number, post: ?Object}>} milestonePosts The list of milestone data.
    * @param {function(): void} onNsfwUpdate Callback to apply NSFW visibility after rendering.
    */
+  // T-26 baseline: complexity 18. Branches across milestone state
+  // (achieved/upcoming/locked) × NSFW visibility × post-availability.
+  // eslint-disable-next-line complexity
   renderMilestones(
     milestonePosts: MilestoneEntry[],
     onNsfwUpdate: () => void,
@@ -617,6 +617,9 @@ export class TagAnalyticsChartRenderer {
    * @param {string} tagName The tag name used for search URL construction.
    * @param {!Array<Object>=} milestones Optional milestones to overlay.
    */
+  // T-26 baseline: 227 LOC. D3 axis + bar + tooltip + milestone overlay in
+  // one method. Decomposition candidate; not in Phase 5c scope.
+  // eslint-disable-next-line max-lines-per-function
   renderBarChart(
     data: HistoryEntry[],
     selector: string,
@@ -1022,23 +1025,15 @@ export class TagAnalyticsChartRenderer {
       .attr('stroke', '#fff')
       .attr('stroke-width', 2);
 
-    // Detailed Tooltip - Append to BODY to avoid clipping
-    // Remove existing if any
-    d3.select('body').selectAll('.tag-analytics-tooltip').remove();
-
+    // Detailed Tooltip - Append to BODY to avoid clipping.
     const tooltip = d3
-      .select('body')
-      .append('div')
-      .attr('class', 'tag-analytics-tooltip')
-      .style('position', 'absolute')
-      .style('z-index', '11000') // Corrected Z-Index (Higher than modal)
+      .select(createBodyTooltip('tag-analytics-tooltip'))
+      .style('z-index', '11000') // Lower than the default (above modal but not max).
       .style('background', 'rgba(0, 0, 0, 0.8)')
       .style('color', '#fff')
       .style('padding', '8px')
       .style('border-radius', '4px')
       .style('font-size', '12px')
-      .style('pointer-events', 'none')
-      .style('opacity', 0)
       .style('transition', 'opacity 0.2s');
 
     // Overlay recto to capture events

@@ -160,19 +160,6 @@ describe('buildUntaggedTranslationQueries — query string construction', () => 
     expect(q.bc).toBe('user:testuser translation_request translated');
   });
 
-  it('TC-H: encodeURIComponent produces correct URL for each query', () => {
-    const q = buildUntaggedTranslationQueries('testuser');
-    // Verify URL encoding: space→%20, colon→%3A, asterisk→%2A
-    expect(encodeURIComponent(q.t)).toBe('user%3Atestuser%20*_text');
-    expect(encodeURIComponent(q.a)).toBe('user%3Atestuser%20english_text');
-    expect(encodeURIComponent(q.b)).toBe(
-      'user%3Atestuser%20*_text%20translation_request',
-    );
-    expect(encodeURIComponent(q.c)).toBe(
-      'user%3Atestuser%20*_text%20translated',
-    );
-  });
-
   it('each query uses at most 2 real (non-meta) tags — Member(Blue) compatibility', () => {
     const q = buildUntaggedTranslationQueries('testuser');
     // Count non-meta tags: strip `user:...` and count remaining whitespace-separated tokens

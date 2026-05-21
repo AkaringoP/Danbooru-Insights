@@ -63,7 +63,7 @@ export interface Theme {
 export type Threshold4 = [number, number, number, number];
 
 /** Threshold values for each contribution metric. */
-export interface ThresholdMap {
+interface ThresholdMap {
   uploads: Threshold4;
   approvals: Threshold4;
   notes: Threshold4;
@@ -180,6 +180,22 @@ export interface DistributionItem {
   thumb: string | null;
   isOther: boolean;
   color?: string;
+  /**
+   * Sub-tag breakdown for legend hover/tap (v9.6.0+). Populated for Copy /
+   * Fav_Copy / Char distributions when the top-level tag has implications
+   * (sub-tags) that the user actually uses. Empty/undefined = no tooltip.
+   */
+  subTags?: SubTagBreakdownEntry[];
+}
+
+/** Single row in a sub-tag breakdown (DistributionItem.subTags). */
+export interface SubTagBreakdownEntry {
+  tagName: string;
+  count: number;
+  /** 0..1 — share of the parent's sub-tag user-count sum. */
+  share: number;
+  /** True for the trailing "Others" bucket; not clickable in UI. */
+  isOther: boolean;
 }
 
 /** Sync progress state for AnalyticsDataManager. */
@@ -215,9 +231,6 @@ export interface ScatterDataPoint {
   /** True if post is banned. Undefined if not yet backfilled. */
   ban?: boolean;
 }
-
-/** Danbooru rating code. */
-export type Rating = 'g' | 's' | 'q' | 'e';
 
 /** Daily count record for uploads/approvals/notes tables. */
 export interface DailyCountRecord {
@@ -490,20 +503,6 @@ export interface DanbooruRelatedTagResponse {
 }
 
 /**
- * Response from `/counts/posts.json`.
- *
- * Two shapes coexist: modern responses wrap counts in a `counts` object,
- * legacy responses use a flat `posts` field. Consumers always use the
- * `data.counts?.posts ?? data.posts ?? 0` fallback chain.
- */
-export interface DanbooruCountResponse {
-  counts?: {
-    posts: number;
-  };
-  posts?: number;
-}
-
-/**
  * Tag implication entry from `/tag_implications.json`.
  * Used by `isTopLevelTag()` — if any implication exists for a tag, it is
  * NOT considered top-level.
@@ -528,21 +527,6 @@ export interface DanbooruUserFeedback {
   category?: string;
 }
 
-/** Approval entry from `/post_approvals.json`. */
-export interface DanbooruApproval {
-  id: number;
-  post_id: number;
-  user_id: number;
-  created_at: string;
-}
-
-/** Note version entry from `/note_versions.json`. */
-export interface DanbooruNoteVersion {
-  id?: number;
-  updater_id: number;
-  created_at: string;
-}
-
 // =========================================================================
 // End of Danbooru API Response Types
 // =========================================================================
@@ -559,6 +543,14 @@ export interface TagAnalyticsReport {
    * accumulating over time). Absent on pre-v12 records.
    */
   lastFullScanAt?: number;
+  /**
+   * Timestamp (ms) of the last refresh of the count-only deferred overlays
+   * (statusCounts + ratingCounts). Decoupled from `updatedAt` because
+   * `_checkCache` bumps `updatedAt` on every cache hit when refreshing
+   * volatile post fields, but the count overlays only refresh when the
+   * v9.6 count-cache TTL elapses. Absent on pre-v9.6 records.
+   */
+  countsUpdatedAt?: number;
 }
 
 /**
@@ -585,10 +577,30 @@ export interface MonthlyCountRecord {
  * 180-day TTL is applied at read time.
  */
 export interface TagImplicationCacheRecord {
+  /**
+   * Two key shapes coexist in this table:
+   *  - `<tagName>` — antecedent-keyed (`isTopLevelTag` lookup, populated
+   *    by `fetchTopLevelTagsBatch`). The meaningful field is `isTopLevel`.
+   *  - `consequent:<parent>` — consequent-keyed (sub-tag breakdown,
+   *    populated by `fetchSubTagsForParents`, v9.6.0+). The meaningful
+   *    field is `subs`; `isTopLevel` is a `false` placeholder ignored on
+   *    read because callers query the two shapes by distinct key
+   *    prefixes (no cross-contamination).
+   */
   tagName: string;
   isTopLevel: boolean;
+  /** Present for consequent-keyed rows — list of sub-tag candidate names. */
+  subs?: string[];
   /** Fetch timestamp in ms since epoch. */
   fetchedAt: number;
+  /**
+   * Embedded schema version stamped at write time. Read sites compare
+   * against `IMPLICATIONS_CACHE_SCHEMA_VERSION` to detect contract drift
+   * (e.g. the URL changing between releases) without a Dexie version bump.
+   * Optional in the type because pre-v9.6 records on existing clones lack
+   * the field; absence is treated as a mismatch and forces a re-fetch.
+   */
+  schemaVersion?: number;
 }
 
 /** Complete tag analytics metadata. */
@@ -599,6 +611,13 @@ export interface TagAnalyticsMeta {
   post_count: number;
   created_at: string;
   updatedAt: number;
+  /**
+   * v9.6: timestamp (ms) of the last refresh of count-only overlays
+   * (statusCounts + ratingCounts). Surfaced from the cache record so the
+   * app layer can compare against the user-configured count-cache TTL
+   * and decide whether to re-run the deferred counts on cache hit.
+   */
+  countsUpdatedAt?: number;
   _isCached?: boolean;
   firstPost?: DanbooruPost;
   hundredthPost?: DanbooruPost;

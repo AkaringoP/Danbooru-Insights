@@ -1,10 +1,29 @@
 import * as d3 from 'd3';
 import {CONFIG} from '../config';
-import {applyDashboardTheme, resolveEffectiveDashboardTheme} from '../main';
+import {
+  applyDashboardTheme,
+  resolveEffectiveDashboardTheme,
+} from '../ui/theme-palette';
+import {fetchRemoteCount} from '../core/data-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
+import {createModal, type ModalHandle} from '../ui/modal';
+import {
+  applyPopoverChrome,
+  bindDashboardThemeSelect,
+  calcPopoverPosition,
+  createClickOutsideHandler,
+  DASHBOARD_THEME_SELECT_HTML,
+} from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import type {Database} from '../core/database';
+import {
+  getNsfwEnabled,
+  setNsfwEnabled,
+  getCountCacheTtlMs,
+  getCountCacheTtlMin,
+  setCountCacheTtlMin,
+} from '../core/settings';
 import type {SettingsManager} from '../core/settings';
 import {TagAnalyticsDataService} from './tag-analytics-data';
 import type {
@@ -15,7 +34,6 @@ import type {
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {showToast} from '../ui/toast';
-import {lockBodyScroll, unlockBodyScroll} from '../core/scroll-lock';
 import type {
   TagAnalyticsMeta,
   DanbooruPost,
@@ -67,6 +85,7 @@ export class TagAnalyticsApp {
   dataService: TagAnalyticsDataService;
   isFetching: boolean;
   chartRenderer: TagAnalyticsChartRenderer;
+  modal: ModalHandle | null = null;
 
   /**
    * Initializes the TagAnalyticsApp.
@@ -266,6 +285,10 @@ export class TagAnalyticsApp {
    * Cache-first path: load cache, update volatile data if fresh, render.
    * @returns null if served from cache (caller should return), otherwise delta info.
    */
+  // T-26 baseline: complexity 16. Cache miss × time-expired × diff-threshold
+  // × volatile-refresh × v9.6 count TTL × cache-write branches all live in
+  // this orchestrator. Splitting risks dropping render order guarantees.
+  // eslint-disable-next-line complexity
   private async _checkCache(): Promise<CacheCheckResult | null> {
     const tagName = this.tagName;
     const cachedData = await this.dataService.loadFromCache();
@@ -303,6 +326,7 @@ export class TagAnalyticsApp {
     // Cache is fresh — update volatile data and render
     cachedData._isCached = true;
     try {
+      this.injectAnalyticsButton(null, 50, 'Refreshing volatile data...');
       const newPostCount24h = await this.dataService.fetchNewPostCount(tagName);
       const [latestPost, trendingPost, trendingPostNSFW] = await Promise.all([
         this.dataService.fetchLatestPost(tagName),
@@ -313,6 +337,39 @@ export class TagAnalyticsApp {
       cachedData.trendingPost = trendingPost ?? undefined;
       cachedData.trendingPostNSFW = trendingPostNSFW ?? undefined;
       cachedData.newPostCount = newPostCount24h;
+
+      // v9.6: refresh the deferred count overlays (statusCounts +
+      // ratingCounts) when the per-user count-cache TTL has elapsed
+      // since the last overlay refresh. Falls back to `updatedAt` for
+      // pre-v9.6 records that have no countsUpdatedAt stamp.
+      const countsTtlMs = getCountCacheTtlMs();
+      const countsAnchor =
+        cachedData.countsUpdatedAt ?? cachedData.updatedAt ?? 0;
+      const countsAge = Date.now() - countsAnchor;
+      if (countsAge > countsTtlMs) {
+        log.debug(
+          `Refreshing deferred counts: age ${(countsAge / 60000).toFixed(1)}m > ttl ${(countsTtlMs / 60000).toFixed(1)}m`,
+        );
+        this.injectAnalyticsButton(
+          null,
+          80,
+          'Refreshing status and rating counts...',
+        );
+        const startDate =
+          cachedData.historyData && cachedData.historyData.length > 0
+            ? new Date(cachedData.historyData[0].date)
+                .toISOString()
+                .split('T')[0]
+            : null;
+        const [freshStatus, freshRating] = await Promise.all([
+          this.dataService.fetchStatusCounts(tagName),
+          this.dataService.fetchRatingCounts(tagName, startDate),
+        ]);
+        cachedData.statusCounts = freshStatus;
+        cachedData.ratingCounts = freshRating;
+        this.dataService.markCountsRefreshed();
+      }
+
       await this.dataService.saveToCache(cachedData);
     } catch (e) {
       log.warn('Failed to update volatile data for cache:', {error: e});
@@ -468,6 +525,9 @@ export class TagAnalyticsApp {
     meta.statusCounts = statusCounts;
     meta.commentaryCounts = commentaryCounts;
     meta.ratingCounts = localStatsAllTime.ratingCounts;
+    // v9.6: small-tag path produces statusCounts + ratingCounts from
+    // local aggregation in this turn, so stamp the overlay as fresh.
+    this.dataService.markCountsRefreshed();
     meta.precalculatedMilestones = milestones;
     meta.latestPost = latestPost ?? undefined;
     meta.newPostCount = newPostCount;
@@ -591,6 +651,10 @@ export class TagAnalyticsApp {
   /**
    * Large tag path: multi-phase parallel fetch (quick stats → heavy stats → deferred counts).
    */
+  // T-26 baseline: 239 LOC / complexity 34. Multi-phase fetch with
+  // intermediate render checkpoints and 5+ failure branches. Decomposition
+  // candidate; not in Phase 5c scope.
+  // eslint-disable-next-line max-lines-per-function, complexity
   private async _fetchLargeTag(
     meta: TagAnalyticsMeta,
     initialStats: InitialStats,
@@ -826,11 +890,17 @@ export class TagAnalyticsApp {
     log.debug(
       `[Phase 3] Starting Deferred Counts (Rating) with startDate: ${minDateStr}`,
     );
+    this.injectAnalyticsButton(null, 95, 'Fetching rating counts... (95%)');
     const ratingCounts = await measure(
       'Rating Counts',
       this.dataService.fetchRatingCounts(tagName, minDateStr),
     );
     meta.ratingCounts = ratingCounts;
+    // v9.6: Phase 3 freshly populated both statusCounts (Phase 2) and
+    // ratingCounts (this Phase) — mark the overlay so saveToCache stamps
+    // countsUpdatedAt and the TTL refresh on the next open compares
+    // against this moment.
+    this.dataService.markCountsRefreshed();
 
     // --- Single render: all phases complete, fully-populated dashboard ---
     // (ranking SWR below may swap cached-for-fresh ranking entries later,
@@ -1132,12 +1202,10 @@ export class TagAnalyticsApp {
 
         if (monthlyData.historyCutoff) {
           try {
-            const cutoffUrl = `/counts/posts.json?tags=${encodeURIComponent(tagName)}+status:any+date:<${encodeURIComponent(monthlyData.historyCutoff)}`;
-            const r = await this.rateLimiter
-              .fetch(cutoffUrl)
-              .then((res: Response) => res.json());
-            referenceTotal =
-              (r && r.counts ? r.counts.posts : r ? r.posts : 0) || 0;
+            referenceTotal = await fetchRemoteCount(
+              this.rateLimiter,
+              `${tagName} status:any date:<${monthlyData.historyCutoff}`,
+            );
           } catch (e) {
             log.warn(
               'Failed to fetch cutoff total, falling back to meta.post_count',
@@ -1377,34 +1445,21 @@ export class TagAnalyticsApp {
 
     const currentDays = this.dataService.getRetentionDays();
     const currentThreshold = this.dataService.getSyncThreshold();
+    const currentCountTtl = getCountCacheTtlMin();
 
     const popover = document.createElement('div');
     popover.id = 'tag-analytics-settings-popover';
     // Sync dashboard theme (popover is appended to body, outside dashboard containers)
-    const effective = resolveEffectiveDashboardTheme(
-      this.settings.getDarkMode(),
-    );
-    if (effective === 'dark') popover.setAttribute('data-di-theme', 'dark');
-    popover.style.position = 'absolute';
-    popover.style.zIndex = '11001';
-    popover.style.background = 'var(--di-bg, #fff)';
-    popover.style.border = '1px solid var(--di-border, #e1e4e8)';
-    popover.style.borderRadius = '6px';
-    popover.style.padding = '12px';
-    popover.style.boxShadow =
-      '0 2px 10px var(--di-shadow-light, rgba(0,0,0,0.1))';
-    popover.style.fontSize = '11px';
-    popover.style.color = 'var(--di-text, #333)';
-    popover.style.width = '260px';
+    if (
+      resolveEffectiveDashboardTheme(this.settings.getDarkMode()) === 'dark'
+    ) {
+      popover.setAttribute('data-di-theme', 'dark');
+    }
+    applyPopoverChrome(popover, {width: '260px', zIndex: '11001'});
 
-    // Position logic
-    const rect = target.getBoundingClientRect();
-    const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-    const scrollLeft =
-      window.pageXOffset || document.documentElement.scrollLeft;
-
-    popover.style.top = `${rect.top + scrollTop}px`;
-    popover.style.left = `${rect.right + scrollLeft + 10}px`;
+    const {top, left} = calcPopoverPosition(target);
+    popover.style.top = `${top}px`;
+    popover.style.left = `${left}px`;
 
     popover.innerHTML = `
   <div class="di-section">
@@ -1426,37 +1481,36 @@ export class TagAnalyticsApp {
   </div>
 
   <div class="di-section di-divider">
-    <strong>Dashboard Theme</strong>
-    <select id="dark-mode-select" style="width:100%; margin-top:4px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333); font-size:11px;">
-      <option value="auto">Auto (follow Danbooru)</option>
-      <option value="light">Light</option>
-      <option value="dark">Dark</option>
-    </select>
+    <strong>Count Refresh (min)</strong><br>
+    Refresh post-count values older than this on dashboard open.
   </div>
+  <div class="di-row">
+     <input type="number" id="count-ttl-input" value="${currentCountTtl}" min="1" step="1">
+     <button id="count-ttl-save-btn" class="di-save-btn">✅ Save</button>
+  </div>
+
+  ${DASHBOARD_THEME_SELECT_HTML}
 `;
 
     document.body.appendChild(popover);
 
-    // Dark mode select handler
-    const darkModeSelect = popover.querySelector(
-      '#dark-mode-select',
-    ) as HTMLSelectElement;
-    if (darkModeSelect) {
-      darkModeSelect.value = this.settings.getDarkMode();
-      darkModeSelect.addEventListener('change', () => {
-        const pref = darkModeSelect.value as 'auto' | 'light' | 'dark';
+    bindDashboardThemeSelect(
+      popover,
+      () => this.settings.getDarkMode(),
+      pref => {
         this.settings.setDarkMode(pref);
         applyDashboardTheme(this.settings);
-      });
-    }
+      },
+    );
 
-    // Close on click outside
-    const closeHandler = (e: MouseEvent) => {
-      if (!popover.contains(e.target as Node) && e.target !== target) {
+    const closeHandler = createClickOutsideHandler(
+      popover,
+      () => {
         popover.remove();
         document.removeEventListener('click', closeHandler);
-      }
-    };
+      },
+      {ignore: target},
+    );
     setTimeout(() => document.addEventListener('click', closeHandler), 0);
 
     // Save Handler
@@ -1489,6 +1543,28 @@ export class TagAnalyticsApp {
         });
       }
     };
+
+    // Count-cache TTL save (independent button — matches the pattern in
+    // UserAnalyticsApp's sync settings popover).
+    const countTtlSaveBtn = popover.querySelector('#count-ttl-save-btn');
+    (countTtlSaveBtn as HTMLElement).onclick = () => {
+      const input = popover.querySelector('#count-ttl-input');
+      const val = parseInt((input as HTMLInputElement).value, 10);
+      if (!isNaN(val) && val >= 1) {
+        setCountCacheTtlMin(val);
+        popover.remove();
+        document.removeEventListener('click', closeHandler);
+        showToast({
+          type: 'success',
+          message: `Count refresh threshold set to ${val} min.`,
+        });
+      } else {
+        showToast({
+          type: 'warn',
+          message: 'Please enter a count-refresh threshold ≥ 1 minute.',
+        });
+      }
+    };
   }
 
   /**
@@ -1498,6 +1574,9 @@ export class TagAnalyticsApp {
    * @param {number=} progress The loading progress percentage.
    * @param {string=} statusText Optional text to display next to the button.
    */
+  // T-26 baseline: complexity 25. Branches across state (idle/loading/ready)
+  // × placement (header/inline) × progress reporting. Stable, low churn.
+  // eslint-disable-next-line complexity
   injectAnalyticsButton(
     tagData: TagAnalyticsMeta | null,
     progress?: number,
@@ -1631,61 +1710,42 @@ export class TagAnalyticsApp {
    * Creates the modal overlay for the dashboard.
    */
   createModal(): void {
-    if (document.getElementById('tag-analytics-modal')) return;
-
-    const modal = document.createElement('div');
-    modal.id = 'tag-analytics-modal';
-
-    // Apply dashboard theme attribute
-    const effective = resolveEffectiveDashboardTheme(
-      this.settings.getDarkMode(),
-    );
-    if (effective === 'dark') modal.setAttribute('data-di-theme', 'dark');
-    modal.style.display = 'none';
-    modal.style.position = 'fixed';
-    modal.style.top = '0';
-    modal.style.left = '0';
-    modal.style.width = '100%';
-    modal.style.height = '100%';
-    modal.style.backgroundColor = 'rgba(0,0,0,0.5)';
-    modal.style.zIndex = '10000';
-    modal.style.justifyContent = 'center';
-    modal.style.alignItems = 'center';
-
-    modal.innerHTML = `
-          <div>
-              <button id="tag-analytics-close">&times;</button>
-              <div id="tag-analytics-content">
-                  <h2>Loading...</h2>
-              </div>
+    this.modal = createModal({
+      id: 'tag-analytics-modal',
+      resolveTheme: () =>
+        resolveEffectiveDashboardTheme(this.settings.getDarkMode()),
+      innerHtml: `
+        <div>
+          <button id="tag-analytics-close">&times;</button>
+          <div id="tag-analytics-content">
+            <h2>Loading...</h2>
           </div>
-      `;
+        </div>
+      `,
+      onBeforeClose: () => {
+        this.chartRenderer.cleanup();
+        // Remove any lingering area chart tooltips appended to body.
+        d3.select('body').selectAll('.tag-analytics-tooltip').remove();
+      },
+    });
 
-    document.body.appendChild(modal);
+    // Inline styles preserved from the prior hand-rolled createModal — the
+    // tag-analytics CSS only defines the height clamp, so position/backdrop
+    // come from here. (The grass modal uses richer CSS in styles.ts.)
+    const overlay = this.modal.overlay;
+    overlay.style.position = 'fixed';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.backgroundColor = 'rgba(0,0,0,0.5)';
+    overlay.style.zIndex = '10000';
+    overlay.style.justifyContent = 'center';
+    overlay.style.alignItems = 'center';
+    overlay.style.display = 'none';
 
-    // Close handlers
     const closeBtn = document.getElementById('tag-analytics-close');
     if (closeBtn) closeBtn.onclick = () => this.toggleModal(false);
-    modal.onclick = e => {
-      if (e.target === modal) this.toggleModal(false);
-    };
-
-    // Keyboard: close on Escape
-    document.addEventListener('keydown', (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && modal.style.display !== 'none') {
-        this.toggleModal(false);
-      }
-    });
-
-    // Close on browser back button (mobile-friendly)
-    window.addEventListener('popstate', () => {
-      if (
-        modal.style.display !== 'none' &&
-        history.state?.diModalOpen !== 'tag-analytics-modal'
-      ) {
-        this.toggleModal(false);
-      }
-    });
   }
 
   /**
@@ -1693,37 +1753,12 @@ export class TagAnalyticsApp {
    * @param {boolean} show Whether to show or hide the modal.
    */
   toggleModal(show: boolean): void {
-    if (!document.getElementById('tag-analytics-modal')) {
-      this.createModal();
-    }
-    const modal = document.getElementById('tag-analytics-modal');
-    if (!modal) return;
-
+    if (!this.modal) this.createModal();
+    if (!this.modal) return;
+    this.modal.toggle(show);
     if (show) {
-      // Push history state for back button support
-      if (history.state?.diModalOpen !== 'tag-analytics-modal') {
-        history.pushState(
-          {diModalOpen: 'tag-analytics-modal'},
-          '',
-          location.href,
-        );
-      }
-      modal.style.display = 'flex';
-      lockBodyScroll();
       const closeBtn = document.getElementById('tag-analytics-close');
       if (closeBtn) closeBtn.focus();
-    } else {
-      // If history state still belongs to us, route through history.back().
-      // The popstate listener will re-enter this branch with state cleared.
-      if (history.state?.diModalOpen === 'tag-analytics-modal') {
-        history.back();
-        return;
-      }
-      modal.style.display = 'none';
-      unlockBodyScroll();
-      this.chartRenderer.cleanup();
-      // Remove any lingering area chart tooltips appended to body
-      d3.select('body').selectAll('.tag-analytics-tooltip').remove();
     }
   }
 
@@ -1732,8 +1767,7 @@ export class TagAnalyticsApp {
    * Toggles blur/opacity on marked elements.
    */
   updateNsfwVisibility(): void {
-    const isNsfwEnabled =
-      localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
+    const isNsfwEnabled = getNsfwEnabled();
     const items = document.querySelectorAll('.di-nsfw-monitor');
 
     items.forEach(item => {
@@ -2036,13 +2070,9 @@ export class TagAnalyticsApp {
     // NSFW Logic
     const nsfwCheck = document.getElementById('tag-analytics-nsfw-toggle');
     if (nsfwCheck) {
-      (nsfwCheck as HTMLInputElement).checked =
-        localStorage.getItem('tag_analytics_nsfw_enabled') === 'true';
+      (nsfwCheck as HTMLInputElement).checked = getNsfwEnabled();
       nsfwCheck.onchange = e => {
-        localStorage.setItem(
-          'tag_analytics_nsfw_enabled',
-          (e.target as HTMLInputElement).checked.toString(),
-        );
+        setNsfwEnabled((e.target as HTMLInputElement).checked);
         this.updateNsfwVisibility();
       };
       // Apply initial state

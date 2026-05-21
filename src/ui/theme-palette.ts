@@ -6,7 +6,13 @@
  * styles.ts, so they automatically reflect the current dark/light mode.
  * Call `getPalette()` each time you need colors — the result is a fresh
  * snapshot of the current computed values.
+ *
+ * Also exposes the dashboard-theme application helpers (previously living
+ * in `src/main.ts`). Apps and popovers consume these directly without
+ * back-importing from the entry-point.
  */
+import type {SettingsManager} from '../core/settings';
+import type {DarkModePreference} from '../types';
 
 export interface ThemePalette {
   /* Surface */
@@ -101,10 +107,52 @@ export function getPalette(el?: Element): ThemePalette {
   return palette;
 }
 
+// ---------------------------------------------------------------------------
+// Dashboard theme application
+// ---------------------------------------------------------------------------
+
 /**
- * Convenience: returns true if the current Danbooru theme is dark.
- * Checks `data-current-user-theme` attribute on `<body>`.
+ * All top-level container IDs that receive the dashboard theme attribute.
+ * The two analytics modals are the primary recipients; popovers and the
+ * hover card piggy-back when they exist on the page.
  */
-export function isDarkMode(): boolean {
-  return document.body.getAttribute('data-current-user-theme') === 'dark';
+const DASHBOARD_CONTAINERS = [
+  'danbooru-grass-modal-overlay',
+  'tag-analytics-modal',
+  'scatter-popover-ui',
+  'danbooru-grass-sync-settings',
+  'tag-analytics-settings-popover',
+  'di-post-hover-card',
+];
+
+/**
+ * Resolves the effective dashboard theme from the user preference and
+ * Danbooru's current page theme (for 'auto' mode).
+ */
+export function resolveEffectiveDashboardTheme(
+  pref: DarkModePreference,
+): 'light' | 'dark' {
+  if (pref === 'light' || pref === 'dark') return pref;
+  return document.body.getAttribute('data-current-user-theme') === 'dark'
+    ? 'dark'
+    : 'light';
+}
+
+/**
+ * Sets or removes `data-di-theme="dark"` on all existing dashboard
+ * containers. Called when the dashboard theme setting changes or when
+ * Danbooru's page theme toggles (auto mode).
+ */
+export function applyDashboardTheme(settings: SettingsManager): void {
+  const effective = resolveEffectiveDashboardTheme(settings.getDarkMode());
+  for (const id of DASHBOARD_CONTAINERS) {
+    const el = document.getElementById(id);
+    if (el) {
+      if (effective === 'dark') {
+        el.setAttribute('data-di-theme', 'dark');
+      } else {
+        el.removeAttribute('data-di-theme');
+      }
+    }
+  }
 }

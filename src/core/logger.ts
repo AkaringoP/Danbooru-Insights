@@ -29,7 +29,7 @@ declare const __DEBUG_ENABLED__: boolean;
 const DEBUG_KEY = 'di.debug.enabled';
 
 /** Optional structured metadata attached to a log entry. */
-export type LogMeta = Record<string, unknown>;
+type LogMeta = Record<string, unknown>;
 
 export interface Logger {
   error(message: string, meta?: LogMeta): void;
@@ -102,26 +102,4 @@ export function createLogger(module: string): Logger {
       emit(console.log.bind(console), module, 'DEBUG', message, meta);
     },
   };
-}
-
-/**
- * Convert an HTTP status code to a user-friendly error message.
- * Technical details (status code, URL) should go to the console via the logger;
- * this message is for display in toasts or error panels.
- */
-export function httpErrorMessage(status: number): string {
-  switch (status) {
-    case 429:
-      return 'Too many requests. Please wait a moment.';
-    case 503:
-      return 'Server is temporarily unavailable.';
-    case 404:
-      return 'Data not found.';
-    case 403:
-      return 'Access denied.';
-    case 500:
-      return 'Server error occurred.';
-    default:
-      return 'An error occurred while loading data.';
-  }
 }

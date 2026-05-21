@@ -14,16 +14,16 @@ import type {Database} from './database';
 import type {Metric, ScheduleInterval, Threshold4} from '../types';
 
 /** Window for activity sampling (days back from today). */
-export const WINDOW_DAYS = 180;
+const WINDOW_DAYS = 180;
 
 /** Minimum active-day samples required to compute thresholds. */
 export const MIN_ACTIVE_DAYS = 14;
 
 /** Saturate detection threshold — fraction of active days at L1 or L4. */
-export const SATURATION_RATIO = 0.9;
+const SATURATION_RATIO = 0.9;
 
 /** Simulation guard — minimum drop in max-bucket concentration. */
-export const MIN_IMPROVEMENT = 0.2;
+const MIN_IMPROVEMENT = 0.2;
 
 /**
  * Computes auto-tuned thresholds from active-day counts.

@@ -173,17 +173,14 @@ describe('calculateHistoryFromPosts', () => {
 
     // Should have entries from 2024-01 through at least 2024-03
     const jan = history.find((h: HistoryEntry) => h.date === '2024-01-01');
-    expect(jan).toBeDefined();
     expect(jan!.count).toBe(2);
     expect(jan!.cumulative).toBe(2);
 
     const feb = history.find((h: HistoryEntry) => h.date === '2024-02-01');
-    expect(feb).toBeDefined();
     expect(feb!.count).toBe(0);
     expect(feb!.cumulative).toBe(2);
 
     const mar = history.find((h: HistoryEntry) => h.date === '2024-03-01');
-    expect(mar).toBeDefined();
     expect(mar!.count).toBe(1);
     expect(mar!.cumulative).toBe(3);
   });

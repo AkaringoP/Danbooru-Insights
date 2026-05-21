@@ -21,6 +21,893 @@ import {
 
 const log = createLogger('GraphRenderer');
 
+// ============================================================
+// GRAPH RENDERER — MODULE-LEVEL CONSTANTS & STYLE INJECTION
+// ============================================================
+
+/**
+ * Inline CSS injected once per page by renderGraph(). Lives at module
+ * scope so it's not re-parsed on every render and so the (large) string
+ * stays out of the function body during decomposition (T-24).
+ */
+const GRASS_INLINE_CSS = `
+          /* Container & Header Styling */
+          #danbooru-grass-container {
+            background: var(--grass-bg, #fff) !important;
+            color: var(--grass-text, #24292f) !important;
+            border-radius: 6px;
+          }
+          #danbooru-grass-container h2 {
+            color: var(--grass-text, #24292f) !important;
+            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+            font-weight: normal !important;
+          }
+          /* Controls — always light (GrassApp chrome is theme-independent) */
+          #grass-controls select {
+            background-color: #f6f8fa !important;
+            color: #24292f !important;
+            border: 1px solid #d0d7de !important;
+            border-radius: 6px;
+            padding: 2px 2px;
+          }
+          /* Empty Cells & Domain Backgrounds */
+          .ch-subdomain-bg { fill: var(--grass-empty-cell, #ebedf0); }
+          .ch-domain-bg { fill: transparent !important; } /* Fix black bars */
+
+          /* All SVG Text (Months & Days) */
+          #cal-heatmap text,
+          #gh-day-labels text {
+            fill: var(--grass-text, #24292f) !important;
+            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+            font-size: 10px;
+          }
+
+          /* Scrollable Area */
+          #cal-heatmap-scroll {
+            overflow-x: auto;
+            overflow-y: hidden;
+            flex: 1;
+            white-space: nowrap;
+          }
+          #cal-heatmap-scroll::-webkit-scrollbar { height: 8px; }
+          #cal-heatmap-scroll::-webkit-scrollbar-thumb {
+            background: var(--grass-scrollbar-thumb, #d0d7de);
+            border-radius: 4px;
+          }
+
+          /* Settings Popover */
+          #danbooru-grass-settings-popover {
+            position: fixed;
+            max-height: 70vh;
+            overflow-y: auto;
+            background: var(--di-bg, #fff);
+            color: var(--di-text, #333);
+            border: 1px solid var(--di-border-input, #ddd);
+            box-shadow: 0 4px 12px var(--di-shadow, rgba(0,0,0,0.2));
+            border-radius: 8px;
+            padding: 12px;
+            z-index: 10000;
+            display: none;
+            width: 290px;
+            transform-origin: top left;
+          }
+          .theme-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 8px;
+          }
+          .theme-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            position: relative;
+            cursor: pointer;
+            border: 2px solid transparent;
+            box-sizing: border-box;
+          }
+          .theme-icon:hover { transform: scale(1.1); }
+          .theme-icon.active { border-color: var(--di-link, #007bff); }
+          .theme-icon-inner {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 16px; height: 16px;
+            border-radius: 4px;
+          }
+          .popover-header {
+            font-weight: 600;
+            font-size: 12px;
+            color: var(--di-text, #333);
+            margin-bottom: 8px;
+          }
+          .popover-select {
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 4px;
+            border-radius: 4px;
+            border: 1px solid var(--di-border-input, #ddd);
+            background-color: var(--di-bg-tertiary, #f0f0f0);
+            font-size: 12px;
+          }
+          .threshold-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 6px;
+            font-size: 12px;
+          }
+          .threshold-input {
+            width: 60px;
+            margin-left: auto;
+            padding: 2px 4px;
+            border: 1px solid var(--di-border-input, #ddd);
+            border-radius: 4px;
+          }
+
+          /* Approvals Detail Popover */
+          #danbooru-approvals-popover {
+            position: absolute;
+            background: var(--di-bg, #fff);
+            color: var(--di-text, #333);
+            border: 1px solid var(--di-border-input, #ddd);
+            box-shadow: 0 4px 20px var(--di-shadow, rgba(0,0,0,0.2));
+            border-radius: 10px;
+            padding: 16px;
+            z-index: 100005;
+            display: none;
+            width: 320px;
+            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+          }
+          #danbooru-approvals-popover .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--di-border-light, #eee);
+          }
+          #danbooru-approvals-popover .header-title {
+            font-weight: 600;
+            font-size: 14px;
+          }
+          #danbooru-approvals-popover .close-btn {
+            cursor: pointer;
+            color: var(--di-text-muted, #888);
+            font-size: 18px;
+            line-height: 1;
+          }
+          /* Summary Grid Layout */
+          #danbooru-grass-summary-grid-wrapper {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            width: fit-content;
+            margin: 0 auto;
+            padding: 10px;
+            background: var(--grass-bg, rgba(128, 128, 128, 0.05));
+            border-radius: 8px;
+            border: 1px solid rgba(0,0,0,0.05);
+          }
+          #danbooru-grass-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 4px;
+            width: fit-content;
+          }
+          .summary-row-container {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+          }
+          .summary-side-labels {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-around;
+            height: 48px; /* 22px * 2 + 4px gap */
+            padding-top: 2px;
+          }
+          .summary-top-labels {
+            display: flex;
+            margin-left: 28px; /* Match width of side labels + gap */
+            position: relative;
+            height: 14px;
+          }
+          .summary-label {
+             fill: var(--grass-text, #24292f);
+             color: var(--grass-text, #24292f);
+             font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+             font-size: 10px;
+             white-space: nowrap;
+          }
+          .top-label-item {
+            position: absolute;
+            transform: translateX(-50%);
+          }
+          .large-grass-cell {
+            width: 22px;
+            height: 22px;
+            background-color: var(--grass-empty-cell, #ebedf0);
+            border-radius: 4px;
+            transition: background-color 0.2s, transform 0.1s, box-shadow 0.2s;
+          }
+          .large-grass-cell:hover {
+            transform: scale(1.1);
+            background-color: var(--grass-text, #30363d);
+            opacity: 0.15;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+          }
+          #danbooru-approvals-popover .gallery-btn {
+            cursor: pointer;
+            color: var(--di-link, #007bff);
+            display: flex;
+            align-items: center;
+            padding: 2px;
+            border-radius: 4px;
+            transition: background 0.2s;
+            text-decoration: none;
+          }
+          #danbooru-approvals-popover .gallery-btn:hover {
+            background: var(--di-bg-tertiary, #f0f0f0);
+            color: var(--di-link, #007bff);
+          }
+          #danbooru-approvals-popover .post-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+            margin-bottom: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+          }
+          #danbooru-approvals-popover .post-link {
+            display: block;
+            text-align: center;
+            padding: 4px;
+            background: var(--di-bg-tertiary, #f0f0f0);
+            border: 1px solid var(--di-border-input, #ddd);
+            border-radius: 4px;
+            font-size: 11px;
+            color: var(--di-link, #007bff);
+            text-decoration: none;
+          }
+          #danbooru-approvals-popover .post-link:hover {
+            background: var(--di-link, #007bff);
+            color: #fff;
+          }
+          #danbooru-approvals-popover .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            font-size: 12px;
+          }
+          #danbooru-approvals-popover .page-btn {
+            padding: 2px 8px;
+            border: 1px solid var(--di-border-input, #ddd);
+            background: var(--di-bg, #fff);
+            border-radius: 4px;
+            cursor: pointer;
+          }
+          #danbooru-approvals-popover .page-btn:disabled {
+            opacity: 0.5;
+            cursor: default;
+          }
+        `;
+
+/** Inject the grass stylesheet exactly once per page. Idempotent — a second
+ *  call is a no-op via the data-id check. */
+function ensureGrassStyles(): void {
+  const styleId = 'danbooru-grass-styles';
+  if (document.getElementById(styleId)) return;
+  const style = document.createElement('style');
+  style.id = styleId;
+  style.textContent = GRASS_INLINE_CSS;
+  document.head.appendChild(style);
+}
+
+// ============================================================
+// GRAPH RENDERER — FILE-PRIVATE HELPERS (renderGraph pipeline)
+// ============================================================
+
+/**
+ * Replace the `#danbooru-grass-container h2` contents with the formatted
+ * total + an embedded year selector. Called once per render — covered by
+ * the T-19 vitest case "updates the contribution-count header with the
+ * formatted total".
+ */
+function renderGrassHeader(args: {
+  header: Element;
+  total: number;
+  year: number;
+  availableYears: number[];
+  onYearChange: (year: number) => void;
+}): void {
+  const {header, total, year, availableYears, onYearChange} = args;
+  header.innerHTML = '';
+
+  const textSpan = document.createElement('span');
+  textSpan.textContent = `${total.toLocaleString()} contributions in `;
+  header.appendChild(textSpan);
+
+  if (availableYears && onYearChange) {
+    const yearSelect = document.createElement('select');
+    yearSelect.style.cssText = `
+            font-family: inherit;
+            font-size: inherit;
+            font-weight: normal;
+            color: #24292f;
+            background-color: #f6f8fa;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 2px 4px;
+            margin-left: 6px;
+            cursor: pointer;
+            vertical-align: baseline;
+          `;
+
+    availableYears.forEach(y => {
+      const opt = document.createElement('option');
+      opt.value = String(y);
+      opt.textContent = String(y);
+      if (y === year) opt.selected = true;
+      yearSelect.appendChild(opt);
+    });
+
+    yearSelect.onchange = e =>
+      onYearChange(parseInt((e.target as HTMLSelectElement).value, 10));
+    header.appendChild(yearSelect);
+  } else {
+    // Fallback if no controls passed (e.g. init)
+    header.appendChild(document.createTextNode(String(year)));
+  }
+}
+
+/**
+ * Build a per-cell URL builder closure. The returned function maps a
+ * date string + count to the Danbooru search/notes URL that the cell
+ * should navigate to on click. Pure factory — no DOM side effects.
+ *
+ * Note: `noteupdater:X+date:Y` would intersect "posts whose notes X has
+ * ever edited" with "posts uploaded on Y", which excludes most actual
+ * edit days. Mirror the .json fetch in data-manager.ts
+ * (search[updater_id]) and pass created_at as Y..Y+1 so the timestamp
+ * column resolves to "anywhere in that day" instead of an exact-midnight
+ * match (single-date string returned 0 results in practice).
+ */
+function buildGrassUrlBuilder(
+  metric: string,
+  sanitizedName: string,
+  userIdVal: string | number,
+): (date: string, count: number) => string | null {
+  return (date: string, _count: number): string | null => {
+    if (!date) return null;
+    switch (metric) {
+      case 'uploads':
+        return `/posts?tags=user:${sanitizedName}+date:${date}`;
+      case 'approvals':
+        return '#';
+      case 'notes': {
+        const next = new Date(`${date}T00:00:00Z`);
+        next.setUTCDate(next.getUTCDate() + 1);
+        const nextDate = next.toISOString().slice(0, 10);
+        return `/note_versions?search[updater_id]=${userIdVal}&search[created_at]=${date}..${nextDate}`;
+      }
+      default:
+        return null;
+    }
+  };
+}
+
+/**
+ * Inject the seven-row day-labels column on the left of the heatmap.
+ * Mon/Wed/Fri get visible text; Sun/Tue/Thu/Sat are invisible spacers
+ * sized so the column grid aligns with CalHeatmap's 11px cell + 2px
+ * gutter rhythm.
+ */
+function injectGrassDayLabels(container: HTMLElement): void {
+  const labels = document.createElement('div');
+  labels.id = 'gh-day-labels';
+  labels.style.display = 'flex';
+  labels.style.flexDirection = 'column';
+  // Align padding-top: Month Header (20px)
+  labels.style.paddingTop = '20px';
+  labels.style.paddingRight = '5px';
+  labels.style.marginRight = '5px';
+  labels.style.textAlign = 'right';
+  labels.style.flexShrink = '0';
+  labels.style.color = 'var(--grass-text, #24292f)';
+  labels.style.fontSize = '9px';
+
+  // Align "Mon, Wed, Fri" to rows 1, 3, 5 (Sunday is Row 0)
+  // Grid Stride = Cell Height (11) + Gutter (2).
+  // To match perfectly, we use divs of Height 11px and Margin-Bottom 2px.
+  const rowStyle = 'height:11px; line-height:11px; margin-bottom:2px;';
+  const hiddenStyle = 'height:11px; visibility:hidden; margin-bottom:2px;';
+  const lastHiddenStyle = 'height:11px; visibility:hidden; margin-bottom:0;';
+
+  labels.innerHTML = `
+        <div style="${hiddenStyle}"></div> <!-- Sun (0) -->
+        <div style="${rowStyle}">Mon</div> <!-- Mon (1) -->
+        <div style="${hiddenStyle}"></div> <!-- Tue (2) -->
+        <div style="${rowStyle}">Wed</div> <!-- Wed (3) -->
+        <div style="${hiddenStyle}"></div> <!-- Thu (4) -->
+        <div style="${rowStyle}">Fri</div> <!-- Fri (5) -->
+        <div style="${lastHiddenStyle}"></div> <!-- Sat (6) -->
+      `;
+  container.appendChild(labels);
+}
+
+/**
+ * Smart tooltip positioning: default position is right+below the cursor,
+ * but if that would overflow the viewport on the right we flip to
+ * top-centered above the cursor (with a 5px left guard). Shared with the
+ * legend hover handler so both feel identical.
+ */
+function updateGrassTooltip(
+  tooltip: D3GrassTooltip,
+  event: MouseEvent,
+  content: string,
+): void {
+  tooltip.style('opacity', 1).html(content);
+  const node = tooltip.node();
+  if (!node) return;
+  const rect = (node as HTMLElement).getBoundingClientRect();
+  const viewportWidth = window.innerWidth;
+  let left = event.pageX + 10;
+  let top = event.pageY - 28;
+  if (left + rect.width > viewportWidth - 20) {
+    left = event.pageX - rect.width / 2;
+    top = event.pageY - rect.height - 15;
+    if (left < 5) left = 5;
+  }
+  tooltip.style('left', left + 'px').style('top', top + 'px');
+}
+
+/**
+ * Touch-compatible variant of updateGrassTooltip. Same overflow logic
+ * but with an extra "keep above viewport top" guard so a tap near the
+ * top of the screen doesn't push the tooltip out of view.
+ */
+function updateGrassTooltipTouch(
+  tooltip: D3GrassTooltip,
+  touch: Touch,
+  content: string,
+): void {
+  tooltip.style('opacity', 1).html(content);
+  const node = tooltip.node();
+  if (!node) return;
+  const rect = (node as HTMLElement).getBoundingClientRect();
+  const viewportWidth = window.innerWidth;
+  const scrollY = window.scrollY || window.pageYOffset;
+  let left = touch.pageX + 10;
+  let top = touch.pageY - 28;
+  if (left + rect.width > viewportWidth - 20) {
+    left = touch.pageX - rect.width / 2;
+    top = touch.pageY - rect.height - 15;
+    if (left < 5) left = 5;
+  }
+  if (top < scrollY + 5) top = scrollY + 5;
+  tooltip.style('left', left + 'px').style('top', top + 'px');
+}
+
+/** Convenience d3 selection alias for the grass tooltip. */
+type D3GrassTooltip = d3.Selection<d3.BaseType, unknown, HTMLElement, unknown>;
+
+/**
+ * Build the CalHeatmap paint config object — the same options shape
+ * CalHeatmap.paint() expects. Extracted because the renderGraph initial
+ * paint and the theme-change re-paint both consume an identical config,
+ * and inlining it twice was the largest single block in the function.
+ */
+function buildPaintConfig(args: {
+  scrollWrapper: HTMLElement;
+  year: number;
+  source: Array<{date: string; value: number}>;
+  thresholds: number[];
+  settingsManager: SettingsManager;
+}): Record<string, unknown> {
+  const {scrollWrapper, year, source, thresholds, settingsManager} = args;
+  return {
+    itemSelector: scrollWrapper,
+    range: 12,
+    domain: {
+      type: 'month',
+      gutter: 3,
+      label: {position: 'top', text: 'MMM', height: 20, textAlign: 'start'},
+    },
+    subDomain: {type: 'day', radius: 2, width: 11, height: 11, gutter: 2},
+    date: {
+      start: new Date(
+        new Date(year, 0, 1).getTime() - new Date().getTimezoneOffset() * 60000,
+      ),
+    },
+    data: {source, x: 'date', y: 'value'},
+    scale: {
+      color: {
+        range: settingsManager.resolveLevels(
+          settingsManager.getTheme(),
+          CONFIG.THEMES[settingsManager.getTheme()] || CONFIG.THEMES.light,
+        ),
+        domain: thresholds,
+        type: 'threshold',
+      },
+    },
+    theme: 'light',
+  };
+}
+
+// ============================================================
+// GRAPH RENDERER — FILE-PRIVATE HELPERS (injectSkeleton pipeline)
+// ============================================================
+
+/**
+ * Mutable layout state shared between injectSkeleton's setup and the
+ * drag handlers created by createGrassHandle. The `inline` and `below`
+ * pairs hold the per-mode persisted geometry; the `saved` pair tracks
+ * the currently-active mode so applyConstraints can read a single source
+ * of truth without re-deriving from layoutMode on every call. Both
+ * inline/below pairs are written on a mode-change drag; only the active
+ * pair is written on a horizontal drag.
+ */
+interface GrassLayout {
+  inlineWidth: number | null;
+  inlineX: number;
+  belowWidth: number | null;
+  belowX: number;
+  savedWidth: number | null;
+  savedX: number;
+}
+
+/**
+ * Locate the user-statistics section on a Danbooru profile page. Uses
+ * three fallbacks because the markup changes between profile templates
+ * (e.g. `/users/N`, `/profile`, custom redirects):
+ *   1. Configured CSS selector (CONFIG.SELECTORS.STATISTICS_SECTION).
+ *   2. The `<table>` inside the show-page's first column.
+ *   3. An H1/H2 whose text is literally "Statistics".
+ *
+ * Returns `null` if all three fail — the caller logs and bails.
+ */
+function findStatisticsAnchor(): Element | null {
+  let stats = document.querySelector(CONFIG.SELECTORS.STATISTICS_SECTION);
+  if (!stats) {
+    const table = document.querySelector(
+      '#a-show > div:nth-child(1) > div:nth-child(2) > table',
+    );
+    if (table) stats = table.parentElement;
+  }
+  if (!stats) {
+    document.querySelectorAll('h1, h2').forEach(el => {
+      if (el.textContent?.trim() === 'Statistics') stats = el.parentElement;
+    });
+  }
+  return stats;
+}
+
+/**
+ * Find or create the `#danbooru-grass-wrapper` flex row that holds the
+ * stats table side-by-side with the grass container. Idempotent — if
+ * the stats element is already wrapped, returns the existing wrapper
+ * without re-parenting. Also applies the maxWidth:60% constraint to
+ * the stats section so long content (e.g. Previous Names) doesn't push
+ * the grass into a wrap.
+ */
+function ensureGrassWrapper(stats: Element): HTMLElement {
+  let wrapper = document.getElementById('danbooru-grass-wrapper');
+  if (!wrapper) {
+    if ((stats.parentNode as HTMLElement).id === 'danbooru-grass-wrapper') {
+      wrapper = stats.parentNode as HTMLElement;
+    } else {
+      wrapper = document.createElement('div');
+      wrapper.id = 'danbooru-grass-wrapper';
+      wrapper.style.display = 'flex';
+      wrapper.style.alignItems = 'flex-start';
+      wrapper.style.gap = '20px';
+      wrapper.style.flexWrap = 'wrap';
+      wrapper.style.width = '100%';
+      stats.parentNode?.insertBefore(wrapper, stats);
+      wrapper.appendChild(stats);
+    }
+  }
+
+  // Constrain the stats section so that long content (e.g. Previous
+  // Names with many entries) doesn't push its width past ~60% of the
+  // wrapper, which would leave no room for GrassApp beside it and
+  // force a wrap. The table content itself is fine at this width;
+  // only the long text rows (Previous Names, etc.) get word-wrapped.
+  const statsEl = stats as HTMLElement;
+  statsEl.style.minWidth = '0';
+  statsEl.style.maxWidth = '60%';
+  statsEl.style.overflowWrap = 'break-word';
+  statsEl.style.overflow = 'hidden';
+  return wrapper;
+}
+
+/**
+ * Build the trio of width measurers used by applyConstraints and the
+ * resize handle. Each one reads the CalHeatmap SVG that gets painted
+ * inside `container` after the initial render — so they must be called
+ * AFTER the first paint or they return null. `resetCaches` is invoked
+ * from `reapplyGraphConstraints` so a fresh measurement runs once the
+ * SVG is in the DOM.
+ *
+ * - `measureNaturalWidth`: full 12-month span (container ceiling — never
+ *   wider than this).
+ * - `measureCurrentToDecWidth`: current-month → December span; the
+ *   magnet-snap target so the graph "sticks" at the width where Dec's
+ *   right edge is flush with the container edge. Falls back to natural
+ *   width on past years (scroll starts at Jan).
+ * - `measureHourlyMinWidth`: the rendered width of the Hourly
+ *   Distribution panel; used as the drag/resize floor so the card stack
+ *   never gets asymmetric.
+ */
+function createGrassMeasurers(args: {
+  container: HTMLElement;
+  hourlyPanelMinWidth: number;
+  getCurrentYear: () => number | null;
+}): {
+  measureNaturalWidth: () => number | null;
+  measureCurrentToDecWidth: () => number | null;
+  measureHourlyMinWidth: () => number;
+  resetCaches: () => void;
+} {
+  const {container, hourlyPanelMinWidth, getCurrentYear} = args;
+  let cachedNaturalWidth: number | null = null;
+  let cachedCurrentToDecWidth: number | null = null;
+
+  const measureNaturalWidth = (): number | null => {
+    if (cachedNaturalWidth !== null) return cachedNaturalWidth;
+    const heatmapEl = container.querySelector(
+      '#cal-heatmap',
+    ) as HTMLElement | null;
+    if (!heatmapEl) return null;
+    // Measure the intrinsic 12-month span by reading the bounding boxes
+    // of CalHeatmap's `.ch-domain` groups (per-month SVG containers).
+    // getBoundingClientRect on the first and last domain gives us the
+    // real rendered span regardless of CSS constraints on ancestors.
+    const domains = heatmapEl.querySelectorAll('.ch-domain');
+    if (domains.length === 0) return null;
+    const firstRect = domains[0].getBoundingClientRect();
+    const lastRect = domains[domains.length - 1].getBoundingClientRect();
+    const svgWidth = Math.ceil(lastRect.right - firstRect.left);
+    if (svgWidth <= 0) return null;
+    const labelsEl = container.querySelector(
+      '#gh-day-labels',
+    ) as HTMLElement | null;
+    let labelsWidth = 0;
+    if (labelsEl) {
+      const labelCS = getComputedStyle(labelsEl);
+      labelsWidth =
+        labelsEl.offsetWidth +
+        parseFloat(labelCS.marginLeft || '0') +
+        parseFloat(labelCS.marginRight || '0');
+    }
+    const cs = getComputedStyle(container);
+    const padH =
+      parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
+    cachedNaturalWidth = Math.ceil(svgWidth + labelsWidth + padH);
+    return cachedNaturalWidth;
+  };
+
+  const measureCurrentToDecWidth = (): number | null => {
+    if (cachedCurrentToDecWidth !== null) return cachedCurrentToDecWidth;
+    const heatmapEl = container.querySelector(
+      '#cal-heatmap',
+    ) as HTMLElement | null;
+    if (!heatmapEl) return null;
+    const domains = heatmapEl.querySelectorAll('.ch-domain');
+    if (domains.length === 0) return null;
+
+    // For past years, scrollToCurrentMonth scrolls to Jan (index 0), so
+    // the snap target is the full natural width.
+    const isCurrentYear = getCurrentYear() === new Date().getFullYear();
+    const startIdx = isCurrentYear ? new Date().getMonth() : 0;
+    if (startIdx >= domains.length) return null;
+
+    const startRect = domains[startIdx].getBoundingClientRect();
+    const lastRect = domains[domains.length - 1].getBoundingClientRect();
+    const svgSpan = Math.ceil(lastRect.right - startRect.left);
+    if (svgSpan <= 0) return null;
+
+    // scrollToCurrentMonth offsets by 10px from the left edge
+    const scrollOffset = isCurrentYear ? 10 : 0;
+
+    const labelsEl = container.querySelector(
+      '#gh-day-labels',
+    ) as HTMLElement | null;
+    let labelsWidth = 0;
+    if (labelsEl) {
+      const labelCS = getComputedStyle(labelsEl);
+      labelsWidth =
+        labelsEl.offsetWidth +
+        parseFloat(labelCS.marginLeft || '0') +
+        parseFloat(labelCS.marginRight || '0');
+    }
+    const cs = getComputedStyle(container);
+    const padH =
+      parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
+    cachedCurrentToDecWidth = Math.ceil(
+      svgSpan + scrollOffset + labelsWidth + padH,
+    );
+    return cachedCurrentToDecWidth;
+  };
+
+  const measureHourlyMinWidth = (): number => {
+    const panel = document.getElementById('danbooru-grass-panel');
+    if (!panel) return hourlyPanelMinWidth;
+    const w = panel.offsetWidth;
+    return w > 0 ? w : hourlyPanelMinWidth;
+  };
+
+  const resetCaches = (): void => {
+    cachedNaturalWidth = null;
+    cachedCurrentToDecWidth = null;
+  };
+
+  return {
+    measureNaturalWidth,
+    measureCurrentToDecWidth,
+    measureHourlyMinWidth,
+    resetCaches,
+  };
+}
+
+/**
+ * Build the `applyConstraints` closure that owns "how wide should the
+ * grass container be right now?". Reads the wrapper/stats geometry,
+ * picks a sensible isWrapped flag (preferring an explicit saved layout
+ * mode over the offsetTop-based heuristic so a mode-switch reflow
+ * doesn't trip on stale positions), then clamps to [hourlyMin,
+ * min(saved, natural, maxAvailable)]. Falls through to natural width
+ * when no saved width exists yet.
+ */
+function createApplyConstraints(args: {
+  container: HTMLElement;
+  wrapper: HTMLElement;
+  stats: Element;
+  layout: GrassLayout;
+  getSavedLayoutMode: () => 'inline' | 'below' | null;
+  measureNaturalWidth: () => number | null;
+  measureHourlyMinWidth: () => number;
+}): () => void {
+  const {
+    container,
+    wrapper,
+    stats,
+    layout,
+    getSavedLayoutMode,
+    measureNaturalWidth,
+    measureHourlyMinWidth,
+  } = args;
+
+  return () => {
+    const wrapperWidth = wrapper.offsetWidth;
+    const statsWidth = (stats as HTMLElement).offsetWidth;
+    const gap = 20;
+
+    // When savedLayoutMode is explicitly set, trust it — during a
+    // mode switch the browser may not have reflowed yet (the old
+    // container width keeps it physically wrapped), so the offsetTop
+    // check would report stale position and prevent the width from
+    // shrinking to fit beside stats. Only fall back to offsetTop
+    // detection when no explicit mode has been persisted (null = first
+    // visit or legacy user).
+    const savedLayoutMode = getSavedLayoutMode();
+    let isWrapped: boolean;
+    if (savedLayoutMode !== null) {
+      isWrapped = savedLayoutMode === 'below';
+    } else {
+      isWrapped = container.offsetTop > (stats as HTMLElement).offsetTop + 10;
+    }
+
+    let maxAvailableWidth;
+    if (isWrapped) {
+      maxAvailableWidth = wrapperWidth;
+    } else {
+      maxAvailableWidth = Math.max(300, wrapperWidth - statsWidth - gap);
+    }
+
+    // Floor: the Hourly panel's width, unless the viewport is narrower
+    // than the panel itself (mobile / small window) — then we yield to
+    // the viewport so the heatmap doesn't blow past what's available.
+    const hourlyMin = measureHourlyMinWidth();
+    const minWidth = Math.min(hourlyMin, maxAvailableWidth);
+
+    // Natural SVG width is the absolute ceiling — the container should
+    // never be wider than the 12-month heatmap regardless of what was
+    // saved (avoids empty space on the right).
+    const natural = measureNaturalWidth();
+    const naturalCap = natural ?? maxAvailableWidth;
+
+    if (layout.savedWidth) {
+      const numericWidth = parseFloat(String(layout.savedWidth));
+      const clampedWidth = Math.max(
+        minWidth,
+        Math.min(numericWidth, naturalCap, maxAvailableWidth),
+      );
+      container.style.flex = '0 0 auto';
+      container.style.width = `${clampedWidth}px`;
+
+      // Also clamp X to ensure it doesn't overflow right
+      const clampedX = Math.max(
+        0,
+        Math.min(layout.savedX ?? 0, maxAvailableWidth - clampedWidth),
+      );
+      container.style.transform = `translateX(${clampedX}px)`;
+    } else {
+      // No saved width — fit to the heatmap's natural size (12 months),
+      // capped at maxAvailableWidth. In inline mode that's the space
+      // beside stats; in below mode (isWrapped) it's the full wrapper.
+      if (natural !== null) {
+        const target = Math.max(minWidth, Math.min(natural, maxAvailableWidth));
+        container.style.flex = '0 0 auto';
+        container.style.width = `${target}px`;
+      } else {
+        container.style.flex = '1';
+      }
+      container.style.transform = 'translateX(0px)';
+    }
+  };
+}
+
+/**
+ * Re-run applyConstraints + syncPanelPosition every time the wrapper's
+ * box size changes, until layout settles (two consecutive identical
+ * widths) or 2 seconds elapse — whichever comes first. The wrapper's
+ * offsetWidth can be 0 (or smaller than its final value) on the very
+ * first frame while the page is still hydrating; without this observer
+ * savedWidth/xOffset would be clamped against an underestimated
+ * maxAvailableWidth and lock the graph at minWidth (300px) on the left.
+ */
+function attachLayoutResizeObserver(args: {
+  wrapper: HTMLElement;
+  applyConstraints: () => void;
+  syncPanelPosition: () => void;
+}): void {
+  const {wrapper, applyConstraints, syncPanelPosition} = args;
+  if (typeof ResizeObserver === 'undefined') return;
+  let stableTicks = 0;
+  let lastWidth = 0;
+  const ro = new ResizeObserver(() => {
+    const w = wrapper.offsetWidth;
+    if (w <= 0) return;
+    applyConstraints();
+    syncPanelPosition();
+    if (w === lastWidth) {
+      stableTicks++;
+      // Two consecutive identical measurements → layout has settled
+      if (stableTicks >= 2) ro.disconnect();
+    } else {
+      stableTicks = 0;
+      lastWidth = w;
+    }
+  });
+  ro.observe(wrapper);
+  // Safety: always disconnect after 2s so we never observe forever
+  setTimeout(() => ro.disconnect(), 2000);
+}
+
+/**
+ * Create the body-level `#danbooru-grass-tooltip` element used by both
+ * the heatmap cell hover and the legend swatch hover. Idempotent — a
+ * second call is a no-op via the id check. Covered by the T-19 case
+ * "creates the global tooltip element".
+ */
+function ensureGlobalTooltip(): void {
+  if (document.getElementById('danbooru-grass-tooltip')) return;
+  const tooltip = document.createElement('div');
+  tooltip.id = 'danbooru-grass-tooltip';
+  tooltip.style.position = 'absolute';
+  tooltip.style.padding = '8px';
+  tooltip.style.background = '#222';
+  tooltip.style.color = '#fff';
+  tooltip.style.borderRadius = '4px';
+  tooltip.style.border = '1px solid #444';
+  tooltip.style.pointerEvents = 'none';
+  tooltip.style.opacity = '0';
+  tooltip.style.zIndex = '99999';
+  tooltip.style.fontSize = '12px';
+  document.body.appendChild(tooltip);
+}
+
 /**
  * GraphRenderer: Handles rendering of the contribution heatmap graph.
  * Creates and manages the CalHeatmap instance, UI controls, and settings popover.
@@ -119,6 +1006,11 @@ export class GraphRenderer {
    * @param {string|number} userId The user's ID for settings.
    * @return {Promise<boolean>} Resolves to true if injection was successful.
    */
+  // T-26 baseline: complexity 19. Layout decisions span inline/below mode
+  // × snap-to-edge × measurer cache miss/hit × resize-observer wiring.
+  // Already heavily decomposed in T-24; further split would fragment the
+  // GrassLayout struct's mutation contract.
+  // eslint-disable-next-line complexity
   async injectSkeleton(
     dataManager: DataManager,
     userId: string | number,
@@ -131,55 +1023,12 @@ export class GraphRenderer {
       return true; // Preservation Logic: Do not destroy!
     }
 
-    // Normal Injection Logic
-    let stats = document.querySelector(CONFIG.SELECTORS.STATISTICS_SECTION);
-    // Fallbacks...
-    if (!stats) {
-      const table = document.querySelector(
-        '#a-show > div:nth-child(1) > div:nth-child(2) > table',
-      );
-      if (table) stats = table.parentElement;
-    }
-    if (!stats) {
-      // Text Fallback (H1/H2)
-      document.querySelectorAll('h1, h2').forEach(el => {
-        if (el.textContent.trim() === 'Statistics') stats = el.parentElement;
-      });
-    }
-
+    const stats = findStatisticsAnchor();
     if (!stats) {
       log.error('Injection point not found');
       return false;
     }
-
-    // Wrapper Logic
-    let wrapper = document.getElementById('danbooru-grass-wrapper');
-    if (!wrapper) {
-      if ((stats.parentNode as HTMLElement).id === 'danbooru-grass-wrapper') {
-        wrapper = stats.parentNode as HTMLElement;
-      } else {
-        wrapper = document.createElement('div');
-        wrapper.id = 'danbooru-grass-wrapper';
-        wrapper.style.display = 'flex';
-        wrapper.style.alignItems = 'flex-start';
-        wrapper.style.gap = '20px';
-        wrapper.style.flexWrap = 'wrap';
-        wrapper.style.width = '100%';
-        stats.parentNode?.insertBefore(wrapper, stats);
-        wrapper.appendChild(stats);
-      }
-    }
-
-    // Constrain the stats section so that long content (e.g. Previous
-    // Names with many entries) doesn't push its width past ~60% of the
-    // wrapper, which would leave no room for GrassApp beside it and
-    // force a wrap. The table content itself is fine at this width;
-    // only the long text rows (Previous Names, etc.) get word-wrapped.
-    const statsEl = stats as HTMLElement;
-    statsEl.style.minWidth = '0';
-    statsEl.style.maxWidth = '60%';
-    statsEl.style.overflowWrap = 'break-word';
-    statsEl.style.overflow = 'hidden';
+    const wrapper = ensureGrassWrapper(stats);
 
     const container = document.createElement('div');
     container.id = this.containerId;
@@ -192,208 +1041,60 @@ export class GraphRenderer {
     // fallback for the inline mode values on first load.
     const grassSettings = await dataManager.getGrassSettings(userId);
     this.savedLayoutMode = grassSettings?.layoutMode ?? null;
-    let inlineWidth: number | null =
-      grassSettings?.inlineWidth ??
-      (typeof grassSettings?.width === 'number' ? grassSettings.width : null);
-    let inlineX: number =
-      grassSettings?.inlineXOffset ?? grassSettings?.xOffset ?? 0;
-    let belowWidth: number | null = grassSettings?.belowWidth ?? null;
-    let belowX: number = grassSettings?.belowXOffset ?? 0;
-    // Mutable view of the currently-active mode's pair. applyConstraints
-    // reads these; the drag handler updates both the per-mode storage
-    // and this view on a horizontal drag, or swaps this view to the
-    // target mode's pair on a vertical (mode-change) drag.
-    let savedWidth: number | null =
-      this.savedLayoutMode === 'below' ? belowWidth : inlineWidth;
-    let savedX: number = this.savedLayoutMode === 'below' ? belowX : inlineX;
-    // Persist the full record (always include all four per-mode fields —
-    // saveGrassSettings is a Dexie `put`, so any omission is a delete).
+    // Mutable layout state. `savedWidth`/`savedX` are a mutable view of the
+    // currently-active mode's pair — applyConstraints reads them; the drag
+    // handler updates both the per-mode storage and this view on a
+    // horizontal drag, or swaps this view to the target mode's pair on a
+    // vertical (mode-change) drag. Persisted as a Dexie `put` — all four
+    // per-mode fields are always written, since any omission is an
+    // effective delete.
+    const layout: GrassLayout = {
+      inlineWidth:
+        grassSettings?.inlineWidth ??
+        (typeof grassSettings?.width === 'number' ? grassSettings.width : null),
+      inlineX: grassSettings?.inlineXOffset ?? grassSettings?.xOffset ?? 0,
+      belowWidth: grassSettings?.belowWidth ?? null,
+      belowX: grassSettings?.belowXOffset ?? 0,
+      savedWidth: null,
+      savedX: 0,
+    };
+    layout.savedWidth =
+      this.savedLayoutMode === 'below' ? layout.belowWidth : layout.inlineWidth;
+    layout.savedX =
+      this.savedLayoutMode === 'below' ? layout.belowX : layout.inlineX;
     const persistSettings = (): void => {
       void dataManager.saveGrassSettings(userId, {
         layoutMode: this.savedLayoutMode,
-        inlineWidth,
-        inlineXOffset: inlineX,
-        belowWidth,
-        belowXOffset: belowX,
+        inlineWidth: layout.inlineWidth,
+        inlineXOffset: layout.inlineX,
+        belowWidth: layout.belowWidth,
+        belowXOffset: layout.belowX,
       });
     };
 
-    // Panel's CSS min-width — fallback when the panel element isn't in the
-    // DOM yet (very first frame on a fresh page load).
+    // Panel's CSS min-width — fallback when the panel element isn't in
+    // the DOM yet (very first frame on a fresh page load).
     const HOURLY_PANEL_MIN_WIDTH = 310;
+    const {
+      measureNaturalWidth,
+      measureCurrentToDecWidth,
+      measureHourlyMinWidth,
+      resetCaches,
+    } = createGrassMeasurers({
+      container,
+      hourlyPanelMinWidth: HOURLY_PANEL_MIN_WIDTH,
+      getCurrentYear: () => this.currentYear,
+    });
 
-    // The *container* width needed to display the full 12-month heatmap
-    // without any horizontal scroll. This is the heatmap SVG's intrinsic
-    // width plus the day-labels column and horizontal padding that the
-    // container carries. Measured once after paint and cached so that
-    // resize/constraint logic never reads a stale scrollWidth from a
-    // container that's already been shrunk below the SVG's intrinsic size.
-    let cachedNaturalWidth: number | null = null;
-    const measureNaturalWidth = (): number | null => {
-      if (cachedNaturalWidth !== null) return cachedNaturalWidth;
-      const heatmapEl = container.querySelector(
-        '#cal-heatmap',
-      ) as HTMLElement | null;
-      if (!heatmapEl) return null;
-      // Measure the intrinsic 12-month span by reading the bounding
-      // boxes of CalHeatmap's `.ch-domain` groups — these are the
-      // per-month SVG containers. Using getBoundingClientRect on the
-      // first and last domain gives us the real rendered span
-      // regardless of CSS constraints on ancestor elements.
-      const domains = heatmapEl.querySelectorAll('.ch-domain');
-      if (domains.length === 0) return null;
-      const firstRect = domains[0].getBoundingClientRect();
-      const lastRect = domains[domains.length - 1].getBoundingClientRect();
-      const svgWidth = Math.ceil(lastRect.right - firstRect.left);
-      if (svgWidth <= 0) return null;
-      const labelsEl = container.querySelector(
-        '#gh-day-labels',
-      ) as HTMLElement | null;
-      let labelsWidth = 0;
-      if (labelsEl) {
-        const labelCS = getComputedStyle(labelsEl);
-        labelsWidth =
-          labelsEl.offsetWidth +
-          parseFloat(labelCS.marginLeft || '0') +
-          parseFloat(labelCS.marginRight || '0');
-      }
-      const cs = getComputedStyle(container);
-      const padH =
-        parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
-      cachedNaturalWidth = Math.ceil(svgWidth + labelsWidth + padH);
-      return cachedNaturalWidth;
-    };
-
-    // The container width needed to display from the current month to
-    // December without horizontal scroll. Used as the magnet-snap target
-    // so the graph "sticks" at the width where Dec's right edge is flush
-    // with the container edge. Falls back to naturalWidth when viewing a
-    // past year (scroll starts at Jan).
-    let cachedCurrentToDecWidth: number | null = null;
-    const measureCurrentToDecWidth = (): number | null => {
-      if (cachedCurrentToDecWidth !== null) return cachedCurrentToDecWidth;
-      const heatmapEl = container.querySelector(
-        '#cal-heatmap',
-      ) as HTMLElement | null;
-      if (!heatmapEl) return null;
-      const domains = heatmapEl.querySelectorAll('.ch-domain');
-      if (domains.length === 0) return null;
-
-      // For past years, scrollToCurrentMonth scrolls to Jan (index 0),
-      // so the snap target is the full natural width.
-      const isCurrentYear = this.currentYear === new Date().getFullYear();
-      const startIdx = isCurrentYear ? new Date().getMonth() : 0;
-      if (startIdx >= domains.length) return null;
-
-      const startRect = domains[startIdx].getBoundingClientRect();
-      const lastRect = domains[domains.length - 1].getBoundingClientRect();
-      const svgSpan = Math.ceil(lastRect.right - startRect.left);
-      if (svgSpan <= 0) return null;
-
-      // scrollToCurrentMonth offsets by 10px from the left edge
-      const scrollOffset = isCurrentYear ? 10 : 0;
-
-      const labelsEl = container.querySelector(
-        '#gh-day-labels',
-      ) as HTMLElement | null;
-      let labelsWidth = 0;
-      if (labelsEl) {
-        const labelCS = getComputedStyle(labelsEl);
-        labelsWidth =
-          labelsEl.offsetWidth +
-          parseFloat(labelCS.marginLeft || '0') +
-          parseFloat(labelCS.marginRight || '0');
-      }
-      const cs = getComputedStyle(container);
-      const padH =
-        parseFloat(cs.paddingLeft || '0') + parseFloat(cs.paddingRight || '0');
-      cachedCurrentToDecWidth = Math.ceil(
-        svgSpan + scrollOffset + labelsWidth + padH,
-      );
-      return cachedCurrentToDecWidth;
-    };
-
-    // Hourly Distribution panel uses `width: fit-content; min-width: 310px`
-    // so its offsetWidth is the real floor we want to enforce — if the
-    // heatmap narrows below the panel, the card stack looks asymmetric.
-    const measureHourlyMinWidth = (): number => {
-      const panel = document.getElementById('danbooru-grass-panel');
-      if (!panel) return HOURLY_PANEL_MIN_WIDTH;
-      const w = panel.offsetWidth;
-      return w > 0 ? w : HOURLY_PANEL_MIN_WIDTH;
-    };
-
-    // Constraints logic
-    const applyConstraints = () => {
-      const wrapperWidth = wrapper.offsetWidth;
-      const statsWidth = (stats as HTMLElement).offsetWidth;
-      const gap = 20;
-
-      // When savedLayoutMode is explicitly set, trust it — during a
-      // mode switch the browser may not have reflowed yet (the old
-      // container width keeps it physically wrapped), so the
-      // offsetTop check would report stale position and prevent the
-      // width from shrinking to fit beside stats. Only fall back to
-      // offsetTop detection when no explicit mode has been persisted
-      // (null = first visit or legacy user).
-      let isWrapped: boolean;
-      if (this.savedLayoutMode !== null) {
-        isWrapped = this.savedLayoutMode === 'below';
-      } else {
-        isWrapped = container.offsetTop > (stats as HTMLElement).offsetTop + 10;
-      }
-
-      let maxAvailableWidth;
-      if (isWrapped) {
-        maxAvailableWidth = wrapperWidth;
-      } else {
-        maxAvailableWidth = Math.max(300, wrapperWidth - statsWidth - gap);
-      }
-
-      // Floor: the Hourly panel's width, unless the viewport is narrower than
-      // the panel itself (mobile / small window) — then we yield to the
-      // viewport so the heatmap doesn't blow past what's available.
-      const hourlyMin = measureHourlyMinWidth();
-      const minWidth = Math.min(hourlyMin, maxAvailableWidth);
-
-      // Natural SVG width is the absolute ceiling — the container should
-      // never be wider than the 12-month heatmap regardless of what was
-      // saved (avoids empty space on the right).
-      const natural = measureNaturalWidth();
-      const naturalCap = natural ?? maxAvailableWidth;
-
-      if (savedWidth) {
-        const numericWidth = parseFloat(String(savedWidth));
-        const clampedWidth = Math.max(
-          minWidth,
-          Math.min(numericWidth, naturalCap, maxAvailableWidth),
-        );
-        container.style.flex = '0 0 auto';
-        container.style.width = `${clampedWidth}px`;
-
-        // Also clamp X to ensure it doesn't overflow right
-        const clampedX = Math.max(
-          0,
-          Math.min(savedX ?? 0, maxAvailableWidth - clampedWidth),
-        );
-        container.style.transform = `translateX(${clampedX}px)`;
-      } else {
-        // No saved width — fit to the heatmap's natural size (12 months),
-        // capped at maxAvailableWidth. In inline mode that's the space
-        // beside stats; in below mode (isWrapped) it's the full wrapper.
-        if (natural !== null) {
-          const target = Math.max(
-            minWidth,
-            Math.min(natural, maxAvailableWidth),
-          );
-          container.style.flex = '0 0 auto';
-          container.style.width = `${target}px`;
-        } else {
-          container.style.flex = '1';
-        }
-        container.style.transform = 'translateX(0px)';
-      }
-    };
+    const applyConstraints = createApplyConstraints({
+      container,
+      wrapper,
+      stats,
+      layout,
+      getSavedLayoutMode: () => this.savedLayoutMode,
+      measureNaturalWidth,
+      measureHourlyMinWidth,
+    });
 
     // Sync Hourly panel position/width with heatmap container
     const syncPanelPosition = () => {
@@ -406,11 +1107,11 @@ export class GraphRenderer {
       panel.style.marginLeft = xOffset > 0 ? `${xOffset}px` : '0';
     };
 
-    // Expose applyConstraints to the CalHeatmap paint callback below so it
-    // can re-run once the SVG is in the DOM and measureNaturalWidth() works.
+    // Expose applyConstraints to the CalHeatmap paint callback below so
+    // it can re-run once the SVG is in the DOM and measureNaturalWidth()
+    // works. resetCaches() drops the stale "no SVG yet" null caches.
     this.reapplyGraphConstraints = () => {
-      cachedNaturalWidth = null;
-      cachedCurrentToDecWidth = null;
+      resetCaches();
       applyConstraints();
       syncPanelPosition();
     };
@@ -421,443 +1122,11 @@ export class GraphRenderer {
       syncPanelPosition();
     }, 0);
 
-    // Re-apply on layout stabilization. The wrapper's offsetWidth can be 0
-    // (or smaller than its final value) on the very first frame, especially
-    // when the page is still hydrating. That used to cause savedWidth/xOffset
-    // to be clamped against an underestimated maxAvailableWidth and lock the
-    // graph at minWidth (300px) on the left. ResizeObserver fires whenever
-    // the wrapper's box size changes, so we re-run the constraint pass each
-    // time and stop once we've seen a sensible width settle.
-    if (typeof ResizeObserver !== 'undefined') {
-      let stableTicks = 0;
-      let lastWidth = 0;
-      const ro = new ResizeObserver(() => {
-        const w = wrapper.offsetWidth;
-        if (w <= 0) return;
-        applyConstraints();
-        syncPanelPosition();
-        if (w === lastWidth) {
-          stableTicks++;
-          // Two consecutive identical measurements → layout has settled
-          if (stableTicks >= 2) ro.disconnect();
-        } else {
-          stableTicks = 0;
-          lastWidth = w;
-        }
-      });
-      ro.observe(wrapper);
-      // Safety: always disconnect after 2s so we never observe forever
-      setTimeout(() => ro.disconnect(), 2000);
-    }
+    attachLayoutResizeObserver({wrapper, applyConstraints, syncPanelPosition});
 
     container.style.minWidth = '300px';
 
     // Resize & Move Logic
-    const createHandle = (
-      type: 'resize' | 'move',
-      side?: 'left' | 'right',
-    ): HTMLDivElement => {
-      const handle = document.createElement('div');
-      if (type === 'resize') {
-        // Background is faint by default — enough to hint at an interactive
-        // zone without distracting from the heatmap — and darkens on hover
-        // so the user can tell exactly where the drag target is. Rounded on
-        // the inside corners only (outside edge lives on the container edge).
-        const insideRadius = side === 'left' ? '0 8px 8px 0' : '8px 0 0 8px';
-        handle.style.cssText = `
-            position: absolute;
-            top: 0;
-            ${side}: -5px;
-            width: 10px;
-            height: 100%;
-            cursor: col-resize;
-            z-index: 101;
-            background: rgba(136, 136, 136, 0.08);
-            border-radius: ${insideRadius};
-            transition: background 0.15s ease;
-          `;
-        handle.addEventListener('mouseenter', () => {
-          handle.style.background = 'rgba(136, 136, 136, 0.25)';
-        });
-        handle.addEventListener('mouseleave', () => {
-          handle.style.background = 'rgba(136, 136, 136, 0.08)';
-        });
-      } else if (type === 'move') {
-        handle.style.cssText = `
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 30px;
-            height: 30px;
-            cursor: move;
-            z-index: 102;
-            background: rgba(136, 136, 136, 0.1);
-            border-bottom-right-radius: 8px;
-            border-top-left-radius: 8px;
-          `;
-      }
-
-      handle.onmousedown = e => {
-        e.preventDefault();
-        const startX = e.clientX;
-        const startY = e.clientY;
-        const startWidth = container.offsetWidth;
-        const startXOffset =
-          parseFloat(
-            container.style.transform.replace(/translateX\(|px\)/g, ''),
-          ) || 0;
-
-        // Vertical drag-to-reorder state (move handle only). A drop zone
-        // hint appears — and mode switches on mouseup — only if the user
-        // crosses ACTIVATION_THRESHOLD in the direction opposite the
-        // current layout mode. Pure horizontal drags are untouched.
-        //
-        // Hysteresis: activation requires 30px, but once committed the
-        // gesture stays active until the user pulls back within 10px of
-        // the origin (or reverses direction). Without hysteresis the
-        // user could drift back toward the handle — or release on the
-        // near edge of the hint itself (~27px above startY) — and
-        // deltaY would drop below threshold right at mouseup, silently
-        // cancelling the switch.
-        const ACTIVATION_THRESHOLD = 30;
-        const DEACTIVATION_THRESHOLD = 10;
-        // Determine the *visual* mode — not just savedLayoutMode —
-        // because the container may be naturally wrapped (flex-wrap)
-        // due to insufficient horizontal space (e.g. long Previous
-        // Names) even though savedLayoutMode is null/'inline'.
-        const visuallyBelow =
-          container.offsetTop > (stats as HTMLElement).offsetTop + 10;
-        const currentMode: 'inline' | 'below' =
-          this.savedLayoutMode === 'below' || visuallyBelow
-            ? 'below'
-            : 'inline';
-        let verticalIntent = false;
-        let candidateMode: 'inline' | 'below' = currentMode;
-
-        // Destination-bar hint: a glowing bar on the container edge
-        // in the drag direction. Positioned on the container itself
-        // so it's always visible near the move handle.
-        // Below → horizontal bar at container bottom edge
-        // Inline → horizontal bar at container top edge
-        let dropHint: HTMLDivElement | null = null;
-        let hintStyleEl: HTMLStyleElement | null = null;
-        const showDropHint = (mode: 'inline' | 'below'): void => {
-          if (!hintStyleEl) {
-            hintStyleEl = document.createElement('style');
-            hintStyleEl.id = 'di-drop-hint-keyframes';
-            hintStyleEl.textContent = `
-              @keyframes di-glow-pulse {
-                0%, 100% { opacity: 0.7; box-shadow: 0 0 6px 2px rgba(66,153,225,0.5); }
-                50%      { opacity: 1;   box-shadow: 0 0 14px 4px rgba(66,153,225,0.8); }
-              }
-            `;
-            document.head.appendChild(hintStyleEl);
-          }
-          if (!dropHint) {
-            dropHint = document.createElement('div');
-            dropHint.id = 'danbooru-grass-drop-hint';
-            dropHint.style.cssText = `
-                position: absolute;
-                left: 0;
-                width: 100%;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                pointer-events: none;
-                z-index: 10000;
-                transition: opacity 0.15s ease;
-              `;
-            const bar = document.createElement('div');
-            bar.style.cssText = `
-                width: 100%;
-                height: 3px;
-                background: rgba(66, 153, 225, 0.9);
-                border-radius: 2px;
-                animation: di-glow-pulse 1s ease-in-out infinite;
-              `;
-            bar.className = 'di-drop-bar';
-            const label = document.createElement('span');
-            label.className = 'di-drop-label';
-            label.style.cssText = `
-                font-size: 0.75em;
-                font-weight: 600;
-                color: rgba(66, 153, 225, 0.9);
-                margin: 2px 0;
-                white-space: nowrap;
-              `;
-            dropHint.appendChild(bar);
-            dropHint.appendChild(label);
-            container.appendChild(dropHint);
-          }
-          const label = dropHint.querySelector('.di-drop-label') as HTMLElement;
-          if (mode === 'below') {
-            // bar + label sit just below the container bottom edge
-            dropHint.style.flexDirection = 'column';
-            dropHint.style.bottom = '';
-            dropHint.style.top = `${container.offsetHeight + 4}px`;
-            label.textContent = 'Move to below ↓';
-          } else {
-            // label + bar sit just above the container top edge
-            dropHint.style.flexDirection = 'column-reverse';
-            dropHint.style.top = '';
-            dropHint.style.bottom = `${container.offsetHeight + 4}px`;
-            label.textContent = 'Move to side ↑';
-          }
-          dropHint.style.display = 'flex';
-          dropHint.style.opacity = '1';
-        };
-        const hideDropHint = (): void => {
-          if (dropHint) {
-            dropHint.style.opacity = '0';
-            dropHint.style.display = 'none';
-          }
-        };
-        const destroyDropHint = (): void => {
-          dropHint?.remove();
-          dropHint = null;
-          hintStyleEl?.remove();
-          hintStyleEl = null;
-        };
-
-        // Magnet-snap state: when the container width approaches the
-        // natural (full 12-month) width, it snaps to it and resists
-        // small movements in either direction (hysteresis). The user
-        // must drag past the threshold to break free.
-        const SNAP_THRESHOLD = 15;
-        const snapEnabled = this.settingsManager.getSnapToEdge();
-        let snappedToNat = false;
-
-        const onMouseMove = (mE: MouseEvent): void => {
-          const delta = mE.clientX - startX;
-
-          // Constraints
-          // Constraints
-          const wrapperWidth = wrapper.offsetWidth;
-          const statsWidth = (stats as HTMLElement).offsetWidth;
-          const gap = 20;
-
-          // Check if wrapped (Graph is below Stats)
-          const isWrapped =
-            container.offsetTop > (stats as HTMLElement).offsetTop + 10;
-
-          let maxAvailableWidth;
-          if (isWrapped) {
-            maxAvailableWidth = wrapperWidth;
-          } else {
-            maxAvailableWidth = Math.max(300, wrapperWidth - statsWidth - gap);
-          }
-
-          // Drag floor: the Hourly panel's rendered width (width below that
-          // would leave the card stack asymmetric with the panel jutting
-          // out). If the viewport is narrower than the panel we yield to
-          // the viewport instead so the drag doesn't stick.
-          const minWidth = Math.min(measureHourlyMinWidth(), maxAvailableWidth);
-
-          if (type === 'move') {
-            let newX = startXOffset + delta;
-            // Don't go left into stats, don't go right out of wrapper
-            newX = Math.max(0, Math.min(newX, maxAvailableWidth - startWidth));
-            container.style.transform = `translateX(${newX}px)`;
-
-            // Vertical intent: activated past ACTIVATION_THRESHOLD in the
-            // direction opposite the current layout. Once committed, the
-            // gesture stays active through small backoffs (hysteresis) —
-            // only the user clearly returning toward the origin
-            // (|deltaY| < DEACTIVATION_THRESHOLD) or reversing direction
-            // cancels it. Same-mode direction never activates so no hint
-            // flashes and no redundant save happens.
-            const deltaY = mE.clientY - startY;
-            if (!verticalIntent) {
-              if (Math.abs(deltaY) >= ACTIVATION_THRESHOLD) {
-                candidateMode = deltaY > 0 ? 'below' : 'inline';
-                verticalIntent = candidateMode !== currentMode;
-              }
-            } else {
-              const committedSign = candidateMode === 'below' ? 1 : -1;
-              const sameDirection = deltaY * committedSign > 0;
-              if (Math.abs(deltaY) < DEACTIVATION_THRESHOLD || !sameDirection) {
-                verticalIntent = false;
-                candidateMode = currentMode;
-              }
-            }
-            if (verticalIntent) showDropHint(candidateMode);
-            else hideDropHint();
-          } else if (type === 'resize') {
-            // Natural SVG width caps resize — no point making the
-            // container wider than the heatmap it holds.
-            const natCap = measureNaturalWidth() ?? maxAvailableWidth;
-            // Snap target: width from current month to December end.
-            // Falls back to natCap for past years (scroll starts at Jan).
-            const snapEdge = measureCurrentToDecWidth() ?? natCap;
-            if (side === 'right') {
-              const spaceRight = maxAvailableWidth - startXOffset;
-              const maxWidth = Math.min(natCap, spaceRight);
-              // Unclamped: bounded by available space, not by snapEdge
-              const unclamped = Math.max(
-                minWidth,
-                Math.min(startWidth + delta, maxWidth),
-              );
-
-              // Magnet snap: ±SNAP_THRESHOLD band around snapEdge.
-              // Enter when within band, exit when outside in either
-              // direction — so the user can expand past or shrink past.
-              if (snapEnabled && snapEdge <= maxWidth) {
-                if (
-                  !snappedToNat &&
-                  unclamped >= snapEdge - SNAP_THRESHOLD &&
-                  unclamped <= snapEdge + SNAP_THRESHOLD
-                ) {
-                  snappedToNat = true;
-                }
-                if (
-                  snappedToNat &&
-                  (unclamped < snapEdge - SNAP_THRESHOLD ||
-                    unclamped > snapEdge + SNAP_THRESHOLD)
-                ) {
-                  snappedToNat = false;
-                }
-              }
-              const newWidth = snappedToNat ? snapEdge : unclamped;
-
-              container.style.flex = '0 0 auto';
-              container.style.width = `${newWidth}px`;
-            } else if (side === 'left') {
-              // Expansion left is limited by XOffset reaching 0
-              const minDelta = -startXOffset;
-              const clampedDelta = Math.max(delta, minDelta);
-              const maxWidth = Math.min(natCap, maxAvailableWidth);
-              // Unclamped: bounded by natCap/available, not by snapEdge
-              const unclamped = Math.max(
-                minWidth,
-                Math.min(startWidth - clampedDelta, maxWidth),
-              );
-
-              // Magnet snap (same ±band as right handle)
-              if (snapEnabled && snapEdge <= maxWidth) {
-                if (
-                  !snappedToNat &&
-                  unclamped >= snapEdge - SNAP_THRESHOLD &&
-                  unclamped <= snapEdge + SNAP_THRESHOLD
-                ) {
-                  snappedToNat = true;
-                }
-                if (
-                  snappedToNat &&
-                  (unclamped < snapEdge - SNAP_THRESHOLD ||
-                    unclamped > snapEdge + SNAP_THRESHOLD)
-                ) {
-                  snappedToNat = false;
-                }
-              }
-              const newWidth = snappedToNat ? snapEdge : unclamped;
-
-              // If width hits minWidth, stop moving X
-              const finalDelta = startWidth - newWidth;
-              const newX = startXOffset + finalDelta;
-
-              container.style.flex = '0 0 auto';
-              container.style.width = `${newWidth}px`;
-              container.style.transform = `translateX(${newX}px)`;
-            }
-            this.scrollToCurrentMonth();
-          }
-          syncPanelPosition();
-        };
-
-        const onMouseUp = () => {
-          document.removeEventListener('mousemove', onMouseMove);
-          document.removeEventListener('mouseup', onMouseUp);
-          destroyDropHint();
-
-          // Commit mode change first so the persisted record below
-          // reflects the new layout. Re-running applyConstraints here
-          // also picks up the new isWrapped state after flex-basis flips.
-          const modeChanged =
-            type === 'move' && verticalIntent && candidateMode !== currentMode;
-          if (modeChanged) {
-            const columnWrapper = document.getElementById(
-              'danbooru-grass-column',
-            );
-            if (columnWrapper) {
-              // Set each longhand explicitly instead of relying on the
-              // shorthand + flex-basis override dance. Some CSSOM
-              // behaviour around `style.flexBasis = ''` after a prior
-              // `style.flex = '1'` can leave the basis in an undefined
-              // intermediate state that doesn't actually unwrap the row.
-              columnWrapper.style.setProperty('flex-grow', '1');
-              columnWrapper.style.setProperty('flex-shrink', '1');
-              columnWrapper.style.setProperty(
-                'flex-basis',
-                candidateMode === 'below' ? '100%' : '0%',
-              );
-            }
-            this.savedLayoutMode = candidateMode;
-
-            // Restore the target mode's persisted width/xOffset (or
-            // null/0 if the user hasn't customised this mode yet — then
-            // applyConstraints falls through to natural width). Any
-            // horizontal translateX accrued during this vertical drag
-            // is discarded intentionally, per the spec.
-            savedWidth = candidateMode === 'below' ? belowWidth : inlineWidth;
-            savedX = candidateMode === 'below' ? belowX : inlineX;
-
-            // Reset inline container styles so applyConstraints picks up
-            // the new savedWidth/savedX and writes a fresh layout. The
-            // alignSelf:flex-start trick is only needed when we're going
-            // to measure natural width (savedWidth === null); otherwise
-            // applyConstraints writes the saved width directly.
-            const needsNaturalMeasure = !savedWidth;
-            if (needsNaturalMeasure) {
-              container.style.alignSelf = 'flex-start';
-            }
-            container.style.width = '';
-            container.style.flex = '';
-            container.style.transform = '';
-            // Force a synchronous reflow before applyConstraints measures.
-            void container.offsetWidth;
-            applyConstraints();
-            if (needsNaturalMeasure) {
-              container.style.alignSelf = '';
-            }
-            // The restored per-mode width may be narrower than the
-            // heatmap's 12-month span (user previously shrunk via the
-            // resize handle), so re-align the horizontal scroll to the
-            // current month the same way a fresh paint does.
-            this.scrollToCurrentMonth();
-          } else {
-            // Non-mode-change drag (horizontal move or resize). Persist
-            // the new width + xOffset under the *current* mode so the
-            // other mode's saved values are untouched.
-            const finalX =
-              parseFloat(
-                container.style.transform.replace(/translateX\(|px\)/g, ''),
-              ) || 0;
-            const newWidthPx = parseFloat(container.style.width);
-            const nextWidth = Number.isFinite(newWidthPx) ? newWidthPx : null;
-            if (this.savedLayoutMode === 'below') {
-              belowWidth = nextWidth;
-              belowX = finalX;
-            } else {
-              inlineWidth = nextWidth;
-              inlineX = finalX;
-            }
-            savedWidth = nextWidth;
-            savedX = finalX;
-          }
-          // Fire-and-forget: persistence of layout settings on drag-end.
-          // Both branches (mode change and horizontal) need the full
-          // record written — saveGrassSettings is a Dexie `put` and any
-          // missing field is an effective delete.
-          persistSettings();
-          syncPanelPosition();
-        };
-
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
-      };
-      handle.className = 'di-grass-handle';
-      return handle;
-    };
 
     container.style.background = 'var(--card-background-color, #222)';
     container.style.padding = '15px';
@@ -873,10 +1142,39 @@ export class GraphRenderer {
         <div id="grass-loading" style="text-align:center; padding:20px; color:#888;">Initializing...</div>
       `;
 
-    // Append handles AFTER innerHTML to prevent them from being overwritten
-    container.appendChild(createHandle('resize', 'left'));
-    container.appendChild(createHandle('resize', 'right'));
-    container.appendChild(createHandle('move'));
+    // Append handles AFTER innerHTML to prevent them from being overwritten.
+    // The drag/resize/mode-switch logic lives in createGrassHandle below —
+    // extracted here so this method stays close to its declared role of
+    // "ensure the skeleton DOM exists".
+    const sharedHandleArgs = {
+      container,
+      wrapper,
+      stats,
+      layout,
+      measureNaturalWidth,
+      measureCurrentToDecWidth,
+      measureHourlyMinWidth,
+      applyConstraints,
+      syncPanelPosition,
+      persistSettings,
+    };
+    container.appendChild(
+      this.createGrassHandle({
+        type: 'resize',
+        side: 'left',
+        ...sharedHandleArgs,
+      }),
+    );
+    container.appendChild(
+      this.createGrassHandle({
+        type: 'resize',
+        side: 'right',
+        ...sharedHandleArgs,
+      }),
+    );
+    container.appendChild(
+      this.createGrassHandle({type: 'move', ...sharedHandleArgs}),
+    );
 
     // Apply Initial Theme
     const currentTheme = this.settingsManager.getTheme();
@@ -886,21 +1184,7 @@ export class GraphRenderer {
     this.populateSummaryGrid();
 
     // Create Tooltip Element globally
-    if (!document.getElementById('danbooru-grass-tooltip')) {
-      const tooltip = document.createElement('div');
-      tooltip.id = 'danbooru-grass-tooltip';
-      tooltip.style.position = 'absolute';
-      tooltip.style.padding = '8px';
-      tooltip.style.background = '#222';
-      tooltip.style.color = '#fff';
-      tooltip.style.borderRadius = '4px';
-      tooltip.style.border = '1px solid #444';
-      tooltip.style.pointerEvents = 'none';
-      tooltip.style.opacity = '0';
-      tooltip.style.zIndex = '99999';
-      tooltip.style.fontSize = '12px';
-      document.body.appendChild(tooltip);
-    }
+    ensureGlobalTooltip();
 
     return true;
   }
@@ -1295,6 +1579,988 @@ export class GraphRenderer {
    * @param {Function} onYearChange Callback for year change.
    * @param {Function} onRefresh Callback for refresh.
    */
+
+  /**
+   * Build the footer (settings button, details-toggle, settings popover,
+   * and the legend swatches). Idempotent — guarded by the
+   * `#danbooru-grass-footer` id check so re-renders don't stack chrome.
+   * Lives as a private method so it can use `this.settingsManager` /
+   * `this.db` / `this.populateSummaryGrid()` etc. without threading them
+   * through args.
+   */
+  // T-26 baseline: 203 LOC (3 over budget). Builds the footer row (settings
+  // button + collapsed-summary toggle + flyout popover + legend swatches +
+  // summary grid) as one DOM-construction sweep; the parts are coupled via
+  // event handlers on shared refs.
+  // eslint-disable-next-line max-lines-per-function
+  private buildGrassFooter(args: {
+    mainContainer: HTMLElement;
+    metric: string;
+    year: number;
+    userIdVal: string | number;
+    onYearChange: (year: number) => void;
+    onRefresh: () => void;
+  }): void {
+    const {mainContainer, metric, year, userIdVal, onYearChange, onRefresh} =
+      args;
+    if (document.getElementById('danbooru-grass-footer')) return;
+
+    const footer = document.createElement('div');
+    footer.id = 'danbooru-grass-footer';
+    footer.style.display = 'flex';
+    footer.style.justifyContent = 'space-between';
+    footer.style.alignItems = 'center';
+    footer.style.padding = '5px 20px 10px 0px';
+    footer.style.marginTop = '10px';
+    mainContainer.appendChild(footer);
+
+    // Container for Left Controls (Settings + Toggle)
+    const footerLeft = document.createElement('div');
+    footerLeft.style.display = 'flex';
+    footerLeft.style.alignItems = 'center';
+    footerLeft.style.gap = '8px';
+    footer.appendChild(footerLeft);
+
+    // 3.1 Settings Button (Left)
+    const settingsBtn = document.createElement('div');
+    settingsBtn.id = 'danbooru-grass-settings';
+    settingsBtn.title = 'Settings';
+    settingsBtn.style.cssText = `
+          padding: 2px 8px;
+          border: 1px solid #d0d7de;
+          border-radius: 6px;
+          background-color: #f6f8fa;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          color: #57606a;
+        `;
+    settingsBtn.innerHTML = `
+          <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;">
+            <path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.292.028 1.555.563l.566 1.142c.27.547.106 1.181-.394 1.524l-.904.621c-.056.038-.076.104-.076.17a8.7 8.7 0 0 0 0 1.018c0 .066.02.132.076.17l.904.62c.5.344.664.978.394 1.524l-.566 1.142c-.263.535-.91.74-1.555.563l-1.103-.303c-.066-.019-.176-.011-.299.071a6.8 6.8 0 0 1-.668.386c-.133.066-.194.158-.212.224l-.288 1.107c-.17.646-.716 1.196-1.461 1.26a8.2 8.2 0 0 1-.701.031 8.2 8.2 0 0 1-.701-.031c-.745-.064-1.29-.614-1.461-1.26l-.288-1.106c-.018-.066-.079-.158-.212-.224a6.8 6.8 0 0 1-.668-.386c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.292-.028-1.555-.563l-.566-1.142c-.27-.547-.106-1.181.394-1.524l.904-.621c.056-.038.076-.104.076-.17a8.7 8.7 0 0 0 0-1.018c0-.066-.02-.132-.076-.17l-.904-.62c-.5-.344-.664-.978-.394-1.524l.566-1.142c.263-.535.91-.74 1.555-.563l1.103.303c.066.019.176.011.299-.071.214-.143.437-.272.668-.386.133-.066.194-.158.212-.224l.288-1.107C6.71.645 7.256.095 8.001.031A8.2 8.2 0 0 1 8 0Zm-.571 1.525c-.036.003-.108.036-.123.098l-.289 1.106c-.17.643-.64 1.103-1.246 1.218a5.2 5.2 0 0 0-1.157.669c-.53.411-1.192.427-1.748.046l-.904-.621c-.055-.038-.135-.04-.158.006l-.566 1.142c-.023.047.013.109.055.137l.904.621a1.9 1.9 0 0 1 0 3.23l-.904.621c-.042.029-.078.09-.055.137l.566 1.142c.023.047.103.044.158.006l.904-.621c.556-.38 1.218-.365 1.748.046.348.27.753.496 1.157.669.606.115 1.076.575 1.246 1.218l.289 1.106c.015.062.087.095.123.098.36.031.725.031 1.082 0 .036-.003.108-.036.123-.098l.289-1.106c.17-.643.64-1.103 1.246-1.218.404-.173.809-.399 1.157-.669.53-.411 1.192-.427 1.748-.046l.904.621c.055.038.135.04.158-.006l.566-1.142c.023-.047-.013-.109-.055-.137l-.904-.621a1.9 1.9 0 0 1 0-3.23l.904-.621c.042-.029.078-.09.055-.137l-.566-1.142c-.023-.047-.103-.044-.158-.006l-.904.621c-.556.38-1.218.365-1.748-.046a5.2 5.2 0 0 0-1.157-.669c-.606-.115-1.076-.575-1.246-1.218l-.289-1.106c-.015-.062-.087-.095-.123-.098a6.5 6.5 0 0 0-1.082 0ZM8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"></path>
+          </svg>
+        `;
+    const onSettingsClose = (): void => {
+      if (typeof onYearChange === 'function') {
+        onYearChange(year);
+      }
+    };
+
+    settingsBtn.onmouseover = () => {
+      settingsBtn.style.backgroundColor = '#f6f8fa';
+      settingsBtn.style.filter = 'brightness(0.95)';
+    };
+    settingsBtn.onmouseout = () => {
+      settingsBtn.style.backgroundColor = '#f6f8fa';
+      settingsBtn.style.filter = '';
+    };
+    footerLeft.appendChild(settingsBtn);
+
+    // 3.1.2 Toggle Button (Chevron)
+    const toggleBtn = document.createElement('div');
+    toggleBtn.id = 'danbooru-grass-toggle-panel';
+    toggleBtn.title = 'Show Details';
+    toggleBtn.style.cssText = `
+          padding: 2px 8px;
+          border: 1px solid #d0d7de;
+          border-radius: 6px;
+          background-color: #f6f8fa;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          color: #57606a;
+        `;
+    const chevronDown =
+      '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;"><path d="M12.78 6.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L3.22 7.28a.75.75 0 0 1 1.06-1.06L8 9.94l3.72-3.72a.75.75 0 0 1 1.06 0Z"></path></svg>';
+    const chevronUp =
+      '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;"><path d="M3.22 9.78a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1-1.06 1.06L8 6.06 4.28 9.78a.75.75 0 0 1-1.06 0Z"></path></svg>';
+
+    toggleBtn.innerHTML = chevronDown;
+
+    toggleBtn.onmouseover = () => {
+      toggleBtn.style.backgroundColor = '#f6f8fa';
+      toggleBtn.style.filter = 'brightness(0.95)';
+    };
+    toggleBtn.onmouseout = () => {
+      toggleBtn.style.backgroundColor = '#f6f8fa';
+      toggleBtn.style.filter = '';
+    };
+
+    footerLeft.appendChild(toggleBtn);
+
+    // 3.1.3 Panel Container - Restructure for correct alignment
+    let columnWrapper = document.getElementById('danbooru-grass-column');
+    if (!columnWrapper) {
+      if (mainContainer.parentNode) {
+        columnWrapper = document.createElement('div');
+        columnWrapper.id = 'danbooru-grass-column';
+        columnWrapper.style.display = 'flex';
+        columnWrapper.style.flexDirection = 'column';
+        // Set flex longhands explicitly so the below↔inline toggle can
+        // override `flex-basis` without fighting a shorthand declaration.
+        columnWrapper.style.flexGrow = '1';
+        columnWrapper.style.flexShrink = '1';
+        columnWrapper.style.flexBasis = '0%';
+        columnWrapper.style.minWidth = '300px';
+
+        // Insert wrapper where mainContainer is
+        mainContainer.parentNode.insertBefore(columnWrapper, mainContainer);
+        columnWrapper.appendChild(mainContainer);
+
+        // Note: do NOT force `mainContainer.style.width = '100%'` here.
+        // The user's saved width/xOffset (applied earlier by
+        // applyConstraints) must be preserved. The column flex wrapper
+        // already gives mainContainer a sensible default through its own
+        // flex: 1 + minWidth: 300px, so an explicit override is unnecessary
+        // and would clobber the px value the user picked via the resize
+        // handle.
+      }
+    }
+    // Apply persisted vertical layout: 'below' forces the column to wrap
+    // onto its own flex row (stats above, grass below). Reverting to
+    // 0% basis restores the default "take remaining row space beside
+    // stats" behaviour.
+    if (columnWrapper) {
+      columnWrapper.style.flexBasis =
+        this.savedLayoutMode === 'below' ? '100%' : '0%';
+    }
+
+    let panel = document.getElementById('danbooru-grass-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'danbooru-grass-panel';
+      panel.style.cssText = `
+                width: fit-content;
+                min-width: 310px;
+                background: var(--grass-bg, #fff);
+                border: 1px solid #d0d7de;
+                border-radius: 8px;
+                margin-top: 10px;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+
+                /* Animation Styles */
+                height: 0;
+                opacity: 0;
+                padding: 0 10px;
+                overflow: hidden;
+                transition: height 0.3s ease, opacity 0.3s ease, padding 0.3s ease;
+                display: block;
+            `;
+      if (columnWrapper) {
+        columnWrapper.appendChild(panel);
+      } else {
+        mainContainer.parentNode?.appendChild(panel);
+      }
+    }
+
+    if (panel) {
+      this.populateSummaryGrid();
+    }
+
+    // Toggle Logic
+    let isExpanded = false;
+    toggleBtn.onclick = () => {
+      isExpanded = !isExpanded;
+      if (isExpanded) {
+        panel.style.height = '150px';
+        panel.style.opacity = '1';
+        panel.style.padding = '10px';
+        toggleBtn.innerHTML = chevronUp;
+        toggleBtn.title = 'Hide Details';
+      } else {
+        panel.style.height = '0';
+        panel.style.opacity = '0';
+        panel.style.padding = '0 10px';
+        toggleBtn.innerHTML = chevronDown;
+        toggleBtn.title = 'Show Details';
+      }
+    };
+
+    // 3.1.5 Settings Popover
+    const {
+      popover,
+      close: closeSettings,
+      refresh: refreshSettings,
+    } = createSettingsPopover({
+      settingsManager: this.settingsManager,
+      db: this.db,
+      metric,
+      settingsBtn,
+      targetUserId: String(userIdVal),
+      closeSettings: onSettingsClose,
+      onRefresh,
+    });
+
+    settingsBtn.onclick = e => {
+      const current = popover.style.display;
+      if (current === 'block') {
+        closeSettings();
+      } else {
+        // Pull the latest settings before showing — they may have
+        // changed via the auto-tune suggestion toast while the popover
+        // was closed. Also align the metric dropdown to whatever the
+        // user is currently viewing in the main grass.
+        refreshSettings(this.currentMetric);
+        const btnRect = settingsBtn.getBoundingClientRect();
+        popover.style.left = btnRect.left + 'px';
+        popover.style.top = btnRect.bottom + 4 + 'px';
+        popover.style.display = 'block';
+      }
+      e.stopPropagation();
+    };
+
+    document.body.appendChild(popover);
+
+    // 3.2 Legend (Right)
+    const legend = document.createElement('div');
+    legend.id = 'danbooru-grass-legend';
+    legend.style.display = 'flex';
+    legend.style.justifyContent = 'flex-end';
+    legend.style.alignItems = 'center';
+    legend.style.fontSize = '10px';
+    legend.style.color = 'var(--grass-text, #57606a)';
+    legend.style.gap = '4px';
+
+    // Custom Thresholds Logic (Empty + 4 Levels). Colors[0]=Empty (<T1),
+    // Colors[1]=L1 (>=T1), … Colors[4]=L4 (>=T4).
+    const colors = [
+      'var(--grass-level-0)',
+      'var(--grass-level-1)',
+      'var(--grass-level-2)',
+      'var(--grass-level-3)',
+      'var(--grass-level-4)',
+    ];
+    const rects = colors
+      .map(
+        c =>
+          `<div style="width:10px; height:10px; background:${c}; border-radius:2px;"></div>`,
+      )
+      .join('');
+
+    legend.innerHTML = `
+          <span style="margin-right:4px;">Less</span>
+          ${rects}
+          <span style="margin-left:4px;">More</span>
+        `;
+    footer.appendChild(legend);
+  }
+
+  /**
+   * Wire mouseover / click / touch handlers on every painted `#cal-heatmap
+   * rect` plus the matching tooltip swap. Called from renderGraph's
+   * post-paint setTimeout once CalHeatmap has inserted its SVG into the
+   * DOM. Mobile two-step tap: tap cell → tooltip; tap tooltip → navigate.
+   */
+  private attachCellInteractions(args: {
+    tooltip: D3GrassTooltip;
+    isTouch: boolean;
+    metric: string;
+    userIdVal: string | number;
+    getUrl: (date: string, count: number) => string | null;
+  }): void {
+    const {tooltip, isTouch, metric, userIdVal, getUrl} = args;
+    if (isTouch) {
+      tooltip.style('pointer-events', 'auto').style('cursor', 'pointer');
+    }
+
+    // Two-step tap controller for mobile CalHeatmap cells
+    const calTap = isTouch
+      ? createTwoStepTap<CalHeatmapDatum>({
+          insideElements: () => [
+            tooltip.node() as Element | null,
+            document.getElementById('cal-heatmap-scroll'),
+          ],
+          onFirstTap: () => {
+            // Tooltip shown in touchstart handler (needs touch coordinates)
+          },
+          onSecondTap: datum => {
+            const count = datum.v ?? 0;
+            const dateStr = new Date(datum.t).toISOString().split('T')[0];
+            if (metric === 'approvals' && count > 0) {
+              const node = tooltip.node() as HTMLElement | null;
+              const rect = node?.getBoundingClientRect();
+              const pageX = (rect?.left ?? 0) + window.scrollX;
+              const pageY = (rect?.bottom ?? 0) + window.scrollY;
+              const synthetic = {pageX, pageY} as MouseEvent;
+              void this.showApprovalsDetail(dateStr, userIdVal, synthetic);
+              tooltip.style('opacity', 0);
+              return;
+            }
+            const link = getUrl(dateStr, count);
+            if (link && link !== '#') window.open(link, '_blank');
+            tooltip.style('opacity', 0);
+          },
+          onReset: () => {
+            tooltip.style('opacity', 0);
+          },
+        })
+      : null;
+
+    d3.selectAll('#cal-heatmap-scroll rect')
+      .attr('rx', 2)
+      .attr('ry', 2)
+      .on('mouseover', function (event, d) {
+        const datum = d || d3.select(this).datum();
+        if (!datum || !(datum as CalHeatmapDatum).t) return;
+
+        const count = (datum as CalHeatmapDatum).v ?? 0;
+        const dateStr = new Date((datum as CalHeatmapDatum).t)
+          .toISOString()
+          .split('T')[0];
+
+        updateGrassTooltip(
+          tooltip,
+          event,
+          `<strong>${dateStr}</strong>, ${count} ${metric}`,
+        );
+      })
+      .on('mouseout', () => tooltip.style('opacity', 0))
+      .on('click', (event, d) => {
+        if (isTouch) return; // Mobile: click disabled, navigation via tooltip
+        const datum = d;
+        if (!datum || !(datum as CalHeatmapDatum).t) {
+          return;
+        }
+
+        const count = (datum as CalHeatmapDatum).v ?? 0;
+        const dateStr = new Date((datum as CalHeatmapDatum).t)
+          .toISOString()
+          .split('T')[0];
+
+        if (metric === 'approvals' && count > 0) {
+          void this.showApprovalsDetail(dateStr, userIdVal, event);
+        } else {
+          const link = getUrl(dateStr, count);
+          if (link) window.open(link, '_blank');
+        }
+      });
+
+    if (calTap) {
+      // Tap-only tooltip: record touch start position, fire tap only
+      // when the finger hasn't moved (≤10px). Drags scroll normally.
+      const TAP_THRESHOLD = 10;
+      let touchStartX = 0;
+      let touchStartY = 0;
+      let wasDrag = false;
+
+      d3.selectAll('#cal-heatmap-scroll rect')
+        .on('touchstart', (event: TouchEvent) => {
+          const touch = event.touches[0];
+          touchStartX = touch.clientX;
+          touchStartY = touch.clientY;
+          wasDrag = false;
+        })
+        .on('touchmove', () => {
+          wasDrag = true;
+        })
+        .on('touchend', (event: TouchEvent) => {
+          if (wasDrag) {
+            const touch = event.changedTouches[0];
+            const dx = touch.clientX - touchStartX;
+            const dy = touch.clientY - touchStartY;
+            if (dx * dx + dy * dy > TAP_THRESHOLD * TAP_THRESHOLD) return;
+          }
+          // Tap detected — resolve target from start position
+          const target = document.elementFromPoint(touchStartX, touchStartY);
+          if (!target) return;
+          const datum = d3.select(target).datum() as CalHeatmapDatum;
+          if (!datum || !datum.t) return;
+
+          calTap.tap(datum);
+          const count = datum.v ?? 0;
+          const dateStr = new Date(datum.t).toISOString().split('T')[0];
+          updateGrassTooltipTouch(
+            tooltip,
+            {
+              pageX: touchStartX + window.scrollX,
+              pageY: touchStartY + window.scrollY,
+              clientX: touchStartX,
+              clientY: touchStartY,
+            } as Touch,
+            `<strong>${dateStr}</strong>, ${count} ${metric}`,
+          );
+        });
+
+      // Tooltip tap → navigate via controller
+      tooltip.on('click', () => {
+        calTap.navigateActive();
+      });
+    }
+  }
+
+  /**
+   * Wire mouseover/tap handlers on the 5 legend swatches showing the
+   * threshold ranges. Touch path uses TapTracker so taps don't double-fire
+   * with synthetic clicks; desktop path uses plain mouseover.
+   */
+  private attachLegendInteractions(args: {
+    tooltip: D3GrassTooltip;
+    isTouch: boolean;
+    metric: string;
+    userIdVal: string | number;
+  }): void {
+    const {tooltip, isTouch, metric, userIdVal} = args;
+    const t = this.settingsManager.getThresholdsForView(
+      String(userIdVal),
+      metric as import('../types').Metric,
+    );
+    const legendThresholds = [
+      `${t[0] > 1 ? `0-${t[0] - 1}` : '0'} (Less)`,
+      `${t[0]}-${t[1] - 1}`,
+      `${t[1]}-${t[2] - 1}`,
+      `${t[2]}-${t[3] - 1}`,
+      `${t[3]}+ (More)`,
+    ];
+
+    // Tear down any prior legend wiring first — fast threshold edits
+    // trigger rapid re-renders, and stacked touch listeners would
+    // double-fire taps.
+    this.legendTouchAbort?.abort();
+    this.legendTouchAbort = null;
+    this.legendTap?.destroy();
+    this.legendTap = null;
+
+    const legendDivs = d3.selectAll('#danbooru-grass-legend > div');
+
+    if (isTouch) {
+      // Expand hit area on touch — visual swatch stays 10×10 thanks to
+      // box-sizing: content-box. Total tap rect ≈ 24×24.
+      legendDivs.each(function () {
+        const el = this as HTMLElement;
+        el.style.padding = '7px';
+        el.style.boxSizing = 'content-box';
+      });
+
+      this.legendTouchAbort = new AbortController();
+      const legendSignal = this.legendTouchAbort.signal;
+      const tooltipEl = document.getElementById('danbooru-grass-tooltip');
+
+      this.legendTap = createTwoStepTap<number>({
+        insideElements: () => [
+          document.getElementById('danbooru-grass-legend'),
+          document.getElementById('danbooru-grass-tooltip'),
+        ],
+        onFirstTap: i => {
+          if (!tooltipEl) return;
+          tooltipEl.style.opacity = '1';
+          tooltipEl.innerHTML = legendThresholds[i];
+          const swatchEl = document.querySelectorAll(
+            '#danbooru-grass-legend > div',
+          )[i] as HTMLElement | undefined;
+          if (swatchEl) {
+            this.positionTooltipAboveCell(
+              tooltipEl,
+              swatchEl.getBoundingClientRect(),
+            );
+          }
+        },
+        // Legend has no navigation — same-swatch re-tap is a no-op
+        // so the range tooltip persists until the user taps elsewhere
+        // or outside.
+        onSecondTap: () => {
+          if (tooltipEl) tooltipEl.style.opacity = '0';
+        },
+        onReset: () => {
+          if (tooltipEl) tooltipEl.style.opacity = '0';
+        },
+        navigateOnSameTap: false,
+      });
+
+      const tap = this.legendTap;
+      legendDivs.each(function (_d, i) {
+        if (i < legendThresholds.length) {
+          const el = this as HTMLElement;
+          const tracker = new TapTracker();
+          el.addEventListener(
+            'touchstart',
+            e => tracker.onTouchStart(e as TouchEvent),
+            {passive: true, signal: legendSignal},
+          );
+          el.addEventListener(
+            'touchmove',
+            e => tracker.onTouchMove(e as TouchEvent),
+            {passive: true, signal: legendSignal},
+          );
+          el.addEventListener(
+            'touchend',
+            e => {
+              if (tracker.onTouchEnd(e as TouchEvent)) tap.tap(i);
+            },
+            {signal: legendSignal},
+          );
+        }
+      });
+    } else {
+      // Desktop: hover-only.
+      legendDivs.each(function (_d, i) {
+        if (i >= 0 && i < legendThresholds.length) {
+          d3.select(this)
+            .on('mouseover', event => {
+              updateGrassTooltip(tooltip, event, legendThresholds[i]);
+            })
+            .on('mouseout', () => tooltip.style('opacity', 0));
+        }
+      });
+    }
+  }
+
+  /**
+   * Build one of the three drag handles attached to the grass container:
+   * - 'resize'+'left' and 'resize'+'right': horizontal width drag with
+   *   optional magnet-snap to the current-month→December edge.
+   * - 'move': horizontal X drag PLUS a vertical drag-to-reorder gesture
+   *   that swaps the layout between 'inline' (side-by-side with stats)
+   *   and 'below' (full-width row under stats), with a glowing drop-zone
+   *   hint and hysteresis so small backoffs don't cancel the commit.
+   *
+   * `args.layout` is shared mutable state: the drag handlers update its
+   * inline/below per-mode geometry and the active `savedWidth`/`savedX`
+   * pair on mouseup, which `persistSettings` then writes to IndexedDB.
+   */
+  // T-26 baseline: 320 LOC. resize-left / resize-right / move handlers
+  // share the mouse-event lifecycle and the GrassLayout struct closure
+  // (T-24 archive details). Splitting further would either duplicate the
+  // mousedown/mousemove/mouseup boilerplate or invent a comparator
+  // class — both worse than the current factory shape.
+  // eslint-disable-next-line max-lines-per-function
+  private createGrassHandle(args: {
+    type: 'resize' | 'move';
+    side?: 'left' | 'right';
+    container: HTMLElement;
+    wrapper: HTMLElement;
+    stats: Element;
+    layout: GrassLayout;
+    measureNaturalWidth: () => number | null;
+    measureCurrentToDecWidth: () => number | null;
+    measureHourlyMinWidth: () => number;
+    applyConstraints: () => void;
+    syncPanelPosition: () => void;
+    persistSettings: () => void;
+  }): HTMLDivElement {
+    const {
+      type,
+      side,
+      container,
+      wrapper,
+      stats,
+      layout,
+      measureNaturalWidth,
+      measureCurrentToDecWidth,
+      measureHourlyMinWidth,
+      applyConstraints,
+      syncPanelPosition,
+      persistSettings,
+    } = args;
+
+    const handle = document.createElement('div');
+    if (type === 'resize') {
+      // Background is faint by default — enough to hint at an interactive
+      // zone without distracting from the heatmap — and darkens on hover
+      // so the user can tell exactly where the drag target is. Rounded on
+      // the inside corners only (outside edge lives on the container edge).
+      const insideRadius = side === 'left' ? '0 8px 8px 0' : '8px 0 0 8px';
+      handle.style.cssText = `
+            position: absolute;
+            top: 0;
+            ${side}: -5px;
+            width: 10px;
+            height: 100%;
+            cursor: col-resize;
+            z-index: 101;
+            background: rgba(136, 136, 136, 0.08);
+            border-radius: ${insideRadius};
+            transition: background 0.15s ease;
+          `;
+      handle.addEventListener('mouseenter', () => {
+        handle.style.background = 'rgba(136, 136, 136, 0.25)';
+      });
+      handle.addEventListener('mouseleave', () => {
+        handle.style.background = 'rgba(136, 136, 136, 0.08)';
+      });
+    } else if (type === 'move') {
+      handle.style.cssText = `
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 30px;
+            height: 30px;
+            cursor: move;
+            z-index: 102;
+            background: rgba(136, 136, 136, 0.1);
+            border-bottom-right-radius: 8px;
+            border-top-left-radius: 8px;
+          `;
+    }
+
+    // T-26 baseline: arrow 254 LOC. The mousedown handler owns the entire
+    // drag session (snapshot start state + onMouseMove + onMouseUp + commit
+    // mode-switch). Inseparable from its closed-over startX/startY/etc.
+    // eslint-disable-next-line max-lines-per-function
+    handle.onmousedown = e => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startWidth = container.offsetWidth;
+      const startXOffset =
+        parseFloat(
+          container.style.transform.replace(/translateX\(|px\)/g, ''),
+        ) || 0;
+
+      // Vertical drag-to-reorder state (move handle only). A drop zone
+      // hint appears — and mode switches on mouseup — only if the user
+      // crosses ACTIVATION_THRESHOLD in the direction opposite the
+      // current layout mode. Pure horizontal drags are untouched.
+      //
+      // Hysteresis: activation requires 30px, but once committed the
+      // gesture stays active until the user pulls back within 10px of
+      // the origin (or reverses direction). Without hysteresis the
+      // user could drift back toward the handle — or release on the
+      // near edge of the hint itself (~27px above startY) — and
+      // deltaY would drop below threshold right at mouseup, silently
+      // cancelling the switch.
+      const ACTIVATION_THRESHOLD = 30;
+      const DEACTIVATION_THRESHOLD = 10;
+      // Determine the *visual* mode — not just savedLayoutMode —
+      // because the container may be naturally wrapped (flex-wrap)
+      // due to insufficient horizontal space (e.g. long Previous
+      // Names) even though savedLayoutMode is null/'inline'.
+      const visuallyBelow =
+        container.offsetTop > (stats as HTMLElement).offsetTop + 10;
+      const currentMode: 'inline' | 'below' =
+        this.savedLayoutMode === 'below' || visuallyBelow ? 'below' : 'inline';
+      let verticalIntent = false;
+      let candidateMode: 'inline' | 'below' = currentMode;
+
+      // Destination-bar hint: a glowing bar on the container edge in
+      // the drag direction. Positioned on the container itself so it's
+      // always visible near the move handle. Below → bar at container
+      // bottom edge; Inline → bar at container top edge.
+      let dropHint: HTMLDivElement | null = null;
+      let hintStyleEl: HTMLStyleElement | null = null;
+      const showDropHint = (mode: 'inline' | 'below'): void => {
+        if (!hintStyleEl) {
+          hintStyleEl = document.createElement('style');
+          hintStyleEl.id = 'di-drop-hint-keyframes';
+          hintStyleEl.textContent = `
+              @keyframes di-glow-pulse {
+                0%, 100% { opacity: 0.7; box-shadow: 0 0 6px 2px rgba(66,153,225,0.5); }
+                50%      { opacity: 1;   box-shadow: 0 0 14px 4px rgba(66,153,225,0.8); }
+              }
+            `;
+          document.head.appendChild(hintStyleEl);
+        }
+        if (!dropHint) {
+          dropHint = document.createElement('div');
+          dropHint.id = 'danbooru-grass-drop-hint';
+          dropHint.style.cssText = `
+                position: absolute;
+                left: 0;
+                width: 100%;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                pointer-events: none;
+                z-index: 10000;
+                transition: opacity 0.15s ease;
+              `;
+          const bar = document.createElement('div');
+          bar.style.cssText = `
+                width: 100%;
+                height: 3px;
+                background: rgba(66, 153, 225, 0.9);
+                border-radius: 2px;
+                animation: di-glow-pulse 1s ease-in-out infinite;
+              `;
+          bar.className = 'di-drop-bar';
+          const label = document.createElement('span');
+          label.className = 'di-drop-label';
+          label.style.cssText = `
+                font-size: 0.75em;
+                font-weight: 600;
+                color: rgba(66, 153, 225, 0.9);
+                margin: 2px 0;
+                white-space: nowrap;
+              `;
+          dropHint.appendChild(bar);
+          dropHint.appendChild(label);
+          container.appendChild(dropHint);
+        }
+        const label = dropHint.querySelector('.di-drop-label') as HTMLElement;
+        if (mode === 'below') {
+          // bar + label sit just below the container bottom edge
+          dropHint.style.flexDirection = 'column';
+          dropHint.style.bottom = '';
+          dropHint.style.top = `${container.offsetHeight + 4}px`;
+          label.textContent = 'Move to below ↓';
+        } else {
+          // label + bar sit just above the container top edge
+          dropHint.style.flexDirection = 'column-reverse';
+          dropHint.style.top = '';
+          dropHint.style.bottom = `${container.offsetHeight + 4}px`;
+          label.textContent = 'Move to side ↑';
+        }
+        dropHint.style.display = 'flex';
+        dropHint.style.opacity = '1';
+      };
+      const hideDropHint = (): void => {
+        if (dropHint) {
+          dropHint.style.opacity = '0';
+          dropHint.style.display = 'none';
+        }
+      };
+      const destroyDropHint = (): void => {
+        dropHint?.remove();
+        dropHint = null;
+        hintStyleEl?.remove();
+        hintStyleEl = null;
+      };
+
+      // Magnet-snap state: when the container width approaches the
+      // natural (full 12-month) width, it snaps to it and resists small
+      // movements in either direction (hysteresis). The user must drag
+      // past the threshold to break free.
+      const SNAP_THRESHOLD = 15;
+      const snapEnabled = this.settingsManager.getSnapToEdge();
+      let snappedToNat = false;
+
+      // T-26 baseline: arrow complexity 33. Vertical-drag mode-switch
+      // (inline ↔ below) × horizontal snap-to-edge × wrapping detection ×
+      // bounds enforcement, all inside one move handler so the user sees
+      // a single continuous gesture. Decomposition would require sharing
+      // ~12 mutable closure variables across helpers.
+      // eslint-disable-next-line complexity
+      const onMouseMove = (mE: MouseEvent): void => {
+        const delta = mE.clientX - startX;
+
+        const wrapperWidth = wrapper.offsetWidth;
+        const statsWidth = (stats as HTMLElement).offsetWidth;
+        const gap = 20;
+
+        const isWrapped =
+          container.offsetTop > (stats as HTMLElement).offsetTop + 10;
+
+        let maxAvailableWidth;
+        if (isWrapped) {
+          maxAvailableWidth = wrapperWidth;
+        } else {
+          maxAvailableWidth = Math.max(300, wrapperWidth - statsWidth - gap);
+        }
+
+        // Drag floor: the Hourly panel's rendered width (anything below
+        // it would leave the card stack asymmetric with the panel
+        // jutting out). If the viewport is narrower than the panel we
+        // yield to the viewport instead so the drag doesn't stick.
+        const minWidth = Math.min(measureHourlyMinWidth(), maxAvailableWidth);
+
+        if (type === 'move') {
+          let newX = startXOffset + delta;
+          newX = Math.max(0, Math.min(newX, maxAvailableWidth - startWidth));
+          container.style.transform = `translateX(${newX}px)`;
+
+          // Vertical intent: activated past ACTIVATION_THRESHOLD in the
+          // direction opposite the current layout. Once committed, the
+          // gesture stays active through small backoffs (hysteresis) —
+          // only the user clearly returning toward the origin
+          // (|deltaY| < DEACTIVATION_THRESHOLD) or reversing direction
+          // cancels it. Same-mode direction never activates so no hint
+          // flashes and no redundant save happens.
+          const deltaY = mE.clientY - startY;
+          if (!verticalIntent) {
+            if (Math.abs(deltaY) >= ACTIVATION_THRESHOLD) {
+              candidateMode = deltaY > 0 ? 'below' : 'inline';
+              verticalIntent = candidateMode !== currentMode;
+            }
+          } else {
+            const committedSign = candidateMode === 'below' ? 1 : -1;
+            const sameDirection = deltaY * committedSign > 0;
+            if (Math.abs(deltaY) < DEACTIVATION_THRESHOLD || !sameDirection) {
+              verticalIntent = false;
+              candidateMode = currentMode;
+            }
+          }
+          if (verticalIntent) showDropHint(candidateMode);
+          else hideDropHint();
+        } else if (type === 'resize') {
+          // Natural SVG width caps resize — no point making the
+          // container wider than the heatmap it holds.
+          const natCap = measureNaturalWidth() ?? maxAvailableWidth;
+          // Snap target: width from current month to December end.
+          // Falls back to natCap for past years (scroll starts at Jan).
+          const snapEdge = measureCurrentToDecWidth() ?? natCap;
+          if (side === 'right') {
+            const spaceRight = maxAvailableWidth - startXOffset;
+            const maxWidth = Math.min(natCap, spaceRight);
+            // Unclamped: bounded by available space, not by snapEdge
+            const unclamped = Math.max(
+              minWidth,
+              Math.min(startWidth + delta, maxWidth),
+            );
+
+            // Magnet snap: ±SNAP_THRESHOLD band around snapEdge. Enter
+            // when within band, exit when outside in either direction —
+            // so the user can expand past or shrink past.
+            if (snapEnabled && snapEdge <= maxWidth) {
+              if (
+                !snappedToNat &&
+                unclamped >= snapEdge - SNAP_THRESHOLD &&
+                unclamped <= snapEdge + SNAP_THRESHOLD
+              ) {
+                snappedToNat = true;
+              }
+              if (
+                snappedToNat &&
+                (unclamped < snapEdge - SNAP_THRESHOLD ||
+                  unclamped > snapEdge + SNAP_THRESHOLD)
+              ) {
+                snappedToNat = false;
+              }
+            }
+            const newWidth = snappedToNat ? snapEdge : unclamped;
+
+            container.style.flex = '0 0 auto';
+            container.style.width = `${newWidth}px`;
+          } else if (side === 'left') {
+            // Expansion left is limited by XOffset reaching 0
+            const minDelta = -startXOffset;
+            const clampedDelta = Math.max(delta, minDelta);
+            const maxWidth = Math.min(natCap, maxAvailableWidth);
+            const unclamped = Math.max(
+              minWidth,
+              Math.min(startWidth - clampedDelta, maxWidth),
+            );
+
+            if (snapEnabled && snapEdge <= maxWidth) {
+              if (
+                !snappedToNat &&
+                unclamped >= snapEdge - SNAP_THRESHOLD &&
+                unclamped <= snapEdge + SNAP_THRESHOLD
+              ) {
+                snappedToNat = true;
+              }
+              if (
+                snappedToNat &&
+                (unclamped < snapEdge - SNAP_THRESHOLD ||
+                  unclamped > snapEdge + SNAP_THRESHOLD)
+              ) {
+                snappedToNat = false;
+              }
+            }
+            const newWidth = snappedToNat ? snapEdge : unclamped;
+
+            // If width hits minWidth, stop moving X
+            const finalDelta = startWidth - newWidth;
+            const newX = startXOffset + finalDelta;
+
+            container.style.flex = '0 0 auto';
+            container.style.width = `${newWidth}px`;
+            container.style.transform = `translateX(${newX}px)`;
+          }
+          this.scrollToCurrentMonth();
+        }
+        syncPanelPosition();
+      };
+
+      const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        destroyDropHint();
+
+        // Commit mode change first so the persisted record below
+        // reflects the new layout. Re-running applyConstraints here
+        // also picks up the new isWrapped state after flex-basis flips.
+        const modeChanged =
+          type === 'move' && verticalIntent && candidateMode !== currentMode;
+        if (modeChanged) {
+          const columnWrapper = document.getElementById(
+            'danbooru-grass-column',
+          );
+          if (columnWrapper) {
+            // Set each longhand explicitly instead of relying on the
+            // shorthand + flex-basis override dance. Some CSSOM
+            // behaviour around `style.flexBasis = ''` after a prior
+            // `style.flex = '1'` can leave the basis in an undefined
+            // intermediate state that doesn't actually unwrap the row.
+            columnWrapper.style.setProperty('flex-grow', '1');
+            columnWrapper.style.setProperty('flex-shrink', '1');
+            columnWrapper.style.setProperty(
+              'flex-basis',
+              candidateMode === 'below' ? '100%' : '0%',
+            );
+          }
+          this.savedLayoutMode = candidateMode;
+
+          // Restore the target mode's persisted width/xOffset (or null/0
+          // if the user hasn't customised this mode yet — then
+          // applyConstraints falls through to natural width). Any
+          // horizontal translateX accrued during this vertical drag is
+          // discarded intentionally, per the spec.
+          layout.savedWidth =
+            candidateMode === 'below' ? layout.belowWidth : layout.inlineWidth;
+          layout.savedX =
+            candidateMode === 'below' ? layout.belowX : layout.inlineX;
+
+          // Reset inline container styles so applyConstraints picks up
+          // the new savedWidth/savedX and writes a fresh layout. The
+          // alignSelf:flex-start trick is only needed when we're going
+          // to measure natural width (savedWidth === null); otherwise
+          // applyConstraints writes the saved width directly.
+          const needsNaturalMeasure = !layout.savedWidth;
+          if (needsNaturalMeasure) {
+            container.style.alignSelf = 'flex-start';
+          }
+          container.style.width = '';
+          container.style.flex = '';
+          container.style.transform = '';
+          // Force a synchronous reflow before applyConstraints measures.
+          void container.offsetWidth;
+          applyConstraints();
+          if (needsNaturalMeasure) {
+            container.style.alignSelf = '';
+          }
+          // The restored per-mode width may be narrower than the
+          // heatmap's 12-month span (user previously shrunk via the
+          // resize handle), so re-align the horizontal scroll to the
+          // current month the same way a fresh paint does.
+          this.scrollToCurrentMonth();
+        } else {
+          // Non-mode-change drag (horizontal move or resize). Persist
+          // the new width + xOffset under the *current* mode so the
+          // other mode's saved values are untouched.
+          const finalX =
+            parseFloat(
+              container.style.transform.replace(/translateX\(|px\)/g, ''),
+            ) || 0;
+          const newWidthPx = parseFloat(container.style.width);
+          const nextWidth = Number.isFinite(newWidthPx) ? newWidthPx : null;
+          if (this.savedLayoutMode === 'below') {
+            layout.belowWidth = nextWidth;
+            layout.belowX = finalX;
+          } else {
+            layout.inlineWidth = nextWidth;
+            layout.inlineX = finalX;
+          }
+          layout.savedWidth = nextWidth;
+          layout.savedX = finalX;
+        }
+        // Fire-and-forget: persistence of layout settings on drag-end.
+        // Both branches (mode change and horizontal) need the full
+        // record written — saveGrassSettings is a Dexie `put` and any
+        // missing field is an effective delete.
+        persistSettings();
+        syncPanelPosition();
+      };
+
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    };
+    handle.className = 'di-grass-handle';
+    return handle;
+  }
+
+  // T-26 baseline: complexity 18. Year-pick × metric routing × footer
+  // build × interaction wiring × auto-tune triggers. Already T-24 decomposed
+  // into pipeline helpers; remaining branches live in renderGraph itself.
+  // eslint-disable-next-line complexity
   async renderGraph(
     dataMap: MetricData | Record<string, number>,
     year: number,
@@ -1323,47 +2589,8 @@ export class GraphRenderer {
       0,
     );
     const header = document.querySelector('#danbooru-grass-container h2');
-
     if (header) {
-      header.innerHTML = ''; // Clear existing text
-
-      // 1. Text Part
-      const textSpan = document.createElement('span');
-      textSpan.textContent = `${total.toLocaleString()} contributions in `;
-      header.appendChild(textSpan);
-
-      // 2. Year Selector Part
-      if (availableYears && onYearChange) {
-        const yearSelect = document.createElement('select');
-        yearSelect.style.cssText = `
-            font-family: inherit;
-            font-size: inherit;
-            font-weight: normal;
-            color: #24292f;
-            background-color: #f6f8fa;
-            border: 1px solid #d0d7de;
-            border-radius: 6px;
-            padding: 2px 4px;
-            margin-left: 6px;
-            cursor: pointer;
-            vertical-align: baseline;
-          `;
-
-        availableYears.forEach(y => {
-          const opt = document.createElement('option');
-          opt.value = String(y);
-          opt.textContent = String(y);
-          if (y === year) opt.selected = true;
-          yearSelect.appendChild(opt);
-        });
-
-        yearSelect.onchange = e =>
-          onYearChange(parseInt((e.target as HTMLSelectElement).value, 10));
-        header.appendChild(yearSelect);
-      } else {
-        // Fallback if no controls passed (e.g. init)
-        header.appendChild(document.createTextNode(String(year)));
-      }
+      renderGrassHeader({header, total, year, availableYears, onYearChange});
     }
 
     const win = window as CalHeatmapAny;
@@ -1398,304 +2625,11 @@ export class GraphRenderer {
     const userIdVal =
       typeof userInfo === 'string' ? userInfo : (userInfo.id ?? userInfo.name);
 
-    const getUrl = (date: string, _count: number): string | null => {
-      if (!date) return null;
+    const getUrl = buildGrassUrlBuilder(metric, sanitizedName, userIdVal);
 
-      switch (metric) {
-        case 'uploads':
-          return `/posts?tags=user:${sanitizedName}+date:${date}`;
-        case 'approvals':
-          return '#'; // Enable click for approvals (Handled by JS)
-        case 'notes': {
-          // /posts?tags=noteupdater:X+date:Y was the wrong slice — it
-          // intersected "posts whose notes X has ever edited" with "posts
-          // uploaded on Y", which excluded most actual edit days (users
-          // typically translate older posts). Mirror the .json fetch in
-          // data-manager.ts (search[updater_id]) and pass created_at as
-          // a Y..Y+1 range so the timestamp column resolves to "anywhere
-          // in that day" instead of an exact-midnight match (single-date
-          // string returned 0 results in practice).
-          const next = new Date(`${date}T00:00:00Z`);
-          next.setUTCDate(next.getUTCDate() + 1);
-          const nextDate = next.toISOString().slice(0, 10);
-          return `/note_versions?search[updater_id]=${userIdVal}&search[created_at]=${date}..${nextDate}`;
-        }
-        default:
-          return null;
-      }
-    };
-
-    // Inject Custom CSS
-    const styleId = 'danbooru-grass-styles';
-    if (!document.getElementById(styleId)) {
-      const style = document.createElement('style');
-      style.id = styleId;
-      style.textContent = `
-          /* Container & Header Styling */
-          #danbooru-grass-container {
-            background: var(--grass-bg, #fff) !important;
-            color: var(--grass-text, #24292f) !important;
-            border-radius: 6px;
-          }
-          #danbooru-grass-container h2 {
-            color: var(--grass-text, #24292f) !important;
-            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
-            font-weight: normal !important;
-          }
-          /* Controls — always light (GrassApp chrome is theme-independent) */
-          #grass-controls select {
-            background-color: #f6f8fa !important;
-            color: #24292f !important;
-            border: 1px solid #d0d7de !important;
-            border-radius: 6px;
-            padding: 2px 2px;
-          }
-          /* Empty Cells & Domain Backgrounds */
-          .ch-subdomain-bg { fill: var(--grass-empty-cell, #ebedf0); }
-          .ch-domain-bg { fill: transparent !important; } /* Fix black bars */
-
-          /* All SVG Text (Months & Days) */
-          #cal-heatmap text,
-          #gh-day-labels text {
-            fill: var(--grass-text, #24292f) !important;
-            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
-            font-size: 10px;
-          }
-
-          /* Scrollable Area */
-          #cal-heatmap-scroll {
-            overflow-x: auto;
-            overflow-y: hidden;
-            flex: 1;
-            white-space: nowrap;
-          }
-          #cal-heatmap-scroll::-webkit-scrollbar { height: 8px; }
-          #cal-heatmap-scroll::-webkit-scrollbar-thumb {
-            background: var(--grass-scrollbar-thumb, #d0d7de);
-            border-radius: 4px;
-          }
-
-          /* Settings Popover */
-          #danbooru-grass-settings-popover {
-            position: fixed;
-            max-height: 70vh;
-            overflow-y: auto;
-            background: var(--di-bg, #fff);
-            color: var(--di-text, #333);
-            border: 1px solid var(--di-border-input, #ddd);
-            box-shadow: 0 4px 12px var(--di-shadow, rgba(0,0,0,0.2));
-            border-radius: 8px;
-            padding: 12px;
-            z-index: 10000;
-            display: none;
-            width: 290px;
-            transform-origin: top left;
-          }
-          .theme-grid {
-            display: grid;
-            grid-template-columns: repeat(6, 1fr);
-            gap: 8px;
-          }
-          .theme-icon {
-            width: 36px;
-            height: 36px;
-            border-radius: 8px;
-            position: relative;
-            cursor: pointer;
-            border: 2px solid transparent;
-            box-sizing: border-box;
-          }
-          .theme-icon:hover { transform: scale(1.1); }
-          .theme-icon.active { border-color: var(--di-link, #007bff); }
-          .theme-icon-inner {
-            position: absolute;
-            top: 50%; left: 50%;
-            transform: translate(-50%, -50%);
-            width: 16px; height: 16px;
-            border-radius: 4px;
-          }
-          .popover-header {
-            font-weight: 600;
-            font-size: 12px;
-            color: var(--di-text, #333);
-            margin-bottom: 8px;
-          }
-          .popover-select {
-            width: 100%;
-            margin-bottom: 10px;
-            padding: 4px;
-            border-radius: 4px;
-            border: 1px solid var(--di-border-input, #ddd);
-            background-color: var(--di-bg-tertiary, #f0f0f0);
-            font-size: 12px;
-          }
-          .threshold-row {
-            display: flex;
-            align-items: center;
-            margin-bottom: 6px;
-            font-size: 12px;
-          }
-          .threshold-input {
-            width: 60px;
-            margin-left: auto;
-            padding: 2px 4px;
-            border: 1px solid var(--di-border-input, #ddd);
-            border-radius: 4px;
-          }
-
-          /* Approvals Detail Popover */
-          #danbooru-approvals-popover {
-            position: absolute;
-            background: var(--di-bg, #fff);
-            color: var(--di-text, #333);
-            border: 1px solid var(--di-border-input, #ddd);
-            box-shadow: 0 4px 20px var(--di-shadow, rgba(0,0,0,0.2));
-            border-radius: 10px;
-            padding: 16px;
-            z-index: 100005;
-            display: none;
-            width: 320px;
-            font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
-          }
-          #danbooru-approvals-popover .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 12px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid var(--di-border-light, #eee);
-          }
-          #danbooru-approvals-popover .header-title {
-            font-weight: 600;
-            font-size: 14px;
-          }
-          #danbooru-approvals-popover .close-btn {
-            cursor: pointer;
-            color: var(--di-text-muted, #888);
-            font-size: 18px;
-            line-height: 1;
-          }
-          /* Summary Grid Layout */
-          #danbooru-grass-summary-grid-wrapper {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-            width: fit-content;
-            margin: 0 auto;
-            padding: 10px;
-            background: var(--grass-bg, rgba(128, 128, 128, 0.05));
-            border-radius: 8px;
-            border: 1px solid rgba(0,0,0,0.05);
-          }
-          #danbooru-grass-summary-grid {
-            display: grid;
-            grid-template-columns: repeat(12, 1fr);
-            gap: 4px;
-            width: fit-content;
-          }
-          .summary-row-container {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-          }
-          .summary-side-labels {
-            display: flex;
-            flex-direction: column;
-            justify-content: space-around;
-            height: 48px; /* 22px * 2 + 4px gap */
-            padding-top: 2px;
-          }
-          .summary-top-labels {
-            display: flex;
-            margin-left: 28px; /* Match width of side labels + gap */
-            position: relative;
-            height: 14px;
-          }
-          .summary-label {
-             fill: var(--grass-text, #24292f);
-             color: var(--grass-text, #24292f);
-             font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
-             font-size: 10px;
-             white-space: nowrap;
-          }
-          .top-label-item {
-            position: absolute;
-            transform: translateX(-50%);
-          }
-          .large-grass-cell {
-            width: 22px;
-            height: 22px;
-            background-color: var(--grass-empty-cell, #ebedf0);
-            border-radius: 4px;
-            transition: background-color 0.2s, transform 0.1s, box-shadow 0.2s;
-          }
-          .large-grass-cell:hover {
-            transform: scale(1.1);
-            background-color: var(--grass-text, #30363d);
-            opacity: 0.15;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-          }
-          #danbooru-approvals-popover .gallery-btn {
-            cursor: pointer;
-            color: var(--di-link, #007bff);
-            display: flex;
-            align-items: center;
-            padding: 2px;
-            border-radius: 4px;
-            transition: background 0.2s;
-            text-decoration: none;
-          }
-          #danbooru-approvals-popover .gallery-btn:hover {
-            background: var(--di-bg-tertiary, #f0f0f0);
-            color: var(--di-link, #007bff);
-          }
-          #danbooru-approvals-popover .post-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 6px;
-            margin-bottom: 12px;
-            max-height: 300px;
-            overflow-y: auto;
-          }
-          #danbooru-approvals-popover .post-link {
-            display: block;
-            text-align: center;
-            padding: 4px;
-            background: var(--di-bg-tertiary, #f0f0f0);
-            border: 1px solid var(--di-border-input, #ddd);
-            border-radius: 4px;
-            font-size: 11px;
-            color: var(--di-link, #007bff);
-            text-decoration: none;
-          }
-          #danbooru-approvals-popover .post-link:hover {
-            background: var(--di-link, #007bff);
-            color: #fff;
-          }
-          #danbooru-approvals-popover .pagination {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 10px;
-            font-size: 12px;
-          }
-          #danbooru-approvals-popover .page-btn {
-            padding: 2px 8px;
-            border: 1px solid var(--di-border-input, #ddd);
-            background: var(--di-bg, #fff);
-            border-radius: 4px;
-            cursor: pointer;
-          }
-          #danbooru-approvals-popover .page-btn:disabled {
-            opacity: 0.5;
-            cursor: default;
-          }
-        `;
-      document.head.appendChild(style);
-    }
+    ensureGrassStyles();
 
     // Ensure our container structure supports the side-label + scrollable graph
-
     container.innerHTML = ''; // Reset
     container.style.display = 'flex';
     container.style.flexDirection = 'row';
@@ -1703,36 +2637,7 @@ export class GraphRenderer {
     container.style.overflow = 'hidden';
 
     // 1. Label Column
-    const labels = document.createElement('div');
-    labels.id = 'gh-day-labels';
-    labels.style.display = 'flex';
-    labels.style.flexDirection = 'column';
-    // Align padding-top: Month Header (20px)
-    labels.style.paddingTop = '20px';
-    labels.style.paddingRight = '5px';
-    labels.style.marginRight = '5px';
-    labels.style.textAlign = 'right';
-    labels.style.flexShrink = '0';
-    labels.style.color = 'var(--grass-text, #24292f)';
-    labels.style.fontSize = '9px';
-
-    // Align "Mon, Wed, Fri" to rows 1, 3, 5 (Sunday is Row 0)
-    // Grid Stride = Cell Height (11) + Gutter (2).
-    // To match perfectly, we use divs of Height 11px and Margin-Bottom 2px.
-    const rowStyle = 'height:11px; line-height:11px; margin-bottom:2px;';
-    const hiddenStyle = 'height:11px; visibility:hidden; margin-bottom:2px;';
-    const lastHiddenStyle = 'height:11px; visibility:hidden; margin-bottom:0;';
-
-    labels.innerHTML = `
-        <div style="${hiddenStyle}"></div> <!-- Sun (0) -->
-        <div style="${rowStyle}">Mon</div> <!-- Mon (1) -->
-        <div style="${hiddenStyle}"></div> <!-- Tue (2) -->
-        <div style="${rowStyle}">Wed</div> <!-- Wed (3) -->
-        <div style="${hiddenStyle}"></div> <!-- Thu (4) -->
-        <div style="${rowStyle}">Fri</div> <!-- Fri (5) -->
-        <div style="${lastHiddenStyle}"></div> <!-- Sat (6) -->
-      `;
-    container.appendChild(labels);
+    injectGrassDayLabels(container);
 
     // 2. Scrollable Graph Wrapper
     const scrollWrapper = document.createElement('div');
@@ -1743,260 +2648,14 @@ export class GraphRenderer {
     // 3. Footer (Settings & Legend)
     const mainContainer = document.getElementById('danbooru-grass-container');
     if (!mainContainer) return;
-    if (!document.getElementById('danbooru-grass-footer')) {
-      const footer = document.createElement('div');
-      footer.id = 'danbooru-grass-footer';
-      footer.style.display = 'flex';
-      footer.style.justifyContent = 'space-between';
-      footer.style.alignItems = 'center';
-      footer.style.padding = '5px 20px 10px 0px'; // Added left padding
-      footer.style.marginTop = '10px';
-      mainContainer.appendChild(footer);
-
-      // Container for Left Controls (Settings + Toggle)
-      const footerLeft = document.createElement('div');
-      footerLeft.style.display = 'flex';
-      footerLeft.style.alignItems = 'center';
-      footerLeft.style.gap = '8px'; // Spacing between buttons
-      footer.appendChild(footerLeft);
-
-      // 3.1 Settings Button (Left)
-      const settingsBtn = document.createElement('div');
-      settingsBtn.id = 'danbooru-grass-settings';
-      settingsBtn.title = 'Settings';
-      settingsBtn.style.cssText = `
-          padding: 2px 8px;
-          border: 1px solid #d0d7de;
-          border-radius: 6px;
-          background-color: #f6f8fa;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          color: #57606a;
-        `;
-      settingsBtn.innerHTML = `
-          <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;">
-            <path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.292.028 1.555.563l.566 1.142c.27.547.106 1.181-.394 1.524l-.904.621c-.056.038-.076.104-.076.17a8.7 8.7 0 0 0 0 1.018c0 .066.02.132.076.17l.904.62c.5.344.664.978.394 1.524l-.566 1.142c-.263.535-.91.74-1.555.563l-1.103-.303c-.066-.019-.176-.011-.299.071a6.8 6.8 0 0 1-.668.386c-.133.066-.194.158-.212.224l-.288 1.107c-.17.646-.716 1.196-1.461 1.26a8.2 8.2 0 0 1-.701.031 8.2 8.2 0 0 1-.701-.031c-.745-.064-1.29-.614-1.461-1.26l-.288-1.106c-.018-.066-.079-.158-.212-.224a6.8 6.8 0 0 1-.668-.386c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.292-.028-1.555-.563l-.566-1.142c-.27-.547-.106-1.181.394-1.524l.904-.621c.056-.038.076-.104.076-.17a8.7 8.7 0 0 0 0-1.018c0-.066-.02-.132-.076-.17l-.904-.62c-.5-.344-.664-.978-.394-1.524l.566-1.142c.263-.535.91-.74 1.555-.563l1.103.303c.066.019.176.011.299-.071.214-.143.437-.272.668-.386.133-.066.194-.158.212-.224l.288-1.107C6.71.645 7.256.095 8.001.031A8.2 8.2 0 0 1 8 0Zm-.571 1.525c-.036.003-.108.036-.123.098l-.289 1.106c-.17.643-.64 1.103-1.246 1.218a5.2 5.2 0 0 0-1.157.669c-.53.411-1.192.427-1.748.046l-.904-.621c-.055-.038-.135-.04-.158.006l-.566 1.142c-.023.047.013.109.055.137l.904.621a1.9 1.9 0 0 1 0 3.23l-.904.621c-.042.029-.078.09-.055.137l.566 1.142c.023.047.103.044.158.006l.904-.621c.556-.38 1.218-.365 1.748.046.348.27.753.496 1.157.669.606.115 1.076.575 1.246 1.218l.289 1.106c.015.062.087.095.123.098.36.031.725.031 1.082 0 .036-.003.108-.036.123-.098l.289-1.106c.17-.643.64-1.103 1.246-1.218.404-.173.809-.399 1.157-.669.53-.411 1.192-.427 1.748-.046l.904.621c.055.038.135.04.158-.006l.566-1.142c.023-.047-.013-.109-.055-.137l-.904-.621a1.9 1.9 0 0 1 0-3.23l.904-.621c.042-.029.078-.09.055-.137l-.566-1.142c-.023-.047-.103-.044-.158-.006l-.904.621c-.556.38-1.218.365-1.748-.046a5.2 5.2 0 0 0-1.157-.669c-.606-.115-1.076-.575-1.246-1.218l-.289-1.106c-.015-.062-.087-.095-.123-.098a6.5 6.5 0 0 0-1.082 0ZM8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"></path>
-          </svg>
-        `;
-      const onSettingsClose = (): void => {
-        if (typeof onYearChange === 'function') {
-          onYearChange(year);
-        }
-      };
-
-      settingsBtn.onmouseover = () => {
-        settingsBtn.style.backgroundColor = '#f6f8fa';
-        settingsBtn.style.filter = 'brightness(0.95)';
-      };
-      settingsBtn.onmouseout = () => {
-        settingsBtn.style.backgroundColor = '#f6f8fa';
-        settingsBtn.style.filter = '';
-      };
-      footerLeft.appendChild(settingsBtn);
-
-      // 3.1.2 Toggle Button (Chevron)
-      const toggleBtn = document.createElement('div');
-      toggleBtn.id = 'danbooru-grass-toggle-panel';
-      toggleBtn.title = 'Show Details';
-      toggleBtn.style.cssText = `
-          padding: 2px 8px;
-          border: 1px solid #d0d7de;
-          border-radius: 6px;
-          background-color: #f6f8fa;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          color: #57606a;
-        `;
-      // Chevron Down SVG
-      const chevronDown =
-        '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;"><path d="M12.78 6.22a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L3.22 7.28a.75.75 0 0 1 1.06-1.06L8 9.94l3.72-3.72a.75.75 0 0 1 1.06 0Z"></path></svg>';
-      const chevronUp =
-        '<svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" style="fill: currentColor;"><path d="M3.22 9.78a.75.75 0 0 1 0-1.06l4.25-4.25a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1-1.06 1.06L8 6.06 4.28 9.78a.75.75 0 0 1-1.06 0Z"></path></svg>';
-
-      toggleBtn.innerHTML = chevronDown;
-
-      toggleBtn.onmouseover = () => {
-        toggleBtn.style.backgroundColor = '#f6f8fa';
-        toggleBtn.style.filter = 'brightness(0.95)';
-      };
-      toggleBtn.onmouseout = () => {
-        toggleBtn.style.backgroundColor = '#f6f8fa';
-        toggleBtn.style.filter = '';
-      };
-
-      footerLeft.appendChild(toggleBtn);
-
-      // 3.1.3 Panel Container - Restructure for correct alignment
-      // Check if we already have the column wrapper
-      let columnWrapper = document.getElementById('danbooru-grass-column');
-      if (!columnWrapper) {
-        // If mainContainer is attached to the wrapper (or elsewhere), we need to wrap it.
-        if (mainContainer.parentNode) {
-          columnWrapper = document.createElement('div');
-          columnWrapper.id = 'danbooru-grass-column';
-          columnWrapper.style.display = 'flex';
-          columnWrapper.style.flexDirection = 'column';
-          // Set flex longhands explicitly so the below↔inline toggle can
-          // override `flex-basis` without fighting a shorthand declaration.
-          columnWrapper.style.flexGrow = '1';
-          columnWrapper.style.flexShrink = '1';
-          columnWrapper.style.flexBasis = '0%';
-          columnWrapper.style.minWidth = '300px';
-
-          // Insert wrapper where mainContainer is
-          mainContainer.parentNode.insertBefore(columnWrapper, mainContainer);
-          // Move mainContainer inside wrapper
-          columnWrapper.appendChild(mainContainer);
-
-          // Note: do NOT force `mainContainer.style.width = '100%'` here.
-          // The user's saved width/xOffset (applied earlier by
-          // applyConstraints) must be preserved. The column flex wrapper
-          // already gives mainContainer a sensible default through its own
-          // flex: 1 + minWidth: 300px, so an explicit override is unnecessary
-          // and would clobber the px value the user picked via the resize
-          // handle.
-        }
-      }
-      // Apply persisted vertical layout: 'below' forces the column to wrap
-      // onto its own flex row (stats above, grass below). Reverting to
-      // 0% basis restores the default "take remaining row space beside
-      // stats" behaviour.
-      if (columnWrapper) {
-        columnWrapper.style.flexBasis =
-          this.savedLayoutMode === 'below' ? '100%' : '0%';
-      }
-
-      let panel = document.getElementById('danbooru-grass-panel');
-      if (!panel) {
-        panel = document.createElement('div');
-        panel.id = 'danbooru-grass-panel';
-        panel.style.cssText = `
-                width: fit-content;
-                min-width: 310px;
-                background: var(--grass-bg, #fff);
-                border: 1px solid #d0d7de;
-                border-radius: 8px;
-                margin-top: 10px;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-
-                /* Animation Styles */
-                height: 0;
-                opacity: 0;
-                padding: 0 10px;
-                overflow: hidden;
-                transition: height 0.3s ease, opacity 0.3s ease, padding 0.3s ease;
-                display: block;
-            `;
-        // Append panel to the new column wrapper
-        if (columnWrapper) {
-          columnWrapper.appendChild(panel);
-        } else {
-          // Fallback (shouldn't happen if wrapper logic works)
-          mainContainer.parentNode?.appendChild(panel);
-        }
-      }
-
-      if (panel) {
-        // Always ensure the grid structure exists so updateSummaryGrid works
-        this.populateSummaryGrid();
-      }
-
-      // Toggle Logic
-      let isExpanded = false;
-      toggleBtn.onclick = () => {
-        isExpanded = !isExpanded;
-        if (isExpanded) {
-          panel.style.height = '150px'; // Increased to fit Header + Grid + Legend
-          panel.style.opacity = '1';
-          panel.style.padding = '10px';
-          toggleBtn.innerHTML = chevronUp;
-          toggleBtn.title = 'Hide Details';
-        } else {
-          panel.style.height = '0';
-          panel.style.opacity = '0';
-          panel.style.padding = '0 10px';
-          toggleBtn.innerHTML = chevronDown;
-          toggleBtn.title = 'Show Details';
-        }
-      };
-
-      // 3.1.5 Settings Popover
-      const {
-        popover,
-        close: closeSettings,
-        refresh: refreshSettings,
-      } = createSettingsPopover({
-        settingsManager: this.settingsManager,
-        db: this.db,
-        metric,
-        settingsBtn,
-        targetUserId: String(userIdVal),
-        closeSettings: onSettingsClose,
-        onRefresh,
-      });
-
-      settingsBtn.onclick = e => {
-        const current = popover.style.display;
-        if (current === 'block') {
-          closeSettings();
-        } else {
-          // Pull the latest settings before showing — they may have
-          // changed via the auto-tune suggestion toast while the popover
-          // was closed. Also align the metric dropdown to whatever the
-          // user is currently viewing in the main grass.
-          refreshSettings(this.currentMetric);
-          // Position popover near the settings button
-          const btnRect = settingsBtn.getBoundingClientRect();
-          popover.style.left = btnRect.left + 'px';
-          popover.style.top = btnRect.bottom + 4 + 'px';
-          popover.style.display = 'block';
-        }
-        e.stopPropagation();
-      };
-
-      document.body.appendChild(popover); // Append to body for correct stacking
-
-      // 3.2 Legend (Right)
-      const legend = document.createElement('div');
-      legend.id = 'danbooru-grass-legend';
-      legend.style.display = 'flex';
-      legend.style.justifyContent = 'flex-end';
-      legend.style.alignItems = 'center';
-      legend.style.fontSize = '10px';
-      legend.style.color = 'var(--grass-text, #57606a)';
-      legend.style.gap = '4px';
-
-      // Custom Thresholds Logic (Empty + 4 Levels)
-      const colors = [
-        'var(--grass-level-0)',
-        'var(--grass-level-1)',
-        'var(--grass-level-2)',
-        'var(--grass-level-3)',
-        'var(--grass-level-4)',
-      ];
-      // const thresholds = this.settingsManager.getThresholds(metric); // Unused local var
-
-      // Create Legend Rects
-      // Colors[0] is Empty (< T1).
-      // Colors[1] is L1 (>= T1).
-      // ...
-      // Colors[4] is L4 (>= T4).
-      const rects = colors
-        .map(
-          c =>
-            `<div style="width:10px; height:10px; background:${c}; border-radius:2px;"></div>`,
-        )
-        .join('');
-
-      legend.innerHTML = `
-          <span style="margin-right:4px;">Less</span>
-          ${rects}
-          <span style="margin-left:4px;">More</span>
-        `;
-      footer.appendChild(legend);
-    }
+    this.buildGrassFooter({
+      mainContainer,
+      metric,
+      year,
+      userIdVal,
+      onYearChange,
+      onRefresh,
+    });
 
     // --- GUARD: Empty Data Guard ---
     // Removed to allow empty graph rendering
@@ -2013,38 +2672,17 @@ export class GraphRenderer {
     );
 
     // Reusable paint config (for theme-change re-paints)
-    const buildPaintConfig = () => ({
-      itemSelector: scrollWrapper,
-      range: 12,
-      domain: {
-        type: 'month',
-        gutter: 3,
-        label: {position: 'top', text: 'MMM', height: 20, textAlign: 'start'},
-      },
-      subDomain: {type: 'day', radius: 2, width: 11, height: 11, gutter: 2},
-      date: {
-        start: new Date(
-          new Date(year, 0, 1).getTime() -
-            new Date().getTimezoneOffset() * 60000,
-        ),
-      },
-      data: {source: source, x: 'date', y: 'value'},
-      scale: {
-        color: {
-          range: this.settingsManager.resolveLevels(
-            this.settingsManager.getTheme(),
-            CONFIG.THEMES[this.settingsManager.getTheme()] ||
-              CONFIG.THEMES.light,
-          ),
-          domain: currentThresholds,
-          type: 'threshold',
-        },
-      },
-      theme: 'light',
-    });
+    const makePaintConfig = () =>
+      buildPaintConfig({
+        scrollWrapper,
+        year,
+        source,
+        thresholds: currentThresholds,
+        settingsManager: this.settingsManager,
+      });
 
     win.cal
-      .paint(buildPaintConfig())
+      .paint(makePaintConfig())
       .then(() => {
         // Heatmap SVG now exists — re-run applyConstraints so the
         // "fit to natural width" branch can actually measure it. On the
@@ -2071,7 +2709,7 @@ export class GraphRenderer {
             const savedScroll = sw ? sw.scrollLeft : 0;
 
             win.cal.destroy();
-            win.cal.paint(buildPaintConfig()).then(() => {
+            win.cal.paint(makePaintConfig()).then(() => {
               // Restore scroll position after paint
               if (sw) sw.scrollLeft = savedScroll;
               // Natural width may have shifted (cell size tweaks via theme)
@@ -2095,310 +2733,24 @@ export class GraphRenderer {
         this.postPaintTimeoutId = setTimeout(() => {
           this.postPaintTimeoutId = null;
           const tooltip = d3.select('#danbooru-grass-tooltip');
-
-          // Helper: Smart Tooltip Positioning
-          const updateTooltip = (event: MouseEvent, content: string): void => {
-            tooltip.style('opacity', 1).html(content);
-
-            const node = tooltip.node();
-            if (!node) return;
-
-            const rect = (node as HTMLElement).getBoundingClientRect();
-            const viewportWidth = window.innerWidth;
-
-            // Default Position: Right (+10), Top (-28)
-            let left = event.pageX + 10;
-            let top = event.pageY - 28;
-
-            // Check for Right Overflow
-            if (left + rect.width > viewportWidth - 20) {
-              // Overflow detected: Switch to "Top-Centered"
-              // Position above the cursor, centered horizontally
-              left = event.pageX - rect.width / 2;
-              top = event.pageY - rect.height - 15; // Move appropriately above
-
-              // Safety: Don't overflow left
-              if (left < 5) left = 5;
-            }
-
-            tooltip.style('left', left + 'px').style('top', top + 'px');
-          };
-
-          // Helper: Touch-compatible tooltip positioning
-          const updateTooltipTouch = (touch: Touch, content: string): void => {
-            tooltip.style('opacity', 1).html(content);
-
-            const node = tooltip.node();
-            if (!node) return;
-
-            const rect = (node as HTMLElement).getBoundingClientRect();
-            const viewportWidth = window.innerWidth;
-            const scrollY = window.scrollY || window.pageYOffset;
-
-            // Default Position: Right (+10), Top (-28) — mirror updateTooltip
-            let left = touch.pageX + 10;
-            let top = touch.pageY - 28;
-
-            // Check for Right Overflow
-            if (left + rect.width > viewportWidth - 20) {
-              left = touch.pageX - rect.width / 2;
-              top = touch.pageY - rect.height - 15;
-              if (left < 5) left = 5;
-            }
-
-            // Keep tooltip above viewport top
-            if (top < scrollY + 5) top = scrollY + 5;
-
-            tooltip.style('left', left + 'px').style('top', top + 'px');
-          };
-
           const isTouch = isTouchDevice();
 
-          // --- Auto-Scroll to Current Date (Refined) ---
           if (!skipScroll) this.scrollToCurrentMonth();
 
-          // 1. Tooltips for Graph Cells
-          if (isTouch) {
-            tooltip.style('pointer-events', 'auto').style('cursor', 'pointer');
-          }
+          this.attachCellInteractions({
+            tooltip,
+            isTouch,
+            metric,
+            userIdVal,
+            getUrl,
+          });
 
-          // Two-step tap controller for mobile CalHeatmap cells
-          const calTap = isTouch
-            ? createTwoStepTap<CalHeatmapDatum>({
-                insideElements: () => [
-                  tooltip.node() as Element | null,
-                  document.getElementById('cal-heatmap-scroll'),
-                ],
-                onFirstTap: () => {
-                  // Tooltip shown in touchstart handler (needs touch coordinates)
-                },
-                onSecondTap: datum => {
-                  const count = datum.v ?? 0;
-                  const dateStr = new Date(datum.t).toISOString().split('T')[0];
-                  if (metric === 'approvals' && count > 0) {
-                    const node = tooltip.node() as HTMLElement | null;
-                    const rect = node?.getBoundingClientRect();
-                    const pageX = (rect?.left ?? 0) + window.scrollX;
-                    const pageY = (rect?.bottom ?? 0) + window.scrollY;
-                    const synthetic = {pageX, pageY} as MouseEvent;
-                    void this.showApprovalsDetail(
-                      dateStr,
-                      userIdVal,
-                      synthetic,
-                    );
-                    tooltip.style('opacity', 0);
-                    return;
-                  }
-                  const link = getUrl(dateStr, count);
-                  if (link && link !== '#') window.open(link, '_blank');
-                  tooltip.style('opacity', 0);
-                },
-                onReset: () => {
-                  tooltip.style('opacity', 0);
-                },
-              })
-            : null;
-
-          d3.selectAll('#cal-heatmap-scroll rect')
-            .attr('rx', 2)
-            .attr('ry', 2)
-            .on('mouseover', function (event, d) {
-              const datum = d || d3.select(this).datum();
-              if (!datum || !(datum as CalHeatmapDatum).t) return;
-
-              const count = (datum as CalHeatmapDatum).v ?? 0;
-              const dateStr = new Date((datum as CalHeatmapDatum).t)
-                .toISOString()
-                .split('T')[0];
-
-              updateTooltip(
-                event,
-                `<strong>${dateStr}</strong>, ${count} ${metric}`,
-              );
-            })
-            .on('mouseout', () => tooltip.style('opacity', 0))
-            .on('click', (event, d) => {
-              if (isTouch) return; // Mobile: click disabled, navigation via tooltip
-              const datum = d;
-              if (!datum || !(datum as CalHeatmapDatum).t) {
-                return;
-              }
-
-              const count = (datum as CalHeatmapDatum).v ?? 0;
-              const dateStr = new Date((datum as CalHeatmapDatum).t)
-                .toISOString()
-                .split('T')[0];
-
-              if (metric === 'approvals' && count > 0) {
-                void this.showApprovalsDetail(dateStr, userIdVal, event);
-              } else {
-                const link = getUrl(dateStr, count);
-                if (link) window.open(link, '_blank');
-              }
-            });
-
-          if (calTap) {
-            // Tap-only tooltip: record touch start position, fire tap only
-            // when the finger hasn't moved (≤10px). Drags scroll normally.
-            const TAP_THRESHOLD = 10;
-            let touchStartX = 0;
-            let touchStartY = 0;
-            let wasDrag = false;
-
-            d3.selectAll('#cal-heatmap-scroll rect')
-              .on('touchstart', (event: TouchEvent) => {
-                const touch = event.touches[0];
-                touchStartX = touch.clientX;
-                touchStartY = touch.clientY;
-                wasDrag = false;
-              })
-              .on('touchmove', () => {
-                wasDrag = true;
-              })
-              .on('touchend', (event: TouchEvent) => {
-                if (wasDrag) {
-                  const touch = event.changedTouches[0];
-                  const dx = touch.clientX - touchStartX;
-                  const dy = touch.clientY - touchStartY;
-                  if (dx * dx + dy * dy > TAP_THRESHOLD * TAP_THRESHOLD) return;
-                }
-                // Tap detected — resolve target from start position
-                const target = document.elementFromPoint(
-                  touchStartX,
-                  touchStartY,
-                );
-                if (!target) return;
-                const datum = d3.select(target).datum() as CalHeatmapDatum;
-                if (!datum || !datum.t) return;
-
-                calTap.tap(datum);
-                const count = datum.v ?? 0;
-                const dateStr = new Date(datum.t).toISOString().split('T')[0];
-                // Use a synthetic touch-like object at the start position
-                updateTooltipTouch(
-                  {
-                    pageX: touchStartX + window.scrollX,
-                    pageY: touchStartY + window.scrollY,
-                    clientX: touchStartX,
-                    clientY: touchStartY,
-                  } as Touch,
-                  `<strong>${dateStr}</strong>, ${count} ${metric}`,
-                );
-              });
-
-            // Tooltip tap → navigate via controller
-            tooltip.on('click', () => {
-              calTap.navigateActive();
-            });
-          }
-
-          // 2. Tooltips for Legend Cells
-          // Calculate ranges based on thresholds [t1, t2, t3, t4]
-          const t = this.settingsManager.getThresholdsForView(
-            String(userIdVal),
-            metric as import('../types').Metric,
-          );
-          const legendThresholds = [
-            `${t[0] > 1 ? `0-${t[0] - 1}` : '0'} (Less)`,
-            `${t[0]}-${t[1] - 1}`,
-            `${t[1]}-${t[2] - 1}`,
-            `${t[2]}-${t[3] - 1}`,
-            `${t[3]}+ (More)`,
-          ];
-
-          // Tear down any prior legend wiring first — fast threshold
-          // edits trigger rapid re-renders, and stacked touch listeners
-          // would double-fire taps.
-          this.legendTouchAbort?.abort();
-          this.legendTouchAbort = null;
-          this.legendTap?.destroy();
-          this.legendTap = null;
-
-          // Select the 6 manual colored divs in the legend
-          const legendDivs = d3.selectAll('#danbooru-grass-legend > div');
-
-          if (isTouch) {
-            // Expand hit area on touch — visual swatch stays 10×10 thanks
-            // to box-sizing: content-box. Total tap rect ≈ 24×24, well
-            // above the original 10×10 and within the legend's flex-end
-            // layout budget.
-            legendDivs.each(function () {
-              const el = this as HTMLElement;
-              el.style.padding = '7px';
-              el.style.boxSizing = 'content-box';
-            });
-
-            this.legendTouchAbort = new AbortController();
-            const legendSignal = this.legendTouchAbort.signal;
-            const tooltipEl = document.getElementById('danbooru-grass-tooltip');
-
-            this.legendTap = createTwoStepTap<number>({
-              insideElements: () => [
-                document.getElementById('danbooru-grass-legend'),
-                document.getElementById('danbooru-grass-tooltip'),
-              ],
-              onFirstTap: i => {
-                if (!tooltipEl) return;
-                tooltipEl.style.opacity = '1';
-                tooltipEl.innerHTML = legendThresholds[i];
-                const swatchEl = document.querySelectorAll(
-                  '#danbooru-grass-legend > div',
-                )[i] as HTMLElement | undefined;
-                if (swatchEl) {
-                  this.positionTooltipAboveCell(
-                    tooltipEl,
-                    swatchEl.getBoundingClientRect(),
-                  );
-                }
-              },
-              // Legend has no navigation — same-swatch re-tap is a no-op
-              // so the range tooltip persists until the user taps
-              // elsewhere or outside.
-              onSecondTap: () => {
-                if (tooltipEl) tooltipEl.style.opacity = '0';
-              },
-              onReset: () => {
-                if (tooltipEl) tooltipEl.style.opacity = '0';
-              },
-              navigateOnSameTap: false,
-            });
-
-            const tap = this.legendTap;
-            legendDivs.each(function (_d, i) {
-              if (i < legendThresholds.length) {
-                const el = this as HTMLElement;
-                const tracker = new TapTracker();
-                el.addEventListener(
-                  'touchstart',
-                  e => tracker.onTouchStart(e as TouchEvent),
-                  {passive: true, signal: legendSignal},
-                );
-                el.addEventListener(
-                  'touchmove',
-                  e => tracker.onTouchMove(e as TouchEvent),
-                  {passive: true, signal: legendSignal},
-                );
-                el.addEventListener(
-                  'touchend',
-                  e => {
-                    if (tracker.onTouchEnd(e as TouchEvent)) tap.tap(i);
-                  },
-                  {signal: legendSignal},
-                );
-              }
-            });
-          } else {
-            // Desktop: keep original hover behavior.
-            legendDivs.each(function (_d, i) {
-              if (i >= 0 && i < legendThresholds.length) {
-                d3.select(this)
-                  .on('mouseover', event => {
-                    updateTooltip(event, legendThresholds[i]);
-                  })
-                  .on('mouseout', () => tooltip.style('opacity', 0));
-              }
-            });
-          }
+          this.attachLegendInteractions({
+            tooltip,
+            isTouch,
+            metric,
+            userIdVal,
+          });
         }, 300); // Increased timeout significantly to ensure render is done
       })
       .catch((err: unknown) => {

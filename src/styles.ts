@@ -2,7 +2,7 @@
  * Centralized CSS styles for Danbooru Insights to prevent duplicate injection
  * and improve performance by utilizing CSS classes and pseudo-classes.
  */
-export const GLOBAL_CSS = `
+const GLOBAL_CSS = `
     /* -- Dark Mode: CSS Variables --
        Light values are provided as var() fallbacks in each rule.
        Dark overrides are scoped to OUR container elements only — NOT on
@@ -319,6 +319,61 @@ export const GLOBAL_CSS = `
         color: var(--di-text-muted, #888888);
         padding-top: 8px;
         border-top: 1px solid var(--di-border-light, #eeeeee);
+    }
+
+    /* -- Widget Locked Placeholder (v9.6.0) -- */
+    .di-widget-locked-card {
+        background: var(--di-bg, #fff);
+        border: 1px solid var(--di-border-light, #eeeeee);
+        border-radius: 8px;
+        padding: 28px 24px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        text-align: center;
+        color: var(--di-text, #333333);
+    }
+    .di-widget-locked-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 1em;
+        font-weight: 600;
+        color: var(--di-text-heading, var(--di-text, #333333));
+    }
+    .di-widget-locked-icon {
+        font-size: 1.1em;
+    }
+    .di-widget-locked-state {
+        margin-top: 4px;
+        font-size: 0.95em;
+        color: var(--di-text-secondary, #666666);
+    }
+    .di-widget-locked-progress {
+        width: 100%;
+        max-width: 320px;
+        height: 8px;
+        background: var(--di-bg-tertiary, #f0f0f0);
+        border-radius: 999px;
+        overflow: hidden;
+    }
+    .di-widget-locked-progress-fill {
+        height: 100%;
+        background: var(--di-accent, #4a90e2);
+        border-radius: 999px;
+        transition: width 0.3s ease;
+    }
+    .di-widget-locked-counter {
+        font-size: 0.85em;
+        font-variant-numeric: tabular-nums;
+        color: var(--di-text-secondary, #666666);
+    }
+    .di-widget-locked-message {
+        font-size: 0.8em;
+        color: var(--di-text-muted, #888888);
+        max-width: 380px;
+        line-height: 1.4;
     }
 
     /* -- Created Tags Widget -- */
@@ -1295,6 +1350,100 @@ export const GLOBAL_CSS = `
     .di-tt-modal-btn-primary:focus-visible {
       outline: 2px solid var(--di-link, #007bff);
       outline-offset: 2px;
+    }
+
+    /* Sub-tag breakdown tooltip (Copy / Fav_Copy / Char legend hover/tap, v9.6.0+) */
+    .di-subtag-tooltip {
+      position: absolute;
+      min-width: 180px;
+      max-width: 280px;
+      /* Cap height so a long sub list (gundam: 10+ subs) doesn't flow
+       * past the viewport and hide its trailing Others row. Scroll the
+       * list region (di-subtag-tooltip-list) — the heading stays
+       * pinned. 80vh keeps a small margin against the very top/bottom. */
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      padding: 8px 10px;
+      background: var(--di-bg-glass, rgba(40, 40, 50, 0.97));
+      color: var(--di-text, #e0e0e0);
+      border: 1px solid var(--di-border, #3a3a55);
+      border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      font-size: 12px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.12s ease-out;
+    }
+    .di-subtag-tooltip-heading {
+      font-weight: 600;
+      color: var(--di-text-heading, #d0d0d0);
+      margin-bottom: 5px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid var(--di-border-light, #2e2e48);
+      /* Pinned above the scrollable list — never participate in the
+       * flex remainder. */
+      flex: 0 0 auto;
+    }
+    .di-subtag-tooltip-list {
+      display: flex;
+      flex-direction: column;
+      /* min-height: 0 is required for overflow-y to actually clip:
+       * by default a flex items min-height is auto, which sizes to
+       * the intrinsic content, defeating the parents max-height cap.
+       * flex: 1 1 auto claims the remaining vertical space inside
+       * the tooltip so the scrollbar appears in the list region. */
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      /* Slim scrollbar matching the dashboard legend's style. */
+      scrollbar-width: thin;
+    }
+    .di-subtag-tooltip-list::-webkit-scrollbar { width: 6px; }
+    .di-subtag-tooltip-list::-webkit-scrollbar-track { background: transparent; }
+    .di-subtag-tooltip-list::-webkit-scrollbar-thumb {
+      background: var(--di-border, #3a3a55);
+      border-radius: 3px;
+    }
+    .di-subtag-tooltip-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 36px;
+      padding: 3px 6px;
+      border-radius: 4px;
+      color: var(--di-text, #e0e0e0);
+      text-decoration: none;
+    }
+    a.di-subtag-tooltip-item:hover {
+      background: var(--di-bg-tertiary, #2a2a44);
+      color: var(--di-link, #007bff);
+    }
+    .di-subtag-tooltip-item--other {
+      color: var(--di-text-muted, #888888);
+      cursor: default;
+    }
+    .di-subtag-tooltip-item-name {
+      flex: 1 1 auto;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .di-subtag-tooltip-item-share {
+      flex: 0 0 auto;
+      min-width: 46px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-weight: 500;
+      color: var(--di-text-secondary, #aaaaaa);
+    }
+    .di-subtag-tooltip-item-count {
+      flex: 0 0 auto;
+      min-width: 52px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      color: var(--di-text-muted, #888888);
+      font-size: 0.9em;
     }
   `;
 

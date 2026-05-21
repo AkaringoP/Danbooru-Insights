@@ -20,9 +20,13 @@ yarn-error.log
 *.swp
 
 # Claude (tool config, not source code)
-CLAUDE.md
+# Note: CLAUDE.md and .claude/rules/ are intentionally tracked — they're the
+# project's instruction files for Claude Code sessions and benefit from being
+# available on mobile / other machines via GitHub. CLAUDE.ko.md and
+# .claude/settings.local.json stay local (user-specific config).
 CLAUDE.ko.md
-.claude/
+.claude/*
+!.claude/rules/
 
 # Claude session files (generated during AI-assisted work sessions)
 PLAN.md
@@ -33,6 +37,11 @@ checklist.md
 # Task archive (local-only translated TASK.md snapshots)
 .archive/
 
+# v10 design docs (Korean drafts kept local until translated to English for
+# push). Code references under src/ point here as a future-work pointer;
+# those links will resolve once the docs are translated and committed.
+docs/v10/
+
 # Local build-comparison artifact (manually-saved alternate-branch userscript
 # for side-by-side perf measurement; not source, not produced by the build).
 danbooruinsights-main.user.js
@@ -42,3 +51,9 @@ danbooruinsights-main.user.js
 # Created during Phase 0 of feature/db-strategy-upgrade. See PLAN.md
 # "성능 비교 전략" and TASK.md Tasks 0.2 ~ 4.2.
 bench/
+
+# Playwright runtime output (not snapshots — those live in test/e2e/snapshots/
+# and are committed). test-results/ holds per-run traces/videos/screenshots;
+# playwright-report/ is the HTML reporter output.
+test-results/
+playwright-report/

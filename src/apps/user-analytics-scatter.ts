@@ -184,6 +184,10 @@ function createInitialScatterState(options: ScatterPlotOptions): ScatterState {
 // DOM construction (event handlers attached separately by wire* helpers)
 // ============================================================
 
+// T-26 baseline: 263 LOC. Pure DOM scaffolding for header + filters +
+// canvas wrapper. Decomposition would split per-section but adds noise
+// for a fundamentally flat structure.
+// eslint-disable-next-line max-lines-per-function
 function buildScatterDom(): ScatterDom {
   // Wrapper for Header + Widget
   const wrapper = document.createElement('div');
@@ -516,6 +520,9 @@ function buildScatterDom(): ScatterDom {
  * pass. Pure function: takes the current state + data + canvas dimensions
  * and returns a fresh scale object.
  */
+// T-26 baseline: complexity 20. Axis-domain / padding / step calculations
+// across log/linear modes and per-year filters. Pure, well-tested.
+// eslint-disable-next-line complexity
 function computeScatterScale(
   state: ScatterState,
   scatterData: ScatterDataPoint[],
@@ -560,16 +567,18 @@ function computeScatterScale(
   }
   if (maxVal === 0) maxVal = 100;
 
-  // Y-axis step
-  let stepY = 100;
+  // Y-axis step.
+  // Tag mode keeps tiered steps tuned to integer gentag counts (the "10"
+  // threshold is a domain landmark — see drawY10Emphasis).
+  // Score mode targets ~6 sections via a nice-step rounding so small and
+  // large score ranges both render at a consistent grid density.
+  let stepY: number;
   if (state.mode === 'tags') {
     if (maxVal < 50) stepY = 10;
     else if (maxVal < 200) stepY = 25;
     else stepY = 50;
   } else {
-    if (maxVal < 200) stepY = 50;
-    else if (maxVal < 1000) stepY = 100;
-    else stepY = 500;
+    stepY = niceStepForCount(maxVal, 6);
   }
 
   maxVal = Math.ceil(maxVal / stepY) * stepY;
@@ -616,6 +625,40 @@ function filterVisiblePoints(
 // ============================================================
 // Pure helpers for Y-grid threshold interaction (testable, no DOM)
 // ============================================================
+
+/**
+ * Picks a "nice" Y-axis step size so the grid lands on round numbers
+ * (multiples of 1, 2, 2.5, 5, 10 × 10^N) while keeping the section count
+ * close to `targetSections`. Used by Score-mode scale computation so
+ * small-range and large-range users both see ~6 grid sections instead of
+ * 3 vs 10 from a hard-tiered switch.
+ *
+ * The 2.5 multiplier is excluded when the magnitude base is `< 10` —
+ * `2.5 × 1 = 2.5` is not a valid step for an integer-valued axis.
+ *
+ * @internal exported for tests
+ */
+export function niceStepForCount(
+  maxVal: number,
+  targetSections: number = 6,
+): number {
+  if (maxVal <= 0 || targetSections <= 0) return 1;
+  const raw = maxVal / targetSections;
+  const exp = Math.floor(Math.log10(raw));
+  const base = Math.pow(10, exp);
+  const ratio = raw / base;
+  const niceMults = base < 10 ? [1, 2, 5, 10] : [1, 2, 2.5, 5, 10];
+  let best = niceMults[0];
+  let bestDiff = Math.abs(ratio - best);
+  for (const m of niceMults) {
+    const diff = Math.abs(ratio - m);
+    if (diff < bestDiff) {
+      best = m;
+      bestDiff = diff;
+    }
+  }
+  return best * base;
+}
 
 /**
  * Returns the Y-grid values that are eligible for the threshold interaction.
