@@ -7,6 +7,15 @@ All notable changes to Danbooru Insights are documented here.
 ## v9.6.2 — Dynamic candidate pool + count rerank + char filter unification
 
 ### Fixed
+- **Char / Copy / Fav legend: hovering the Others row left the previous
+  row's sub-chart frozen on screen and its tooltip open.** Others was
+  excluded from the legend-row attribute (`data-di-subtag-idx`) so the
+  post-render wire-up skipped it entirely — the legend container's
+  mouseleave never fires while the cursor is still inside the legend
+  rectangle, and Others had no own handler to drive an explicit exit.
+  Others now carries the attribute and the wire-up routes it to an
+  exit-only handler: chart-mode exits back to the main pie and the
+  sub-tag tooltip hides immediately on enter.
 - **Character / Copyright / Fav-copyright pie tabs were selecting TOP10
   using `/related_tag.json`'s `frequency`, which is estimated from at
   most 5,000 md5-ordered posts.** Close-frequency pairs (madoka/sensei,

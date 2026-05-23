@@ -1050,14 +1050,16 @@ function renderPieLegend(args: {
       const countTitle = d.details.count
         ? escapeHtml(d.details.count.toLocaleString())
         : '';
-      // Mark every interactive (non-Others) Copy/Fav_Copy/Char legend
-      // row for the post-render wire-up. Rows with subTags get the full
-      // tooltip + chart-mode treatment; rows without (e.g. `gundam` for
-      // a user with no franchise-specific sub-tagging) still trigger
-      // chart-mode in single-slice fallback (v9.6+).
-      const isInteractiveRow =
-        subtagTooltipEnabled && d.details.kind === 'tag' && !d.details.isOther;
-      const subtagAttr = isInteractiveRow ? ` data-di-subtag-idx="${idx}"` : '';
+      // Mark every Copy/Fav_Copy/Char legend row for the post-render
+      // wire-up — including Others, which needs its own mouseenter
+      // handler to revert the sub-chart back to the main pie (v9.6.2+).
+      // Rows with subTags get the full tooltip + chart-mode treatment;
+      // rows without (e.g. `gundam` for a user with no franchise-specific
+      // sub-tagging) still trigger chart-mode in single-slice fallback
+      // (v9.6+). The forEach branch in renderPieLegend routes each
+      // row by `slice.details.isOther`.
+      const isLegendHoverRow = subtagTooltipEnabled && d.details.kind === 'tag';
+      const subtagAttr = isLegendHoverRow ? ` data-di-subtag-idx="${idx}"` : '';
       return `
                <div${subtagAttr} style="display:flex; align-items:center; font-size:0.85em; margin-bottom:5px;">
                   <div style="width:12px; height:12px; background:${swatchColor}; border-radius:2px; margin-right:8px; border:1px solid var(--di-shadow-light, rgba(0,0,0,0.1)); flex-shrink:0;"></div>
@@ -1197,7 +1199,24 @@ function wireSubtagTooltipHandlers(
     const idx = parseInt(row.dataset['diSubtagIdx'] || '-1', 10);
     if (idx < 0 || idx >= processedData.length) return;
     const slice = processedData[idx];
-    if (slice.details.kind !== 'tag' || slice.details.isOther) return;
+    if (slice.details.kind !== 'tag') return;
+
+    // Others row: revert to the main pie on hover. Without this, the
+    // sub-chart from the previously hovered row stayed frozen on screen
+    // — Others itself had no handler, and the legend container's
+    // mouseleave never fires while the cursor is still inside the
+    // legend rectangle. Hovering Others should look like "I'm done with
+    // sub-chart mode" from the user's POV.
+    if (slice.details.isOther) {
+      row.addEventListener('mouseenter', () => {
+        cancelPendingExit();
+        cancelPendingEnter();
+        hideSubtagTooltip();
+        chartModeControl?.exit();
+      });
+      return;
+    }
+
     const parentName = slice.label;
     const parentColor = slice.color;
 
