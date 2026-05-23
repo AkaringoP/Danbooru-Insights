@@ -175,7 +175,22 @@ export interface DistributionItem {
   name: string;
   tagName?: string;
   originalTag?: string;
+  /**
+   * Accurate per-user (or per-fav) count from `/counts/posts.json`.
+   * Source of truth for top-10 *selection* (`selectTopKByCount` in
+   * `src/core/related-tag-rerank.ts`) and for sub-tag breakdown rows.
+   * Do not substitute `frequency` here — `frequency` is sample-based
+   * and was the v9.6.1 source of madoka/sensei swap + Unbreakable
+   * top-10 leakage that v9.6.2 fixed.
+   */
   count: number;
+  /**
+   * Danbooru `/related_tag.json` sample-estimated frequency (up to
+   * 5,000 md5-ordered posts). Used as the 1st-pass candidate ordering
+   * before count-rerank in `selectTopKByCount`. Do not use for final
+   * *selection* or display — the sample SE on close pairs can flip
+   * ranks (madoka/sensei class).
+   */
   frequency: number;
   thumb: string | null;
   isOther: boolean;
@@ -184,6 +199,7 @@ export interface DistributionItem {
    * Sub-tag breakdown for legend hover/tap (v9.6.0+). Populated for Copy /
    * Fav_Copy / Char distributions when the top-level tag has implications
    * (sub-tags) that the user actually uses. Empty/undefined = no tooltip.
+   * Entry counts come from `/counts/posts.json` via `attachSubTagBreakdowns`.
    */
   subTags?: SubTagBreakdownEntry[];
 }

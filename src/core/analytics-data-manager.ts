@@ -19,6 +19,11 @@ import {
   type TagCloudFilterEntry,
 } from './global-tag-stats';
 import {applySubTagBreakdown, fetchSubTagsForParents} from './sub-tag-resolver';
+import {
+  charPoolSize,
+  copyPoolSize,
+  selectTopKByCount,
+} from './related-tag-rerank';
 import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
@@ -1319,59 +1324,92 @@ export class AnalyticsDataManager extends DataManager {
 
       const tags: DanbooruRelatedTag[] = resp.related_tags;
 
-      // Limit to Top 10
-      const itemsToProcess = tags.slice(0, 10);
+      // Dynamic candidate pool by total post count. Large dispersed users
+      // (Fate/Hololive-class) need a wider net than the legacy fixed 10
+      // because `/related_tag.json` frequency is estimated from at most
+      // 5,000 md5-ordered posts — true top-10 character tags can land
+      // outside the 11+ window. See [related-tag-rerank.ts].
+      const N = await this.getTotalPostCount(userInfo);
+      const {filtered: filteredCap, raw: rawCap} = charPoolSize(N);
 
-      // _item is a transient prop holding the source DanbooruRelatedTag for
-      // post_count fallback; deleted before the array is returned.
-      const top10: Array<DistributionItem & {_item?: DanbooruRelatedTag}> =
-        itemsToProcess.map(item => ({
-          name: item.tag.name.replace(/_/g, ' '),
-          tagName: item.tag.name,
-          count: 0,
-          frequency: item.frequency,
-          thumb: null,
-          isOther: false,
-          _item: item,
-        }));
+      // Frequency-ordered raw candidates (pre-filter), 1.5× margin so
+      // variant-heavy fandoms still yield `filteredCap` survivors.
+      const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
 
-      // Parallel: per-tag count fetch + sub-tag breakdown discovery.
-      // Both mutate `top10` on disjoint fields.
-      await Promise.all([
-        perfLogger.wrap(
-          'dbi:db:refresh:mapConcurrent',
-          () =>
-            this.mapConcurrent(top10, 3, async obj => {
-              const tagName = obj.tagName;
-              if (reportSubStatus)
-                reportSubStatus(`Fetching Count: ${obj.name}`);
-              try {
-                const c = await this.fetchRemoteCount(
-                  `user:${normalizedName} ${tagName}`,
-                );
-                obj.count = c || obj._item?.tag.post_count || 0;
-              } catch (_e: unknown) {
-                log.debug('Failed to fetch user tag count', {error: _e});
-              }
-              delete obj._item;
-            }),
-          {distribution: 'character', n: top10.length, concurrency: 3},
-        ),
-        this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`),
-      ]);
+      // isTopLevelTag filter — new in v9.6.2 for character (copy/fav
+      // already filtered). Variants like `abigail_williams_(first_ascension)_(fate)`
+      // collapse into the base tag's sub-tag breakdown instead of
+      // competing for a top-10 slot.
+      const filterResults = await this.mapConcurrent(
+        rawCandidates,
+        6,
+        async (item): Promise<DanbooruRelatedTag | null> =>
+          (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
+      );
+      const filteredCandidates = filterResults
+        .filter((item): item is DanbooruRelatedTag => item !== null)
+        .slice(0, filteredCap);
 
-      const sumFreq = top10.reduce(
-        (acc: number, curr: {frequency: number}) => acc + curr.frequency,
+      // Pre-rerank candidate items. `_item` carries the source row so
+      // count-fetch can fall back to its global post_count; stripped
+      // before the array escapes.
+      const preItems: Array<
+        DistributionItem & {_item?: DanbooruRelatedTag; tagName: string}
+      > = filteredCandidates.map(item => ({
+        name: item.tag.name.replace(/_/g, ' '),
+        tagName: item.tag.name,
+        count: 0,
+        frequency: item.frequency,
+        thumb: null,
+        isOther: false,
+        _item: item,
+      }));
+
+      // Accurate per-tag count fetch. Counts feed `selectTopKByCount`
+      // below — accurate ranks beat the frequency estimate. Concurrency
+      // 6 sits under the rate limiter's 8-slot ceiling and absorbs the
+      // wider candidate pool.
+      await perfLogger.wrap(
+        'dbi:db:refresh:mapConcurrent',
+        () =>
+          this.mapConcurrent(preItems, 6, async obj => {
+            if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
+            try {
+              const c = await this.fetchRemoteCount(
+                `user:${normalizedName} ${obj.tagName}`,
+              );
+              obj.count = c || obj._item?.tag.post_count || 0;
+            } catch (_e: unknown) {
+              log.debug('Failed to fetch user tag count', {error: _e});
+            }
+          }),
+        {distribution: 'character', n: preItems.length, concurrency: 6},
+      );
+
+      // Rerank by count desc → frequency desc → tagName asc, then
+      // truncate. Sub-tag breakdown runs after this so we only spend
+      // /counts/posts.json calls on tags that survive the cut.
+      const top10 = selectTopKByCount(preItems, 10);
+      for (const obj of top10) delete obj._item;
+
+      await this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`);
+
+      // Others = total user uploads − Σ top10.count. Clamped at 0 because
+      // a single post can carry multiple characters, so Σtop10.count can
+      // exceed N for variant-heavy uploaders (then Others is meaningless
+      // and we omit the slice).
+      const sumCount = top10.reduce(
+        (acc: number, curr: {count: number}) => acc + curr.count,
         0,
       );
-      const otherFreq = 1.0 - sumFreq;
+      const othersCount = Math.max(0, N - sumCount);
 
-      if (otherFreq > 0.001) {
+      if (othersCount > 0) {
         top10.push({
           name: 'Others',
           tagName: '',
-          count: 0,
-          frequency: otherFreq,
+          count: othersCount,
+          frequency: 0,
           thumb: '',
           isOther: true,
         });
@@ -1432,73 +1470,74 @@ export class AnalyticsDataManager extends DataManager {
 
       const tags: DanbooruRelatedTag[] = resp.related_tags;
 
-      // Limit to Top 20 Candidates for filtering performance
-      const candidates: DanbooruRelatedTag[] = tags.slice(0, 20);
+      // Dynamic candidate pool — see getCharacterDistribution for the
+      // rationale. Copy/fav caps lower (40) than character (80) because
+      // copyright/franchise tags consolidate harder than character tags.
+      const N = await this.getTotalPostCount(userInfo);
+      const {filtered: filteredCap, raw: rawCap} = copyPoolSize(N);
 
-      // Concurrent Filter checks - Limit 2
-      const filteredResults = await this.mapConcurrent(
-        candidates,
-        2,
+      const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
+
+      const filterResults = await this.mapConcurrent(
+        rawCandidates,
+        6,
         async (item): Promise<DanbooruRelatedTag | null> =>
           (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
       );
-      const filtered = filteredResults.filter(
-        (item): item is DanbooruRelatedTag => item !== null,
-      );
+      const filteredCandidates = filterResults
+        .filter((item): item is DanbooruRelatedTag => item !== null)
+        .slice(0, filteredCap);
 
-      // Concurrent Fetch Data for Top 10 - Limit 5
       // _item is a transient prop holding the source DanbooruRelatedTag so
       // we can fall back to its global post_count if the user-scoped count
       // query fails. It is `delete`d before the array is returned.
-      const top10: Array<DistributionItem & {_item?: DanbooruRelatedTag}> =
-        filtered.slice(0, 10).map(item => ({
-          name: item.tag.name.replace(/_/g, ' '),
-          tagName: item.tag.name,
-          count: 0,
-          frequency: item.frequency,
-          thumb: null,
-          isOther: false,
-          _item: item,
-        }));
+      const preItems: Array<
+        DistributionItem & {_item?: DanbooruRelatedTag; tagName: string}
+      > = filteredCandidates.map(item => ({
+        name: item.tag.name.replace(/_/g, ' '),
+        tagName: item.tag.name,
+        count: 0,
+        frequency: item.frequency,
+        thumb: null,
+        isOther: false,
+        _item: item,
+      }));
 
-      // Parallel: per-tag count fetch + sub-tag breakdown discovery.
-      // Both mutate `top10` in place on disjoint fields (count vs subTags)
-      // so the concurrency is safe.
-      await Promise.all([
-        perfLogger.wrap(
-          'dbi:db:refresh:mapConcurrent',
-          () =>
-            this.mapConcurrent(top10, 3, async obj => {
-              const tagName = obj.tagName;
-              if (reportSubStatus)
-                reportSubStatus(`Fetching Count: ${obj.name}`);
-              try {
-                const c = await this.fetchRemoteCount(
-                  `user:${normalizedName} ${tagName}`,
-                );
-                obj.count = c || obj._item?.tag.post_count || 0;
-              } catch (_e: unknown) {
-                log.debug('Failed to fetch user tag count', {error: _e});
-              }
-              delete obj._item;
-            }),
-          {distribution: 'copyright', n: top10.length, concurrency: 3},
-        ),
-        this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`),
-      ]);
+      await perfLogger.wrap(
+        'dbi:db:refresh:mapConcurrent',
+        () =>
+          this.mapConcurrent(preItems, 6, async obj => {
+            if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
+            try {
+              const c = await this.fetchRemoteCount(
+                `user:${normalizedName} ${obj.tagName}`,
+              );
+              obj.count = c || obj._item?.tag.post_count || 0;
+            } catch (_e: unknown) {
+              log.debug('Failed to fetch user tag count', {error: _e});
+            }
+          }),
+        {distribution: 'copyright', n: preItems.length, concurrency: 6},
+      );
 
-      const sumFreq = top10.reduce(
-        (acc: number, curr: {frequency: number}) => acc + curr.frequency,
+      const top10 = selectTopKByCount(preItems, 10);
+      for (const obj of top10) delete obj._item;
+
+      await this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`);
+
+      // Others = total user uploads − Σ top10.count; see getCharacterDistribution.
+      const sumCount = top10.reduce(
+        (acc: number, curr: {count: number}) => acc + curr.count,
         0,
       );
-      const otherFreq = 1.0 - sumFreq;
+      const othersCount = Math.max(0, N - sumCount);
 
-      if (otherFreq > 0.001) {
+      if (othersCount > 0) {
         top10.push({
           name: 'Others',
           tagName: '',
-          count: 0,
-          frequency: otherFreq,
+          count: othersCount,
+          frequency: 0,
           thumb: '',
           isOther: true,
         });
@@ -1653,12 +1692,24 @@ export class AnalyticsDataManager extends DataManager {
         return [];
 
       const tags: DanbooruRelatedTag[] = resp.related_tags;
-      const candidates: DanbooruRelatedTag[] = tags.slice(0, 20);
 
-      // Concurrent Filter checks (Sub-copyright) - Limit 5
-      const filteredResults = await this.mapConcurrent(
-        candidates,
-        2,
+      // Dynamic candidate pool — same shape as getCopyrightDistribution.
+      // N is the fav-owner's *upload* count; the fav-count itself isn't
+      // strictly the right scale, but it's the only one we already have
+      // cached and it's monotone-correlated with fav breadth in practice.
+      const N = await this.getTotalPostCount(userInfo);
+      const {filtered: filteredCap, raw: rawCap} = copyPoolSize(N);
+
+      const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
+
+      // Inline /tag_implications.json filter — kept distinct from
+      // `isTopLevelTag` so the fav tab doesn't share the implications
+      // cache with the user-scoped tabs (fav behaviour is fav-set-
+      // dependent and intentionally orthogonal). Concurrency 6 matches
+      // the count-fetch budget.
+      const filterResults = await this.mapConcurrent(
+        rawCandidates,
+        6,
         async (item): Promise<DanbooruRelatedTag | null> => {
           const tagName = item.tag.name;
           const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}&search[status]=active`;
@@ -1674,108 +1725,73 @@ export class AnalyticsDataManager extends DataManager {
         },
       );
 
-      const filtered = filteredResults.filter(
-        (item): item is DanbooruRelatedTag => item !== null,
-      );
+      const filteredCandidates = filterResults
+        .filter((item): item is DanbooruRelatedTag => item !== null)
+        .slice(0, filteredCap);
 
-      // 1. Return basic stats immediately (with null thumbs)
-      // We still need to calculate frequencies and filter "Others"
-      // But we skip the heavy "fetchThumbnailWithRetry" part in the initial critical path.
-
-      // Concurrent Fetch Data for Top 10 - Limit 5
-      // Modification: Do NOT await valid thumbs. Just structural data.
       // _item is a transient prop, deleted before the array is returned.
-      const top10: Array<DistributionItem & {_item?: DanbooruRelatedTag}> =
-        filtered.slice(0, 10).map(item => {
-          const tagName = item.tag.name;
-          const displayName = tagName.replace(/_/g, ' ');
+      const preItems: Array<
+        DistributionItem & {_item?: DanbooruRelatedTag; tagName: string}
+      > = filteredCandidates.map(item => ({
+        name: item.tag.name.replace(/_/g, ' '),
+        tagName: item.tag.name,
+        count: 0,
+        frequency: item.frequency,
+        thumb: null,
+        isOther: false,
+        _item: item,
+      }));
 
-          // We still probably want the "User Count" if possible, but that requires a fetch too?
-          // The original code did `fetch countUrl`. That is also a bottleneck?
-          // Providing "approximate" counts (global post_count) might be misleading.
-          // BUT replacing 10 sequential/parallel fetches is good.
-          // Let's Keep the count fetching if it's fast enough or necessary?
-          // User's plan said: "Load Chart (Shapes) first".
-          // Pie chart NEEDS counts/frequencies for shapes.
-          // User Count is needed for "Frequency" (User Count / Total User Posts).
-          // So we MUST wait for counts.
-          // But THUMBNAILS are only for tooltips/visuals. We can skip those.
+      // Use fav: for counting (more standard), ordfav: for sorting/linking.
+      // No post_count fallback here — fav-scoped count failures stay 0
+      // and `selectTopKByCount` naturally ranks them last.
+      await this.mapConcurrent(preItems, 6, async obj => {
+        if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
+        try {
+          obj.count = await this.fetchRemoteCount(
+            `fav:${normalizedName} ${obj.tagName}`,
+          );
+        } catch (e: unknown) {
+          log.warn('Count fetch failed for fav copyright tag', {
+            tagName: obj.tagName,
+            error: e,
+          });
+        }
+      });
 
-          // So we will keep the 'mapConcurrent' for Counts, but remove Thumb fetch.
-          return {
-            name: displayName,
-            tagName: tagName,
-            count: 0, // Placeholder, will fill in mapConcurrent
-            frequency: item.frequency,
-            thumb: null, // Lazy Load
-            isOther: false,
-            _item: item, // Temp storage
-          };
-        });
+      const top10 = selectTopKByCount(preItems, 10);
+      for (const obj of top10) delete obj._item;
 
-      // Fill Counts + sub-tag breakdowns concurrently. Both mutate `top10`
-      // on disjoint fields.
-      await Promise.all([
-        this.mapConcurrent(top10, 3, async obj => {
-          const tagName = obj.tagName;
-          if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
-          try {
-            // Use fav: for counting (more standard), ordfav: for sorting/linking
-            obj.count = await this.fetchRemoteCount(
-              `fav:${normalizedName} ${tagName}`,
-            );
-          } catch (e: unknown) {
-            log.warn('Count fetch failed for fav copyright tag', {
-              tagName: obj.tagName,
-              error: e,
-            });
-          }
-          delete obj._item;
-        }),
-        this.attachSubTagBreakdowns(top10, tags, `fav:${normalizedName}`),
-      ]);
+      await this.attachSubTagBreakdowns(top10, tags, `fav:${normalizedName}`);
 
-      const sumFreq = top10.reduce(
-        (acc: number, curr: {frequency: number}) => acc + curr.frequency,
+      // Others base = total favourite count (the fav set's size, not the
+      // owner's upload count). One extra /counts/posts.json — negligible
+      // next to the candidate-pool fetches. Multi-tag overlap clamp same
+      // as character/copyright.
+      let totalFavCount = 0;
+      try {
+        totalFavCount = await this.fetchRemoteCount(`fav:${normalizedName}`);
+      } catch (e: unknown) {
+        log.debug('Failed to fetch total fav count', {error: e});
+      }
+      const sumCount = top10.reduce(
+        (acc: number, curr: {count: number}) => acc + curr.count,
         0,
       );
-      const otherFreq = 1.0 - sumFreq;
+      const othersCount = Math.max(0, totalFavCount - sumCount);
 
-      if (otherFreq > 0.001) {
+      if (othersCount > 0) {
         top10.push({
           name: 'Others',
           tagName: '',
-          count: 0,
-          frequency: otherFreq,
+          count: othersCount,
+          frequency: 0,
           thumb: '',
           isOther: true,
         });
       }
 
-      // Save Stats (Initial - without thumbs)
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
-
-      // TRIGGER LAZY LOADING FOR THUMBNAILS
-      // We assume `reportSubStatus` can act as the "Update Callback" if we pass a special flag or function?
-      // Actually, the caller (refreshAllStats) typically provides a status callback.
-      // We need a way to tell the caller "Hey, data updated!".
-      // The current structure doesn't support a "Data Updated" callback easily down here without changing signature.
-      // UserAnalyticsApp passes `(msg) => ...`. That's just for status text.
-      // We need a new callback or we piggyback.
-      // Let's add a 4th argument `onDataUpdate` to the signature?
-      // Or just leverage the fact that we return the object reference.
-      // If we modify `top10` (objects) in place, the caller holds the reference.
-      // But the caller needs to know WHEN to re-render.
-
-      // For now, let's trigger the background fetch and let it save to DB.
-      // The UI might need a "Listener" or we accept we need to pass a callback.
-      // Let's modify the signature in the next step or assume generic event?
-      // Let's simply fire-and-forget the enricher, and assume the UI will re-render if we tell it to?
-      // We can pass `onDataUpdate` as a property of `reportSubStatus` if it's an object? No.
-
-      // Let's call the internal enrich method.
-      // We will need to pass the `onDataUpdate` callback from the UI layer.
-      // For this refactor, I will add `onDataUpdate` to arguments.
 
       await this.enrichThumbnails(
         cacheKey,

@@ -747,3 +747,414 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     );
   });
 });
+
+// ============================================================
+// v9.6.2 — Dynamic candidate pool + count rerank (T-RR08)
+// ============================================================
+//
+// Integration-style smoke tests covering the new behaviour of
+// getCharacterDistribution / getCopyrightDistribution /
+// getFavCopyrightDistribution. We stub attachSubTagBreakdowns,
+// enrichThumbnails, and getTotalPostCount so the test stays
+// focused on the selection / filter / rerank pipeline.
+
+interface RelatedTagFixture {
+  name: string;
+  frequency: number;
+  /** false → /tag_implications.json returns 1 row (variant), true → []. */
+  isTopLevel: boolean;
+  /** Per-user (or per-fav) count returned by /counts/posts.json. */
+  count: number;
+  /** Optional global post_count carried on tag — only used by char/copy fallback. */
+  postCount?: number;
+}
+
+interface FetchScript {
+  related: RelatedTagFixture[];
+  totalPostCount: number;
+}
+
+function buildDistFetch(
+  script: FetchScript,
+  countQueryPrefix: 'user' | 'fav',
+): (url: string) => Promise<{
+  ok: boolean;
+  status: number;
+  json: () => Promise<unknown>;
+}> {
+  const tagByName = new Map(script.related.map(r => [r.name, r]));
+  return async (rawUrl: string) => {
+    const url = decodeURIComponent(rawUrl);
+    if (url.startsWith('/related_tag.json')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          related_tags: script.related.map(r => ({
+            frequency: r.frequency,
+            tag: {name: r.name, post_count: r.postCount ?? r.count},
+          })),
+        }),
+      };
+    }
+    if (url.startsWith('/tag_implications.json')) {
+      const m = url.match(/antecedent_name_matches\]=([^&]+)/);
+      const name = m ? m[1] : '';
+      const t = tagByName.get(name);
+      // top-level → empty array. variant → 1 row.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (t && !t.isTopLevel ? [{id: 1}] : []),
+      };
+    }
+    if (url.startsWith('/counts/posts.json')) {
+      // tags=user:NAME alone → getTotalPostCount; tags=user:NAME tagname → per-tag
+      const tagsMatch = url.match(/tags=([^&]+)/);
+      const tags = tagsMatch ? tagsMatch[1] : '';
+      const parts = tags.split(/\s+/);
+      if (parts.length === 1 && parts[0].startsWith(`${countQueryPrefix}:`)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: script.totalPostCount}}),
+        };
+      }
+      const last = parts[parts.length - 1];
+      const t = tagByName.get(last);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({counts: {posts: t ? t.count : 0}}),
+      };
+    }
+    return {ok: true, status: 200, json: async () => ({})};
+  };
+}
+
+function makeDistAdm(
+  fetchImpl: ReturnType<typeof buildDistFetch>,
+  totalPostCount: number,
+) {
+  const postsTable = makePostsTable([]);
+  const db = makeSyncDb(postsTable);
+  const rl = makeSyncRateLimiter(fetchImpl);
+  const adm = new AnalyticsDataManager(db as never, rl as never);
+  // Strip out side-effects unrelated to the selection pipeline.
+  vi.spyOn(
+    adm as unknown as {
+      attachSubTagBreakdowns: () => Promise<void>;
+    },
+    'attachSubTagBreakdowns',
+  ).mockResolvedValue();
+  vi.spyOn(
+    adm as unknown as {
+      enrichThumbnails: () => Promise<void>;
+    },
+    'enrichThumbnails',
+  ).mockResolvedValue();
+  vi.spyOn(adm, 'getTotalPostCount').mockResolvedValue(totalPostCount);
+  return {adm, rl, db, postsTable};
+}
+
+describe('getCharacterDistribution — dynamic pool + filter + rerank', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('filters out variant characters (only base survives top-10)', async () => {
+    // Frequency-ranked: abigail_williams_(fate) is a variant, base wins
+    const script: FetchScript = {
+      totalPostCount: 50_000,
+      related: [
+        {
+          name: 'abigail_williams_(fate)',
+          frequency: 0.05,
+          isTopLevel: true,
+          count: 600,
+        },
+        {
+          name: 'abigail_williams_(first_ascension)_(fate)',
+          frequency: 0.04,
+          isTopLevel: false, // variant — filtered out
+          count: 500,
+        },
+        {
+          name: 'jeanne_d_arc_(fate)',
+          frequency: 0.03,
+          isTopLevel: true,
+          count: 400,
+        },
+        {
+          name: 'mash_kyrielight',
+          frequency: 0.025,
+          isTopLevel: true,
+          count: 300,
+        },
+        {
+          name: 'artoria_pendragon_(fate)',
+          frequency: 0.02,
+          isTopLevel: true,
+          count: 250,
+        },
+      ],
+    };
+    const {adm} = makeDistAdm(buildDistFetch(script, 'user'), 50_000);
+
+    const result = await adm.getCharacterDistribution(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    const tagNames = result.filter(r => !r.isOther).map(r => r.tagName);
+    expect(tagNames).toContain('abigail_williams_(fate)');
+    expect(tagNames).not.toContain('abigail_williams_(first_ascension)_(fate)');
+  });
+
+  it('reranks by count when frequency order disagrees', async () => {
+    // High frequency but low count → should fall below low-frequency but high-count
+    const script: FetchScript = {
+      totalPostCount: 300_000, // → charPoolSize: filtered 75, raw 113
+      related: [
+        // Lots of top-level characters; ranks below by count
+        {
+          name: 'low_count_high_freq',
+          frequency: 0.5,
+          isTopLevel: true,
+          count: 100,
+        },
+        {
+          name: 'high_count_low_freq',
+          frequency: 0.1,
+          isTopLevel: true,
+          count: 5000,
+        },
+        {name: 'mid_a', frequency: 0.05, isTopLevel: true, count: 800},
+        {name: 'mid_b', frequency: 0.04, isTopLevel: true, count: 700},
+      ],
+    };
+    const {adm} = makeDistAdm(buildDistFetch(script, 'user'), 300_000);
+
+    const result = await adm.getCharacterDistribution(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    const non = result.filter(r => !r.isOther);
+    expect(non[0].tagName).toBe('high_count_low_freq'); // count 5000 wins
+    expect(non[1].tagName).toBe('mid_a');
+    expect(non[non.length - 1].tagName).toBe('low_count_high_freq');
+  });
+
+  it('small user (N=3000) uses the legacy 10-item pool (no-op stability)', async () => {
+    const related: RelatedTagFixture[] = [];
+    for (let i = 0; i < 12; i++) {
+      related.push({
+        name: `char_${String(i).padStart(2, '0')}`,
+        frequency: (12 - i) / 100,
+        isTopLevel: true,
+        count: (12 - i) * 10,
+      });
+    }
+    const script: FetchScript = {totalPostCount: 3000, related};
+    const {adm, rl} = makeDistAdm(buildDistFetch(script, 'user'), 3000);
+
+    const result = await adm.getCharacterDistribution(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    const non = result.filter(r => !r.isOther);
+    // filtered = 10 → top-10 by count desc: char_00..char_09
+    expect(non.length).toBe(10);
+    expect(non[0].tagName).toBe('char_00');
+    expect(non[9].tagName).toBe('char_09');
+
+    // For small users charPoolSize returns raw=15 — only 15 implication checks
+    const impCalls = rl.fetch.mock.calls.filter((c: [string]) =>
+      c[0].startsWith('/tag_implications.json'),
+    );
+    expect(impCalls.length).toBeLessThanOrEqual(15);
+  });
+
+  it('Others slice is count-based (N − Σ top10.count)', async () => {
+    // N=10_000. top 10 counts 100..1000 sum = 5500 → Others = 4500.
+    const related: RelatedTagFixture[] = [];
+    for (let i = 0; i < 10; i++) {
+      related.push({
+        name: `char_${i}`,
+        frequency: (10 - i) / 100,
+        isTopLevel: true,
+        count: (10 - i) * 100,
+      });
+    }
+    const script: FetchScript = {totalPostCount: 10_000, related};
+    const {adm} = makeDistAdm(buildDistFetch(script, 'user'), 10_000);
+
+    const result = await adm.getCharacterDistribution(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    const others = result.find(r => r.isOther);
+    expect(others).toBeDefined();
+    expect(others?.count).toBe(4500);
+    // Legacy frequency field zeroed on the count-based Others slice.
+    expect(others?.frequency).toBe(0);
+  });
+
+  it('Others slice omitted when Σ top10.count exceeds N (multi-tag overlap)', async () => {
+    // N=1000 but per-tag counts sum well past N (a single post with 12 chars
+    // counts in each tag's bucket). Others is clamped to 0 → not pushed.
+    const related: RelatedTagFixture[] = [];
+    for (let i = 0; i < 10; i++) {
+      related.push({
+        name: `char_${i}`,
+        frequency: 0.4,
+        isTopLevel: true,
+        count: 900, // 10 × 900 = 9000 ≫ N=1000
+      });
+    }
+    const script: FetchScript = {totalPostCount: 1000, related};
+    const {adm} = makeDistAdm(buildDistFetch(script, 'user'), 1000);
+
+    const result = await adm.getCharacterDistribution(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    expect(result.find(r => r.isOther)).toBeUndefined();
+  });
+});
+
+describe('getCopyrightDistribution — dynamic pool + rerank (method A margin)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('survives filter losses and still reranks survivors by count', async () => {
+    // N=150_000 → copyPoolSize: filtered 30, raw 45.
+    // We seed 12 top-level candidates and 8 variants interleaved by
+    // frequency, so the filter halves the field but enough survive.
+    const related: RelatedTagFixture[] = [];
+    for (let i = 0; i < 20; i++) {
+      const isTL = i % 2 === 0; // even = top-level, odd = variant
+      related.push({
+        name: isTL ? `franchise_${i}` : `franchise_${i}_variant`,
+        frequency: (20 - i) / 100,
+        isTopLevel: isTL,
+        count: isTL ? (20 - i) * 100 : 9999, // variants would dominate by count if not filtered
+      });
+    }
+    const script: FetchScript = {totalPostCount: 150_000, related};
+    const {adm} = makeDistAdm(buildDistFetch(script, 'user'), 150_000);
+
+    const result = await adm.getCopyrightDistribution(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    const non = result.filter(r => !r.isOther);
+    // All survivors are top-level
+    expect(non.every(r => r.tagName?.includes('_variant') === false)).toBe(
+      true,
+    );
+    // Highest-count top-level (franchise_0, count 2000) ranks first
+    expect(non[0].tagName).toBe('franchise_0');
+  });
+});
+
+describe('getFavCopyrightDistribution — uses fav: count query', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('per-tag count fetch uses fav: prefix (not user:)', async () => {
+    const script: FetchScript = {
+      totalPostCount: 50_000,
+      related: [
+        {name: 'fate', frequency: 0.3, isTopLevel: true, count: 300},
+        {
+          name: 'kantai_collection',
+          frequency: 0.2,
+          isTopLevel: true,
+          count: 200,
+        },
+        {name: 'touhou', frequency: 0.15, isTopLevel: true, count: 150},
+      ],
+    };
+    const {adm, rl} = makeDistAdm(buildDistFetch(script, 'fav'), 50_000);
+
+    await adm.getFavCopyrightDistribution(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    const perTagCounts = rl.fetch.mock.calls
+      .map((c: [string]) => decodeURIComponent(c[0]))
+      .filter(
+        (u: string) =>
+          u.startsWith('/counts/posts.json') && u.includes('tags=fav:'),
+      );
+    // At least one per-tag call uses fav:tester <tagName>
+    const hasFavTagCall = perTagCounts.some((u: string) =>
+      /fav:tester\s+\w+/.test(u),
+    );
+    expect(hasFavTagCall).toBe(true);
+    // No user: prefix per-tag calls
+    const userTagCalls = rl.fetch.mock.calls.filter((c: [string]) => {
+      const u = decodeURIComponent(c[0]);
+      return /tags=user:tester\s+\w+/.test(u);
+    });
+    expect(userTagCalls.length).toBe(0);
+  });
+
+  it('Others base = totalFavCount (separate fav-only count fetch)', async () => {
+    // totalPostCount in buildDistFetch maps the single-prefix URL response.
+    // For fav: prefix that becomes the total fav-set size used as Others base.
+    const script: FetchScript = {
+      totalPostCount: 2000, // → totalFavCount via /counts/posts.json?tags=fav:tester
+      related: [
+        {name: 'fate', frequency: 0.3, isTopLevel: true, count: 300},
+        {
+          name: 'kantai_collection',
+          frequency: 0.2,
+          isTopLevel: true,
+          count: 200,
+        },
+        {name: 'touhou', frequency: 0.15, isTopLevel: true, count: 150},
+      ],
+    };
+    const {adm, rl} = makeDistAdm(buildDistFetch(script, 'fav'), 999_999);
+    // Note: getTotalPostCount is stubbed to a large value (999_999) above,
+    // but fav distribution must NOT use that — it must hit /counts/posts.json
+    // for fav:tester (the script's `totalPostCount` field).
+
+    const result = await adm.getFavCopyrightDistribution(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    const others = result.find(r => r.isOther);
+    // totalFavCount=2000 − Σ top10.count (300+200+150=650) = 1350
+    expect(others?.count).toBe(1350);
+
+    // Verify the fav-only count fetch happened
+    const favOnlyCall = rl.fetch.mock.calls.some((c: [string]) => {
+      const u = decodeURIComponent(c[0]);
+      return /^\/counts\/posts\.json\?tags=fav:tester$/.test(u);
+    });
+    expect(favOnlyCall).toBe(true);
+  });
+});

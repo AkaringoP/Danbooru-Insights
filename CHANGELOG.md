@@ -4,6 +4,47 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.6.2 — Dynamic candidate pool + count rerank + char filter unification
+
+### Fixed
+- **Character / Copyright / Fav-copyright pie tabs were selecting TOP10
+  using `/related_tag.json`'s `frequency`, which is estimated from at
+  most 5,000 md5-ordered posts.** Close-frequency pairs (madoka/sensei,
+  shiny/cinderella) could swap, and large dispersed-character uploaders
+  could lose true top-10 tags beyond the 11+ candidate window entirely
+  (Unbreakable-class catalogues at 276k posts). Accurate per-tag count
+  was fetched *after* the cut so it only fixed the displayed value, not
+  the selection.
+
+  Selection now widens the candidate pool dynamically by total post
+  count: 10–80 candidates for character (cap 80), 10–40 for copyright /
+  fav-copyright (cap 40). All candidates get accurate
+  `/counts/posts.json` counts, then are reranked by count desc →
+  frequency desc → tagName asc and truncated to 10. Count-fetch
+  concurrency raised from 3 to 6 to absorb the wider pool while staying
+  under the rate limiter's 8-slot ceiling.
+
+### Changed
+- **Character pie now applies the same `isTopLevelTag` filter** as
+  Copyright and Fav-copyright. Costume / ascension variants
+  (e.g. `abigail_williams_(first_ascension)_(fate)`) no longer appear in
+  TOP10 alongside their base character; they show up via the v9.6.0
+  sub-tag breakdown tooltip on the base entry. Resolves the
+  double-counting that put variant and base side-by-side in the
+  character pie for Fate / Hololive / Blue Archive-heavy uploaders.
+- **Char / Copy / Fav pie slice area + legend percentages now ride on
+  the accurate `/counts/posts.json` value**, matching every other pie
+  tab (rating / status / hair / gender / etc. were already count-based).
+  The legacy slice-from-frequency render was inconsistent with the
+  count number shown next to the same row — e.g. `sensei: 1,353` with a
+  3.0% slice computed from a different, sample-estimated frequency.
+  Others slice is now `max(0, N − Σ top10.count)` (clamped at 0 because
+  one post can carry multiple character/copyright tags); the Fav tab
+  spends one extra `/counts/posts.json?tags=fav:NAME` to use the real
+  fav-set size as its base instead of the owner's upload count.
+
+---
+
 ## v9.6.1 — Sub-tag tooltip mobile placement fix
 
 ### Fixed

@@ -288,8 +288,13 @@ function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
       if (currentPieTab === 'hair_color' && item.color) {
         sliceColor = item.color;
       }
+      // Char/Copy/Fav slice area + percentage now ride on the accurate
+      // /counts/posts.json value, matching every other pie tab. The legacy
+      // frequency-based slice was inconsistent with the count number shown
+      // in the legend tooltip (sensei: count 1,353 but slice % computed
+      // from a different sample-estimated frequency).
       return {
-        value: item.frequency ?? 0,
+        value: item.count ?? 0,
         label: item.name ?? '',
         color: sliceColor,
         details: tagDetails(),
