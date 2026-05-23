@@ -163,15 +163,7 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
 ## Active Issues
-- **v9.6.2 hotfix 진행 중** — 브랜치 `hotfix/related-tag-rerank` (origin/main 분기, 머지 대상 = main).
-  Danbooru `/related_tag.json` 의 5000 표본 frequency 가 분산형 char/copy/fav 의 top 10 선정에서
-  부정확 (madoka/sensei 인접 swap + Unbreakable 클래스 후보 밖 진입). 해결: 동적 후보 풀
-  (`charPoolSize`/`copyPoolSize`, N 기반 10단계 매핑, char cap 80 / copy·fav cap 40) + count
-  rerank (`selectTopKByCount`) + character 에 `isTopLevelTag` 필터 신규 적용 (variant 캐릭터
-  → sub-tag breakdown 으로 이동, copy/fav 와 일관성). mapConcurrent count fetch 3 → 6.
-  상세: `PLAN.md` / `TASK.md` (local, gitignored) + `related-tag-sampling-and-validation.md`
-  (v1 통계 모델) / `related-tag-sampling-and-validation(v2).md` (v2 sync-누계 대안, 폐기 사유 기록).
-  태스크 T-RR01 ~ T-RR10. 머지 후 develop ff sync (v9.6.1 hotfix 패턴 동일).
+(현재 추적 중인 항목 없음 — 비자명한 작업 시작할 때 여기 항목 추가해서 미래 세션이 컨텍스트 상속하게 하기)
 
 ## 메모
 - `CONFIG.THEMES` 에 테마 추가 시 light/dark 섹션 코멘트 유지 (현재 12 개 테마 — Light 6: Light/Solarized Light/Sakura/Lavender/Ice/Aurora, Dark 6: Midnight/Solarized Dark/Dracula/Ocean/Monokai/Ember)
