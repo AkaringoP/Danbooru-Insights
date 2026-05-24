@@ -9,7 +9,6 @@ import {RateLimitedFetch} from '../core/rate-limiter';
 import {createModal, type ModalHandle} from '../ui/modal';
 import {
   applyPopoverChrome,
-  bindDashboardThemeSelect,
   calcPopoverPosition,
   createClickOutsideHandler,
   DASHBOARD_THEME_SELECT_HTML,
@@ -63,6 +62,7 @@ interface QuickStatsResult {
   copyrightCounts: Record<string, number> | null;
   characterCounts: Record<string, number> | null;
   commentaryCounts: Record<string, number>;
+  translationCounts: Record<string, number>;
 }
 
 /** Promise bundle built by _buildHeavyStatPromises(). */
@@ -472,7 +472,7 @@ export class TagAnalyticsApp {
     // Parallel Data Fetching (Volatile & Status)
     this.injectAnalyticsButton(null, 25, 'Fetching stats... (25%)');
     let smallTagFetched = 0;
-    const smallTagTotalFetches = 6;
+    const smallTagTotalFetches = 7;
     const trackSmall = <T>(label: string, promise: Promise<T>): Promise<T> =>
       promise.then((res: T) => {
         smallTagFetched++;
@@ -489,6 +489,7 @@ export class TagAnalyticsApp {
       trendingPostNSFW,
       newPostCount,
       commentaryCounts,
+      translationCounts,
     ] = await Promise.all([
       trackSmall(
         'Fetching status',
@@ -514,6 +515,10 @@ export class TagAnalyticsApp {
         'Analyzing commentary',
         this.dataService.fetchCommentaryCounts(tagName),
       ),
+      trackSmall(
+        'Analyzing translation',
+        this.dataService.fetchTranslationCounts(tagName),
+      ),
       this.dataService.backfillUploaderNames(initialPosts),
     ]);
 
@@ -524,6 +529,7 @@ export class TagAnalyticsApp {
     meta.timeToHundred = timeToHundred ?? undefined;
     meta.statusCounts = statusCounts;
     meta.commentaryCounts = commentaryCounts;
+    meta.translationCounts = translationCounts;
     meta.ratingCounts = localStatsAllTime.ratingCounts;
     // v9.6: small-tag path produces statusCounts + ratingCounts from
     // local aggregation in this turn, so stamp the overlay as fresh.
@@ -828,6 +834,7 @@ export class TagAnalyticsApp {
     meta.copyrightCounts = quickStats.copyrightCounts ?? undefined;
     meta.characterCounts = quickStats.characterCounts ?? undefined;
     meta.commentaryCounts = quickStats.commentaryCounts;
+    meta.translationCounts = quickStats.translationCounts;
 
     // --- Phase 2 completes ---
     log.debug('[Phase 2] Awaiting Heavy Stats...');
@@ -1080,6 +1087,14 @@ export class TagAnalyticsApp {
           this.dataService.fetchCommentaryCounts(tagName),
         ),
       },
+      {
+        id: 'translation',
+        label: 'Analyzing translation status...',
+        promise: measure(
+          'Translation Status',
+          this.dataService.fetchTranslationCounts(tagName),
+        ),
+      },
     ];
 
     log.debug('[Phase 1] Executing Quick Stats...');
@@ -1102,6 +1117,7 @@ export class TagAnalyticsApp {
       copyrightCounts,
       characterCounts,
       commentaryCounts,
+      translationCounts,
     ] = quickResults as [
       Record<string, number>,
       DanbooruPost | null,
@@ -1110,6 +1126,7 @@ export class TagAnalyticsApp {
       DanbooruPost | null,
       Record<string, number> | null,
       Record<string, number> | null,
+      Record<string, number>,
       Record<string, number>,
     ];
 
@@ -1122,6 +1139,7 @@ export class TagAnalyticsApp {
       copyrightCounts,
       characterCounts,
       commentaryCounts,
+      translationCounts,
     };
   }
 
@@ -1446,6 +1464,7 @@ export class TagAnalyticsApp {
     const currentDays = this.dataService.getRetentionDays();
     const currentThreshold = this.dataService.getSyncThreshold();
     const currentCountTtl = getCountCacheTtlMin();
+    const originalDarkMode = this.settings.getDarkMode();
 
     const popover = document.createElement('div');
     popover.id = 'tag-analytics-settings-popover';
@@ -1477,7 +1496,6 @@ export class TagAnalyticsApp {
   </div>
   <div class="di-row">
      <input type="number" id="sync-threshold-input" value="${currentThreshold}" min="1" step="1">
-     <button id="retention-save-btn" class="di-save-btn">✅ Save</button>
   </div>
 
   <div class="di-section di-divider">
@@ -1486,83 +1504,115 @@ export class TagAnalyticsApp {
   </div>
   <div class="di-row">
      <input type="number" id="count-ttl-input" value="${currentCountTtl}" min="1" step="1">
-     <button id="count-ttl-save-btn" class="di-save-btn">✅ Save</button>
   </div>
 
   ${DASHBOARD_THEME_SELECT_HTML}
+
+  <div class="di-popover-actions">
+    <button id="popover-cancel-btn" class="di-popover-btn di-popover-btn-cancel">Cancel</button>
+    <button id="popover-save-btn" class="di-popover-btn di-popover-btn-save" disabled>Save</button>
+  </div>
 `;
 
     document.body.appendChild(popover);
 
-    bindDashboardThemeSelect(
-      popover,
-      () => this.settings.getDarkMode(),
-      pref => {
-        this.settings.setDarkMode(pref);
-        applyDashboardTheme(this.settings);
-      },
-    );
+    const daysInput = popover.querySelector(
+      '#retention-days-input',
+    ) as HTMLInputElement;
+    const thresholdInput = popover.querySelector(
+      '#sync-threshold-input',
+    ) as HTMLInputElement;
+    const countTtlInput = popover.querySelector(
+      '#count-ttl-input',
+    ) as HTMLInputElement;
+    const darkModeSelect = popover.querySelector(
+      '#dark-mode-select',
+    ) as HTMLSelectElement;
+    darkModeSelect.value = originalDarkMode;
+
+    const saveBtn = popover.querySelector(
+      '#popover-save-btn',
+    ) as HTMLButtonElement;
+    const cancelBtn = popover.querySelector(
+      '#popover-cancel-btn',
+    ) as HTMLButtonElement;
+
+    const checkDirty = (): void => {
+      const isDirty =
+        daysInput.value !== String(currentDays) ||
+        thresholdInput.value !== String(currentThreshold) ||
+        countTtlInput.value !== String(currentCountTtl) ||
+        darkModeSelect.value !== originalDarkMode;
+      saveBtn.disabled = !isDirty;
+    };
+    daysInput.addEventListener('input', checkDirty);
+    thresholdInput.addEventListener('input', checkDirty);
+    countTtlInput.addEventListener('input', checkDirty);
+    darkModeSelect.addEventListener('change', checkDirty);
 
     const closeHandler = createClickOutsideHandler(
       popover,
-      () => {
-        popover.remove();
-        document.removeEventListener('click', closeHandler);
-      },
+      () => closePopover(),
       {ignore: target},
     );
     setTimeout(() => document.addEventListener('click', closeHandler), 0);
 
-    // Save Handler
-    const saveBtn = popover.querySelector('#retention-save-btn');
-    (saveBtn as HTMLElement).onclick = () => {
-      const daysInput = popover.querySelector('#retention-days-input');
-      const thresholdInput = popover.querySelector('#sync-threshold-input');
-
-      const days = parseInt((daysInput as HTMLInputElement).value, 10);
-      const threshold = parseInt(
-        (thresholdInput as HTMLInputElement).value,
-        10,
-      );
-
-      if (!isNaN(days) && days > 0 && !isNaN(threshold) && threshold > 0) {
-        this.dataService.setRetentionDays(days);
-        this.dataService.setSyncThreshold(threshold);
-
-        popover.remove();
-        document.removeEventListener('click', closeHandler);
-        showToast({
-          type: 'success',
-          message: `Settings Saved: Retention ${days} days, Sync Threshold ${threshold} posts. Cleaning up old data now...`,
-        });
-        void this.dataService.cleanupOldCache(); // Run cleanup immediately (fire-and-forget)
-      } else {
-        showToast({
-          type: 'warn',
-          message: 'Please enter valid positive numbers.',
-        });
-      }
+    const closePopover = (): void => {
+      popover.remove();
+      document.removeEventListener('click', closeHandler);
     };
 
-    // Count-cache TTL save (independent button — matches the pattern in
-    // UserAnalyticsApp's sync settings popover).
-    const countTtlSaveBtn = popover.querySelector('#count-ttl-save-btn');
-    (countTtlSaveBtn as HTMLElement).onclick = () => {
-      const input = popover.querySelector('#count-ttl-input');
-      const val = parseInt((input as HTMLInputElement).value, 10);
-      if (!isNaN(val) && val >= 1) {
-        setCountCacheTtlMin(val);
-        popover.remove();
-        document.removeEventListener('click', closeHandler);
-        showToast({
-          type: 'success',
-          message: `Count refresh threshold set to ${val} min.`,
-        });
-      } else {
+    cancelBtn.onclick = closePopover;
+
+    saveBtn.onclick = () => {
+      const days = parseInt(daysInput.value, 10);
+      const threshold = parseInt(thresholdInput.value, 10);
+      const countTtl = parseInt(countTtlInput.value, 10);
+
+      if (isNaN(days) || days < 1) {
         showToast({
           type: 'warn',
-          message: 'Please enter a count-refresh threshold ≥ 1 minute.',
+          message: 'Data Retention must be ≥ 1 day.',
         });
+        return;
+      }
+      if (isNaN(threshold) || threshold < 1) {
+        showToast({
+          type: 'warn',
+          message: 'Sync Threshold must be ≥ 1.',
+        });
+        return;
+      }
+      if (isNaN(countTtl) || countTtl < 1) {
+        showToast({
+          type: 'warn',
+          message: 'Count Refresh must be ≥ 1 minute.',
+        });
+        return;
+      }
+
+      const retentionChanged = days !== currentDays;
+      const thresholdChanged = threshold !== currentThreshold;
+      if (retentionChanged) this.dataService.setRetentionDays(days);
+      if (thresholdChanged) this.dataService.setSyncThreshold(threshold);
+      if (countTtl !== currentCountTtl) setCountCacheTtlMin(countTtl);
+      if (darkModeSelect.value !== originalDarkMode) {
+        this.settings.setDarkMode(
+          darkModeSelect.value as 'auto' | 'light' | 'dark',
+        );
+        applyDashboardTheme(this.settings);
+      }
+
+      closePopover();
+
+      // Retention shrink can leave stale rows; kick cleanup off in the
+      // background so the dashboard reflects the new policy on next open.
+      if (retentionChanged || thresholdChanged) {
+        showToast({
+          type: 'success',
+          message: 'Settings saved. Cleaning up old data now…',
+        });
+        void this.dataService.cleanupOldCache();
       }
     };
   }
@@ -1903,10 +1953,15 @@ export class TagAnalyticsApp {
     `
       : '';
 
-    const extraPieTabsHtml = `
-      ${tagData.copyrightCounts ? '<button class="di-pie-tab" data-type="copyright">Copyright</button>' : ''}
-      ${tagData.characterCounts ? '<button class="di-pie-tab" data-type="character">Character</button>' : ''}
-      ${tagData.commentaryCounts ? '<button class="di-pie-tab" data-type="commentary">Commentary</button>' : ''}
+    const topRowPieTabsHtml = `
+      ${tagData.copyrightCounts ? '<button class="di-pie-tab" data-type="copyright" title="Copyright">Copy</button>' : ''}
+      ${tagData.characterCounts ? '<button class="di-pie-tab" data-type="character" title="Character">Char</button>' : ''}
+      <button class="di-pie-tab active" data-type="status">Status</button>
+      <button class="di-pie-tab" data-type="rating">Rating</button>
+    `;
+    const bottomRowPieTabsHtml = `
+      <button class="di-pie-tab" data-type="commentary">Commentary</button>
+      <button class="di-pie-tab" data-type="translation">Translation</button>
     `;
 
     return `
@@ -1936,9 +1991,8 @@ export class TagAnalyticsApp {
               <div class="di-distribution-header">
                  <div class="di-distribution-title">Distribution</div>
                  <div class="pie-tabs">
-                    <button class="di-pie-tab active" data-type="status">Status</button>
-                    <button class="di-pie-tab" data-type="rating">Rating</button>
-                    ${extraPieTabsHtml}
+                    <div class="pie-tabs-row">${topRowPieTabsHtml}</div>
+                    <div class="pie-tabs-row">${bottomRowPieTabsHtml}</div>
                  </div>
               </div>
               <div id="status-pie-chart-wrapper">

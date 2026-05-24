@@ -141,7 +141,10 @@ export function applyPopoverChrome(
  * scoped to a specific popover id) so it works as a standalone snippet
  * inside any popover's innerHTML.
  *
- * Pair with `bindDashboardThemeSelect` to wire the change handler.
+ * Callers read/write `#dark-mode-select` directly — the select is part of
+ * the deferred Save/Cancel commit batch in both popovers, so a shared
+ * "bind change → setDarkMode" helper would be wrong: changes must only
+ * apply when the user clicks Save.
  */
 export const DASHBOARD_THEME_SELECT_HTML = `
   <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--di-border-light, #eee);">
@@ -153,27 +156,6 @@ export const DASHBOARD_THEME_SELECT_HTML = `
     </select>
   </div>
 `;
-
-/**
- * Wires the `#dark-mode-select` inside `popover` to read/write the user's
- * dark-mode preference. Decoupled from SettingsManager and the theme
- * applier so the helper does not have to import either: callers pass
- * `getValue`/`setValue` closures.
- */
-export function bindDashboardThemeSelect(
-  popover: HTMLElement,
-  getValue: () => string,
-  setValue: (pref: 'auto' | 'light' | 'dark') => void,
-): void {
-  const select = popover.querySelector(
-    '#dark-mode-select',
-  ) as HTMLSelectElement | null;
-  if (!select) return;
-  select.value = getValue();
-  select.addEventListener('change', () => {
-    setValue(select.value as 'auto' | 'light' | 'dark');
-  });
-}
 
 /**
  * Idempotent body-attached tooltip element. Sets the four technical base

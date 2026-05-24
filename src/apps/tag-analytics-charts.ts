@@ -83,6 +83,17 @@ export class TagAnalyticsChartRenderer {
         commentary_request: requested,
         'has:commentary -commentary -commentary_request': untagged,
       };
+    } else if (type === 'translation') {
+      // Transform Translation Counts. Keys mirror the search query used on
+      // click (matches user-side `untagged_translation` pattern) so the
+      // chart click handler can pass them through unchanged.
+      const tr = tagData.translationCounts;
+      counts = {
+        translated: tr?.translated || 0,
+        translation_request: tr?.requested || 0,
+        '*_text -english_text -translation_request -translated':
+          tr?.untagged || 0,
+      };
     }
     if (!counts) return;
 
@@ -104,6 +115,13 @@ export class TagAnalyticsChartRenderer {
           if (key === 'commentary') name = 'Commentary';
           else if (key === 'commentary_request') name = 'Requested';
           else if (key === 'has:commentary -commentary -commentary_request')
+            name = 'Untagged';
+        } else if (type === 'translation') {
+          if (key === 'translated') name = 'Translated';
+          else if (key === 'translation_request') name = 'Requested';
+          else if (
+            key === '*_text -english_text -translation_request -translated'
+          )
             name = 'Untagged';
         } else name = key.replace(/_/g, ' ');
 
@@ -165,6 +183,12 @@ export class TagAnalyticsChartRenderer {
         if (key === 'commentary') return '#007bff'; // Blue
         if (key === 'commentary_request') return '#ffc107'; // Yellow/Orange
         if (key === 'has:commentary -commentary -commentary_request')
+          return '#6c757d'; // Grey
+      }
+      if (type === 'translation') {
+        if (key === 'translated') return '#28a745'; // Green
+        if (key === 'translation_request') return '#ffc107'; // Yellow/Orange
+        if (key === '*_text -english_text -translation_request -translated')
           return '#6c757d'; // Grey
       }
       if (key === 'others') return '#888'; // Grey for Others
@@ -1170,7 +1194,7 @@ export class TagAnalyticsChartRenderer {
         const percentage = maxCount > 0 ? (count / maxCount) * 100 : 0;
 
         return `
-          <div style="display: flex; justify-content: space-between; font-size: 0.85em; padding: 3px 5px; border-bottom: 1px solid #f5f5f5; background: linear-gradient(90deg, rgba(0,0,0,0.06) ${percentage}%, transparent ${percentage}%);">
+          <div style="display: flex; justify-content: space-between; font-size: 0.85em; padding: 3px 5px; border-bottom: 1px solid #f5f5f5; background: linear-gradient(90deg, var(--di-ranking-row-fill, rgba(0,0,0,0.06)) ${percentage}%, transparent ${percentage}%);">
               <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px;" title="${safeName}">${i + 1}. ${nameHtml}</span>
               <span style="color: var(--di-chart-axis-secondary, #666); font-weight: bold;">${count}</span>
           </div>`;

@@ -148,8 +148,8 @@ describe('computeUntaggedTranslation — inclusion-exclusion formula', () => {
 });
 
 describe('buildUntaggedTranslationQueries — query string construction', () => {
-  it('TC-H: builds all 7 queries with correct tag structure', () => {
-    const q = buildUntaggedTranslationQueries('testuser');
+  it('TC-H: builds all 7 queries with correct tag structure (user prefix)', () => {
+    const q = buildUntaggedTranslationQueries('user:testuser');
     expect(q.t).toBe('user:testuser *_text');
     expect(q.a).toBe('user:testuser english_text');
     expect(q.b).toBe('user:testuser *_text translation_request');
@@ -161,7 +161,7 @@ describe('buildUntaggedTranslationQueries — query string construction', () => 
   });
 
   it('each query uses at most 2 real (non-meta) tags — Member(Blue) compatibility', () => {
-    const q = buildUntaggedTranslationQueries('testuser');
+    const q = buildUntaggedTranslationQueries('user:testuser');
     // Count non-meta tags: strip `user:...` and count remaining whitespace-separated tokens
     const countRealTags = (query: string): number => {
       return query
@@ -178,8 +178,16 @@ describe('buildUntaggedTranslationQueries — query string construction', () => 
   });
 
   it('handles usernames with underscores (already normalized)', () => {
-    const q = buildUntaggedTranslationQueries('some_user_name');
+    const q = buildUntaggedTranslationQueries('user:some_user_name');
     expect(q.t).toBe('user:some_user_name *_text');
     expect(q.ac).toBe('user:some_user_name english_text translated');
+  });
+
+  it('accepts a plain tag name as prefix (tag-side translation distribution)', () => {
+    const q = buildUntaggedTranslationQueries('sword');
+    expect(q.t).toBe('sword *_text');
+    expect(q.a).toBe('sword english_text');
+    expect(q.b).toBe('sword *_text translation_request');
+    expect(q.bc).toBe('sword translation_request translated');
   });
 });
