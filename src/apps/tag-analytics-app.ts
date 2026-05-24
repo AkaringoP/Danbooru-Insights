@@ -62,6 +62,7 @@ interface QuickStatsResult {
   copyrightCounts: Record<string, number> | null;
   characterCounts: Record<string, number> | null;
   commentaryCounts: Record<string, number>;
+  translationCounts: Record<string, number>;
 }
 
 /** Promise bundle built by _buildHeavyStatPromises(). */
@@ -471,7 +472,7 @@ export class TagAnalyticsApp {
     // Parallel Data Fetching (Volatile & Status)
     this.injectAnalyticsButton(null, 25, 'Fetching stats... (25%)');
     let smallTagFetched = 0;
-    const smallTagTotalFetches = 6;
+    const smallTagTotalFetches = 7;
     const trackSmall = <T>(label: string, promise: Promise<T>): Promise<T> =>
       promise.then((res: T) => {
         smallTagFetched++;
@@ -488,6 +489,7 @@ export class TagAnalyticsApp {
       trendingPostNSFW,
       newPostCount,
       commentaryCounts,
+      translationCounts,
     ] = await Promise.all([
       trackSmall(
         'Fetching status',
@@ -513,6 +515,10 @@ export class TagAnalyticsApp {
         'Analyzing commentary',
         this.dataService.fetchCommentaryCounts(tagName),
       ),
+      trackSmall(
+        'Analyzing translation',
+        this.dataService.fetchTranslationCounts(tagName),
+      ),
       this.dataService.backfillUploaderNames(initialPosts),
     ]);
 
@@ -523,6 +529,7 @@ export class TagAnalyticsApp {
     meta.timeToHundred = timeToHundred ?? undefined;
     meta.statusCounts = statusCounts;
     meta.commentaryCounts = commentaryCounts;
+    meta.translationCounts = translationCounts;
     meta.ratingCounts = localStatsAllTime.ratingCounts;
     // v9.6: small-tag path produces statusCounts + ratingCounts from
     // local aggregation in this turn, so stamp the overlay as fresh.
@@ -827,6 +834,7 @@ export class TagAnalyticsApp {
     meta.copyrightCounts = quickStats.copyrightCounts ?? undefined;
     meta.characterCounts = quickStats.characterCounts ?? undefined;
     meta.commentaryCounts = quickStats.commentaryCounts;
+    meta.translationCounts = quickStats.translationCounts;
 
     // --- Phase 2 completes ---
     log.debug('[Phase 2] Awaiting Heavy Stats...');
@@ -1079,6 +1087,14 @@ export class TagAnalyticsApp {
           this.dataService.fetchCommentaryCounts(tagName),
         ),
       },
+      {
+        id: 'translation',
+        label: 'Analyzing translation status...',
+        promise: measure(
+          'Translation Status',
+          this.dataService.fetchTranslationCounts(tagName),
+        ),
+      },
     ];
 
     log.debug('[Phase 1] Executing Quick Stats...');
@@ -1101,6 +1117,7 @@ export class TagAnalyticsApp {
       copyrightCounts,
       characterCounts,
       commentaryCounts,
+      translationCounts,
     ] = quickResults as [
       Record<string, number>,
       DanbooruPost | null,
@@ -1109,6 +1126,7 @@ export class TagAnalyticsApp {
       DanbooruPost | null,
       Record<string, number> | null,
       Record<string, number> | null,
+      Record<string, number>,
       Record<string, number>,
     ];
 
@@ -1121,6 +1139,7 @@ export class TagAnalyticsApp {
       copyrightCounts,
       characterCounts,
       commentaryCounts,
+      translationCounts,
     };
   }
 
@@ -1934,10 +1953,15 @@ export class TagAnalyticsApp {
     `
       : '';
 
-    const extraPieTabsHtml = `
-      ${tagData.copyrightCounts ? '<button class="di-pie-tab" data-type="copyright">Copyright</button>' : ''}
-      ${tagData.characterCounts ? '<button class="di-pie-tab" data-type="character">Character</button>' : ''}
-      ${tagData.commentaryCounts ? '<button class="di-pie-tab" data-type="commentary">Commentary</button>' : ''}
+    const topRowPieTabsHtml = `
+      ${tagData.copyrightCounts ? '<button class="di-pie-tab" data-type="copyright" title="Copyright">Copy</button>' : ''}
+      ${tagData.characterCounts ? '<button class="di-pie-tab" data-type="character" title="Character">Char</button>' : ''}
+      <button class="di-pie-tab active" data-type="status">Status</button>
+      <button class="di-pie-tab" data-type="rating">Rating</button>
+    `;
+    const bottomRowPieTabsHtml = `
+      <button class="di-pie-tab" data-type="commentary">Commentary</button>
+      <button class="di-pie-tab" data-type="translation">Translation</button>
     `;
 
     return `
@@ -1967,9 +1991,8 @@ export class TagAnalyticsApp {
               <div class="di-distribution-header">
                  <div class="di-distribution-title">Distribution</div>
                  <div class="pie-tabs">
-                    <button class="di-pie-tab active" data-type="status">Status</button>
-                    <button class="di-pie-tab" data-type="rating">Rating</button>
-                    ${extraPieTabsHtml}
+                    <div class="pie-tabs-row">${topRowPieTabsHtml}</div>
+                    <div class="pie-tabs-row">${bottomRowPieTabsHtml}</div>
                  </div>
               </div>
               <div id="status-pie-chart-wrapper">

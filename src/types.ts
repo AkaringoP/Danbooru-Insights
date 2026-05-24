@@ -655,6 +655,7 @@ export interface TagAnalyticsMeta {
   statusCounts: Record<string, number>;
   ratingCounts: Record<string, number>;
   commentaryCounts?: Record<string, number>;
+  translationCounts?: Record<string, number>;
   copyrightCounts?: Record<string, number>;
   characterCounts?: Record<string, number>;
   latestPost?: DanbooruPost;

@@ -719,10 +719,17 @@ const GLOBAL_CSS = `
     }
     .pie-tabs {
         display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 4px;
+    }
+    .pie-tabs-row {
+        display: flex;
         flex-wrap: wrap;
         gap: 4px;
         justify-content: flex-end;
     }
+    .pie-tabs-row:empty { display: none; }
     #status-pie-chart-wrapper {
         display: flex;
         align-items: center;

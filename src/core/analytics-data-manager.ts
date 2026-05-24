@@ -133,8 +133,12 @@ export function computeUntaggedTranslation(
  * Builds the 6 subqueries for Untagged inclusion-exclusion calculation plus the
  * BC intersection query used for Assumption-1 runtime monitoring. All queries
  * use ≤2 real tags so they work on Member(Blue) accounts.
+ *
+ * `prefix` is prepended to every subquery — `user:X` for user-side translation
+ * distribution, a single tag name (e.g. `sword`) for tag-side. Pass it
+ * already-normalized (spaces → underscores, no trailing whitespace).
  */
-export function buildUntaggedTranslationQueries(normalizedName: string): {
+export function buildUntaggedTranslationQueries(prefix: string): {
   t: string;
   a: string;
   b: string;
@@ -143,15 +147,14 @@ export function buildUntaggedTranslationQueries(normalizedName: string): {
   ac: string;
   bc: string;
 } {
-  const u = `user:${normalizedName}`;
   return {
-    t: `${u} *_text`,
-    a: `${u} english_text`,
-    b: `${u} *_text translation_request`,
-    c: `${u} *_text translated`,
-    ab: `${u} english_text translation_request`,
-    ac: `${u} english_text translated`,
-    bc: `${u} translation_request translated`,
+    t: `${prefix} *_text`,
+    a: `${prefix} english_text`,
+    b: `${prefix} *_text translation_request`,
+    c: `${prefix} *_text translated`,
+    ab: `${prefix} english_text translation_request`,
+    ac: `${prefix} english_text translated`,
+    bc: `${prefix} translation_request translated`,
   };
 }
 
@@ -2718,7 +2721,7 @@ export class AnalyticsDataManager extends DataManager {
             // Untagged via inclusion-exclusion: max(0, t − a − b − c + ab + ac).
             // See PLAN.md §9 for derivation. All 6 queries use ≤2 real tags
             // so they work on Member(Blue) accounts.
-            const q = buildUntaggedTranslationQueries(normalizedName);
+            const q = buildUntaggedTranslationQueries(`user:${normalizedName}`);
             const [t, a, b, c, ab, ac] = await Promise.all([
               fetchCount(q.t),
               fetchCount(q.a),

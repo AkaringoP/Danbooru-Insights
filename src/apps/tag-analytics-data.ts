@@ -1,4 +1,8 @@
 import {CONFIG, DAY_MS} from '../config';
+import {
+  buildUntaggedTranslationQueries,
+  computeUntaggedTranslation,
+} from '../core/analytics-data-manager';
 import {fetchRemoteCount} from '../core/data-manager';
 import {createLogger} from '../core/logger';
 import {bulkPutSafe, evictOldestNonCurrentUser} from '../core/quota-manager';
@@ -962,6 +966,39 @@ export class TagAnalyticsDataService {
 
     return results;
   }
+
+  /**
+   * Fetches translation-related counts for a tag: Translated, Requested,
+   * and Untagged. Untagged is computed via the same inclusion-exclusion
+   * formula used on the user side (max(0, t − a − b − c + ab + ac)); the
+   * 6 subqueries each use ≤2 real tags so Member(Blue) accounts work.
+   *
+   * @return Object containing counts for 'translated', 'requested', 'untagged'.
+   */
+  async fetchTranslationCounts(
+    tagName: string,
+  ): Promise<Record<string, number>> {
+    const direct: Record<string, string> = {
+      translated: `${tagName} translated`,
+      requested: `${tagName} translation_request`,
+    };
+    const incl = buildUntaggedTranslationQueries(tagName);
+
+    const [translated, requested, t, a, b, c, ab, ac] = await Promise.all([
+      this.fetchCountWithRetry(direct.translated),
+      this.fetchCountWithRetry(direct.requested),
+      this.fetchCountWithRetry(incl.t),
+      this.fetchCountWithRetry(incl.a),
+      this.fetchCountWithRetry(incl.b),
+      this.fetchCountWithRetry(incl.c),
+      this.fetchCountWithRetry(incl.ab),
+      this.fetchCountWithRetry(incl.ac),
+    ]);
+
+    const untagged = computeUntaggedTranslation({t, a, b, c, ab, ac});
+    return {translated, requested, untagged};
+  }
+
   /**
    * Fetches post counts for each status (active, deleted, etc.).
    * @param {string} tagName - The tag to analyze.
