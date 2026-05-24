@@ -4,6 +4,50 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.6.3 — Translation pie tab + Save/Cancel popover + dark-mode rank bar
+
+### Added
+- **TagAnalytics: Translation pie tab.** Mirrors the UserAnalytics
+  Translated / Requested / Untagged split for tag-side distribution.
+  Untagged is computed via the same 6-query inclusion-exclusion
+  formula (`max(0, t − a − b − c + ab + ac)`) so every subquery stays
+  at ≤2 real tags and Member(Blue) accounts work without paying for
+  a Gold-tier search. `buildUntaggedTranslationQueries` was
+  generalized to take a prefix so both user-side (`user:X`) and
+  tag-side (`{tagName}`) reuse the same helper.
+
+### Changed
+- **TagAnalytics pie tabs split into two rows.** Top row: Copy /
+  Char / Status / Rating. Bottom row: Commentary / Translation.
+  Copyright / Character labels are shortened to fit four tabs on one
+  line at typical modal widths; full names restored on hover via the
+  `title` attribute. Commentary / Translation now render
+  unconditionally (the legacy commentary-only conditional masked
+  the tab whenever cache was missing the field — fresh syncs always
+  populate both, and old caches expire within 24h).
+- **Settings popovers (UserAnalytics sync settings + TagAnalytics
+  settings) commit on Save instead of per-field.** Each popover now
+  buffers all edits — Partial Sync Threshold, Count Refresh,
+  Dashboard Theme, plus Retention / Sync Threshold on the tag side —
+  behind a single `[Cancel] [Save]` action row at the bottom. Save
+  starts disabled until something is dirty; Cancel or outside-click
+  discards every pending edit (including the theme preview).
+  Replaces the per-field ✅ Save buttons that previously committed
+  threshold / count fields immediately while the theme select
+  applied on change, which made cancellation impossible after
+  touching the theme.
+
+### Fixed
+- **TagAnalytics ranking row % bar was invisible in dark mode.** The
+  per-row gradient fill was a hard-coded `rgba(0,0,0,0.06)` overlay —
+  fine as a soft tint on the white card, nearly black-on-black on the
+  dark card so the user's share of total uploads couldn't be read at
+  a glance. Lifted to `--di-ranking-row-fill` so the dark palette
+  swaps in a white wash (`rgba(255,255,255,0.09)`); light mode keeps
+  the original via CSS fallback.
+
+---
+
 ## v9.6.2 — Dynamic candidate pool + count rerank + char filter unification
 
 ### Fixed
