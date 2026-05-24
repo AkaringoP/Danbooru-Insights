@@ -56,6 +56,10 @@ const GLOBAL_CSS = `
       /* Overlay */
       --di-overlay-bg: rgba(0, 0, 0, 0.6);
 
+      /* Ranking row fill (% bar behind each user row) — white wash on
+         dark, black wash on light. Light fallback lives at the use site. */
+      --di-ranking-row-fill: rgba(255, 255, 255, 0.09);
+
       /* Spinner */
       --di-spinner-track: #2a2a44;
       --di-spinner-accent: #58a6ff;

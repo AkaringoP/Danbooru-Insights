@@ -1194,7 +1194,7 @@ export class TagAnalyticsChartRenderer {
         const percentage = maxCount > 0 ? (count / maxCount) * 100 : 0;
 
         return `
-          <div style="display: flex; justify-content: space-between; font-size: 0.85em; padding: 3px 5px; border-bottom: 1px solid #f5f5f5; background: linear-gradient(90deg, rgba(0,0,0,0.06) ${percentage}%, transparent ${percentage}%);">
+          <div style="display: flex; justify-content: space-between; font-size: 0.85em; padding: 3px 5px; border-bottom: 1px solid #f5f5f5; background: linear-gradient(90deg, var(--di-ranking-row-fill, rgba(0,0,0,0.06)) ${percentage}%, transparent ${percentage}%);">
               <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px;" title="${safeName}">${i + 1}. ${nameHtml}</span>
               <span style="color: var(--di-chart-axis-secondary, #666); font-weight: bold;">${count}</span>
           </div>`;
