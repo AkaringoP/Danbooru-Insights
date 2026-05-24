@@ -9,7 +9,6 @@ import {RateLimitedFetch} from '../core/rate-limiter';
 import {createModal, type ModalHandle} from '../ui/modal';
 import {
   applyPopoverChrome,
-  bindDashboardThemeSelect,
   calcPopoverPosition,
   createClickOutsideHandler,
   DASHBOARD_THEME_SELECT_HTML,
@@ -1446,6 +1445,7 @@ export class TagAnalyticsApp {
     const currentDays = this.dataService.getRetentionDays();
     const currentThreshold = this.dataService.getSyncThreshold();
     const currentCountTtl = getCountCacheTtlMin();
+    const originalDarkMode = this.settings.getDarkMode();
 
     const popover = document.createElement('div');
     popover.id = 'tag-analytics-settings-popover';
@@ -1477,7 +1477,6 @@ export class TagAnalyticsApp {
   </div>
   <div class="di-row">
      <input type="number" id="sync-threshold-input" value="${currentThreshold}" min="1" step="1">
-     <button id="retention-save-btn" class="di-save-btn">✅ Save</button>
   </div>
 
   <div class="di-section di-divider">
@@ -1486,83 +1485,115 @@ export class TagAnalyticsApp {
   </div>
   <div class="di-row">
      <input type="number" id="count-ttl-input" value="${currentCountTtl}" min="1" step="1">
-     <button id="count-ttl-save-btn" class="di-save-btn">✅ Save</button>
   </div>
 
   ${DASHBOARD_THEME_SELECT_HTML}
+
+  <div class="di-popover-actions">
+    <button id="popover-cancel-btn" class="di-popover-btn di-popover-btn-cancel">Cancel</button>
+    <button id="popover-save-btn" class="di-popover-btn di-popover-btn-save" disabled>Save</button>
+  </div>
 `;
 
     document.body.appendChild(popover);
 
-    bindDashboardThemeSelect(
-      popover,
-      () => this.settings.getDarkMode(),
-      pref => {
-        this.settings.setDarkMode(pref);
-        applyDashboardTheme(this.settings);
-      },
-    );
+    const daysInput = popover.querySelector(
+      '#retention-days-input',
+    ) as HTMLInputElement;
+    const thresholdInput = popover.querySelector(
+      '#sync-threshold-input',
+    ) as HTMLInputElement;
+    const countTtlInput = popover.querySelector(
+      '#count-ttl-input',
+    ) as HTMLInputElement;
+    const darkModeSelect = popover.querySelector(
+      '#dark-mode-select',
+    ) as HTMLSelectElement;
+    darkModeSelect.value = originalDarkMode;
+
+    const saveBtn = popover.querySelector(
+      '#popover-save-btn',
+    ) as HTMLButtonElement;
+    const cancelBtn = popover.querySelector(
+      '#popover-cancel-btn',
+    ) as HTMLButtonElement;
+
+    const checkDirty = (): void => {
+      const isDirty =
+        daysInput.value !== String(currentDays) ||
+        thresholdInput.value !== String(currentThreshold) ||
+        countTtlInput.value !== String(currentCountTtl) ||
+        darkModeSelect.value !== originalDarkMode;
+      saveBtn.disabled = !isDirty;
+    };
+    daysInput.addEventListener('input', checkDirty);
+    thresholdInput.addEventListener('input', checkDirty);
+    countTtlInput.addEventListener('input', checkDirty);
+    darkModeSelect.addEventListener('change', checkDirty);
 
     const closeHandler = createClickOutsideHandler(
       popover,
-      () => {
-        popover.remove();
-        document.removeEventListener('click', closeHandler);
-      },
+      () => closePopover(),
       {ignore: target},
     );
     setTimeout(() => document.addEventListener('click', closeHandler), 0);
 
-    // Save Handler
-    const saveBtn = popover.querySelector('#retention-save-btn');
-    (saveBtn as HTMLElement).onclick = () => {
-      const daysInput = popover.querySelector('#retention-days-input');
-      const thresholdInput = popover.querySelector('#sync-threshold-input');
-
-      const days = parseInt((daysInput as HTMLInputElement).value, 10);
-      const threshold = parseInt(
-        (thresholdInput as HTMLInputElement).value,
-        10,
-      );
-
-      if (!isNaN(days) && days > 0 && !isNaN(threshold) && threshold > 0) {
-        this.dataService.setRetentionDays(days);
-        this.dataService.setSyncThreshold(threshold);
-
-        popover.remove();
-        document.removeEventListener('click', closeHandler);
-        showToast({
-          type: 'success',
-          message: `Settings Saved: Retention ${days} days, Sync Threshold ${threshold} posts. Cleaning up old data now...`,
-        });
-        void this.dataService.cleanupOldCache(); // Run cleanup immediately (fire-and-forget)
-      } else {
-        showToast({
-          type: 'warn',
-          message: 'Please enter valid positive numbers.',
-        });
-      }
+    const closePopover = (): void => {
+      popover.remove();
+      document.removeEventListener('click', closeHandler);
     };
 
-    // Count-cache TTL save (independent button — matches the pattern in
-    // UserAnalyticsApp's sync settings popover).
-    const countTtlSaveBtn = popover.querySelector('#count-ttl-save-btn');
-    (countTtlSaveBtn as HTMLElement).onclick = () => {
-      const input = popover.querySelector('#count-ttl-input');
-      const val = parseInt((input as HTMLInputElement).value, 10);
-      if (!isNaN(val) && val >= 1) {
-        setCountCacheTtlMin(val);
-        popover.remove();
-        document.removeEventListener('click', closeHandler);
-        showToast({
-          type: 'success',
-          message: `Count refresh threshold set to ${val} min.`,
-        });
-      } else {
+    cancelBtn.onclick = closePopover;
+
+    saveBtn.onclick = () => {
+      const days = parseInt(daysInput.value, 10);
+      const threshold = parseInt(thresholdInput.value, 10);
+      const countTtl = parseInt(countTtlInput.value, 10);
+
+      if (isNaN(days) || days < 1) {
         showToast({
           type: 'warn',
-          message: 'Please enter a count-refresh threshold ≥ 1 minute.',
+          message: 'Data Retention must be ≥ 1 day.',
         });
+        return;
+      }
+      if (isNaN(threshold) || threshold < 1) {
+        showToast({
+          type: 'warn',
+          message: 'Sync Threshold must be ≥ 1.',
+        });
+        return;
+      }
+      if (isNaN(countTtl) || countTtl < 1) {
+        showToast({
+          type: 'warn',
+          message: 'Count Refresh must be ≥ 1 minute.',
+        });
+        return;
+      }
+
+      const retentionChanged = days !== currentDays;
+      const thresholdChanged = threshold !== currentThreshold;
+      if (retentionChanged) this.dataService.setRetentionDays(days);
+      if (thresholdChanged) this.dataService.setSyncThreshold(threshold);
+      if (countTtl !== currentCountTtl) setCountCacheTtlMin(countTtl);
+      if (darkModeSelect.value !== originalDarkMode) {
+        this.settings.setDarkMode(
+          darkModeSelect.value as 'auto' | 'light' | 'dark',
+        );
+        applyDashboardTheme(this.settings);
+      }
+
+      closePopover();
+
+      // Retention shrink can leave stale rows; kick cleanup off in the
+      // background so the dashboard reflects the new policy on next open.
+      if (retentionChanged || thresholdChanged) {
+        showToast({
+          type: 'success',
+          message: 'Settings saved. Cleaning up old data now…',
+        });
+        void this.dataService.cleanupOldCache();
       }
     };
   }

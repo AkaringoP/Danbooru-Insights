@@ -31,7 +31,6 @@ import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {createModal, type ModalHandle} from '../ui/modal';
 import {
   applyPopoverChrome,
-  bindDashboardThemeSelect,
   calcPopoverPosition,
   createClickOutsideHandler,
   DASHBOARD_THEME_SELECT_HTML,
@@ -1424,80 +1423,112 @@ export class UserAnalyticsApp {
     popover.style.top = `${top}px`;
     popover.style.left = `${left}px`;
 
+    const originalDarkMode = settingsManager.getDarkMode();
+
     popover.innerHTML = `
       <div style="margin-bottom:8px; line-height:1.4;">
         <strong>Partial Sync Threshold</strong><br>
         Allow report view without sync if: <br>
         (Total - Synced) <= Threshold
       </div>
-      <div style="display:flex; align-items:center; justify-content:space-between;">
+      <div>
          <input type="number" id="sync-thresh-input" value="${currentVal}" min="0" style="width:60px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333);">
-         <button id="sync-thresh-save" style="background:none; border:1px solid #28a745; color:#28a745; border-radius:4px; cursor:pointer; padding:2px 8px; font-size:11px;">✅ Save</button>
       </div>
       <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--di-border-light, #eee); line-height:1.4;">
         <strong>Count Refresh (min)</strong><br>
         Refresh post-count values older than this on dashboard open.
       </div>
-      <div style="display:flex; align-items:center; justify-content:space-between; margin-top:4px;">
+      <div style="margin-top:4px;">
          <input type="number" id="count-ttl-input" value="${currentCountTtl}" min="1" style="width:60px; padding:3px; border:1px solid var(--di-border-input, #ddd); border-radius:3px; background:var(--di-bg, #fff); color:var(--di-text, #333);">
-         <button id="count-ttl-save" style="background:none; border:1px solid #28a745; color:#28a745; border-radius:4px; cursor:pointer; padding:2px 8px; font-size:11px;">✅ Save</button>
       </div>
       ${DASHBOARD_THEME_SELECT_HTML}
+      <div class="di-popover-actions">
+        <button id="popover-cancel-btn" class="di-popover-btn di-popover-btn-cancel">Cancel</button>
+        <button id="popover-save-btn" class="di-popover-btn di-popover-btn-save" disabled>Save</button>
+      </div>
     `;
 
     document.body.appendChild(popover);
 
-    bindDashboardThemeSelect(
-      popover,
-      () => settingsManager.getDarkMode(),
-      pref => {
-        settingsManager.setDarkMode(pref);
-        applyDashboardTheme(settingsManager);
-      },
-    );
+    const syncThreshInput = popover.querySelector(
+      '#sync-thresh-input',
+    ) as HTMLInputElement;
+    const countTtlInput = popover.querySelector(
+      '#count-ttl-input',
+    ) as HTMLInputElement;
+    const darkModeSelect = popover.querySelector(
+      '#dark-mode-select',
+    ) as HTMLSelectElement;
+    darkModeSelect.value = originalDarkMode;
+
+    const saveBtn = popover.querySelector(
+      '#popover-save-btn',
+    ) as HTMLButtonElement;
+    const cancelBtn = popover.querySelector(
+      '#popover-cancel-btn',
+    ) as HTMLButtonElement;
+
+    const checkDirty = (): void => {
+      const isDirty =
+        syncThreshInput.value !== String(currentVal) ||
+        countTtlInput.value !== String(currentCountTtl) ||
+        darkModeSelect.value !== originalDarkMode;
+      saveBtn.disabled = !isDirty;
+    };
+    syncThreshInput.addEventListener('input', checkDirty);
+    countTtlInput.addEventListener('input', checkDirty);
+    darkModeSelect.addEventListener('change', checkDirty);
 
     const closeHandler = createClickOutsideHandler(
       popover,
-      () => {
-        popover.remove();
-        document.removeEventListener('click', closeHandler);
-      },
+      () => closePopover(),
       {ignore: target},
     );
     setTimeout(() => document.addEventListener('click', closeHandler), 0);
 
-    // Save Handler — Partial Sync Threshold
-    const saveBtn = popover.querySelector('#sync-thresh-save');
-    (saveBtn as HTMLElement).onclick = () => {
-      const input = popover.querySelector('#sync-thresh-input');
-      const val = parseInt((input as HTMLInputElement).value, 10);
-      if (!isNaN(val) && val >= 0) {
-        settingsManager.setSyncThreshold(val);
-        popover.remove();
-        document.removeEventListener('click', closeHandler);
-        // Refresh Header Status immediately to reflect new threshold state
-        void this.updateHeaderStatus();
-      } else {
-        showToast({type: 'warn', message: 'Please enter a valid number.'});
-      }
+    const closePopover = (): void => {
+      popover.remove();
+      document.removeEventListener('click', closeHandler);
     };
 
-    // Save Handler — Count Refresh TTL (minutes)
-    const countTtlSaveBtn = popover.querySelector('#count-ttl-save');
-    (countTtlSaveBtn as HTMLElement).onclick = () => {
-      const input = popover.querySelector('#count-ttl-input');
-      const val = parseInt((input as HTMLInputElement).value, 10);
-      if (!isNaN(val) && val >= 1) {
-        setCountCacheTtlMin(val);
-        showToast({
-          type: 'success',
-          message: `Count refresh set to ${val} min.`,
-        });
-      } else {
+    cancelBtn.onclick = closePopover;
+
+    saveBtn.onclick = () => {
+      const syncThreshVal = parseInt(syncThreshInput.value, 10);
+      const countTtlVal = parseInt(countTtlInput.value, 10);
+      if (isNaN(syncThreshVal) || syncThreshVal < 0) {
         showToast({
           type: 'warn',
-          message: 'Please enter a number ≥ 1 minute.',
+          message: 'Partial Sync Threshold must be a non-negative number.',
         });
+        return;
+      }
+      if (isNaN(countTtlVal) || countTtlVal < 1) {
+        showToast({
+          type: 'warn',
+          message: 'Count Refresh must be ≥ 1 minute.',
+        });
+        return;
+      }
+
+      let needsHeaderRefresh = false;
+      if (syncThreshVal !== currentVal) {
+        settingsManager.setSyncThreshold(syncThreshVal);
+        needsHeaderRefresh = true;
+      }
+      if (countTtlVal !== currentCountTtl) {
+        setCountCacheTtlMin(countTtlVal);
+      }
+      if (darkModeSelect.value !== originalDarkMode) {
+        settingsManager.setDarkMode(
+          darkModeSelect.value as 'auto' | 'light' | 'dark',
+        );
+        applyDashboardTheme(settingsManager);
+      }
+
+      closePopover();
+      if (needsHeaderRefresh) {
+        void this.updateHeaderStatus();
       }
     };
   }

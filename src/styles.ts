@@ -453,14 +453,37 @@ const GLOBAL_CSS = `
         background: var(--di-input-bg, #ffffff);
         color: var(--di-text, #333333);
     }
-    #tag-analytics-settings-popover .di-save-btn {
-        background: none;
-        border: 1px solid #28a745;
-        color: #28a745;
+    /* Popover Save/Cancel action row (shared: UserAnalyticsApp sync popover
+       + TagAnalyticsApp settings popover). Save commits all edits at once;
+       Cancel (or outside click) discards them. */
+    .di-popover-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 12px;
+        padding-top: 8px;
+        border-top: 1px solid var(--di-border-light, #eeeeee);
+    }
+    .di-popover-btn {
         border-radius: 4px;
         cursor: pointer;
-        padding: 2px 8px;
+        padding: 4px 12px;
         font-size: 11px;
+        font-weight: 600;
+    }
+    .di-popover-btn-save {
+        background: #28a745;
+        border: 1px solid #28a745;
+        color: #ffffff;
+    }
+    .di-popover-btn-save:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+    }
+    .di-popover-btn-cancel {
+        background: none;
+        border: 1px solid #dc3545;
+        color: #dc3545;
     }
 
     /* Tag analytics entry button (icon-container in createButton) */
