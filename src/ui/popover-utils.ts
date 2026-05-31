@@ -58,6 +58,41 @@ export function calcPopoverPositionBelowCentered(
   };
 }
 
+/**
+ * Document-coordinate position for a popover placed **below** `target`
+ * (8px gap), left-aligned to the target but clamped so a `popoverWidth`-wide
+ * popover stays within the viewport (8px side margins). Used by the
+ * dashboard preview popover, which mimics Danbooru's native user card
+ * (below the anchor with an upward caret).
+ *
+ * Also returns `caretLeft`: the x-offset **within the popover** for an
+ * upward caret pointing at the target's horizontal centre, clamped so the
+ * caret stays inside the popover body.
+ */
+export function calcPopoverPositionBelow(
+  target: Element,
+  popoverWidth: number,
+): {top: number; left: number; caretLeft: number} {
+  const rect = target.getBoundingClientRect();
+  const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+  const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+
+  const margin = 8;
+  const maxLeft = Math.max(margin, window.innerWidth - popoverWidth - margin);
+  const viewportLeft = Math.min(Math.max(margin, rect.left), maxLeft);
+  const top = rect.bottom + scrollTop + margin;
+  const left = viewportLeft + scrollLeft;
+
+  const caretHalf = 7; // half the caret's visual width
+  const anchorCenter = rect.left + rect.width / 2;
+  const caretLeft = Math.min(
+    Math.max(caretHalf, anchorCenter - viewportLeft),
+    popoverWidth - caretHalf,
+  );
+
+  return {top, left, caretLeft};
+}
+
 export interface ClickOutsideOptions {
   /**
    * Elements (in addition to `container`) whose clicks should NOT trigger

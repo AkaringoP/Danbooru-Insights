@@ -24,6 +24,15 @@ import {
   copyPoolSize,
   selectTopKByCount,
 } from './related-tag-rerank';
+import {
+  buildPreviewPostUrls,
+  classifyCommentType,
+  classifyUploadType,
+  filterUploadCoupledCommentary,
+  mergeRecentActivity,
+  toPostPreview,
+} from './dashboard-preview';
+import type {CommentarySegment, UploadMeta} from './dashboard-preview';
 import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
@@ -41,7 +50,23 @@ import type {
   DanbooruPost,
   DanbooruRelatedTag,
   DanbooruUserFeedback,
+  PostPreview,
+  ActivityType,
+  ActivitySegment,
+  ActivityDistribution,
 } from '../types';
+
+/**
+ * One activity-feed descriptor for
+ * {@link AnalyticsDataManager.getActivityDistribution}: the endpoint and the
+ * user search param, plus an optional extra search clause (e.g. `is_new`).
+ */
+interface ActivityDescriptor {
+  type: ActivityType;
+  endpoint: string;
+  param: string;
+  extra?: string;
+}
 
 /** Summary statistics for a user's upload history. */
 export interface SummaryStats {
@@ -1925,6 +1950,338 @@ export class AnalyticsDataManager extends DataManager {
     const result = {sfw, nsfw};
     if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
     return result;
+  }
+
+  /**
+   * Fetches a user's most-recent uploads for the preview popover grid as
+   * lightweight PostPreview view-models. Real-time: no DB storage, no cache.
+   * Two parallel requests — recent posts (`status:any` so deleted/pending/
+   * flagged are included) and the user's appealed post ids (`status:appealed`
+   * has no per-post API flag, so it is resolved separately).
+   * @param {!TargetUser} userInfo The user to fetch for.
+   * @param {number} limit Max posts to return (default 20).
+   * @return {!Promise<!Array<PostPreview>>} Newest-first previews; [] on error.
+   */
+  async getRecentPostsPreview(
+    userInfo: TargetUser,
+    limit = 20,
+  ): Promise<PostPreview[]> {
+    if (!userInfo.name) return [];
+    const normalizedName = userInfo.name.replace(/ /g, '_');
+    const {postsUrl, appealedUrl} = buildPreviewPostUrls(normalizedName, limit);
+
+    try {
+      const [posts, appealed] = await Promise.all([
+        this.rateLimiter.fetch(postsUrl).then(r => r.json()),
+        this.rateLimiter
+          .fetch(appealedUrl)
+          .then(r => r.json())
+          .catch(() => []),
+      ]);
+      if (!Array.isArray(posts)) return [];
+      const appealedIds = new Set<number>(
+        (Array.isArray(appealed) ? appealed : []).map(
+          (p: DanbooruPost) => p.id,
+        ),
+      );
+      return posts.map((p: DanbooruPost) => toPostPreview(p, appealedIds));
+    } catch (e: unknown) {
+      log.warn('Failed to fetch recent posts preview', {
+        user: userInfo.name,
+        error: e,
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Fetches the user's most-recent activity across 11 feed types (post upload
+   * + tag edit + note/wiki/artist/commentary/pool version edits +
+   * forum/approval/comment/appeal) for the preview popover's distribution
+   * strip. Each type is one `limit&only=ts` request, run with
+   * {@link mapConcurrent}; the merged feed keeps the most-recent `limit`
+   * segments. Real-time: no DB storage, no cache (the ui popover applies its
+   * own 60s cache + in-flight dedupe).
+   *
+   * Requires the numeric `userInfo.id` — every search param here is id-based
+   * (`updater_id`/`creator_id`/`user_id`); returns an empty distribution if
+   * it is missing. Per-type failures degrade gracefully to no segments.
+   *
+   * Commentary is filtered: a post uploaded *with* commentary auto-creates a
+   * v1 ArtistCommentaryVersion in the same transaction, which would
+   * double-count the upload as commentary work. Those upload-coupled v1s are
+   * dropped via {@link filterUploadCoupledCommentary} after looking up the
+   * relevant posts' upload times.
+   * @param {!TargetUser} userInfo The user to fetch for.
+   * @param {number} limit Max segments in the merged feed (default 100).
+   * @return {!Promise<!ActivityDistribution>} Merged feed + per-type counts.
+   */
+  async getActivityDistribution(
+    userInfo: TargetUser,
+    limit = 100,
+  ): Promise<ActivityDistribution> {
+    const userId = userInfo.id;
+    if (!userId) return mergeRecentActivity([], limit);
+
+    // post_versions is split by `is_new`: the version created at upload
+    // (`upload`) vs. later tag/metadata edits (`edit`). Two requests, since
+    // `search[is_new]` filters server-side (per the post_versions search UI).
+    const v = (type: ActivityType, endpoint: string, extra?: string) => ({
+      type,
+      endpoint,
+      param: 'updater_id',
+      extra,
+    });
+    const descriptors: ActivityDescriptor[] = [
+      v('upload', '/post_versions.json', 'search[is_new]=true'),
+      v('edit', '/post_versions.json', 'search[is_new]=false'),
+      v('note', '/note_versions.json'),
+      v('wiki', '/wiki_page_versions.json'),
+      v('artist', '/artist_versions.json'),
+      v('commentary', '/artist_commentary_versions.json'),
+      v('pool', '/pool_versions.json'),
+      {type: 'forum', endpoint: '/forum_posts.json', param: 'creator_id'},
+      {type: 'approval', endpoint: '/post_approvals.json', param: 'user_id'},
+      {type: 'comment', endpoint: '/comments.json', param: 'creator_id'},
+      {type: 'appeal', endpoint: '/post_appeals.json', param: 'creator_id'},
+    ];
+
+    const perType = await this.mapConcurrent(descriptors, 6, async d => {
+      if (d.type === 'upload')
+        return this.fetchUploadActivity(d, userId, limit);
+      if (d.type === 'commentary') {
+        return this.fetchCommentaryActivity(d, userId, limit);
+      }
+      if (d.type === 'comment') {
+        return this.fetchCommentActivity(d, userId, limit);
+      }
+      return this.fetchActivityType(d, userId, limit);
+    });
+    return mergeRecentActivity(perType, limit);
+  }
+
+  /**
+   * Upload activity (post_versions, is_new=true) → segments retyped to
+   * `suspicious` when the post is deleted/banned or heavily downvoted (one
+   * batch {@link fetchPostBadnessMeta} lookup over the segments' post ids).
+   * See {@link classifyUploadType}. Suspicious segments keep their `postId`
+   * so the legend can link straight to the flagged posts.
+   */
+  private async fetchUploadActivity(
+    d: ActivityDescriptor,
+    userId: string,
+    limit: number,
+  ): Promise<ActivitySegment[]> {
+    try {
+      const url =
+        `${d.endpoint}?search[${d.param}]=${encodeURIComponent(userId)}` +
+        `${d.extra ? `&${d.extra}` : ''}&limit=${limit}` +
+        '&only=id,post_id,updated_at,created_at';
+      const rows = await this.rateLimiter.fetch(url).then(r => r.json());
+      if (!Array.isArray(rows)) return [];
+      const segs = rows.map(
+        (r: {post_id?: number; updated_at?: string; created_at?: string}) => ({
+          postId: r.post_id ?? -1,
+          ts: Date.parse(r.updated_at ?? r.created_at ?? ''),
+        }),
+      );
+      const meta = await this.fetchPostBadnessMeta(segs.map(s => s.postId));
+      return segs.map(s => {
+        const type = classifyUploadType(meta.get(s.postId));
+        // upload → gallery #post_<postId>; suspicious carries postId for the
+        // id: list (its anchor is derived from suspiciousPostIds instead).
+        return type === 'suspicious'
+          ? {type, ts: s.ts, postId: s.postId}
+          : {type, ts: s.ts, anchorId: s.postId};
+      });
+    } catch (e: unknown) {
+      log.warn('Activity feed fetch failed', {type: 'upload', error: e});
+      return [];
+    }
+  }
+
+  /**
+   * Comment activity → segments retyped to `suspicious` when the comment is
+   * heavily downvoted (see {@link classifyCommentType}). Fetches `score` and
+   * `post_id` alongside the timestamp; a suspicious comment keeps the id of
+   * the post it sits on so the legend's link can surface that post.
+   */
+  private async fetchCommentActivity(
+    d: ActivityDescriptor,
+    userId: string,
+    limit: number,
+  ): Promise<ActivitySegment[]> {
+    try {
+      const url =
+        `${d.endpoint}?search[${d.param}]=${encodeURIComponent(userId)}` +
+        `&limit=${limit}&only=id,post_id,score,created_at`;
+      const rows = await this.rateLimiter.fetch(url).then(r => r.json());
+      if (!Array.isArray(rows)) return [];
+      return rows.map(
+        (r: {
+          id?: number;
+          post_id?: number;
+          score?: number;
+          created_at?: string;
+        }) => {
+          const type = classifyCommentType(r.score);
+          const ts = Date.parse(r.created_at ?? '');
+          // suspicious → postId for the id: list (gallery anchor); a normal
+          // comment → anchorId = comment id for `#comment_<id>` on /comments.
+          return type === 'suspicious' && r.post_id
+            ? {type, ts, postId: r.post_id}
+            : {type, ts, anchorId: r.id};
+        },
+      );
+    } catch (e: unknown) {
+      log.warn('Activity feed fetch failed', {type: 'comment', error: e});
+      return [];
+    }
+  }
+
+  /**
+   * Maps post ids → {@link UploadMeta} (deleted/banned/score) in one
+   * `status:any` batch query so deleted uploads still resolve. Capped at the
+   * `/posts.json` limit (200); misses leave a segment unflagged (fail-open).
+   */
+  private async fetchPostBadnessMeta(
+    postIds: number[],
+  ): Promise<Map<number, UploadMeta>> {
+    const unique = [...new Set(postIds.filter(id => id > 0))].slice(0, 200);
+    const map = new Map<number, UploadMeta>();
+    if (unique.length === 0) return map;
+    try {
+      const query = `id:${unique.join(',')} status:any`;
+      const url =
+        `/posts.json?tags=${encodeURIComponent(query)}` +
+        `&limit=${unique.length}&only=id,is_deleted,is_banned,score`;
+      const rows = await this.rateLimiter.fetch(url).then(r => r.json());
+      if (Array.isArray(rows)) {
+        for (const p of rows as Array<{
+          id?: number;
+          is_deleted?: boolean;
+          is_banned?: boolean;
+          score?: number;
+        }>) {
+          if (p.id !== undefined) {
+            map.set(p.id, {
+              isDeleted: !!p.is_deleted,
+              isBanned: !!p.is_banned,
+              score: p.score,
+            });
+          }
+        }
+      }
+    } catch (e: unknown) {
+      log.warn('Post badness lookup failed', {count: unique.length, error: e});
+    }
+    return map;
+  }
+
+  /**
+   * Fetches one activity feed type as `{type, ts}` segments. `ts` prefers
+   * `updated_at` (merge-window edits land on the latest touch) and falls back
+   * to `created_at`. `extra` appends an extra search clause (e.g.
+   * `search[is_new]=false`). Returns `[]` on any failure so one dead endpoint
+   * never sinks the whole strip.
+   */
+  private async fetchActivityType(
+    d: ActivityDescriptor,
+    userId: string,
+    limit: number,
+  ): Promise<ActivitySegment[]> {
+    try {
+      const url =
+        `${d.endpoint}?search[${d.param}]=${encodeURIComponent(userId)}` +
+        `${d.extra ? `&${d.extra}` : ''}&limit=${limit}` +
+        '&only=id,updated_at,created_at';
+      const rows = await this.rateLimiter.fetch(url).then(r => r.json());
+      if (!Array.isArray(rows)) return [];
+      return rows.map(
+        (r: {id?: number; updated_at?: string; created_at?: string}) => ({
+          type: d.type,
+          ts: Date.parse(r.updated_at ?? r.created_at ?? ''),
+          anchorId: r.id, // native record id → `#<prefix>_<id>` scroll target
+        }),
+      );
+    } catch (e: unknown) {
+      log.warn('Activity feed fetch failed', {type: d.type, error: e});
+      return [];
+    }
+  }
+
+  /**
+   * Like {@link fetchActivityType} but for commentary: keeps each segment's
+   * `post_id`, looks up those posts' upload times, and drops the
+   * upload-coupled v1 commentary versions (see
+   * {@link filterUploadCoupledCommentary}).
+   */
+  private async fetchCommentaryActivity(
+    d: ActivityDescriptor,
+    userId: string,
+    limit: number,
+  ): Promise<ActivitySegment[]> {
+    try {
+      const url =
+        `${d.endpoint}?search[${d.param}]=${encodeURIComponent(userId)}` +
+        `&limit=${limit}&only=id,post_id,updated_at,created_at`;
+      const rows = await this.rateLimiter.fetch(url).then(r => r.json());
+      if (!Array.isArray(rows)) return [];
+      const segments: CommentarySegment[] = rows.map(
+        (r: {
+          id?: number;
+          post_id?: number;
+          updated_at?: string;
+          created_at?: string;
+        }) => ({
+          type: 'commentary',
+          postId: r.post_id ?? -1,
+          ts: Date.parse(r.updated_at ?? r.created_at ?? ''),
+          anchorId: r.id, // commentary version id → #artist_commentary_version_<id>
+        }),
+      );
+      const uploadTimes = await this.fetchPostUploadTimes(
+        segments.map(s => s.postId),
+      );
+      return filterUploadCoupledCommentary(segments, uploadTimes);
+    } catch (e: unknown) {
+      log.warn('Activity feed fetch failed', {type: 'commentary', error: e});
+      return [];
+    }
+  }
+
+  /**
+   * Maps post ids → upload time (epoch ms, from `created_at`) in one
+   * `status:any` batch query (`id:` comma list so deleted uploads still
+   * resolve). Used to detect upload-coupled commentary. Capped at the
+   * `/posts.json` limit (200); any commentary beyond that is simply kept
+   * (fail-open). Returns an empty map on no ids or failure.
+   */
+  private async fetchPostUploadTimes(
+    postIds: number[],
+  ): Promise<Map<number, number>> {
+    const unique = [...new Set(postIds.filter(id => id > 0))].slice(0, 200);
+    const map = new Map<number, number>();
+    if (unique.length === 0) return map;
+    try {
+      const query = `id:${unique.join(',')} status:any`;
+      const url =
+        `/posts.json?tags=${encodeURIComponent(query)}` +
+        `&limit=${unique.length}&only=id,created_at`;
+      const rows = await this.rateLimiter.fetch(url).then(r => r.json());
+      if (Array.isArray(rows)) {
+        for (const p of rows as Array<{id?: number; created_at?: string}>) {
+          const ts = Date.parse(p.created_at ?? '');
+          if (p.id !== undefined && Number.isFinite(ts)) map.set(p.id, ts);
+        }
+      }
+    } catch (e: unknown) {
+      log.warn('Post upload-time lookup failed', {
+        count: unique.length,
+        error: e,
+      });
+    }
+    return map;
   }
 
   /**

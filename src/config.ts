@@ -8,6 +8,7 @@ export const CONFIG: {
   STORAGE_PREFIX: string;
   CLEANUP_THRESHOLD_MS: number;
   MAX_OPTIMIZED_POSTS: number;
+  MAX_PREVIEW_ONLY_UPLOADS: number;
   REPORT_COOLDOWN_MS: number;
   ANALYTICS_CLEANUP_THRESHOLD_MS: number;
   CACHE_EXPIRY_MS: number;
@@ -25,6 +26,9 @@ export const CONFIG: {
   CLEANUP_THRESHOLD_MS: 7 * DAY_MS, // 7 Days
   /** Max posts for small-tag/quick-sync optimization path. */
   MAX_OPTIMIZED_POSTS: 1200,
+  /** Total-uploads cap below which the icon click shows the preview popover
+   *  instead of the full dashboard (avoids loading a near-empty report). */
+  MAX_PREVIEW_ONLY_UPLOADS: 30,
   /** Cooldown between report queue requests (ms). */
   REPORT_COOLDOWN_MS: 3000,
   /** Retention threshold for analytics-data-manager cleanup (14 days). */

@@ -35,7 +35,17 @@ import {
   createClickOutsideHandler,
   DASHBOARD_THEME_SELECT_HTML,
 } from '../ui/popover-utils';
+import {
+  createDashboardPreviewPopover,
+  RECENT_POSTS_LIMIT,
+  ACTIVITY_SEGMENT_LIMIT,
+} from '../ui/dashboard-preview-popover';
+import {
+  activityTypeIndexUrl,
+  suspiciousPostsUrl,
+} from '../core/dashboard-preview';
 import {createLogger} from '../core/logger';
+import {isTouchDevice} from '../ui/two-step-tap';
 import {showToast} from '../ui/toast';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
@@ -1006,6 +1016,10 @@ export class UserAnalyticsApp {
    *  initial sync-status check (which runs fire-and-forget on mount). */
   private initialStatusCheck: Promise<void> | null = null;
 
+  /** Total upload count from the last updateHeaderStatus(); drives the
+   *  ≤MAX_PREVIEW_ONLY_UPLOADS click→popover shortcut. null until first check. */
+  private totalPostCount: number | null = null;
+
   /**
    * Initializes the UserAnalyticsApp.
    * @param {Database} db The Dexie database instance.
@@ -1111,29 +1125,89 @@ export class UserAnalyticsApp {
       // Button
       const btn = document.createElement('span');
       btn.className = 'di-analytics-entry-btn';
-      btn.title = 'Open Analytics Report';
       btn.setAttribute('role', 'button');
       btn.setAttribute('aria-label', 'Open user analytics report');
       btn.innerHTML = '📊';
       btn.style.margin = '0'; // Reset margin since container has it
+
+      // Hover/click preview popover. Replaces the old `title` tooltip: data
+      // (recent uploads + activity distribution) is fetched real-time via the
+      // injected callbacks. Section B (activity) loads in the background.
+      const previewPopover = createDashboardPreviewPopover({
+        anchor: btn,
+        fetchPosts: () =>
+          this.dataManager.getRecentPostsPreview(
+            this.context.targetUser,
+            RECENT_POSTS_LIMIT,
+          ),
+        fetchActivity: () =>
+          this.dataManager.getActivityDistribution(
+            this.context.targetUser,
+            ACTIVITY_SEGMENT_LIMIT,
+          ),
+        // `suspicious` links to the exact flagged posts (id: list of the
+        // suspicious uploads + the posts suspicious comments sit on); falls
+        // back to the name-scoped deleted-uploads search when none resolved.
+        // Other types append `#<prefix>_<oldestId>` to scroll to the oldest
+        // in-window row (the boundary of what the strip analysed).
+        activityHref: (type, dist) =>
+          type === 'suspicious'
+            ? (suspiciousPostsUrl(dist.suspiciousPostIds) ??
+              activityTypeIndexUrl(type, this.context.targetUser))
+            : activityTypeIndexUrl(
+                type,
+                this.context.targetUser,
+                dist.oldestAnchorByType[type],
+              ),
+      });
+
+      // Hover opens a transient popover (skipped on touch — unreachable
+      // there; the click path still works). A short dwell debounce avoids
+      // firing on an accidental graze.
+      let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+      if (!('ontouchstart' in window)) {
+        btn.addEventListener('mouseenter', () => {
+          if (hoverTimer !== null) clearTimeout(hoverTimer);
+          hoverTimer = setTimeout(() => previewPopover.show(), 200);
+        });
+        btn.addEventListener('mouseleave', () => {
+          if (hoverTimer !== null) {
+            clearTimeout(hoverTimer);
+            hoverTimer = null;
+          }
+          previewPopover.scheduleHide();
+        });
+      }
+
       btn.onclick = async e => {
         e.preventDefault();
         e.stopPropagation();
+        if (hoverTimer !== null) {
+          clearTimeout(hoverTimer);
+          hoverTimer = null;
+        }
 
-        // Wait for the initial sync-status check to complete before reading
-        // this.isFullySynced. Otherwise a click placed during the first
-        // check-in-progress window (typical after a page refresh) sees the
-        // constructor's placeholder value and triggers an unnecessary sync.
+        // Wait for the initial sync-status check before reading
+        // isFullySynced / totalPostCount (avoids racing the first check after
+        // a page refresh, which would see the constructor's placeholder).
         if (this.initialStatusCheck) {
           try {
             await this.initialStatusCheck;
           } catch {
-            // Ignored — status check errors are already logged in
-            // updateHeaderStatus; we still let the click proceed.
+            // Ignored — errors are already logged in updateHeaderStatus.
           }
         }
 
-        // Auto-Sync Check: If not synced, wait for sync THEN open
+        // Tiny uploaders: the full dashboard adds little over the preview, so
+        // skip the heavy sync/modal and show the pinned popover instead.
+        const total = this.totalPostCount;
+        if (total !== null && total <= CONFIG.MAX_PREVIEW_ONLY_UPLOADS) {
+          previewPopover.show({pinned: true});
+          return;
+        }
+
+        // Normal path: dismiss any hover popover, sync if needed, open modal.
+        previewPopover.hide();
         if (this.isFullySynced === false) {
           try {
             await this.performPartialSync(btn, false);
@@ -1141,10 +1215,28 @@ export class UserAnalyticsApp {
             log.error('Auto-sync failed', {error: err});
           }
         }
-
         this.toggleModal(true);
       };
       container.appendChild(btn);
+
+      // Mini-report button (touch only). On touch the 📊 tap opens the full
+      // modal for >30-post users, leaving the hover-only preview unreachable —
+      // this opens the pinned preview directly. Desktop already has it on hover.
+      if (isTouchDevice()) {
+        const reportBtn = document.createElement('span');
+        reportBtn.className = 'di-analytics-entry-btn';
+        reportBtn.setAttribute('role', 'button');
+        reportBtn.setAttribute('aria-label', 'Open quick mini-report');
+        reportBtn.title = 'Quick mini-report';
+        reportBtn.innerHTML = '📋';
+        reportBtn.style.marginLeft = '6px';
+        reportBtn.addEventListener('click', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          previewPopover.show({pinned: true});
+        });
+        container.appendChild(reportBtn);
+      }
 
       // Status Text (Mobile/Compact friendly)
       const statusText = document.createElement('div');
@@ -1331,6 +1423,7 @@ export class UserAnalyticsApp {
 
     // Use Robust Total Fetching
     const total = await dataManager.getTotalPostCount(this.context.targetUser);
+    this.totalPostCount = total;
 
     const count = stats.count;
     const lastSyncKey = `danbooru_grass_last_sync_${this.context.targetUser.id}`;
