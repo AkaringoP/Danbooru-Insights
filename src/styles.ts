@@ -396,6 +396,40 @@ const GLOBAL_CSS = `
         text-transform: uppercase;
         letter-spacing: 0.3px;
     }
+    /* Sortable column header: the whole label + single ▲/▼ arrow is one
+       clickable target, with a little padding to enlarge the hit area. */
+    .di-cts-th {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+        padding: 2px 4px;
+        margin: -2px -4px;
+        border-radius: 4px;
+        user-select: none;
+        transition: background 0.12s, color 0.12s;
+    }
+    .di-cts-th:hover {
+        background: var(--di-table-row-hover, #f6f8fa);
+    }
+    .di-cts-th--active {
+        color: var(--di-text, #333);
+    }
+    /* One arrow per column. Hidden until the header is hovered (keeps the row
+       clean); the active sort's arrow overrides this and stays lit + accent. */
+    .di-cts-arrow {
+        opacity: 0;
+        font-size: 9px;
+        color: var(--di-text-muted, #888);
+        transition: opacity 0.12s, color 0.12s;
+    }
+    .di-cts-th:hover .di-cts-arrow {
+        opacity: 0.6;
+    }
+    .di-cts-arrow--active {
+        opacity: 1;
+        color: var(--di-link, #007bff);
+    }
     .di-created-tags-table td {
         padding: 5px 8px;
         border-bottom: 1px solid var(--di-table-border, #f0f0f0);
