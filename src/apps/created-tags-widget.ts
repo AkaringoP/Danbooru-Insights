@@ -83,28 +83,25 @@ export function renderCreatedTagsWidget(
     }
   };
 
-  // A column header with a ▲ (asc) / ▼ (desc) arrow pair. The arrows are
-  // hidden until the header is hovered (CSS), except the active sort's arrow,
-  // which stays lit so the current sort is always visible. `rightAlign` keeps
-  // the numeric Posts column's label/arrows flush right.
+  // A clickable column header with a SINGLE ▲/▼ arrow. The active column shows
+  // its current direction (always lit); an inactive column shows the direction
+  // a click would apply (its default), revealed on hover. The whole header is
+  // the hit target. `rightAlign` keeps the numeric Posts column flush right.
   const sortableHeader = (
     mode: SortMode,
     label: string,
     rightAlign = false,
   ): string => {
-    const arrow = (dir: SortDirection, glyph: string): string => {
-      const active = sortMode === mode && sortDir === dir;
-      return (
-        `<span class="di-cts-arrow${active ? ' di-cts-arrow--active' : ''}" ` +
-        `role="button" tabindex="0" data-sort="${mode}" data-dir="${dir}" ` +
-        `title="Sort by ${label} ${dir === 'asc' ? 'ascending' : 'descending'}">${glyph}</span>`
-      );
-    };
-    const cls = sortMode === mode ? ' di-cts-th--active' : '';
+    const isActive = sortMode === mode;
+    const dir = isActive ? sortDir : SORT_DEFAULT_DIR[mode];
+    const glyph = dir === 'desc' ? '▼' : '▲';
+    const cls = isActive ? ' di-cts-th--active' : '';
     return (
-      `<span class="di-cts-th${cls}" style="justify-content:${rightAlign ? 'flex-end' : 'flex-start'};">` +
+      `<span class="di-cts-th${cls}" role="button" tabindex="0" data-sort="${mode}" ` +
+      `style="justify-content:${rightAlign ? 'flex-end' : 'flex-start'};" ` +
+      'title="Click to sort (again to flip direction)">' +
       `<span class="di-cts-th-label">${label}</span>` +
-      `<span class="di-cts-arrows">${arrow('asc', '▲')}${arrow('desc', '▼')}</span>` +
+      `<span class="di-cts-arrow${isActive ? ' di-cts-arrow--active' : ''}">${glyph}</span>` +
       '</span>'
     );
   };
@@ -150,26 +147,32 @@ export function renderCreatedTagsWidget(
 
     contentDiv.innerHTML = html;
 
-    // Sort-arrow handlers: pick the column + direction the arrow encodes, reset
-    // to page 1, re-sort, re-render (which repaints the active arrow state).
-    const applySort = (mode: SortMode, dir: SortDirection) => {
-      sortMode = mode;
-      sortDir = dir;
+    // Header click: same column → flip direction; other column → switch to it
+    // at its default direction. Reset to page 1, re-sort, re-render (repaints
+    // the active arrow). The whole header span (label + arrow) is the target.
+    const applySort = (mode: SortMode) => {
+      if (sortMode === mode) {
+        sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        sortMode = mode;
+        sortDir = SORT_DEFAULT_DIR[mode];
+      }
       currentPage = 0;
       sortItems();
       renderTable();
     };
-    contentDiv.querySelectorAll<HTMLElement>('.di-cts-arrow').forEach(el => {
-      const mode = el.dataset.sort as SortMode;
-      const dir = el.dataset.dir as SortDirection;
-      el.onclick = () => applySort(mode, dir);
-      el.onkeydown = e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          applySort(mode, dir);
-        }
-      };
-    });
+    contentDiv
+      .querySelectorAll<HTMLElement>('.di-cts-th[data-sort]')
+      .forEach(el => {
+        const mode = el.dataset.sort as SortMode;
+        el.onclick = () => applySort(mode);
+        el.onkeydown = e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            applySort(mode);
+          }
+        };
+      });
 
     // Pagination click handlers
     contentDiv.querySelectorAll('[data-page]').forEach(btn => {

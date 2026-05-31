@@ -396,38 +396,36 @@ const GLOBAL_CSS = `
         text-transform: uppercase;
         letter-spacing: 0.3px;
     }
-    /* Sortable column header: label + a ▲/▼ arrow pair. */
+    /* Sortable column header: the whole label + single ▲/▼ arrow is one
+       clickable target, with a little padding to enlarge the hit area. */
     .di-cts-th {
         display: inline-flex;
         align-items: center;
-        gap: 3px;
+        gap: 4px;
+        cursor: pointer;
+        padding: 2px 4px;
+        margin: -2px -4px;
+        border-radius: 4px;
+        user-select: none;
+        transition: background 0.12s, color 0.12s;
+    }
+    .di-cts-th:hover {
+        background: var(--di-table-row-hover, #f6f8fa);
     }
     .di-cts-th--active {
         color: var(--di-text, #333);
     }
-    .di-cts-arrows {
-        display: inline-flex;
-        flex-direction: column;
-        line-height: 0.7;
-        font-size: 8px;
-    }
-    /* Arrows are hidden by default and revealed on header hover, so the row
-       stays clean; the active sort's arrow overrides this and stays visible. */
+    /* One arrow per column. Hidden until the header is hovered (keeps the row
+       clean); the active sort's arrow overrides this and stays lit + accent. */
     .di-cts-arrow {
         opacity: 0;
-        cursor: pointer;
+        font-size: 9px;
         color: var(--di-text-muted, #888);
         transition: opacity 0.12s, color 0.12s;
-        user-select: none;
     }
-    .di-created-tags-table th:hover .di-cts-arrow {
-        opacity: 0.45;
+    .di-cts-th:hover .di-cts-arrow {
+        opacity: 0.6;
     }
-    .di-created-tags-table th:hover .di-cts-arrow:hover {
-        opacity: 1;
-        color: var(--di-text, #333);
-    }
-    /* Active sort direction: always lit + accent colour, regardless of hover. */
     .di-cts-arrow--active {
         opacity: 1;
         color: var(--di-link, #007bff);
