@@ -396,6 +396,42 @@ const GLOBAL_CSS = `
         text-transform: uppercase;
         letter-spacing: 0.3px;
     }
+    /* Sortable column header: label + a ▲/▼ arrow pair. */
+    .di-cts-th {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+    }
+    .di-cts-th--active {
+        color: var(--di-text, #333);
+    }
+    .di-cts-arrows {
+        display: inline-flex;
+        flex-direction: column;
+        line-height: 0.7;
+        font-size: 8px;
+    }
+    /* Arrows are hidden by default and revealed on header hover, so the row
+       stays clean; the active sort's arrow overrides this and stays visible. */
+    .di-cts-arrow {
+        opacity: 0;
+        cursor: pointer;
+        color: var(--di-text-muted, #888);
+        transition: opacity 0.12s, color 0.12s;
+        user-select: none;
+    }
+    .di-created-tags-table th:hover .di-cts-arrow {
+        opacity: 0.45;
+    }
+    .di-created-tags-table th:hover .di-cts-arrow:hover {
+        opacity: 1;
+        color: var(--di-text, #333);
+    }
+    /* Active sort direction: always lit + accent colour, regardless of hover. */
+    .di-cts-arrow--active {
+        opacity: 1;
+        color: var(--di-link, #007bff);
+    }
     .di-created-tags-table td {
         padding: 5px 8px;
         border-bottom: 1px solid var(--di-table-border, #f0f0f0);
