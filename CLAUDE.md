@@ -62,17 +62,18 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 선택이 자명하지 않으면 근거를 간단히 기록. 이래야 세션 간에 파이프라인 재현성 유지됨
 
 ## Git 브랜치 전략
-- `main` — 안정 릴리즈만. 항상 배포 가능 상태
-- `feature/*` — 새 기능/개선. `main` 에서 분기, `main` 으로 머지
-- `hotfix/*` — 긴급 버그 수정. `main` 에서 분기, `main` 으로 머지
-- `main` 에 직접 커밋 금지
+- `develop` — 통합 브랜치. `feature/*` 가 머지되는 곳. 배포 가능 상태 유지
+- `feature/*` — 새 기능/개선. `develop` 에서 분기, `develop` 으로 머지
+- `hotfix/*` — 긴급 수정. `develop` 에서 분기. 급하면 `main`+`develop` 동시 머지
+- `main` — 안정 릴리즈만. `develop` 에서 머지. 항상 배포 가능
+- `develop` 에 직접 커밋 금지
 - 브랜치 명: `feature/<short-description>` / `hotfix/<short-description>`
 
 ## Build & Dev
 - `npm run dev` — Vite dev 서버 (HMR)
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 583 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 733 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 포함)
 
