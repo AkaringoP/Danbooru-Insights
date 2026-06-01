@@ -25,10 +25,14 @@ import {
   selectTopKByCount,
 } from './related-tag-rerank';
 import {
+  buildMintagVersionsUrl,
+  buildPostVersionsUrl,
   buildPreviewPostUrls,
+  buildUploaderTagCounts,
   classifyCommentType,
   classifyUploadType,
   filterUploadCoupledCommentary,
+  isAbandonedByGap,
   mergeRecentActivity,
   toPostPreview,
 } from './dashboard-preview';
@@ -1969,14 +1973,26 @@ export class AnalyticsDataManager extends DataManager {
     if (!userInfo.name) return [];
     const normalizedName = userInfo.name.replace(/ /g, '_');
     const {postsUrl, appealedUrl} = buildPreviewPostUrls(normalizedName, limit);
+    // Mintag (uploader tag-laziness) needs the upload versions' added_tags;
+    // id-based, so skip it when the numeric id is missing — the grid still
+    // renders, those posts just stay unflagged (fail-open).
+    const versionsUrl = userInfo.id
+      ? buildMintagVersionsUrl(userInfo.id, limit)
+      : null;
 
     try {
-      const [posts, appealed] = await Promise.all([
+      const [posts, appealed, versions] = await Promise.all([
         this.rateLimiter.fetch(postsUrl).then(r => r.json()),
         this.rateLimiter
           .fetch(appealedUrl)
           .then(r => r.json())
           .catch(() => []),
+        versionsUrl
+          ? this.rateLimiter
+              .fetch(versionsUrl)
+              .then(r => r.json())
+              .catch(() => [])
+          : Promise.resolve([]),
       ]);
       if (!Array.isArray(posts)) return [];
       const appealedIds = new Set<number>(
@@ -1984,7 +2000,13 @@ export class AnalyticsDataManager extends DataManager {
           (p: DanbooruPost) => p.id,
         ),
       );
-      return posts.map((p: DanbooruPost) => toPostPreview(p, appealedIds));
+      const tagCounts = buildUploaderTagCounts(
+        Array.isArray(versions) ? versions : [],
+      );
+      return posts.map((p: DanbooruPost) => ({
+        ...toPostPreview(p, appealedIds),
+        uploaderTagCount: tagCounts.get(p.id),
+      }));
     } catch (e: unknown) {
       log.warn('Failed to fetch recent posts preview', {
         user: userInfo.name,
@@ -1992,6 +2014,39 @@ export class AnalyticsDataManager extends DataManager {
       });
       return [];
     }
+  }
+
+  /**
+   * Of the given (mintagged) post ids, returns those that look "abandoned":
+   * their v2 landed at least {@link ABANDONED_GAP_MS} after v1, i.e. the
+   * upload sat under-tagged before someone else stepped in (vs. the
+   * competitive-tagging race, where v2 follows v1 almost immediately).
+   *
+   * One {@link buildPostVersionsUrl} request per id, run with
+   * {@link mapConcurrent}; per-post failures degrade to "not abandoned"
+   * (fail-open). Called as a background pass after the grid renders, so the
+   * red escalation pops in without blocking section A.
+   * @param {!Array<number>} postIds Mintagged post ids to inspect.
+   * @return {!Promise<!Set<number>>} The subset whose v1→v2 gap is abandoned.
+   */
+  async getAbandonedPostIds(postIds: number[]): Promise<Set<number>> {
+    if (!postIds.length) return new Set();
+    const flags = await this.mapConcurrent(
+      postIds,
+      6,
+      async (postId: number) => {
+        try {
+          const rows = await this.rateLimiter
+            .fetch(buildPostVersionsUrl(postId))
+            .then(r => r.json());
+          return Array.isArray(rows) && isAbandonedByGap(rows) ? postId : null;
+        } catch (e: unknown) {
+          log.warn('Abandoned-gap lookup failed', {postId, error: e});
+          return null;
+        }
+      },
+    );
+    return new Set(flags.filter((id): id is number => id !== null));
   }
 
   /**

@@ -125,29 +125,89 @@ export function toPostPreview(
   };
 }
 
-/** Score at/below which a recent upload is flagged (heavily downvoted). */
+/** Score at/below which a recent upload is flagged (heavily downvoted) → red. */
 const SUSPICIOUS_SCORE_MAX = -3;
-/** General-tag count at/below which an upload is flagged (under-tagged). */
-const SUSPICIOUS_GENTAGS_MAX = 5;
+/**
+ * Uploader-added tag count at/below which an upload is "mintagged" → orange.
+ * This counts the tags the *uploader* added on the post's first version
+ * (`added_tags`, which merges the uploader's own follow-up edits within the
+ * ~1h window) — not the post's current total. So a lazy uploader is caught
+ * even when others tagged the post up afterwards. The threshold is generous
+ * because `added_tags` includes non-general tags (artist, copyright, meta).
+ */
+const MINTAG_MAX = 10;
 
 /**
- * Whether a recent upload looks suspicious enough to flag in the preview grid
- * (its label turns red). Two heuristics, OR-combined: a heavily-downvoted
- * post ({@link SUSPICIOUS_SCORE_MAX}) or an under-tagged one
- * ({@link SUSPICIOUS_GENTAGS_MAX}). Rating is deliberately excluded —
+ * Whether a recent upload is heavily downvoted (its label turns red): score
+ * at/below {@link SUSPICIOUS_SCORE_MAX}. A low score is the community's signal
+ * that the post itself is bad. Under-tagging is a separate, milder signal
+ * handled by {@link isMintagged} (orange). Rating is deliberately excluded —
  * mis-rating can't be judged without inspecting the image itself.
  */
 export function isSuspiciousUpload(
-  preview: Pick<PostPreview, 'score' | 'generalTags'>,
+  preview: Pick<PostPreview, 'score'>,
 ): boolean {
-  if (preview.score <= SUSPICIOUS_SCORE_MAX) return true;
-  // Only a *known* tag count flags an upload — an absent count (undefined) is
-  // unknown, not zero, so it must not trip the under-tagged heuristic and
-  // falsely flag a well-tagged post whose field merely wasn't returned.
+  return preview.score <= SUSPICIOUS_SCORE_MAX;
+}
+
+/**
+ * Whether the *uploader* under-tagged their own upload (its label turns
+ * orange): they added {@link MINTAG_MAX} or fewer tags on the first version
+ * ({@link PostPreview.uploaderTagCount}). An unknown count (the post_versions
+ * lookup missed) is not flagged — fail-open, so a failed lookup never
+ * mass-flags a user's whole grid.
+ */
+export function isMintagged(
+  preview: Pick<PostPreview, 'uploaderTagCount'>,
+): boolean {
   return (
-    preview.generalTags !== undefined &&
-    preview.generalTags <= SUSPICIOUS_GENTAGS_MAX
+    preview.uploaderTagCount !== undefined &&
+    preview.uploaderTagCount <= MINTAG_MAX
   );
+}
+
+/**
+ * Minimum gap (ms) between a mintagged upload's v1 and v2 for it to count as
+ * "abandoned" → its label escalates from orange to red. A *short* gap is the
+ * competitive-tagging race (someone tagged alongside the uploader), which
+ * isn't the uploader's fault; a longer gap means the uploader had time to tag,
+ * didn't, and someone else eventually had to clean it up.
+ */
+export const ABANDONED_GAP_MS = 15 * 60 * 1000;
+
+/** A `/post_versions.json` row, trimmed to what the abandoned-gap check reads. */
+interface PostVersionRow {
+  version?: number;
+  updated_at?: string;
+  created_at?: string;
+}
+
+/**
+ * Gap in ms between a post's first two versions (v2 − v1), or null when either
+ * is absent or carries an unparseable timestamp. Timestamp prefers
+ * `updated_at` (consistent with the activity feed), falling back to
+ * `created_at`.
+ */
+export function abandonedGapMs(versions: PostVersionRow[]): number | null {
+  const tsOf = (v: PostVersionRow) =>
+    Date.parse(v.updated_at ?? v.created_at ?? '');
+  const v1 = versions.find(v => v.version === 1);
+  const v2 = versions.find(v => v.version === 2);
+  if (!v1 || !v2) return null;
+  const t1 = tsOf(v1);
+  const t2 = tsOf(v2);
+  if (!Number.isFinite(t1) || !Number.isFinite(t2)) return null;
+  return t2 - t1;
+}
+
+/**
+ * Whether a post's version history marks it "abandoned": a v2 that lands at
+ * least {@link ABANDONED_GAP_MS} after v1, so the upload sat under-tagged
+ * before someone else stepped in. Missing v1/v2 → not abandoned (fail-open).
+ */
+export function isAbandonedByGap(versions: PostVersionRow[]): boolean {
+  const gap = abandonedGapMs(versions);
+  return gap !== null && gap >= ABANDONED_GAP_MS;
 }
 
 /**
@@ -306,6 +366,53 @@ export function buildPreviewPostUrls(
       `user:${normalizedName} status:appealed`,
     )}&limit=${limit}&only=id`,
   };
+}
+
+/**
+ * Builds the `/post_versions.json` URL for the uploader's most-recent uploads'
+ * first versions (`is_new=true`), trimmed to the fields the mintag heuristic
+ * needs. `added_tags` carries the tags the uploader added at upload (merged
+ * with their own ~1h follow-up edits); its length feeds {@link isMintagged}.
+ * Id-based (mirrors {@link AnalyticsDataManager.getActivityDistribution}); the
+ * caller skips this call when the numeric id is missing.
+ */
+export function buildMintagVersionsUrl(userId: string, limit: number): string {
+  return (
+    '/post_versions.json?search[is_new]=true&search[updater_id]=' +
+    `${encodeURIComponent(userId)}&limit=${limit}&only=post_id,added_tags`
+  );
+}
+
+/**
+ * Builds the `/post_versions.json` URL for one post's version history, trimmed
+ * to the version number + timestamps the abandoned-gap check needs. Fetched
+ * per mintagged post to find when v2 landed relative to v1
+ * ({@link abandonedGapMs}). `limit=100` covers virtually every post's history
+ * (a post with >100 versions would lose v1/v2 off the page → fail-open).
+ */
+export function buildPostVersionsUrl(postId: number): string {
+  return (
+    `/post_versions.json?search[post_id]=${postId}` +
+    '&only=version,updated_at,created_at&limit=100'
+  );
+}
+
+/**
+ * Reduces the {@link buildMintagVersionsUrl} response to a
+ * `post_id → uploader-added-tag-count` map (the `added_tags` array length).
+ * Rows lacking a `post_id` or `added_tags` array are skipped, so a missing
+ * field just leaves that post's count unknown (fail-open for isMintagged).
+ */
+export function buildUploaderTagCounts(
+  versions: Array<{post_id?: number; added_tags?: string[]}>,
+): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const v of versions) {
+    if (v.post_id !== undefined && Array.isArray(v.added_tags)) {
+      counts.set(v.post_id, v.added_tags.length);
+    }
+  }
+  return counts;
 }
 
 /**
