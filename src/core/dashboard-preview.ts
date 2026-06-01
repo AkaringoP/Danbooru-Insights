@@ -113,8 +113,14 @@ export function toPostPreview(
     id: post.id,
     thumbUrl: pick180ThumbUrl(post),
     score: post.score ?? (post.up_score ?? 0) + (post.down_score ?? 0),
-    generalTags: post.tag_count_general ?? 0,
-    rating: post.rating,
+    // Kept undefined when absent (NOT coerced to 0): a missing count is
+    // *unknown*, not zero, so it must not trip the under-tagged suspicious
+    // heuristic (see isSuspiciousUpload). The grid renders '?' for unknown.
+    generalTags: post.tag_count_general,
+    // Defensive: rating is universal per the API, but a malformed/restricted
+    // status:any row could omit it. '' keeps the grid from crashing on
+    // `.toUpperCase()` and avoids a literal 'undefined' in the blur dataset.
+    rating: post.rating ?? '',
     status: derivePostStatus(post, appealedIds),
   };
 }
@@ -134,8 +140,12 @@ const SUSPICIOUS_GENTAGS_MAX = 5;
 export function isSuspiciousUpload(
   preview: Pick<PostPreview, 'score' | 'generalTags'>,
 ): boolean {
+  if (preview.score <= SUSPICIOUS_SCORE_MAX) return true;
+  // Only a *known* tag count flags an upload — an absent count (undefined) is
+  // unknown, not zero, so it must not trip the under-tagged heuristic and
+  // falsely flag a well-tagged post whose field merely wasn't returned.
   return (
-    preview.score <= SUSPICIOUS_SCORE_MAX ||
+    preview.generalTags !== undefined &&
     preview.generalTags <= SUSPICIOUS_GENTAGS_MAX
   );
 }
@@ -299,6 +309,15 @@ export function buildPreviewPostUrls(
 }
 
 /**
+ * Tie-break key for same-`ts` segments: the record id (`anchorId`, or `postId`
+ * for suspicious segments that carry no anchor), where a higher id means newer.
+ * 0 when neither is present.
+ */
+function segOrderKey(seg: ActivitySegment): number {
+  return seg.anchorId ?? seg.postId ?? 0;
+}
+
+/**
  * Flattens per-type activity arrays into one most-recent-first list capped
  * at `limit`, plus a per-type tally over that capped window (all activity
  * types present as keys, zero-filled).
@@ -316,7 +335,10 @@ export function mergeRecentActivity(
       if (Number.isFinite(seg.ts)) all.push(seg);
     }
   }
-  all.sort((a, b) => b.ts - a.ts);
+  // Newest first; tie-break by record id (higher = newer) so a batch of
+  // same-second rows sorts deterministically. Without it the oldest-in-window
+  // anchor for a type could shift run to run on equal timestamps (R-12).
+  all.sort((a, b) => b.ts - a.ts || segOrderKey(b) - segOrderKey(a));
   const recent = all.slice(0, limit);
 
   const counts = {} as Record<ActivityType, number>;

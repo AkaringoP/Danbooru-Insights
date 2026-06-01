@@ -487,9 +487,9 @@ export interface PostPreview {
   /** 180x180 variant URL (falls back to best-available, then ''). */
   thumbUrl: string;
   score: number;
-  /** General tag count (`tag_count_general`). */
-  generalTags: number;
-  /** Danbooru rating letter source ('g' | 's' | 'q' | 'e'). */
+  /** General tag count (`tag_count_general`); undefined when the API omits it. */
+  generalTags?: number;
+  /** Danbooru rating letter ('g' | 's' | 'q' | 'e'); '' when the API omits it. */
   rating: string;
   status: PostPreviewStatus;
 }

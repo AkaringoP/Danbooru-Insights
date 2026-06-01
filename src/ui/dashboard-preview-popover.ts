@@ -99,6 +99,8 @@ interface PopoverRefs {
   el: HTMLElement;
   caret: HTMLElement;
   grid: HTMLElement;
+  /** Section A's NSFW checkbox — re-synced on each open (shared flag, R-11). */
+  nsfwToggle: HTMLInputElement;
   /** Section B strip/legend — null when no `fetchActivity` was provided. */
   strip: HTMLElement | null;
   legend: HTMLElement | null;
@@ -160,7 +162,10 @@ function makeCell(post: PostPreview): HTMLElement {
   const label = document.createElement('div');
   label.className = 'di-preview-label';
   if (flagged) label.classList.add('di-preview-label--flag');
-  label.textContent = `${post.rating.toUpperCase()} ▲${post.score} ◫${post.generalTags}`;
+  // rating may be '' and generalTags undefined (API omitted the field) — guard
+  // both so the cell renders cleanly instead of 'UNDEFINED'/'◫undefined'.
+  const ratingPart = post.rating ? `${post.rating.toUpperCase()} ` : '';
+  label.textContent = `${ratingPart}▲${post.score} ◫${post.generalTags ?? '?'}`;
   cell.appendChild(label);
   return cell;
 }
@@ -182,25 +187,19 @@ function renderMessage(grid: HTMLElement, text: string): void {
   grid.appendChild(msg);
 }
 
-/**
- * Unified-loading placeholder (touch + pinned): a single spinner spanning the
- * grid with the activity sections cleared — replaces the per-section skeletons
- * so both render in one shot when the fetches settle.
- */
-function renderUnifiedSpinner(
-  grid: HTMLElement,
-  strip: HTMLElement | null,
-  legend: HTMLElement | null,
-): void {
+/** A single spinner spanning the grid — section A's stale/loading placeholder. */
+function renderGridSpinner(grid: HTMLElement): void {
   grid.textContent = '';
   const spinner = document.createElement('div');
   spinner.className = 'di-preview-loading';
   grid.appendChild(spinner);
-  if (strip) {
-    strip.textContent = '';
-    strip.classList.remove('di-activity-loading');
-  }
-  if (legend) legend.textContent = '';
+}
+
+/** Section B loading placeholder: clear + pulse the strip while its fetch runs. */
+function showActivityLoading(strip: HTMLElement, legend: HTMLElement): void {
+  strip.textContent = '';
+  strip.classList.add('di-activity-loading');
+  legend.textContent = '';
 }
 
 function renderGrid(grid: HTMLElement, posts: PostPreview[]): void {
@@ -240,7 +239,10 @@ function applyNsfwBlur(grid: HTMLElement): void {
  * (the default) blurs q/e. Toggling re-runs the blur pass over `grid` and
  * persists the shared flag.
  */
-function makeNsfwToggle(grid: HTMLElement): HTMLElement {
+function makeNsfwToggle(grid: HTMLElement): {
+  label: HTMLElement;
+  checkbox: HTMLInputElement;
+} {
   const label = document.createElement('label');
   label.className = 'di-preview-nsfw-toggle';
   label.title = 'Show NSFW thumbnails (rating Q/E)';
@@ -253,7 +255,7 @@ function makeNsfwToggle(grid: HTMLElement): HTMLElement {
   });
   label.appendChild(cb);
   label.appendChild(document.createTextNode('NSFW'));
-  return label;
+  return {label, checkbox: cb};
 }
 
 /** Section B: a single muted/pulsing message row (empty or error state). */
@@ -345,6 +347,32 @@ function renderActivity(
   }
 }
 
+/** Section A: render a settled posts fetch — the grid, or a load-error row. */
+function renderPostsResult(
+  grid: HTMLElement,
+  result: PromiseSettledResult<PostPreview[]>,
+): void {
+  if (result.status === 'fulfilled') renderGrid(grid, result.value);
+  else renderMessage(grid, 'Failed to load recent posts.');
+}
+
+/** Section B: render a settled activity fetch — the strip, or an error row. */
+function renderActivityResult(
+  strip: HTMLElement,
+  legend: HTMLElement,
+  result: PromiseSettledResult<ActivityDistribution | null>,
+  activityHref?: (
+    type: ActivityType,
+    dist: ActivityDistribution,
+  ) => string | undefined,
+): void {
+  if (result.status === 'fulfilled' && result.value) {
+    renderActivity(strip, legend, result.value, activityHref);
+  } else {
+    renderActivityMessage(strip, legend, 'Activity unavailable.');
+  }
+}
+
 /**
  * Dims every strip segment whose type differs from `type` (null clears all)
  * and bolds the matching legend label, so the focused activity type's cells
@@ -381,8 +409,17 @@ function applyPeerHighlight(
  * this can be wired on every device (touch reports `'ontouchstart' in window`
  * even on a mouse machine) without fighting the touch two-step. Mouse/pen get
  * hover + leave-clear; touch goes through {@link attachLegendTwoStep}.
+ *
+ * `onClear` runs alongside the leave-clear. On a hybrid device (touch + mouse)
+ * a mouse pointerleave must also reset the touch two-step controller, else its
+ * `active` datum survives the visual clear and the next tap reads as the
+ * "second tap" and navigates unexpectedly (R-09).
  */
-function attachPeerHighlight(strip: HTMLElement, legend: HTMLElement): void {
+function attachPeerHighlight(
+  strip: HTMLElement,
+  legend: HTMLElement,
+  onClear?: () => void,
+): void {
   // Strip is tiled with ~1px gaps, so it only *sets* on a segment (clearing on
   // those gaps would flicker the dim during a sweep) — pointerleave clears it.
   strip.addEventListener('pointerover', e => {
@@ -407,7 +444,9 @@ function attachPeerHighlight(strip: HTMLElement, legend: HTMLElement): void {
     applyPeerHighlight(strip, legend, type);
   });
   const clear = (e: PointerEvent) => {
-    if (e.pointerType !== 'touch') applyPeerHighlight(strip, legend, null);
+    if (e.pointerType === 'touch') return;
+    applyPeerHighlight(strip, legend, null);
+    onClear?.(); // reset the touch two-step too (hybrid devices — R-09)
   };
   strip.addEventListener('pointerleave', clear);
   legend.addEventListener('pointerleave', clear);
@@ -497,7 +536,8 @@ function buildPopoverDom(opts: {
   const headA = document.createElement('div');
   headA.className = 'di-preview-section-head';
   headA.appendChild(makeSectionLabel('Recent uploads'));
-  headA.appendChild(makeNsfwToggle(grid));
+  const nsfw = makeNsfwToggle(grid);
+  headA.appendChild(nsfw.label);
   body.appendChild(headA);
   body.appendChild(grid);
 
@@ -514,8 +554,10 @@ function buildPopoverDom(opts: {
     legend.className = 'di-activity-legend';
     // Highlight interaction, delegated so it survives re-renders. Mouse/pen
     // hover is always wired (pointer events ignore touch by type); touch
-    // additionally gets the two-step tap. Both coexist on hybrid devices.
-    attachPeerHighlight(strip, legend);
+    // additionally gets the two-step tap. Both coexist on hybrid devices, so a
+    // mouse leave-clear also resets the two-step controller (R-09); legendTap
+    // is captured by closure since it's assigned just below.
+    attachPeerHighlight(strip, legend, () => legendTap?.reset());
     if (isTouchDevice()) {
       legendTap = attachLegendTwoStep(strip, legend);
     }
@@ -530,7 +572,7 @@ function buildPopoverDom(opts: {
   el.addEventListener('mouseleave', opts.onLeave);
 
   document.body.appendChild(el);
-  return {el, caret, grid, strip, legend, legendTap};
+  return {el, caret, grid, nsfwToggle: nsfw.checkbox, strip, legend, legendTap};
 }
 
 export interface DashboardPreviewPopoverOptions {
@@ -563,6 +605,13 @@ export interface DashboardPreviewPopover {
   hide(): void;
   /** Close after a short grace delay; no-op while pinned. */
   scheduleHide(): void;
+  /**
+   * Cancel a pending hide/fade and un-dim. Called when the cursor returns to
+   * the *anchor* (the popover element wires this itself) so a re-hover during
+   * the grace/fade window keeps the open popover alive instead of letting it
+   * close and re-load (R-04).
+   */
+  keepOpen(): void;
   /** Remove the popover element and detach all listeners. */
   destroy(): void;
 }
@@ -579,10 +628,19 @@ interface CachedFetcher<T> {
  * Wraps `fetchFn` with a single-slot {@link ttlMs} cache and in-flight dedup —
  * the shared engine behind sections A and B so the popover's load paths don't
  * each re-implement the bookkeeping.
+ *
+ * `isCacheable` gates what gets stored (default: everything). Both fetch
+ * methods swallow network errors into an *empty* result (`[]` / an empty
+ * distribution) rather than rejecting, so without this an offline blip would
+ * pin a false-empty for the full TTL — re-hover after the API recovers would
+ * still show nothing (R-05). Passing `v => v.length > 0` (or the distribution
+ * equivalent) means an empty result is never cached: the next open re-fetches
+ * and recovers. A genuinely-empty user just re-fetches each open — cheap.
  */
 function createCachedFetcher<T>(
   fetchFn: () => Promise<T>,
   ttlMs: number,
+  isCacheable: (value: T) => boolean = () => true,
 ): CachedFetcher<T> {
   let cached: T | null = null;
   let cachedTs = 0;
@@ -603,8 +661,10 @@ function createCachedFetcher<T>(
         void pending.then(clear, clear);
       }
       return pending.then(value => {
-        cached = value;
-        cachedTs = Date.now();
+        if (isCacheable(value)) {
+          cached = value;
+          cachedTs = Date.now();
+        }
         return value;
       });
     },
@@ -621,9 +681,19 @@ export function createDashboardPreviewPopover(
   let visible = false;
   let generation = 0;
   let hideTimer: ReturnType<typeof setTimeout> | null = null;
-  const postsFetcher = createCachedFetcher(fetchPosts, CACHE_TTL_MS);
+  // Don't cache an empty result (an error degrades to one) — see
+  // createCachedFetcher. A real empty just re-fetches cheaply on the next open.
+  const postsFetcher = createCachedFetcher(
+    fetchPosts,
+    CACHE_TTL_MS,
+    posts => posts.length > 0,
+  );
   const activityFetcher = fetchActivity
-    ? createCachedFetcher(fetchActivity, CACHE_TTL_MS)
+    ? createCachedFetcher(
+        fetchActivity,
+        CACHE_TTL_MS,
+        dist => dist.recent.length > 0,
+      )
     : null;
   let clickOutside: ((e: MouseEvent) => void) | null = null;
   let onKeydown: ((e: KeyboardEvent) => void) | null = null;
@@ -732,9 +802,7 @@ export function createDashboardPreviewPopover(
       renderActivity(strip, legend, fresh, activityHref);
       return;
     }
-    strip.textContent = '';
-    strip.classList.add('di-activity-loading');
-    legend.textContent = '';
+    showActivityLoading(strip, legend);
     void activityFetcher.get().then(
       dist => {
         if (gen === generation && visible) {
@@ -749,28 +817,31 @@ export function createDashboardPreviewPopover(
     );
   }
 
-  // Touch + pinned: one spinner over both sections, then render A and B
-  // together — no per-section skeleton churn (the mobile mini-report view).
+  // Touch + pinned (the mobile mini-report): each section renders the instant
+  // its own data is fresh; only a stale section shows a spinner. A fresh grid
+  // no longer blanks behind a unified spinner just because activity is still
+  // loading (R-10). When both are stale this is still effectively one spinner.
   async function loadUnified(gen: number): Promise<void> {
     if (!refs) return;
     const {grid, strip, legend} = refs;
-    const bothFresh =
-      postsFetcher.peekFresh() !== null &&
-      (!activityFetcher || activityFetcher.peekFresh() !== null);
-    if (!bothFresh) renderUnifiedSpinner(grid, strip, legend);
+    const freshPosts = postsFetcher.peekFresh();
+    const freshAct = activityFetcher ? activityFetcher.peekFresh() : null;
+    if (freshPosts) renderGrid(grid, freshPosts);
+    else renderGridSpinner(grid);
+    if (strip && legend) {
+      if (freshAct) renderActivity(strip, legend, freshAct, activityHref);
+      else showActivityLoading(strip, legend);
+    }
     const [postsR, actR] = await Promise.allSettled([
       postsFetcher.get(),
       activityFetcher ? activityFetcher.get() : Promise.resolve(null),
     ]);
     if (gen !== generation || !visible) return;
-    if (postsR.status === 'fulfilled') renderGrid(grid, postsR.value);
-    else renderMessage(grid, 'Failed to load recent posts.');
-    if (strip && legend && activityFetcher) {
-      if (actR.status === 'fulfilled' && actR.value) {
-        renderActivity(strip, legend, actR.value, activityHref);
-      } else {
-        renderActivityMessage(strip, legend, 'Activity unavailable.');
-      }
+    // Only the sections that *weren't* served fresh above get their settled
+    // result rendered now (strip/legend are non-null iff activity was wired).
+    if (!freshPosts) renderPostsResult(grid, postsR);
+    if (strip && legend && !freshAct) {
+      renderActivityResult(strip, legend, actR, activityHref);
     }
   }
 
@@ -785,6 +856,10 @@ export function createDashboardPreviewPopover(
     }
     refs.el.classList.remove('di-preview-popover--fading'); // crisp re-show
     syncPopoverTheme(refs.el);
+    // The NSFW flag is shared, so another component may have flipped it since
+    // this popover was built. The blur itself is already live (applyNsfwBlur
+    // reads the flag per render), but the checkbox could be stale (R-11).
+    refs.nsfwToggle.checked = getNsfwEnabled();
     refs.el.style.display = 'block';
     visible = true;
     cancelHideTimer();
@@ -811,5 +886,5 @@ export function createDashboardPreviewPopover(
     }
   }
 
-  return {show, hide, scheduleHide, destroy};
+  return {show, hide, scheduleHide, keepOpen, destroy};
 }

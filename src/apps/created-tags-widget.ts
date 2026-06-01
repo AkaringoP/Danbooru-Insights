@@ -100,7 +100,9 @@ export function renderCreatedTagsWidget(
       `<span class="di-cts-th${cls}" role="button" tabindex="0" data-sort="${mode}" ` +
       `style="justify-content:${rightAlign ? 'flex-end' : 'flex-start'};" ` +
       'title="Click to sort (again to flip direction)">' +
-      `<span class="di-cts-th-label">${label}</span>` +
+      // Label is a bare flex child (the gap separates it from the arrow); no
+      // wrapper span — `.di-cts-th-label` had no CSS and nothing queried it.
+      `${label}` +
       `<span class="di-cts-arrow${isActive ? ' di-cts-arrow--active' : ''}">${glyph}</span>` +
       '</span>'
     );
