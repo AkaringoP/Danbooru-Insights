@@ -396,6 +396,40 @@ const GLOBAL_CSS = `
         text-transform: uppercase;
         letter-spacing: 0.3px;
     }
+    /* Sortable column header: the whole label + single ▲/▼ arrow is one
+       clickable target, with a little padding to enlarge the hit area. */
+    .di-cts-th {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+        padding: 2px 4px;
+        margin: -2px -4px;
+        border-radius: 4px;
+        user-select: none;
+        transition: background 0.12s, color 0.12s;
+    }
+    .di-cts-th:hover {
+        background: var(--di-table-row-hover, #f6f8fa);
+    }
+    .di-cts-th--active {
+        color: var(--di-text, #333);
+    }
+    /* One arrow per column. Hidden until the header is hovered (keeps the row
+       clean); the active sort's arrow overrides this and stays lit + accent. */
+    .di-cts-arrow {
+        opacity: 0;
+        font-size: 9px;
+        color: var(--di-text-muted, #888);
+        transition: opacity 0.12s, color 0.12s;
+    }
+    .di-cts-th:hover .di-cts-arrow {
+        opacity: 0.6;
+    }
+    .di-cts-arrow--active {
+        opacity: 1;
+        color: var(--di-link, #007bff);
+    }
     .di-created-tags-table td {
         padding: 5px 8px;
         border-bottom: 1px solid var(--di-table-border, #f0f0f0);
@@ -1482,6 +1516,305 @@ const GLOBAL_CSS = `
       font-variant-numeric: tabular-nums;
       color: var(--di-text-muted, #888888);
       font-size: 0.9em;
+    }
+
+    /* ----- Dashboard preview popover ----- */
+    /* Transient (hover) dismiss fades out; FADE_MS in the popover module must
+       match this duration so display:none lands exactly as opacity hits 0. */
+    .di-preview-popover {
+      transition: opacity 350ms ease;
+    }
+    .di-preview-popover--fading {
+      opacity: 0;
+    }
+    .di-preview-caret {
+      position: absolute;
+      top: -6px;
+      width: 12px;
+      height: 12px;
+      background: var(--di-bg, #fff);
+      border-left: 1px solid var(--di-border, #e1e4e8);
+      border-top: 1px solid var(--di-border, #e1e4e8);
+      transform: translateX(-50%) rotate(45deg);
+    }
+    .di-preview-body {
+      padding: 12px;
+    }
+    .di-preview-section-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--di-text-muted, #888);
+      margin: 0 0 6px;
+    }
+    /* Section A header: label + "?" legend hug the left, NSFW toggle pushed to
+       the right (margin-left:auto on the toggle) — NOT space-between, which
+       would strand the "?" in the dead centre. */
+    .di-preview-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 8px;
+    }
+    .di-preview-section-head .di-preview-section-label {
+      margin-bottom: 6px;
+    }
+    .di-preview-nsfw-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: var(--di-text-muted, #888);
+      cursor: pointer;
+      user-select: none;
+      margin-bottom: 6px;
+      margin-left: auto; /* push to the far right of the section head */
+    }
+    .di-preview-nsfw-toggle input {
+      margin: 0;
+      cursor: pointer;
+    }
+    .di-preview-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 4px;
+    }
+    .di-preview-cell {
+      position: relative;
+      display: block;
+      text-decoration: none;
+    }
+    .di-preview-thumb,
+    .di-preview-thumb--empty {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      background: var(--di-bg-tertiary, #f0f0f0);
+      border: 2px solid transparent;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    /* NSFW filter: blur q/e thumbnails (mirrors TagAnalyticsApp). The label
+       below stays readable — only the thumbnail is obscured. */
+    .di-preview-thumb--nsfw {
+      filter: blur(10px) grayscale(100%);
+      opacity: 0.3;
+    }
+    .di-preview-label {
+      font-size: 9px;
+      line-height: 1.3;
+      text-align: center;
+      color: var(--di-text-muted, #888);
+      padding: 1px 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .di-preview-label--flag {
+      color: #e5484d;
+      font-weight: 700;
+    }
+    /* Mintagged: the uploader added few tags. Amber — a milder warning than
+       the red --flag (heavily downvoted); readable on light + dark bodies. */
+    .di-preview-label--mintag {
+      color: #e8950c;
+      font-weight: 700;
+    }
+    /* "?" colour legend in the section-A header: a hover/tap-revealed key for
+       the thumbnail border colours + label colours. */
+    .di-preview-legend-wrap {
+      position: relative;
+      display: inline-flex;
+      margin-bottom: 6px; /* match the label/NSFW baseline in the section head */
+    }
+    .di-preview-legend-icon {
+      cursor: help;
+      width: 14px;
+      height: 14px;
+      border: 1px solid var(--di-border, #ccc);
+      border-radius: 50%;
+      color: var(--di-text-muted, #888);
+      font-size: 9px;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+    }
+    .di-preview-legend-pop {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      z-index: 1;
+      margin-top: 4px;
+      padding: 6px 8px;
+      min-width: 180px;
+      background: var(--di-bg, #fff);
+      border: 1px solid var(--di-border, #ddd);
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      font-size: 10px;
+      color: var(--di-text, #333);
+      white-space: nowrap;
+    }
+    .di-preview-legend-wrap:hover .di-preview-legend-pop,
+    .di-preview-legend-wrap:focus-within .di-preview-legend-pop,
+    .di-preview-legend-wrap--open .di-preview-legend-pop {
+      display: block;
+    }
+    .di-preview-legend-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 1px 0;
+    }
+    .di-preview-legend-swatch {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      box-sizing: border-box;
+      border-radius: 2px;
+      flex: none;
+      text-align: center;
+      line-height: 12px;
+      font-size: 12px;
+    }
+    .di-preview-skeleton {
+      aspect-ratio: 1 / 1;
+      background: var(--di-bg-tertiary, #f0f0f0);
+      border-radius: 4px;
+      animation: di-preview-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes di-preview-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    /* Unified-loading spinner (touch + pinned): spans the grid, one spinner
+       for both sections instead of per-section skeletons. */
+    .di-preview-loading {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 120px;
+    }
+    .di-preview-loading::after {
+      content: '';
+      width: 24px;
+      height: 24px;
+      border: 3px solid var(--di-border, #e1e4e8);
+      border-top-color: var(--di-text-secondary, #888);
+      border-radius: 50%;
+      animation: di-preview-spin 0.7s linear infinite;
+    }
+    @keyframes di-preview-spin {
+      to { transform: rotate(360deg); }
+    }
+    .di-preview-msg {
+      grid-column: 1 / -1;
+      text-align: center;
+      color: var(--di-text-muted, #888);
+      padding: 16px 8px;
+      font-size: 11px;
+    }
+    /* ----- Section B: activity distribution ----- */
+    .di-activity-section {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--di-border, #e1e4e8);
+    }
+    .di-activity-strip {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      min-height: 14px;
+      padding: 1px;
+      border-radius: 3px;
+      background: var(--di-bg-tertiary, #f0f0f0);
+    }
+    .di-activity-row {
+      display: flex;
+      gap: 1px;
+      height: 13px;
+    }
+    .di-activity-seg {
+      flex: 1 1 0;
+      min-width: 0;
+      border-radius: 1px;
+      transition: opacity 0.1s ease;
+    }
+    /* Malicious-looking item: near-black fill + red inset border so it stays
+       visible on dark themes too. Also applied to the legend swatch. */
+    .di-activity-seg--flag {
+      box-shadow: inset 0 0 0 1.5px #e5484d;
+    }
+    /* Peer-highlight: cells of a non-hovered type fade so the hovered
+       activity type's cells stand out together. */
+    .di-activity-seg--mute {
+      opacity: 0.2;
+    }
+    .di-activity-loading {
+      animation: di-preview-pulse 1.2s ease-in-out infinite;
+    }
+    .di-activity-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 10px;
+      margin-top: 8px;
+      font-size: 10px;
+      color: var(--di-text-secondary, #aaa);
+    }
+    .di-activity-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    /* Peer-highlight: the legend label of the hovered type (strip cell or the
+       label itself) goes bold to echo the dimmed strip. The label reserves its
+       *bold* width up front (a hidden bold ghost stacked in the same grid cell)
+       so toggling the weight on hover never reflows the row. */
+    .di-activity-legend-item__text {
+      display: inline-grid;
+    }
+    .di-activity-legend-item__text > span,
+    .di-activity-legend-item__text::after {
+      grid-area: 1 / 1;
+    }
+    .di-activity-legend-item__text::after {
+      content: attr(data-text);
+      font-weight: 700;
+      height: 0;
+      overflow: hidden;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .di-activity-legend-item--active .di-activity-legend-item__text {
+      font-weight: 700;
+    }
+    .di-activity-legend-item--link {
+      cursor: pointer;
+    }
+    .di-activity-legend-item--link:hover {
+      text-decoration: underline;
+    }
+    .di-activity-swatch {
+      width: 9px;
+      height: 9px;
+      border-radius: 2px;
+      flex: 0 0 auto;
+    }
+    .di-activity-empty {
+      color: var(--di-text-muted, #888);
+      font-size: 11px;
+      padding: 4px 0;
     }
   `;
 

@@ -11,12 +11,6 @@ type SortDirection = 'asc' | 'desc';
 
 const PAGE_SIZE = 20;
 
-const SORT_LABELS: Record<SortMode, string> = {
-  posts: 'Posts',
-  name: 'Name',
-  date: 'Date',
-};
-
 /** Default sort direction when switching into a mode. */
 const SORT_DEFAULT_DIR: Record<SortMode, SortDirection> = {
   posts: 'desc',
@@ -54,59 +48,10 @@ export function renderCreatedTagsWidget(
     'font-size:0.9em;color:var(--di-text-secondary, #666);font-weight:bold;';
   titleDiv.textContent = `🏷️ Tags created by ${targetUser.name}`;
 
-  const controlsDiv = document.createElement('div');
-  controlsDiv.style.cssText = 'display:flex;align-items:center;gap:8px;';
-  controlsDiv.style.display = 'none'; // Hidden until loaded
-
-  // Segmented sort control: 3 buttons (Posts / Name / Date).
-  // Clicking the active button toggles direction; clicking another resets
-  // to that mode's default direction.
-  const sortButtons: Record<SortMode, HTMLButtonElement> = {} as Record<
-    SortMode,
-    HTMLButtonElement
-  >;
-
-  const updateSortButtons = () => {
-    (Object.keys(sortButtons) as SortMode[]).forEach(mode => {
-      const btn = sortButtons[mode];
-      const isActive = mode === sortMode;
-      const arrow = isActive ? (sortDir === 'desc' ? ' ▼' : ' ▲') : '';
-      btn.textContent = SORT_LABELS[mode] + arrow;
-      btn.style.background = isActive
-        ? 'var(--di-link, #007bff)'
-        : 'var(--di-bg, #fff)';
-      btn.style.color = isActive ? '#fff' : 'var(--di-text-secondary, #666)';
-      btn.style.borderColor = isActive
-        ? 'var(--di-link, #007bff)'
-        : 'var(--di-border-input, #ddd)';
-      btn.title = isActive
-        ? `Sorted by ${SORT_LABELS[mode]} (${sortDir === 'desc' ? 'descending' : 'ascending'}). Click to toggle direction.`
-        : `Sort by ${SORT_LABELS[mode]}`;
-    });
-  };
-
-  (['posts', 'name', 'date'] as SortMode[]).forEach(mode => {
-    const btn = document.createElement('button');
-    btn.style.cssText =
-      'font-size:11px;padding:2px 8px;border:1px solid var(--di-border-input, #ddd);border-radius:4px;background:var(--di-bg, #fff);color:var(--di-text-secondary, #666);cursor:pointer;transition:all 0.15s;';
-    btn.onclick = () => {
-      if (sortMode === mode) {
-        sortDir = sortDir === 'desc' ? 'asc' : 'desc';
-      } else {
-        sortMode = mode;
-        sortDir = SORT_DEFAULT_DIR[mode];
-      }
-      currentPage = 0;
-      updateSortButtons();
-      sortItems();
-      renderTable();
-    };
-    sortButtons[mode] = btn;
-    controlsDiv.appendChild(btn);
-  });
+  // Sorting is driven by per-column header arrows built in renderTable()
+  // (each sortable column shows a ▲/▼ pair). No standalone sort control.
 
   header.appendChild(titleDiv);
-  header.appendChild(controlsDiv);
   container.appendChild(header);
 
   const contentDiv = document.createElement('div');
@@ -138,6 +83,31 @@ export function renderCreatedTagsWidget(
     }
   };
 
+  // A clickable column header with a SINGLE ▲/▼ arrow. The active column shows
+  // its current direction (always lit); an inactive column shows the direction
+  // a click would apply (its default), revealed on hover. The whole header is
+  // the hit target. `rightAlign` keeps the numeric Posts column flush right.
+  const sortableHeader = (
+    mode: SortMode,
+    label: string,
+    rightAlign = false,
+  ): string => {
+    const isActive = sortMode === mode;
+    const dir = isActive ? sortDir : SORT_DEFAULT_DIR[mode];
+    const glyph = dir === 'desc' ? '▼' : '▲';
+    const cls = isActive ? ' di-cts-th--active' : '';
+    return (
+      `<span class="di-cts-th${cls}" role="button" tabindex="0" data-sort="${mode}" ` +
+      `style="justify-content:${rightAlign ? 'flex-end' : 'flex-start'};" ` +
+      'title="Click to sort (again to flip direction)">' +
+      // Label is a bare flex child (the gap separates it from the arrow); no
+      // wrapper span — `.di-cts-th-label` had no CSS and nothing queried it.
+      `${label}` +
+      `<span class="di-cts-arrow${isActive ? ' di-cts-arrow--active' : ''}">${glyph}</span>` +
+      '</span>'
+    );
+  };
+
   const renderTable = () => {
     const totalPages = Math.ceil(items.length / PAGE_SIZE);
     const start = currentPage * PAGE_SIZE;
@@ -145,10 +115,10 @@ export function renderCreatedTagsWidget(
 
     let html = `<table class="di-created-tags-table">
       <thead><tr>
-        <th>Tag Name</th>
-        <th style="text-align:right;">Posts</th>
+        <th>${sortableHeader('name', 'Tag Name')}</th>
+        <th style="text-align:right;">${sortableHeader('posts', 'Posts', true)}</th>
         <th>Status</th>
-        <th>Date</th>
+        <th>${sortableHeader('date', 'Date')}</th>
       </tr></thead>
       <tbody>`;
 
@@ -178,6 +148,33 @@ export function renderCreatedTagsWidget(
     }
 
     contentDiv.innerHTML = html;
+
+    // Header click: same column → flip direction; other column → switch to it
+    // at its default direction. Reset to page 1, re-sort, re-render (repaints
+    // the active arrow). The whole header span (label + arrow) is the target.
+    const applySort = (mode: SortMode) => {
+      if (sortMode === mode) {
+        sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        sortMode = mode;
+        sortDir = SORT_DEFAULT_DIR[mode];
+      }
+      currentPage = 0;
+      sortItems();
+      renderTable();
+    };
+    contentDiv
+      .querySelectorAll<HTMLElement>('.di-cts-th[data-sort]')
+      .forEach(el => {
+        const mode = el.dataset.sort as SortMode;
+        el.onclick = () => applySort(mode);
+        el.onkeydown = e => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            applySort(mode);
+          }
+        };
+      });
 
     // Pagination click handlers
     contentDiv.querySelectorAll('[data-page]').forEach(btn => {
@@ -210,8 +207,6 @@ export function renderCreatedTagsWidget(
       }
 
       titleDiv.textContent = `🏷️ Tags created by ${targetUser.name} (${items.length})`;
-      controlsDiv.style.display = 'flex';
-      updateSortButtons();
       sortItems();
       renderTable();
     } catch (e) {

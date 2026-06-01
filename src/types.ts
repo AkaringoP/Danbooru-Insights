@@ -443,6 +443,8 @@ export interface DanbooruPost {
   // Status flags (modern post schema)
   is_deleted?: boolean;
   is_banned?: boolean;
+  is_pending?: boolean;
+  is_flagged?: boolean;
 
   // Approval
   approver_id?: number;
@@ -463,6 +465,99 @@ export interface DanbooruPost {
   uploader_level?: string;
   approver_name?: string;
   approver_level?: string;
+}
+
+/* ----- Dashboard preview popover (feature view-models) ----- */
+
+/**
+ * Post status driving the preview popover's thumbnail border colour.
+ * `appealed` is a deleted post with a pending appeal — resolved via a
+ * separate `status:appealed` id query, not a per-post API flag.
+ */
+export type PostPreviewStatus =
+  | 'active'
+  | 'pending'
+  | 'appealed'
+  | 'flagged'
+  | 'deleted';
+
+/** One thumbnail cell in the preview popover's recent-posts grid. */
+export interface PostPreview {
+  id: number;
+  /** 180x180 variant URL (falls back to best-available, then ''). */
+  thumbUrl: string;
+  score: number;
+  /** General tag count (`tag_count_general`); undefined when the API omits it. */
+  generalTags?: number;
+  /**
+   * Tags the *uploader* added on the post's first version (`added_tags` length,
+   * which merges the uploader's own ~1h follow-up edits). Drives the
+   * "mintagged" (under-tagged by the uploader) orange label. Undefined when the
+   * post_versions lookup missed — left unflagged (fail-open).
+   */
+  uploaderTagCount?: number;
+  /** Danbooru rating letter ('g' | 's' | 'q' | 'e'); '' when the API omits it. */
+  rating: string;
+  status: PostPreviewStatus;
+}
+
+/** Activity feed types shown in the preview popover's distribution strip. */
+export type ActivityType =
+  | 'upload' // post_versions is_new=true (the upload itself)
+  | 'edit' // post_versions is_new=false (later tag/metadata edits)
+  | 'note'
+  | 'wiki'
+  | 'artist'
+  | 'commentary'
+  | 'pool'
+  | 'forum'
+  | 'approval'
+  | 'comment'
+  | 'appeal'
+  // cross-cutting: a malicious-looking upload/comment (section B). Named
+  // 'suspicious' (not 'flagged') to avoid clashing with Danbooru's
+  // status:flagged / the is_flagged PostPreviewStatus used in section A.
+  | 'suspicious';
+
+/** One activity occurrence: a type plus its timestamp (ms since epoch). */
+export interface ActivitySegment {
+  type: ActivityType;
+  /** Epoch milliseconds (parsed from updated_at/created_at). */
+  ts: number;
+  /**
+   * The Danbooru post this segment points at, set only for `suspicious`
+   * segments: a suspicious upload's own post, or the post a suspicious
+   * comment is attached to. Used to build the legend's `id:` link-out.
+   */
+  postId?: number;
+  /**
+   * Id used to anchor (`#`-scroll) this segment's row on its type's index
+   * page: the post id for `upload` (gallery `#post_<id>`), else the native
+   * record id (post_version, note_version, comment, …). The oldest in-window
+   * value per type becomes the legend link's scroll target.
+   */
+  anchorId?: number;
+}
+
+/** Merged recent-activity result for the distribution strip. */
+export interface ActivityDistribution {
+  /** Most-recent-first, capped at the requested limit (e.g. 100). */
+  recent: ActivitySegment[];
+  /** Per-type tally within `recent` (all types present, zero-filled). */
+  counts: Record<ActivityType, number>;
+  /**
+   * Deduped post ids of the `suspicious` segments in `recent` (uploads' own
+   * posts + the posts suspicious comments sit on). Drives the legend's
+   * "open the exact flagged posts" `id:` link; empty when none resolved.
+   */
+  suspiciousPostIds: number[];
+  /**
+   * Per type, the `anchorId` of the *oldest* in-window segment — the legend
+   * link appends `#<prefix>_<id>` so the page scrolls to that boundary item.
+   * Absent for types with no resolvable id. `suspicious` is excluded (its
+   * anchor comes from {@link suspiciousPostIds}).
+   */
+  oldestAnchorByType: Partial<Record<ActivityType, number>>;
 }
 
 /**

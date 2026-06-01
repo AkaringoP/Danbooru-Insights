@@ -4,6 +4,64 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.7.1 — Mintag / abandoned upload detection + colour legend
+
+### Added
+- **Mintag detection.** A recent upload whose uploader added **≤ 10 tags** (the
+  count of tags *that user* added in the post's first version, read from
+  `post_versions` `added_tags` — not the post's current total, which others
+  inflate) now gets an **orange** label. Replaces the old
+  `tag_count_general ≤ 5` heuristic, which wrongly counted everyone's tags.
+- **Abandoned detection.** A mintagged upload whose **v2 lands ≥ 15 minutes
+  after v1** is re-coloured **red** — the uploader left the post under-tagged
+  rather than racing a competing tagger (a v2 within 15 min is treated as a
+  tagging race and stays orange). Resolved in a non-blocking background pass
+  after the grid renders, guarded against stale popover generations.
+- **Colour legend.** A `?` help icon next to the "RECENT UPLOADS" header opens
+  a legend (hover on desktop, tap on touch) explaining every border status and
+  the orange/red label colours.
+
+### Changed
+- **Suspicious-upload label is now score-only** (`score ≤ -3`). The general-tag
+  side of the old heuristic moved to the dedicated mintag label above, so the
+  red "suspicious" label no longer fires on merely sparse tagging.
+
+---
+
+## v9.7.0 — Dashboard preview popover + created-tags sort headers
+
+### Added
+- **Dashboard preview popover.** Hovering the analytics icon (or clicking it,
+  for users with ≤30 uploads) now opens a two-section preview instead of a
+  plain tooltip. **Section A — Recent uploads:** a grid of the user's newest
+  uploads with status borders, a red label on suspicious uploads
+  (`score ≤ -3` or `≤ 5` general tags), and a top-right NSFW blur toggle that
+  reuses the unified NSFW flag. **Section B — Activity:** a colour-coded strip
+  of the most-recent ~200 activities across 11 feed types (uploads, tag edits,
+  notes, wiki, artist, commentary, pools, forum, approvals, comments, appeals)
+  with a legend.
+- **Suspicious-activity detection.** Deleted/banned or heavily-downvoted
+  uploads and downvoted comments are re-typed into a separate `suspicious`
+  category (near-black + red border). Clicking the **Suspicious** legend item
+  opens the *exact* flagged posts via `/posts?tags=id:… status:any`.
+- **Legend index links.** Each legend item opens that activity type's Danbooru
+  index page with `&limit=200` (the whole analysed window on one page) and an
+  `#anchor` that scrolls to the oldest in-window row.
+- **Mobile/touch tier.** A dedicated mini-report button (touch only), unified
+  loading (one spinner → both sections render together), and two-step-tap
+  legends. The popover also follows the dashboard's dark theme.
+
+### Changed
+- **Created-tags sort headers.** The Posts/Name/Date segmented control in the
+  "Tags created by" table is replaced by per-column sort arrows. Each sortable
+  column (Tag Name / Posts / Date) shows a single ▲/▼ arrow that stays hidden
+  until you hover the header — except the active sort's arrow, which stays lit
+  so the current sort is always visible. The whole header is the click target;
+  clicking the active column flips its direction. The Status column is not
+  sortable.
+
+---
+
 ## v9.6.3 — Translation pie tab + Save/Cancel popover + dark-mode rank bar
 
 ### Added

@@ -62,17 +62,18 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 선택이 자명하지 않으면 근거를 간단히 기록. 이래야 세션 간에 파이프라인 재현성 유지됨
 
 ## Git 브랜치 전략
-- `main` — 안정 릴리즈만. 항상 배포 가능 상태
-- `feature/*` — 새 기능/개선. `main` 에서 분기, `main` 으로 머지
-- `hotfix/*` — 긴급 버그 수정. `main` 에서 분기, `main` 으로 머지
-- `main` 에 직접 커밋 금지
+- `develop` — 통합 브랜치. `feature/*` 가 머지되는 곳. 배포 가능 상태 유지
+- `feature/*` — 새 기능/개선. `develop` 에서 분기, `develop` 으로 머지
+- `hotfix/*` — 긴급 수정. `develop` 에서 분기. 급하면 `main`+`develop` 동시 머지
+- `main` — 안정 릴리즈만. `develop` 에서 머지. 항상 배포 가능
+- `develop` 에 직접 커밋 금지
 - 브랜치 명: `feature/<short-description>` / `hotfix/<short-description>`
 
 ## Build & Dev
 - `npm run dev` — Vite dev 서버 (HMR)
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 583 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 759 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 포함)
 
@@ -163,7 +164,12 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
 ## Active Issues
-(현재 추적 중인 항목 없음 — 비자명한 작업 시작할 때 여기 항목 추가해서 미래 세션이 컨텍스트 상속하게 하기)
+- (없음) — 대시보드 preview popover 는 **v9.7.0 출시 완료**, mintag/abandoned 감지 + 색상 범례는 **v9.7.1 출시 완료**. 설계 회고는 `.archive/` (로컬), 동작 카탈로그는 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Activity distribution feed" 섹션 참조.
+
+### Preview popover 핵심 요약 (shipped)
+- **섹션 A — 최근 업로드 그리드** (10개@80px, 5×2): status 테두리, **악성 업로드 빨간 라벨**(`isSuspiciousUpload`: 이제 **score≤-3 단독**), **mintag 주황 라벨**(`isMintagged`: uploader 가 v1 에서 추가한 태그 `added_tags.length ≤ 10` — post 의 현재 total 이 아님), **abandoned 빨강 escalation**(mintag 인데 v2 가 v1 후 ≥15분 → `isAbandonedByGap`, 백그라운드 비차단 패스 `getAbandonedPostIds`, generation-guard), 우상단 NSFW 블러 토글(통합 `getNsfwEnabled` 재사용), **`?` 색상 범례**(테두리 status + 라벨 색 설명, hover/tap).
+- **섹션 B — 활동 분포 스트립** (200 세그먼트, 11 타입 `mapConcurrent` 병렬): suspicious 재분류(deleted/banned OR score≤-3 업로드/코멘트), 범례 link-out(`&limit=200` + 가장 오래된 행 `#anchor`), suspicious 정확매칭 link-out(`suspiciousPostsUrl`, `id:<csv> status:any`), commentary 업로드-커플링 필터(±1초).
+- **공통**: hover dismiss linger+fade(`HIDE_GRACE_MS`/`FADE_MS`), 캐시/inflight dedupe(`createCachedFetcher<T>`), 다크모드(`syncPopoverTheme`), 모바일 3계층(📋 미니보고서 버튼 / 통합 로딩 / two-step-tap 범례), peer-highlight(pointer 이벤트 기반).
 
 ## 메모
 - `CONFIG.THEMES` 에 테마 추가 시 light/dark 섹션 코멘트 유지 (현재 12 개 테마 — Light 6: Light/Solarized Light/Sakura/Lavender/Ice/Aurora, Dark 6: Midnight/Solarized Dark/Dracula/Ocean/Monokai/Ember)
