@@ -133,6 +133,12 @@ describe('createDashboardPreviewPopover', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
   });
+  afterEach(() => {
+    // Mirror the section-B block: restore any spies and the shared NSFW flag
+    // this block toggles, so state can't leak into later tests (R-16).
+    vi.restoreAllMocks();
+    setNsfwEnabled(false);
+  });
 
   it('renders 10 skeleton cells immediately on show', () => {
     const anchor = anchorWithRect({});
@@ -431,6 +437,82 @@ describe('createDashboardPreviewPopover', () => {
     } finally {
       vi.useRealTimers();
     }
+    pop.destroy();
+  });
+
+  it('keepOpen() cancels a scheduled transient hide (R-04)', () => {
+    // The icon's mouseenter calls keepOpen() when the cursor returns during
+    // the grace/fade window, so a re-hover keeps the open popover alive rather
+    // than letting it close and re-load. (Controller-level counterpart to the
+    // popover-element bridge tested above.)
+    vi.useFakeTimers();
+    try {
+      const pop = createDashboardPreviewPopover({
+        anchor: anchorWithRect({}),
+        fetchPosts: NEVER,
+      });
+      pop.show(); // transient
+      const el = document.querySelector<HTMLElement>('.di-preview-popover')!;
+      expect(el.style.display).toBe('block');
+      pop.scheduleHide(); // arm grace → fade → hide
+      pop.keepOpen(); // cursor back on the icon: abort it
+      vi.advanceTimersByTime(5000); // well past grace + fade
+      expect(el.style.display).toBe('block');
+      expect(el.classList.contains('di-preview-popover--fading')).toBe(false);
+      // Control: without keepOpen the same chain DOES hide.
+      pop.scheduleHide();
+      vi.advanceTimersByTime(5000);
+      expect(el.style.display).toBe('none');
+      pop.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not cache an empty posts result, re-fetching next open (R-05)', async () => {
+    let calls = 0;
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => {
+        calls++;
+        return calls === 1 ? [] : samplePosts; // 1st empty (e.g. a transient error)
+      },
+    });
+    pop.show();
+    await flush();
+    expect(calls).toBe(1);
+    expect(document.querySelector('.di-preview-msg')?.textContent).toMatch(
+      /no recent uploads/i,
+    );
+    pop.hide();
+    // Reopen within the 60s TTL: an empty result must NOT have been cached, so
+    // it re-fetches and now shows the recovered posts (not a pinned blank).
+    pop.show();
+    await flush();
+    expect(calls).toBe(2);
+    expect(document.querySelectorAll('a.di-preview-cell')).toHaveLength(3);
+    pop.destroy();
+  });
+
+  it('re-syncs the NSFW checkbox to the shared flag on each open (R-11)', async () => {
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => samplePosts,
+    });
+    const cb = () =>
+      document.querySelector<HTMLInputElement>(
+        '.di-preview-nsfw-toggle input',
+      )!;
+    setNsfwEnabled(false);
+    pop.show();
+    await flush();
+    expect(cb().checked).toBe(false);
+    pop.hide();
+    // Another component flips the shared flag while the popover is closed.
+    setNsfwEnabled(true);
+    pop.show();
+    await flush();
+    expect(cb().checked).toBe(true); // reflects the flag, not the build-time value
     pop.destroy();
   });
 });
@@ -793,7 +875,57 @@ describe('createDashboardPreviewPopover — section B (activity)', () => {
     }
   });
 
-  it('touch + pinned shows one unified spinner, then renders A+B together', async () => {
+  it('hybrid: a mouse leave-clear resets the touch two-step (R-09)', async () => {
+    vi.mocked(twoStepTap.isTouchDevice).mockReturnValue(true);
+    const origOpen = window.open;
+    let opened = '';
+    window.open = ((url?: string | URL) => {
+      opened = String(url ?? '');
+      return null;
+    }) as typeof window.open;
+    try {
+      const pop = createDashboardPreviewPopover({
+        anchor: anchorWithRect({}),
+        fetchPosts: async () => samplePosts,
+        fetchActivity: async () =>
+          activityWith([{type: 'upload', ts: Date.now()}], {upload: 1}),
+        activityHref: t => (t === 'upload' ? '/posts?tags=user:x' : undefined),
+      });
+      pop.show({pinned: true});
+      await flush();
+      const legend = document.querySelector<HTMLElement>(
+        '.di-activity-legend',
+      )!;
+      const item = legend.querySelector<HTMLElement>(
+        '.di-activity-legend-item[data-type="upload"]',
+      )!;
+      const tap = () => {
+        item.dispatchEvent(fakeTouch('touchstart'));
+        item.dispatchEvent(fakeTouch('touchend'));
+      };
+      tap(); // first tap → highlight, controller now "armed" for a second tap
+      expect(item.classList.contains('di-activity-legend-item--active')).toBe(
+        true,
+      );
+      // A mouse leaves the legend (hybrid device). Without the reset the
+      // controller would keep its active datum and the next tap would navigate.
+      legend.dispatchEvent(pointerEvent('pointerleave', 'mouse'));
+      expect(item.classList.contains('di-activity-legend-item--active')).toBe(
+        false,
+      );
+      // So the next tap is a fresh FIRST tap: it re-highlights, does NOT open.
+      tap();
+      expect(opened).toBe('');
+      expect(item.classList.contains('di-activity-legend-item--active')).toBe(
+        true,
+      );
+      pop.destroy();
+    } finally {
+      window.open = origOpen;
+    }
+  });
+
+  it('touch + pinned: both stale → each section spins, then renders A+B together', async () => {
     vi.mocked(twoStepTap.isTouchDevice).mockReturnValue(true);
     let resolvePosts!: (p: PostPreview[]) => void;
     let resolveAct!: (d: ActivityDistribution) => void;
@@ -805,14 +937,16 @@ describe('createDashboardPreviewPopover — section B (activity)', () => {
     });
     pop.show({pinned: true});
     await flush();
-    // One spinner, no per-section skeleton churn while both load.
+    // No skeleton churn: section A shows its spinner, section B (also stale)
+    // pulses its strip — each stale section indicates loading independently
+    // (R-10), but both still render in one shot when their fetches settle.
     expect(document.querySelectorAll('.di-preview-loading')).toHaveLength(1);
     expect(document.querySelectorAll('.di-preview-skeleton')).toHaveLength(0);
     expect(
       document
         .querySelector('.di-activity-strip')
         ?.classList.contains('di-activity-loading'),
-    ).toBe(false);
+    ).toBe(true);
     // Both settle → spinner gone, both sections rendered in one shot.
     resolvePosts(samplePosts);
     resolveAct(activityWith([{type: 'upload', ts: Date.now()}], {upload: 1}));
@@ -822,6 +956,42 @@ describe('createDashboardPreviewPopover — section B (activity)', () => {
     expect(
       document.querySelectorAll('.di-activity-legend-item').length,
     ).toBeGreaterThan(0);
+    pop.destroy();
+  });
+
+  it('touch + pinned: a fresh section renders at once while a stale one reloads (R-10)', async () => {
+    vi.mocked(twoStepTap.isTouchDevice).mockReturnValue(true);
+    let actCalls = 0;
+    let resolveAct2!: (d: ActivityDistribution) => void;
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => samplePosts, // non-empty → cached after 1st open
+      fetchActivity: () => {
+        actCalls++;
+        // 1st call: empty → NOT cached (R-05), so it stays stale on reopen.
+        // 2nd call: hangs, so we can observe the per-section loading state.
+        return actCalls === 1
+          ? Promise.resolve(activityWith([], {}))
+          : new Promise<ActivityDistribution>(r => (resolveAct2 = r));
+      },
+    });
+    pop.show({pinned: true});
+    await flush();
+    expect(document.querySelectorAll('a.di-preview-cell')).toHaveLength(3);
+    pop.hide();
+    // Reopen: posts are cached (fresh) so the grid renders immediately — it
+    // must NOT blank behind a unified spinner just because activity is stale.
+    pop.show({pinned: true});
+    await flush();
+    expect(document.querySelectorAll('.di-preview-loading')).toHaveLength(0);
+    expect(document.querySelectorAll('a.di-preview-cell')).toHaveLength(3);
+    expect(
+      document
+        .querySelector('.di-activity-strip')
+        ?.classList.contains('di-activity-loading'),
+    ).toBe(true);
+    resolveAct2(activityWith([{type: 'upload', ts: Date.now()}], {upload: 1}));
+    await flush();
     pop.destroy();
   });
 

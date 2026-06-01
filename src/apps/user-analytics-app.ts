@@ -1163,10 +1163,15 @@ export class UserAnalyticsApp {
 
       // Hover opens a transient popover (skipped on touch — unreachable
       // there; the click path still works). A short dwell debounce avoids
-      // firing on an accidental graze.
+      // firing on an accidental graze. Gate unified to isTouchDevice() so the
+      // hover wiring and the touch-only paths (📋 button, legend two-step)
+      // agree on what counts as "touch" (R-08).
       let hoverTimer: ReturnType<typeof setTimeout> | null = null;
-      if (!('ontouchstart' in window)) {
+      if (!isTouchDevice()) {
         btn.addEventListener('mouseenter', () => {
+          // Cursor back on the icon during the grace/fade window: keep the
+          // open popover alive instead of letting it close and re-load (R-04).
+          previewPopover.keepOpen();
           if (hoverTimer !== null) clearTimeout(hoverTimer);
           hoverTimer = setTimeout(() => previewPopover.show(), 200);
         });
@@ -1177,6 +1182,11 @@ export class UserAnalyticsApp {
           }
           previewPopover.scheduleHide();
         });
+      } else {
+        // Touch-capable (incl. a touch laptop driven by a mouse): hover isn't
+        // wired, so restore the tooltip the bare 📊 otherwise lacks (R-08). On
+        // a true desktop the popover replaces it, so no title there.
+        btn.title = 'Open Analytics Report';
       }
 
       btn.onclick = async e => {

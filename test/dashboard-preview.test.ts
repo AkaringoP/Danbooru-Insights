@@ -147,8 +147,22 @@ describe('toPostPreview', () => {
       new Set(),
     );
     expect(preview.score).toBe(7);
-    expect(preview.generalTags).toBe(0);
+    // tag_count_general absent → undefined (NOT coerced to 0), so the
+    // under-tagged heuristic can tell "no data" from a real 0 (R-02).
+    expect(preview.generalTags).toBeUndefined();
     expect(preview.status).toBe('active');
+  });
+
+  it('falls back to rating "" and undefined tags when the API omits them', () => {
+    // A malformed/restricted status:any row can drop rating + tag_count_general.
+    // toPostPreview must normalise rather than let undefined reach the grid
+    // (rating.toUpperCase() would crash; see R-01/R-03).
+    const preview = toPostPreview(
+      {id: 9, created_at: '2024-01-01', uploader_id: 1} as never,
+      new Set(),
+    );
+    expect(preview.rating).toBe('');
+    expect(preview.generalTags).toBeUndefined();
   });
 });
 
@@ -284,6 +298,26 @@ describe('mergeRecentActivity', () => {
     expect(oldestAnchorByType.note).toBe(3); // only the in-window one survives
     expect(oldestAnchorByType.wiki).toBeUndefined();
   });
+
+  it('breaks same-ts ties by id (higher = newer) deterministically (R-12)', () => {
+    const a = (ts: number, anchorId: number): ActivitySegment => ({
+      type: 'note',
+      ts,
+      anchorId,
+    });
+    // Three note rows share ts=10; the comparator must order them by id desc
+    // regardless of input order, so the oldest-in-window anchor is stable.
+    const order = (perType: ActivitySegment[][]) =>
+      mergeRecentActivity(perType, 100).recent.map(s => s.anchorId);
+    expect(order([[a(10, 1), a(10, 3), a(10, 2)]])).toEqual([3, 2, 1]);
+    // Same set, shuffled input → identical output (determinism).
+    expect(order([[a(10, 2)], [a(10, 1)], [a(10, 3)]])).toEqual([3, 2, 1]);
+    // …and the per-type oldest anchor is the lowest id of the tied batch.
+    expect(
+      mergeRecentActivity([[a(10, 3), a(10, 1), a(10, 2)]], 100)
+        .oldestAnchorByType.note,
+    ).toBe(1);
+  });
 });
 
 describe('suspiciousPostsUrl', () => {
@@ -395,6 +429,13 @@ describe('isSuspiciousUpload', () => {
   it('does not flag a healthy post (good score and tags)', () => {
     expect(isSuspiciousUpload({score: -2, generalTags: 6})).toBe(false);
     expect(isSuspiciousUpload({score: 50, generalTags: 25})).toBe(false);
+  });
+
+  it('does not flag on an unknown (undefined) tag count, only a real 0', () => {
+    // R-02: a missing count must not read as "0 tags" and falsely flag a
+    // well-tagged upload. A genuine 0 still flags (covered above).
+    expect(isSuspiciousUpload({score: 50, generalTags: undefined})).toBe(false);
+    expect(isSuspiciousUpload({score: -3, generalTags: undefined})).toBe(true);
   });
 });
 
