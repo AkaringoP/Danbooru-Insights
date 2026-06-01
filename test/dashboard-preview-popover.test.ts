@@ -183,7 +183,7 @@ describe('createDashboardPreviewPopover', () => {
     pop.destroy();
   });
 
-  it('flags low-score or under-tagged uploads with a red label', async () => {
+  it('labels downvoted uploads red and uploader-under-tagged ones orange', async () => {
     const anchor = anchorWithRect({});
     const posts: PostPreview[] = [
       {
@@ -191,25 +191,37 @@ describe('createDashboardPreviewPopover', () => {
         thumbUrl: 't',
         score: -5,
         generalTags: 20,
+        uploaderTagCount: 30,
         rating: 'g',
         status: 'active',
-      }, // low score
+      }, // heavily downvoted → red
       {
         id: 2,
         thumbUrl: 't',
         score: 99,
-        generalTags: 3,
+        generalTags: 20,
+        uploaderTagCount: 3,
         rating: 'g',
         status: 'active',
-      }, // under-tagged
+      }, // uploader added few tags → orange
       {
         id: 3,
         thumbUrl: 't',
         score: 99,
         generalTags: 20,
+        uploaderTagCount: 30,
         rating: 'g',
         status: 'active',
-      }, // clean
+      }, // clean → no label colour
+      {
+        id: 4,
+        thumbUrl: 't',
+        score: -5,
+        generalTags: 20,
+        uploaderTagCount: 2,
+        rating: 'g',
+        status: 'active',
+      }, // both: red wins over orange
     ];
     const pop = createDashboardPreviewPopover({
       anchor,
@@ -219,8 +231,100 @@ describe('createDashboardPreviewPopover', () => {
     await flush();
     const cells = document.querySelectorAll<HTMLElement>('a.di-preview-cell');
     expect(cells[0].querySelector('.di-preview-label--flag')).not.toBeNull();
-    expect(cells[1].querySelector('.di-preview-label--flag')).not.toBeNull();
+    expect(cells[0].querySelector('.di-preview-label--mintag')).toBeNull();
+    expect(cells[1].querySelector('.di-preview-label--mintag')).not.toBeNull();
+    expect(cells[1].querySelector('.di-preview-label--flag')).toBeNull();
     expect(cells[2].querySelector('.di-preview-label--flag')).toBeNull();
+    expect(cells[2].querySelector('.di-preview-label--mintag')).toBeNull();
+    expect(cells[3].querySelector('.di-preview-label--flag')).not.toBeNull();
+    expect(cells[3].querySelector('.di-preview-label--mintag')).toBeNull();
+    pop.destroy();
+  });
+
+  it('upgrades a mintagged cell to abandoned (red) via the background pass (Phase 2)', async () => {
+    const posts: PostPreview[] = [
+      {
+        id: 1,
+        thumbUrl: 't',
+        score: 99,
+        generalTags: 20,
+        uploaderTagCount: 2,
+        rating: 'g',
+        status: 'active',
+      }, // mintag → orange, then abandoned → red
+      {
+        id: 2,
+        thumbUrl: 't',
+        score: 99,
+        generalTags: 20,
+        uploaderTagCount: 3,
+        rating: 'g',
+        status: 'active',
+      }, // mintag → orange, NOT abandoned (stays orange)
+      {
+        id: 3,
+        thumbUrl: 't',
+        score: 99,
+        generalTags: 20,
+        uploaderTagCount: 30,
+        rating: 'g',
+        status: 'active',
+      }, // clean → never inspected
+    ];
+    let requested: number[] = [];
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => posts,
+      fetchAbandoned: async ids => {
+        requested = ids;
+        return new Set([1]);
+      },
+    });
+    pop.show();
+    await flush();
+    await flush();
+    // Only mintagged posts (1, 2) are sent to the abandoned lookup — not 3.
+    expect([...requested].sort()).toEqual([1, 2]);
+    const cells = document.querySelectorAll<HTMLElement>('a.di-preview-cell');
+    // post 1 upgraded orange → red.
+    expect(cells[0].querySelector('.di-preview-label--flag')).not.toBeNull();
+    expect(cells[0].querySelector('.di-preview-label--mintag')).toBeNull();
+    // post 2 stays orange (not in the abandoned set).
+    expect(cells[1].querySelector('.di-preview-label--mintag')).not.toBeNull();
+    expect(cells[1].querySelector('.di-preview-label--flag')).toBeNull();
+    pop.destroy();
+  });
+
+  it('skips the abandoned upgrade when the popover closed before it resolved', async () => {
+    let resolveAbandoned!: (s: Set<number>) => void;
+    const posts: PostPreview[] = [
+      {
+        id: 1,
+        thumbUrl: 't',
+        score: 99,
+        generalTags: 20,
+        uploaderTagCount: 2,
+        rating: 'g',
+        status: 'active',
+      },
+    ];
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => posts,
+      fetchAbandoned: () =>
+        new Promise<Set<number>>(r => (resolveAbandoned = r)),
+    });
+    pop.show();
+    await flush();
+    pop.hide(); // generation bumps → a late resolve must be ignored
+    resolveAbandoned(new Set([1]));
+    await flush();
+    // Re-open: cell 1 is mintagged (orange), NOT upgraded by the stale resolve.
+    pop.show();
+    await flush();
+    const cell = document.querySelector<HTMLElement>('a.di-preview-cell');
+    expect(cell?.querySelector('.di-preview-label--mintag')).not.toBeNull();
+    expect(cell?.querySelector('.di-preview-label--flag')).toBeNull();
     pop.destroy();
   });
 
@@ -513,6 +617,28 @@ describe('createDashboardPreviewPopover', () => {
     pop.show();
     await flush();
     expect(cb().checked).toBe(true); // reflects the flag, not the build-time value
+    pop.destroy();
+  });
+
+  it('renders the colour legend; on touch a tap toggles it open', async () => {
+    vi.spyOn(twoStepTap, 'isTouchDevice').mockReturnValue(true);
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => samplePosts,
+    });
+    pop.show();
+    await flush();
+    const icon = document.querySelector<HTMLElement>('.di-preview-legend-icon');
+    expect(icon).not.toBeNull();
+    // 4 status borders + 2 label colours.
+    expect(document.querySelectorAll('.di-preview-legend-row')).toHaveLength(6);
+    const wrap = document.querySelector<HTMLElement>(
+      '.di-preview-legend-wrap',
+    )!;
+    icon!.click();
+    expect(wrap.classList.contains('di-preview-legend-wrap--open')).toBe(true);
+    icon!.click();
+    expect(wrap.classList.contains('di-preview-legend-wrap--open')).toBe(false);
     pop.destroy();
   });
 });

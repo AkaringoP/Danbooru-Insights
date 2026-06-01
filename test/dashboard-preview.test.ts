@@ -1,17 +1,24 @@
 import {describe, it, expect} from 'vitest';
 import {
+  ABANDONED_GAP_MS,
   ACTIVITY_COLORS,
   ACTIVITY_TYPES,
   COMMENTARY_UPLOAD_EPSILON_MS,
   PREVIEW_POST_FIELDS,
   STATUS_BORDER_COLORS,
+  abandonedGapMs,
   activityTypeIndexUrl,
   balancedChunks,
+  buildMintagVersionsUrl,
+  buildPostVersionsUrl,
   buildPreviewPostUrls,
+  buildUploaderTagCounts,
+  isAbandonedByGap,
   classifyCommentType,
   classifyUploadType,
   derivePostStatus,
   filterUploadCoupledCommentary,
+  isMintagged,
   isSuspiciousUpload,
   mergeRecentActivity,
   pick180ThumbUrl,
@@ -416,26 +423,132 @@ describe('filterUploadCoupledCommentary', () => {
 });
 
 describe('isSuspiciousUpload', () => {
-  it('flags a heavily-downvoted post (score <= -3)', () => {
-    expect(isSuspiciousUpload({score: -3, generalTags: 30})).toBe(true);
-    expect(isSuspiciousUpload({score: -10, generalTags: 30})).toBe(true);
+  it('flags a heavily-downvoted post (score <= -3) → red', () => {
+    expect(isSuspiciousUpload({score: -3})).toBe(true);
+    expect(isSuspiciousUpload({score: -10})).toBe(true);
   });
 
-  it('flags an under-tagged post (generalTags <= 5)', () => {
-    expect(isSuspiciousUpload({score: 100, generalTags: 5})).toBe(true);
-    expect(isSuspiciousUpload({score: 100, generalTags: 0})).toBe(true);
+  it('does not flag a post with an acceptable score', () => {
+    expect(isSuspiciousUpload({score: -2})).toBe(false);
+    expect(isSuspiciousUpload({score: 0})).toBe(false);
+    expect(isSuspiciousUpload({score: 50})).toBe(false);
+  });
+});
+
+describe('isMintagged', () => {
+  it('flags an upload whose uploader added few tags (<= 10) → orange', () => {
+    expect(isMintagged({uploaderTagCount: 0})).toBe(true);
+    expect(isMintagged({uploaderTagCount: 2})).toBe(true);
+    expect(isMintagged({uploaderTagCount: 10})).toBe(true);
   });
 
-  it('does not flag a healthy post (good score and tags)', () => {
-    expect(isSuspiciousUpload({score: -2, generalTags: 6})).toBe(false);
-    expect(isSuspiciousUpload({score: 50, generalTags: 25})).toBe(false);
+  it('does not flag a well-tagged upload', () => {
+    expect(isMintagged({uploaderTagCount: 11})).toBe(false);
+    expect(isMintagged({uploaderTagCount: 40})).toBe(false);
   });
 
-  it('does not flag on an unknown (undefined) tag count, only a real 0', () => {
-    // R-02: a missing count must not read as "0 tags" and falsely flag a
-    // well-tagged upload. A genuine 0 still flags (covered above).
-    expect(isSuspiciousUpload({score: 50, generalTags: undefined})).toBe(false);
-    expect(isSuspiciousUpload({score: -3, generalTags: undefined})).toBe(true);
+  it('does not flag when the uploader tag count is unknown (fail-open)', () => {
+    // The post_versions lookup missed — don't mass-flag on missing data.
+    expect(isMintagged({uploaderTagCount: undefined})).toBe(false);
+  });
+});
+
+describe('buildMintagVersionsUrl', () => {
+  it('queries first-version uploads by updater id, trimmed to mintag fields', () => {
+    const url = buildMintagVersionsUrl('42', 10);
+    expect(url).toContain('/post_versions.json?');
+    expect(url).toContain('search[is_new]=true');
+    expect(url).toContain('search[updater_id]=42');
+    expect(url).toContain('&limit=10');
+    expect(url).toContain('&only=post_id,added_tags');
+  });
+});
+
+describe('buildUploaderTagCounts', () => {
+  it('maps post_id → added_tags length', () => {
+    const map = buildUploaderTagCounts([
+      {post_id: 1, added_tags: ['a', 'b', 'c']},
+      {post_id: 2, added_tags: []},
+    ]);
+    expect(map.get(1)).toBe(3);
+    expect(map.get(2)).toBe(0); // a real 0 (uploader added nothing) is kept
+  });
+
+  it('skips rows missing post_id or added_tags (leaves count unknown)', () => {
+    const map = buildUploaderTagCounts([
+      {added_tags: ['a']}, // no post_id
+      {post_id: 5}, // no added_tags
+      {post_id: 6, added_tags: ['x', 'y']},
+    ]);
+    expect(map.has(5)).toBe(false);
+    expect(map.get(6)).toBe(2);
+    expect(map.size).toBe(1);
+  });
+});
+
+describe('buildPostVersionsUrl', () => {
+  it('lists one post’s version history, trimmed to version + timestamps', () => {
+    const url = buildPostVersionsUrl(123);
+    expect(url).toContain('/post_versions.json?');
+    expect(url).toContain('search[post_id]=123');
+    expect(url).toContain('&only=version,updated_at,created_at');
+    expect(url).toContain('&limit=100');
+  });
+});
+
+describe('abandonedGapMs', () => {
+  const v = (version: number, ts: string) => ({version, created_at: ts});
+
+  it('returns the v2 − v1 gap in ms', () => {
+    const gap = abandonedGapMs([
+      v(1, '2024-01-01T00:00:00Z'),
+      v(2, '2024-01-01T00:20:00Z'),
+    ]);
+    expect(gap).toBe(20 * 60 * 1000);
+  });
+
+  it('prefers updated_at over created_at', () => {
+    const gap = abandonedGapMs([
+      {version: 1, created_at: '2024-01-01T00:00:00Z'},
+      {
+        version: 2,
+        updated_at: '2024-01-01T00:10:00Z',
+        created_at: '2024-01-01T05:00:00Z',
+      },
+    ]);
+    expect(gap).toBe(10 * 60 * 1000); // from updated_at, not created_at
+  });
+
+  it('returns null when v1 or v2 is missing, or a timestamp is unparseable', () => {
+    expect(abandonedGapMs([v(1, '2024-01-01T00:00:00Z')])).toBeNull();
+    expect(abandonedGapMs([v(2, '2024-01-01T00:00:00Z')])).toBeNull();
+    expect(
+      abandonedGapMs([v(1, 'not-a-date'), v(2, '2024-01-01T00:20:00Z')]),
+    ).toBeNull();
+  });
+});
+
+describe('isAbandonedByGap', () => {
+  const V1_MS = Date.parse('2024-01-01T00:00:00Z');
+  const pair = (gapMs: number) => [
+    {version: 1, created_at: '2024-01-01T00:00:00Z'},
+    {version: 2, created_at: new Date(V1_MS + gapMs).toISOString()},
+  ];
+
+  it('flags a gap at/above the threshold (left under-tagged, others fixed it)', () => {
+    expect(isAbandonedByGap(pair(ABANDONED_GAP_MS))).toBe(true);
+    expect(isAbandonedByGap(pair(ABANDONED_GAP_MS + 60_000))).toBe(true);
+  });
+
+  it('does not flag a sub-threshold gap (the competitive-tagging race)', () => {
+    expect(isAbandonedByGap(pair(ABANDONED_GAP_MS - 60_000))).toBe(false);
+    expect(isAbandonedByGap(pair(0))).toBe(false);
+  });
+
+  it('does not flag when v1/v2 are missing (fail-open)', () => {
+    expect(
+      isAbandonedByGap([{version: 1, created_at: '2024-01-01T00:00:00Z'}]),
+    ).toBe(false);
   });
 });
 

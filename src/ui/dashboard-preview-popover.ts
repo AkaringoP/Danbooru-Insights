@@ -25,12 +25,18 @@
  * The pure DOM builders/renderers live at module scope (taking elements as
  * arguments); the factory closure owns only mutable state + lifecycle.
  */
-import type {ActivityDistribution, ActivityType, PostPreview} from '../types';
+import type {
+  ActivityDistribution,
+  ActivityType,
+  PostPreview,
+  PostPreviewStatus,
+} from '../types';
 import {
   ACTIVITY_COLORS,
   ACTIVITY_TYPES,
   STATUS_BORDER_COLORS,
   balancedChunks,
+  isMintagged,
   isSuspiciousUpload,
 } from '../core/dashboard-preview';
 import {
@@ -127,6 +133,12 @@ function makeSectionLabel(text: string): HTMLElement {
   return el;
 }
 
+/** Cell-title reason phrases (red/orange). Shared so the abandoned upgrade
+ *  pass can swap the mintag reason for the abandoned one in place. */
+const REASON_DOWNVOTED = 'heavily downvoted';
+const REASON_MINTAG = 'uploader added few tags';
+const REASON_ABANDONED = 'abandoned (left untagged)';
+
 /** Section A: one grid cell linking to the post, status border on the thumb. */
 function makeCell(post: PostPreview): HTMLElement {
   const cell = document.createElement('a');
@@ -134,12 +146,16 @@ function makeCell(post: PostPreview): HTMLElement {
   cell.href = `${location.origin}/posts/${post.id}`;
   cell.target = '_blank';
   cell.rel = 'noopener';
+  cell.dataset.postId = String(post.id); // for the abandoned upgrade pass
 
-  // Title: status (if not active) + the suspicious-upload reason (if flagged).
-  const flagged = isSuspiciousUpload(post);
+  // Label severity: a heavily-downvoted post (red) outranks a merely
+  // under-tagged one (orange). A post can be both — red wins.
+  const suspicious = isSuspiciousUpload(post);
+  const mintagged = !suspicious && isMintagged(post);
   const titleParts: string[] = [];
   if (post.status !== 'active') titleParts.push(post.status);
-  if (flagged) titleParts.push('low score / few tags');
+  if (suspicious) titleParts.push(REASON_DOWNVOTED);
+  else if (mintagged) titleParts.push(REASON_MINTAG);
   if (titleParts.length) cell.title = titleParts.join(' · ');
 
   // Status border wraps only the thumbnail, not the label below it.
@@ -161,7 +177,8 @@ function makeCell(post: PostPreview): HTMLElement {
 
   const label = document.createElement('div');
   label.className = 'di-preview-label';
-  if (flagged) label.classList.add('di-preview-label--flag');
+  if (suspicious) label.classList.add('di-preview-label--flag');
+  else if (mintagged) label.classList.add('di-preview-label--mintag');
   // rating may be '' and generalTags undefined (API omitted the field) — guard
   // both so the cell renders cleanly instead of 'UNDEFINED'/'◫undefined'.
   const ratingPart = post.rating ? `${post.rating.toUpperCase()} ` : '';
@@ -216,6 +233,71 @@ function renderGrid(grid: HTMLElement, posts: PostPreview[]): void {
 }
 
 /**
+ * Background upgrade: re-colours the given posts' labels from orange
+ * (mintagged) to red (abandoned) and swaps the title reason in place. Run after
+ * the grid renders so the red escalation pops in without blocking section A.
+ */
+function upgradeAbandonedCells(
+  grid: HTMLElement,
+  abandonedIds: Set<number>,
+): void {
+  abandonedIds.forEach(id => {
+    const cell = grid.querySelector<HTMLElement>(
+      `.di-preview-cell[data-post-id="${id}"]`,
+    );
+    if (!cell) return;
+    const label = cell.querySelector('.di-preview-label');
+    if (label) {
+      label.classList.remove('di-preview-label--mintag');
+      label.classList.add('di-preview-label--flag');
+    }
+    if (cell.title) {
+      cell.title = cell.title.replace(REASON_MINTAG, REASON_ABANDONED);
+    }
+  });
+}
+
+/** Post ids that are mintagged (orange) and not already downvoted (red) — the
+ *  candidates the abandoned pass inspects. */
+function mintaggedPostIds(posts: PostPreview[]): number[] {
+  return posts
+    .filter(p => !isSuspiciousUpload(p) && isMintagged(p))
+    .map(p => p.id);
+}
+
+/**
+ * Background pass over the just-rendered grid: resolves which mintagged posts
+ * are abandoned and upgrades those labels orange→red. Fire-and-forget (the grid
+ * already rendered); `ctx.isCurrent` guards against a stale resolve after the
+ * popover closed or reopened. A failed lookup leaves the orange labels as-is.
+ */
+function runAbandonedPass(
+  posts: PostPreview[],
+  fetchAbandoned: ((ids: number[]) => Promise<Set<number>>) | undefined,
+  ctx: {isCurrent: () => boolean; getGrid: () => HTMLElement | null},
+): void {
+  if (!fetchAbandoned) return;
+  const ids = mintaggedPostIds(posts);
+  if (!ids.length) return;
+  void fetchAbandoned(ids).then(
+    abandoned => {
+      const grid = ctx.getGrid();
+      if (ctx.isCurrent() && grid) upgradeAbandonedCells(grid, abandoned);
+    },
+    () => {},
+  );
+}
+
+/** The posts shown in the unified path: fresh cache, settled fetch, or none. */
+function unifiedShownPosts(
+  fresh: PostPreview[] | null,
+  result: PromiseSettledResult<PostPreview[]>,
+): PostPreview[] {
+  if (fresh) return fresh;
+  return result.status === 'fulfilled' ? result.value : [];
+}
+
+/**
  * Blurs q/e thumbnails when the unified NSFW preference is off (the default).
  * Reads {@link getNsfwEnabled} live, so it reflects the current setting on
  * every render and on every toggle. Only the thumbnail blurs — the label stays
@@ -256,6 +338,78 @@ function makeNsfwToggle(grid: HTMLElement): {
   label.appendChild(cb);
   label.appendChild(document.createTextNode('NSFW'));
   return {label, checkbox: cb};
+}
+
+/** One legend row: a swatch + its meaning. */
+function legendRow(swatch: HTMLElement, text: string): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'di-preview-legend-row';
+  swatch.classList.add('di-preview-legend-swatch');
+  row.appendChild(swatch);
+  const label = document.createElement('span');
+  label.textContent = text;
+  row.appendChild(label);
+  return row;
+}
+
+/** Swatch for a thumbnail status border (transparent box with that border). */
+function borderSwatch(status: PostPreviewStatus): HTMLElement {
+  const s = document.createElement('span');
+  s.style.border = `2px solid ${STATUS_BORDER_COLORS[status]}`;
+  return s;
+}
+
+/** Swatch for a label colour — a ■ wearing the label class (reuses its CSS). */
+function labelSwatch(cls: string): HTMLElement {
+  const s = document.createElement('span');
+  s.className = cls;
+  s.textContent = '■';
+  return s;
+}
+
+/**
+ * The "?" colour-legend affordance for section A's header: hovering it (or, on
+ * touch, tapping it) reveals what the thumbnail border colours and label
+ * colours mean. Pure CSS shows the popup on hover/focus; touch toggles a class.
+ * Border swatches reuse {@link STATUS_BORDER_COLORS}; label swatches reuse the
+ * `.di-preview-label--*` classes, so the legend can't drift from the real
+ * colours.
+ */
+function makeColorLegend(): HTMLElement {
+  const wrap = document.createElement('span');
+  wrap.className = 'di-preview-legend-wrap';
+  const icon = document.createElement('span');
+  icon.className = 'di-preview-legend-icon';
+  icon.textContent = '?';
+  icon.setAttribute('role', 'button');
+  icon.setAttribute('aria-label', 'What the colours mean');
+  icon.tabIndex = 0;
+  const pop = document.createElement('div');
+  pop.className = 'di-preview-legend-pop';
+  pop.appendChild(legendRow(borderSwatch('pending'), 'Pending'));
+  pop.appendChild(legendRow(borderSwatch('appealed'), 'Appealed'));
+  pop.appendChild(legendRow(borderSwatch('flagged'), 'Flagged'));
+  pop.appendChild(legendRow(borderSwatch('deleted'), 'Deleted / banned'));
+  pop.appendChild(
+    legendRow(
+      labelSwatch('di-preview-label--mintag'),
+      'Mintagged — uploader added few tags',
+    ),
+  );
+  pop.appendChild(
+    legendRow(labelSwatch('di-preview-label--flag'), 'Downvoted / abandoned'),
+  );
+  wrap.appendChild(icon);
+  wrap.appendChild(pop);
+  // Desktop reveals on hover/focus (CSS). Touch has no hover, so a tap toggles.
+  if (isTouchDevice()) {
+    icon.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      wrap.classList.toggle('di-preview-legend-wrap--open');
+    });
+  }
+  return wrap;
 }
 
 /** Section B: a single muted/pulsing message row (empty or error state). */
@@ -536,6 +690,7 @@ function buildPopoverDom(opts: {
   const headA = document.createElement('div');
   headA.className = 'di-preview-section-head';
   headA.appendChild(makeSectionLabel('Recent uploads'));
+  headA.appendChild(makeColorLegend());
   const nsfw = makeNsfwToggle(grid);
   headA.appendChild(nsfw.label);
   body.appendChild(headA);
@@ -596,6 +751,13 @@ export interface DashboardPreviewPopoverOptions {
     type: ActivityType,
     dist: ActivityDistribution,
   ) => string | undefined;
+  /**
+   * Optional background pass: given the mintagged posts' ids, resolves the
+   * subset that look "abandoned" (uploaded under-tagged, v2 well after v1).
+   * Those cells upgrade from the orange mintag label to the red flag. Omit to
+   * skip the escalation (the grid still shows the orange mintag labels).
+   */
+  fetchAbandoned?: (postIds: number[]) => Promise<Set<number>>;
 }
 
 export interface DashboardPreviewPopover {
@@ -674,7 +836,8 @@ function createCachedFetcher<T>(
 export function createDashboardPreviewPopover(
   options: DashboardPreviewPopoverOptions,
 ): DashboardPreviewPopover {
-  const {anchor, fetchPosts, fetchActivity, activityHref} = options;
+  const {anchor, fetchPosts, fetchActivity, activityHref, fetchAbandoned} =
+    options;
 
   let refs: PopoverRefs | null = null;
   let pinned = false;
@@ -771,6 +934,14 @@ export function createDashboardPreviewPopover(
     refs.caret.style.left = `${pos.caretLeft}px`;
   }
 
+  // Background abandoned pass, bound to this open's generation (see
+  // runAbandonedPass) — stale resolves after a close/reopen are dropped.
+  const enhanceAbandoned = (gen: number, posts: PostPreview[]) =>
+    runAbandonedPass(posts, fetchAbandoned, {
+      isCurrent: () => gen === generation && visible,
+      getGrid: () => refs?.grid ?? null,
+    });
+
   function loadPosts(gen: number): void {
     if (!refs) return;
     const grid = refs.grid;
@@ -779,12 +950,16 @@ export function createDashboardPreviewPopover(
     const fresh = postsFetcher.peekFresh();
     if (fresh) {
       renderGrid(grid, fresh);
+      enhanceAbandoned(gen, fresh);
       return;
     }
     renderSkeleton(grid);
     void postsFetcher.get().then(
       posts => {
-        if (gen === generation && visible) renderGrid(grid, posts);
+        if (gen === generation && visible) {
+          renderGrid(grid, posts);
+          enhanceAbandoned(gen, posts);
+        }
       },
       () => {
         if (gen === generation && visible) {
@@ -843,6 +1018,7 @@ export function createDashboardPreviewPopover(
     if (strip && legend && !freshAct) {
       renderActivityResult(strip, legend, actR, activityHref);
     }
+    enhanceAbandoned(gen, unifiedShownPosts(freshPosts, postsR));
   }
 
   function show(opts?: {pinned?: boolean}): void {

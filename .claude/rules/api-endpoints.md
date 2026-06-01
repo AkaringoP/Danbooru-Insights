@@ -14,6 +14,12 @@ All API calls must go through `RateLimitedFetch`.
 | `/posts/random.json` | Random post fetch |
 | `/posts/{id}.json` | Single post details (milestone thumbnails) |
 
+## Mintag / abandoned detection (v9.7.1 — preview popover section A)
+
+`AnalyticsDataManager.getRecentPostsPreview` fires a third parallel request alongside the recent-uploads + appeal fetches: `buildMintagVersionsUrl(userId, limit)` → `/post_versions.json?search[is_new]=true&search[updater_id]=<id>&only=post_id,added_tags`. `buildUploaderTagCounts` reduces it to `Map<post_id, added_tags.length>` — the number of tags *that uploader* added in the post's first version (not the post's current `tag_count_general`, which others inflate). A preview is **mintagged** (orange) when `uploaderTagCount ≤ 10` (`isMintagged`).
+
+`AnalyticsDataManager.getAbandonedPostIds(postIds)` runs a background, non-blocking pass (`mapConcurrent`, concurrency 6) over the mintagged ids: `buildPostVersionsUrl(postId)` → `/post_versions.json?search[post_id]=<id>&only=version,updated_at,created_at&limit=100`. A post is **abandoned** (red, escalated from orange) when its `version===2` row lands `≥ 15 min` (`ABANDONED_GAP_MS`) after its `version===1` row (`isAbandonedByGap`); a v2 inside 15 min is treated as a tagging race and stays orange. Unparseable/missing v1 or v2 → not abandoned (fail-soft). The grid renders mintagged labels immediately; abandoned upgrades arrive later, guarded against stale popover generations.
+
 ## Activity distribution feed (v9.7.0 — preview popover section B)
 
 `AnalyticsDataManager.getActivityDistribution` fans out one `&limit=200&only=id,updated_at,created_at` request per type via `mapConcurrent` and merges the most-recent 200. Timestamp = `updated_at ?? created_at` (version tables merge consecutive same-user edits onto `updated_at`).

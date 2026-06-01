@@ -4,6 +4,30 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.7.1 — Mintag / abandoned upload detection + colour legend
+
+### Added
+- **Mintag detection.** A recent upload whose uploader added **≤ 10 tags** (the
+  count of tags *that user* added in the post's first version, read from
+  `post_versions` `added_tags` — not the post's current total, which others
+  inflate) now gets an **orange** label. Replaces the old
+  `tag_count_general ≤ 5` heuristic, which wrongly counted everyone's tags.
+- **Abandoned detection.** A mintagged upload whose **v2 lands ≥ 15 minutes
+  after v1** is re-coloured **red** — the uploader left the post under-tagged
+  rather than racing a competing tagger (a v2 within 15 min is treated as a
+  tagging race and stays orange). Resolved in a non-blocking background pass
+  after the grid renders, guarded against stale popover generations.
+- **Colour legend.** A `?` help icon next to the "RECENT UPLOADS" header opens
+  a legend (hover on desktop, tap on touch) explaining every border status and
+  the orange/red label colours.
+
+### Changed
+- **Suspicious-upload label is now score-only** (`score ≤ -3`). The general-tag
+  side of the old heuristic moved to the dedicated mintag label above, so the
+  red "suspicious" label no longer fires on merely sparse tagging.
+
+---
+
 ## v9.7.0 — Dashboard preview popover + created-tags sort headers
 
 ### Added

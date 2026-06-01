@@ -1548,11 +1548,13 @@ const GLOBAL_CSS = `
       color: var(--di-text-muted, #888);
       margin: 0 0 6px;
     }
-    /* Section A header: label on the left, NSFW blur toggle on the right. */
+    /* Section A header: label + "?" legend hug the left, NSFW toggle pushed to
+       the right (margin-left:auto on the toggle) — NOT space-between, which
+       would strand the "?" in the dead centre. */
     .di-preview-section-head {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-start;
       gap: 8px;
     }
     .di-preview-section-head .di-preview-section-label {
@@ -1570,6 +1572,7 @@ const GLOBAL_CSS = `
       cursor: pointer;
       user-select: none;
       margin-bottom: 6px;
+      margin-left: auto; /* push to the far right of the section head */
     }
     .di-preview-nsfw-toggle input {
       margin: 0;
@@ -1615,6 +1618,72 @@ const GLOBAL_CSS = `
     .di-preview-label--flag {
       color: #e5484d;
       font-weight: 700;
+    }
+    /* Mintagged: the uploader added few tags. Amber — a milder warning than
+       the red --flag (heavily downvoted); readable on light + dark bodies. */
+    .di-preview-label--mintag {
+      color: #e8950c;
+      font-weight: 700;
+    }
+    /* "?" colour legend in the section-A header: a hover/tap-revealed key for
+       the thumbnail border colours + label colours. */
+    .di-preview-legend-wrap {
+      position: relative;
+      display: inline-flex;
+      margin-bottom: 6px; /* match the label/NSFW baseline in the section head */
+    }
+    .di-preview-legend-icon {
+      cursor: help;
+      width: 14px;
+      height: 14px;
+      border: 1px solid var(--di-border, #ccc);
+      border-radius: 50%;
+      color: var(--di-text-muted, #888);
+      font-size: 9px;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+    }
+    .di-preview-legend-pop {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      z-index: 1;
+      margin-top: 4px;
+      padding: 6px 8px;
+      min-width: 180px;
+      background: var(--di-bg, #fff);
+      border: 1px solid var(--di-border, #ddd);
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      font-size: 10px;
+      color: var(--di-text, #333);
+      white-space: nowrap;
+    }
+    .di-preview-legend-wrap:hover .di-preview-legend-pop,
+    .di-preview-legend-wrap:focus-within .di-preview-legend-pop,
+    .di-preview-legend-wrap--open .di-preview-legend-pop {
+      display: block;
+    }
+    .di-preview-legend-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 1px 0;
+    }
+    .di-preview-legend-swatch {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      box-sizing: border-box;
+      border-radius: 2px;
+      flex: none;
+      text-align: center;
+      line-height: 12px;
+      font-size: 12px;
     }
     .di-preview-skeleton {
       aspect-ratio: 1 / 1;

@@ -1158,3 +1158,127 @@ describe('getFavCopyrightDistribution — uses fav: count query', () => {
     expect(favOnlyCall).toBe(true);
   });
 });
+
+describe('getRecentPostsPreview — uploader tag-count (mintag) join', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('attaches uploaderTagCount from the upload versions, joined by post id', async () => {
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      let body: unknown = [];
+      if (url.includes('/post_versions.json')) {
+        body = [
+          {post_id: 1, added_tags: ['a', 'b']}, // 2 → mintagged
+          {post_id: 2, added_tags: Array.from({length: 30}, (_, i) => `t${i}`)},
+          // post 3 absent → uploaderTagCount stays undefined (fail-open)
+        ];
+      } else if (url.includes('status%3Aappealed')) {
+        body = [];
+      } else {
+        body = [
+          {id: 1, rating: 'g', score: 5, tag_count_general: 20},
+          {id: 2, rating: 's', score: 5, tag_count_general: 20},
+          {id: 3, rating: 'e', score: 5, tag_count_general: 20},
+        ];
+      }
+      return {ok: true, status: 200, json: async () => body};
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable()) as never,
+      rl as never,
+    );
+
+    const previews = await adm.getRecentPostsPreview(
+      makeSyncUser({id: '42', name: 'tester'}),
+      10,
+    );
+    expect(previews.map(p => p.uploaderTagCount)).toEqual([2, 30, undefined]);
+  });
+
+  it('skips the versions fetch when the user id is missing', async () => {
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      const body = url.includes('status%3Aappealed')
+        ? []
+        : [{id: 1, rating: 'g', score: 5, tag_count_general: 20}];
+      return {ok: true, status: 200, json: async () => body};
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable()) as never,
+      rl as never,
+    );
+
+    const previews = await adm.getRecentPostsPreview(
+      makeSyncUser({id: undefined, name: 'tester'}),
+      10,
+    );
+    expect(previews[0].uploaderTagCount).toBeUndefined();
+    const urls = rl.fetch.mock.calls.map((c: [string]) => c[0]);
+    expect(urls.some((u: string) => u.includes('/post_versions.json'))).toBe(
+      false,
+    );
+  });
+});
+
+describe('getAbandonedPostIds — v1→v2 gap', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('returns the posts whose v2 lands >= 15min after v1', async () => {
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      const id = Number(url.match(/search\[post_id\]=(\d+)/)?.[1] ?? 0);
+      let rows: unknown = [];
+      if (id === 1) {
+        rows = [
+          {version: 1, created_at: '2024-01-01T00:00:00Z'},
+          {version: 2, created_at: '2024-01-01T00:30:00Z'}, // 30min → abandoned
+        ];
+      } else if (id === 2) {
+        rows = [
+          {version: 1, created_at: '2024-01-01T00:00:00Z'},
+          {version: 2, created_at: '2024-01-01T00:05:00Z'}, // 5min → race, not
+        ];
+      } else if (id === 3) {
+        rows = [{version: 1, created_at: '2024-01-01T00:00:00Z'}]; // no v2 → not
+      }
+      return {ok: true, status: 200, json: async () => rows};
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable()) as never,
+      rl as never,
+    );
+
+    const abandoned = await adm.getAbandonedPostIds([1, 2, 3]);
+    expect([...abandoned].sort()).toEqual([1]);
+  });
+
+  it('returns empty for empty input without fetching', async () => {
+    const rl = makeSyncRateLimiter();
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable()) as never,
+      rl as never,
+    );
+    const abandoned = await adm.getAbandonedPostIds([]);
+    expect(abandoned.size).toBe(0);
+    expect(rl.fetch).not.toHaveBeenCalled();
+  });
+});

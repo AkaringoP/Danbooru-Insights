@@ -489,6 +489,13 @@ export interface PostPreview {
   score: number;
   /** General tag count (`tag_count_general`); undefined when the API omits it. */
   generalTags?: number;
+  /**
+   * Tags the *uploader* added on the post's first version (`added_tags` length,
+   * which merges the uploader's own ~1h follow-up edits). Drives the
+   * "mintagged" (under-tagged by the uploader) orange label. Undefined when the
+   * post_versions lookup missed — left unflagged (fail-open).
+   */
+  uploaderTagCount?: number;
   /** Danbooru rating letter ('g' | 's' | 'q' | 'e'); '' when the API omits it. */
   rating: string;
   status: PostPreviewStatus;

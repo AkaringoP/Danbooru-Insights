@@ -4,7 +4,7 @@
 ![typescript](https://img.shields.io/badge/typescript-✓-blue)
 ![platform](https://img.shields.io/badge/platform-Userscript-orange)
 ![build](https://img.shields.io/badge/build-Vite-646CFF)
-![version](https://img.shields.io/badge/version-9.6.0-blueviolet)
+![version](https://img.shields.io/badge/version-9.7.1-blueviolet)
 
 **Danbooru Insights** (formerly **Danbooru Grass**) is a comprehensive analytics suite for Danbooru users and tags. It injects GitHub-style contribution graphs and advanced dashboards directly into profile, wiki, and artist pages — no account-level requirements, no Gold-only features, works for everyone.
 
@@ -84,7 +84,7 @@ Visit any Wiki page (`/wiki_pages/TAG_NAME`) or Artist page (`/artists/NUMERIC_I
 * **Persistent storage opt-in** (v9.4+): after first successful sync, requests `navigator.storage.persist()` to survive Safari ITP / Chrome heuristic eviction.
 
 ### Engineering
-* **583 Vitest unit tests** + **7 Playwright e2e tests** (visual baselines for grass, pie widget, settings popover).
+* **759 Vitest unit tests** + **7 Playwright e2e tests** (visual baselines for grass, pie widget, settings popover).
 * **Architecture fitness tests**: layer-direction enforcement, raw `fetch()` ban, NSFW localStorage key consolidation, `/counts/posts.json` URL consolidation, popover-position formula consolidation.
 * **Pre-commit hook**: `npm run build` → `npm run lint` → `npm run check:dead` (knip) chained. Blocks regressions before commit.
 
@@ -154,6 +154,23 @@ The dashboard appears below the page header automatically. You'll see:
 ## Version History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release notes.
+
+### v9.7 — Dashboard preview popover + mintag detection
+
+* **Preview popover** on the analytics icon — **Section A**: recent-uploads grid
+  with status borders, suspicious-upload labels, and an NSFW blur toggle;
+  **Section B**: a colour-coded activity strip across 11 feed types with a
+  link-out legend (`&limit=200` + oldest-row `#anchor`).
+* **Suspicious-activity detection**: deleted/banned or heavily-downvoted uploads
+  and downvoted comments re-typed into a `suspicious` category; clicking the
+  legend item opens the exact flagged posts.
+* **Mintag / abandoned detection** (v9.7.1): orange label when the uploader
+  added ≤10 tags (from `post_versions` `added_tags`), escalating to red when v2
+  lands ≥15 min after v1. A `?` legend explains every label/border colour.
+* **Created-tags sort headers**: per-column ▲/▼ sort arrows replace the
+  segmented control.
+* Mobile/touch tier: mini-report button, unified loading, two-step-tap legends,
+  dark-theme-aware popover.
 
 ### v9.6 — Counts refresh + sub-chart mode + widget gating
 
@@ -229,7 +246,7 @@ npm install                    # also wires the pre-commit hook automatically
 
 # develop
 npm run dev                    # Vite dev server with HMR
-npm run test                   # Vitest unit tests (583 cases)
+npm run test                   # Vitest unit tests (759 cases)
 npm run test:e2e               # Playwright e2e (visual baselines)
 npm run lint                   # GTS lint
 npm run fix                    # auto-fix lint

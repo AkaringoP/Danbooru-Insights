@@ -1159,6 +1159,10 @@ export class UserAnalyticsApp {
                 this.context.targetUser,
                 dist.oldestAnchorByType[type],
               ),
+        // Background pass: escalate mintagged (orange) → abandoned (red) for
+        // uploads whose v2 landed well after v1 (left under-tagged).
+        fetchAbandoned: postIds =>
+          this.dataManager.getAbandonedPostIds(postIds),
       });
 
       // Hover opens a transient popover (skipped on touch — unreachable
