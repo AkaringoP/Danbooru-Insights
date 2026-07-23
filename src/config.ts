@@ -12,6 +12,7 @@ export const CONFIG: {
   REPORT_COOLDOWN_MS: number;
   ANALYTICS_CLEANUP_THRESHOLD_MS: number;
   CACHE_EXPIRY_MS: number;
+  FULL_REFRESH_HINT_DAYS: number;
   BACKOFF_DURATION_MS: number;
   RATE_LIMITER: {concurrency: number; jitter: [number, number]; rps: number};
   TAB_COORDINATOR: {
@@ -35,6 +36,14 @@ export const CONFIG: {
   ANALYTICS_CLEANUP_THRESHOLD_MS: 14 * DAY_MS,
   /** Cache expiry for tag_analytics and piestats (24 hours). */
   CACHE_EXPIRY_MS: DAY_MS,
+  /**
+   * Days since the last sync after which the dashboard shows a gentle
+   * "full data refresh recommended" hint above the reset button. Partial
+   * syncs now keep counts / popular posts / milestones fresh, so this only
+   * nudges users whose older-post metadata (score/rating/deleted) may have
+   * drifted — deliberately a low-urgency, roughly-monthly cadence (was 7d).
+   */
+  FULL_REFRESH_HINT_DAYS: 30,
   /** Duration (ms) to pause all requests after receiving a 429 response. */
   BACKOFF_DURATION_MS: 5000,
   // Danbooru enforces a server-side global cap of 10 read req/sec across
