@@ -1023,6 +1023,13 @@ export class UserAnalyticsApp {
    *  ≤MAX_PREVIEW_ONLY_UPLOADS click→popover shortcut. null until first check. */
   private totalPostCount: number | null = null;
 
+  /** The dashboard hover/pinned preview popover, created once in
+   *  injectButton(). Hoisted to an instance field so updateHeaderStatus()
+   *  can wire the touch-only 📋 mini-report button next to the ⚙️ gear. */
+  private previewPopover: ReturnType<
+    typeof createDashboardPreviewPopover
+  > | null = null;
+
   /**
    * Initializes the UserAnalyticsApp.
    * @param {Database} db The Dexie database instance.
@@ -1167,6 +1174,8 @@ export class UserAnalyticsApp {
         fetchAbandoned: postIds =>
           this.dataManager.getAbandonedPostIds(postIds),
       });
+      // Hoist so updateHeaderStatus() can attach the touch 📋 next to the gear.
+      this.previewPopover = previewPopover;
 
       // Hover opens a transient popover (skipped on touch — unreachable
       // there; the click path still works). A short dwell debounce avoids
@@ -1236,24 +1245,8 @@ export class UserAnalyticsApp {
       };
       container.appendChild(btn);
 
-      // Mini-report button (touch only). On touch the 📊 tap opens the full
-      // modal for >30-post users, leaving the hover-only preview unreachable —
-      // this opens the pinned preview directly. Desktop already has it on hover.
-      if (isTouchDevice()) {
-        const reportBtn = document.createElement('span');
-        reportBtn.className = 'di-analytics-entry-btn';
-        reportBtn.setAttribute('role', 'button');
-        reportBtn.setAttribute('aria-label', 'Open quick mini-report');
-        reportBtn.title = 'Quick mini-report';
-        reportBtn.innerHTML = '📋';
-        reportBtn.style.marginLeft = '6px';
-        reportBtn.addEventListener('click', e => {
-          e.preventDefault();
-          e.stopPropagation();
-          previewPopover.show({pinned: true});
-        });
-        container.appendChild(reportBtn);
-      }
+      // The touch-only 📋 mini-report button now lives in updateHeaderStatus(),
+      // sized to match and sitting right after the ⚙️ sync-settings gear.
 
       // Status Text (Mobile/Compact friendly)
       const statusText = document.createElement('div');
@@ -1491,6 +1484,10 @@ export class UserAnalyticsApp {
       this.showSyncSettingsPopover(settingBtn);
     };
     row1.appendChild(settingBtn);
+
+    const miniReport = this.buildMiniReportButton();
+    if (miniReport) row1.appendChild(miniReport);
+
     el.appendChild(row1);
 
     // Row 2: Date / Status Text
@@ -1501,6 +1498,31 @@ export class UserAnalyticsApp {
       row2.textContent = 'Not fully synced';
     }
     el.appendChild(row2);
+  }
+
+  /**
+   * The touch-only 📋 mini-report button, sized to the ⚙️ sync-settings gear
+   * and placed right after it in the header status row. On touch the 📊 tap
+   * opens the full modal, leaving the hover-only preview unreachable — this
+   * opens the pinned preview directly. Returns null on desktop or before the
+   * preview popover has been created.
+   */
+  private buildMiniReportButton(): HTMLSpanElement | null {
+    if (!isTouchDevice() || !this.previewPopover) return null;
+    const reportBtn = document.createElement('span');
+    reportBtn.setAttribute('role', 'button');
+    reportBtn.setAttribute('aria-label', 'Open quick mini-report');
+    reportBtn.title = 'Quick mini-report';
+    reportBtn.textContent = '📋';
+    reportBtn.style.cursor = 'pointer';
+    reportBtn.style.marginLeft = '6px';
+    reportBtn.style.fontSize = '12px';
+    reportBtn.onclick = e => {
+      e.stopPropagation();
+      e.preventDefault();
+      this.previewPopover?.show({pinned: true});
+    };
+    return reportBtn;
   }
 
   /**

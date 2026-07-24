@@ -21,6 +21,11 @@ All notable changes to Danbooru Insights are documented here.
   outside the loaded year); empty months collapse to a "no activity" line.
   Theming follows the grass palette in both light and dark.
 
+### Changed
+- **Mobile mini-report button (📋) resized and relocated.** It now matches the
+  sync-settings gear (⚙️) and sits directly after it in the header status row,
+  rather than as a large icon beside the analytics entry (📊).
+
 ---
 
 ## v9.7.2 — Partial-sync staleness fixes
