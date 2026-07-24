@@ -93,7 +93,7 @@ export function computeMonthStats(
 ): MonthStats {
   const {today, metric} = opts;
   const prefix = monthPrefix(year, month);
-  const denominatorDays = denominatorDaysFor(year, month, today);
+  let denominatorDays = denominatorDaysFor(year, month, today);
 
   let total = 0;
   let activeDays = 0;
@@ -115,6 +115,12 @@ export function computeMonthStats(
       }
     }
   }
+
+  // The denominator is local-`today`-based while the daily keys come from the
+  // data pipeline (UTC-leaning). A user ahead of UTC can already have a
+  // "tomorrow" key in the in-progress month, so activeDays could exceed the
+  // elapsed-day count — clamp so the ratio never reads e.g. "16 / 15 days".
+  denominatorDays = Math.max(denominatorDays, activeDays);
 
   const activeRatio = denominatorDays > 0 ? activeDays / denominatorDays : 0;
   const average =

@@ -1391,3 +1391,78 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
     );
   });
 });
+
+describe('AnalyticsDataManager.refreshAllStats', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  // Every getter refreshAllStats fans out to. Stubbed so the method's own
+  // orchestration is what's under test, not the getters' internals.
+  const REFRESH_GETTERS = [
+    'getStatusDistribution',
+    'getRatingDistribution',
+    'getCharacterDistribution',
+    'getCopyrightDistribution',
+    'getFavCopyrightDistribution',
+    'getBreastsDistribution',
+    'getHairLengthDistribution',
+    'getHairColorDistribution',
+    'getRandomPosts',
+    'getLevelChangeHistory',
+    'getMilestones',
+    'getTagCloudData',
+    'getTopPostsByType',
+    'getRecentPopularPosts',
+  ] as const;
+
+  function spyAllGetters(adm: AnalyticsDataManager) {
+    const target = adm as unknown as Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    >;
+    const spies: Record<string, ReturnType<typeof vi.spyOn>> = {};
+    for (const m of REFRESH_GETTERS) {
+      spies[m] = vi.spyOn(target, m).mockResolvedValue(undefined);
+    }
+    return spies;
+  }
+
+  it('refreshes popular posts on a PARTIAL sync (isFullSync=false) — v9.7.2 contract', async () => {
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      makeSyncRateLimiter() as never,
+    );
+    const spies = spyAllGetters(adm);
+
+    await adm.refreshAllStats(makeSyncUser(), false);
+
+    // The whole point of v9.7.2: these fire with forceRefresh=true even when
+    // it is NOT a full sync (they used to be gated behind isFullSync).
+    expect(spies.getTopPostsByType).toHaveBeenCalledWith(
+      expect.anything(),
+      true,
+    );
+    expect(spies.getRecentPopularPosts).toHaveBeenCalledWith(
+      expect.anything(),
+      true,
+    );
+  });
+
+  it('also refreshes popular posts on a FULL sync', async () => {
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      makeSyncRateLimiter() as never,
+    );
+    const spies = spyAllGetters(adm);
+
+    await adm.refreshAllStats(makeSyncUser(), true);
+
+    expect(spies.getTopPostsByType).toHaveBeenCalled();
+    expect(spies.getRecentPopularPosts).toHaveBeenCalled();
+  });
+});

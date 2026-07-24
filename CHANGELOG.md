@@ -26,6 +26,16 @@ All notable changes to Danbooru Insights are documented here.
   sync-settings gear (⚙️) and sits directly after it in the header status row,
   rather than as a large icon beside the analytics entry (📊).
 
+### Fixed
+- **Grass interactions survive a theme change.** Switching grass theme
+  destroys and re-paints the heatmap SVG; the cell tooltips/clicks, legend
+  swatches, and the new month-label popover are now re-attached afterwards
+  instead of going inert until the next full re-render. The theme-change
+  listener is also de-duplicated so it no longer accumulates per render.
+- **Removed redundant top-score API calls on every sync.** A leftover
+  `getTopScorePost` (uncached, its result discarded) fired two API requests
+  per sync for nothing.
+
 ---
 
 ## v9.7.2 — Partial-sync staleness fixes

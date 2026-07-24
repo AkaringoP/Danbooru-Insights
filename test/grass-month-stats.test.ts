@@ -89,6 +89,21 @@ describe('computeMonthStats — core stats', () => {
     expect(s.average).toBe(0);
     expect(s.activeRatio).toBe(0);
   });
+
+  it('clamps the denominator so activeDays never exceeds it (TZ boundary)', () => {
+    // today is the 15th, but a user ahead of UTC has 16 dated keys already.
+    const daily: Record<string, number> = {};
+    for (let d = 1; d <= 16; d++) {
+      daily[`2026-07-${String(d).padStart(2, '0')}`] = 1;
+    }
+    const s = computeMonthStats(daily, 2026, 6, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.activeDays).toBe(16);
+    expect(s.denominatorDays).toBe(16); // clamped up from the 15 elapsed days
+    expect(s.activeRatio).toBe(1);
+  });
 });
 
 describe('computeMonthStats — month-over-month', () => {
