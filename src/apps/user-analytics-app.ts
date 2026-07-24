@@ -787,8 +787,11 @@ function buildDashboardHeader(
       };
     }
 
-    // Stale Data Check (last sync > 7 days) — shows a transient yellow
-    // bubble anchored above the reset button, auto-removed after 10s.
+    // Stale Data Check (last sync older than FULL_REFRESH_HINT_DAYS) — shows
+    // a transient yellow bubble anchored above the reset button, auto-removed
+    // after 10s. Bumped 7d → 30d in v9.7.2: partial syncs now keep counts /
+    // popular posts / milestones fresh, so this only nudges users whose
+    // older-post metadata may have drifted (a low-urgency, monthly cadence).
     const lastSyncKey = `danbooru_grass_last_sync_${app.context.targetUser.id}`;
     const lastSyncStr = localStorage.getItem(lastSyncKey);
     if (lastSyncStr) {
@@ -797,7 +800,7 @@ function buildDashboardHeader(
       const diffTime = Math.abs(now.getTime() - lastSyncDate.getTime());
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-      if (diffDays > 7 && dBtn) {
+      if (diffDays > CONFIG.FULL_REFRESH_HINT_DAYS && dBtn) {
         const bubble = document.createElement('div');
         bubble.innerHTML = 'Full data refresh recommended';
         bubble.style.cssText = `

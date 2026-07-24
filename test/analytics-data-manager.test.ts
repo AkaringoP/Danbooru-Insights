@@ -235,6 +235,7 @@ function makePostsChain(
     until: vi.fn().mockReturnThis(),
     filter: vi.fn().mockReturnThis(),
     equals: vi.fn().mockReturnThis(),
+    anyOf: vi.fn().mockReturnThis(),
     each: vi.fn(async (cb: (row: Record<string, unknown>) => void) => {
       if (eachFn) {
         eachFn(cb);
@@ -254,6 +255,7 @@ function makePostsChain(
   (chain.until as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.filter as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.equals as ReturnType<typeof vi.fn>).mockReturnValue(chain);
+  (chain.anyOf as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   return chain;
 }
 
@@ -1280,5 +1282,112 @@ describe('getAbandonedPostIds — v1→v2 gap', () => {
     const abandoned = await adm.getAbandonedPostIds([]);
     expect(abandoned.size).toBe(0);
     expect(rl.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  // Three milestone posts with modern metadata (non-empty variants → the
+  // getMilestones missing-thumbnail path never fires an API call). Their `no`
+  // values line up with the auto-step targets for total=200 (1, 100, 200).
+  const milestonePosts = [1, 100, 200].map(no => ({
+    id: 1000 + no,
+    uploader_id: 42,
+    no,
+    rating: 'g',
+    score: 5,
+    created_at: '2025-01-01T00:00:00Z',
+    variants: [{type: '720x720', file_ext: 'webp', url: `http://x/${no}.webp`}],
+    preview_file_url: `http://x/${no}.jpg`,
+  }));
+
+  /**
+   * Wire a posts table whose milestone lookup (`anyOf().toArray()`) returns
+   * `milestonePosts` but whose `.count()` reports `total` — the two are
+   * decoupled so the stamp (count) can diverge from the returned rows.
+   */
+  function makeMilestoneDb(total: number) {
+    const postsTable = makePostsTable(milestonePosts);
+    (postsTable._chain.count as ReturnType<typeof vi.fn>).mockResolvedValue(
+      total,
+    );
+    return makeSyncDb(postsTable);
+  }
+
+  /** Seed piestats so the entries key and the sidecar `__count` key resolve. */
+  function seedCache(
+    db: ReturnType<typeof makeSyncDb>,
+    entries: unknown,
+    stamp: number | null,
+  ) {
+    db.piestats.get = vi.fn(async ({key}: {key: string}) => {
+      if (key === 'milestones_auto_0') return {data: entries};
+      if (key === 'milestones_auto_0__count') {
+        return stamp === null ? null : {data: stamp};
+      }
+      return null;
+    }) as never;
+  }
+
+  it('recomputes when the stamped count no longer matches the live count', async () => {
+    const db = makeMilestoneDb(200);
+    // Cache was written when the user had 100 posts; they now have 200.
+    seedCache(
+      db,
+      [{type: '#1 STALE', post: {id: 9, no: 1}, milestone: 1}],
+      100,
+    );
+    const rl = makeSyncRateLimiter();
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+
+    const result = await adm.getMilestones(makeSyncUser(), false, 'auto');
+
+    // Recomputed from live posts (3 targets) — not the single stale entry.
+    expect(result).toHaveLength(3);
+    expect(result.map(m => m.milestone)).toEqual([1, 100, 200]);
+    // No missing-thumbnail API calls for modern posts.
+    expect(rl.fetch).not.toHaveBeenCalled();
+    // Sidecar stamp rewritten with the fresh count.
+    expect(db.piestats.put).toHaveBeenCalledWith(
+      expect.objectContaining({key: 'milestones_auto_0__count', data: 200}),
+    );
+  });
+
+  it('serves the cached entries when the stamp matches the live count', async () => {
+    const db = makeMilestoneDb(200);
+    seedCache(db, [{type: '#CACHED', post: {id: 7, no: 1}, milestone: 1}], 200);
+    const rl = makeSyncRateLimiter();
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+
+    const result = await adm.getMilestones(makeSyncUser(), false, 'auto');
+
+    // Returned straight from cache — no recompute, no save.
+    expect(result).toEqual([
+      {type: '#CACHED', post: {id: 7, no: 1}, milestone: 1},
+    ]);
+    expect(db.piestats.put).not.toHaveBeenCalled();
+    expect(db.posts._chain.anyOf).not.toHaveBeenCalled();
+  });
+
+  it('treats a legacy stampless cache as a miss and recomputes', async () => {
+    const db = makeMilestoneDb(200);
+    // Pre-stamp cache: entries present, no `__count` sidecar.
+    seedCache(db, [{type: '#OLD', post: {id: 5, no: 1}, milestone: 1}], null);
+    const rl = makeSyncRateLimiter();
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+
+    const result = await adm.getMilestones(makeSyncUser(), false, 'auto');
+
+    expect(result).toHaveLength(3);
+    expect(db.piestats.put).toHaveBeenCalledWith(
+      expect.objectContaining({key: 'milestones_auto_0__count', data: 200}),
+    );
   });
 });
