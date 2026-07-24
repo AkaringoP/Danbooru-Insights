@@ -4,6 +4,25 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.8.0 — Grass month-label hover popover
+
+### Added
+- **Month statistics popover on the contribution graph.** Hovering (or tapping
+  on touch) a month label in the grass heatmap opens a popover summarising that
+  month for the currently-selected metric (uploads / approvals / notes):
+  - **Total + month-over-month** delta in one headline (`▲/▼ %`, or `new` when
+    the previous month had no activity).
+  - **Active-day ratio** (active days / calendar days, with a mini bar).
+  - **Busiest day** (+ count) and **daily average** (calendar-day basis; the
+    in-progress month divides by days elapsed).
+
+  Computed entirely from the year's in-memory daily data — no extra API/DB
+  calls. January omits the MoM delta (its previous month is last December,
+  outside the loaded year); empty months collapse to a "no activity" line.
+  Theming follows the grass palette in both light and dark.
+
+---
+
 ## v9.7.2 — Partial-sync staleness fixes
 
 ### Fixed

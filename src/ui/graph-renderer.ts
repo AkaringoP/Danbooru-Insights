@@ -5,6 +5,8 @@ import type {DataManager} from '../core/data-manager';
 import type {
   TargetUser,
   MetricData,
+  Metric,
+  MonthStats,
   CalHeatmapDatum,
   CalHeatmapAny,
 } from '../types';
@@ -12,6 +14,14 @@ import type {Database} from '../core/database';
 import {SettingsManager} from '../core/settings';
 import {createSettingsPopover, applyPopoverPalette} from './settings-popover';
 import {showApprovalsDetail} from './approval-detail-popover';
+import {computeMonthStats} from '../core/grass-month-stats';
+import {
+  showGrassMonthPopover,
+  scheduleHideGrassMonthPopover,
+  keepGrassMonthPopoverOpen,
+  hideGrassMonthPopover,
+  isGrassMonthPopoverVisible,
+} from './grass-month-popover';
 import {
   isTouchDevice,
   createTwoStepTap,
@@ -934,6 +944,10 @@ export class GraphRenderer {
    *  popover's threshold-editor dropdown aligned with what the user is
    *  actually looking at. */
   private currentMetric: string = 'uploads';
+  /** The year's date→count map last painted, kept so the month-label hover
+   *  popover can compute per-month stats synchronously with no extra DB/API
+   *  call (renderGraph's `dailyData` is otherwise a function local). */
+  private currentDailyData: Record<string, number> = {};
   /** Two-step tap controller for the Hourly Distribution grid on touch
    *  devices. Manages active-cell state + outside-tap dismissal so tooltips
    *  don't get stuck the way synthetic mouseenter/mouseleave do on mobile.
@@ -962,6 +976,12 @@ export class GraphRenderer {
    *  mouseover handlers. Cleared at renderGraph entry and on each
    *  reschedule so only the latest render's timeout ever runs. */
   private postPaintTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  /** Groups the touch listeners attached to month labels; aborted at the top
+   *  of each attachMonthLabelInteractions() so re-renders don't stack them. */
+  private monthLabelTouchAbort: AbortController | null = null;
+  /** Month (0-11) whose month-popover is currently open on touch, so a
+   *  re-tap of the same label toggles it closed. */
+  private activeTapMonth: number | null = null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -2582,6 +2602,9 @@ export class GraphRenderer {
 
     this.currentYear = year;
     this.currentMetric = metric;
+    // Stash for the month-label hover popover (computes per-month stats from
+    // exactly this map — see attachMonthLabelInteractions).
+    this.currentDailyData = dailyData || {};
 
     // Update Header with Total Count and Embedded Year Selector
     const total = Object.values(dailyData || {}).reduce(
@@ -2751,6 +2774,8 @@ export class GraphRenderer {
             metric,
             userIdVal,
           });
+
+          this.attachMonthLabelInteractions({isTouch});
         }, 300); // Increased timeout significantly to ensure render is done
       })
       .catch((err: unknown) => {
@@ -2786,6 +2811,114 @@ export class GraphRenderer {
       `;
     const btn = document.getElementById('grass-retry-btn');
     if (btn) btn.onclick = onRetry;
+  }
+
+  /**
+   * Wires hover (desktop) / tap (mobile) on the heatmap month labels
+   * (`.ch-domain-text`) to a per-month stats popover. Labels render in
+   * calendar order for `this.currentYear`, so the Nth label = month N
+   * (0-based Jan..Dec) — the same convention as the existing
+   * `.ch-domain:nth-of-type` usage. [D-MAP: verify order on live pages]
+   *
+   * Reads only in-memory state (`currentDailyData` / `currentYear` /
+   * `currentMetric`) so the popover renders with no extra DB/API call.
+   */
+  private attachMonthLabelInteractions(args: {isTouch: boolean}): void {
+    const {isTouch} = args;
+    const year = this.currentYear;
+    if (year === null) return;
+    const labels = document.querySelectorAll<SVGTextElement>(
+      '#cal-heatmap-scroll .ch-domain-text',
+    );
+    if (labels.length === 0) return;
+
+    const metric = (this.currentMetric as Metric) || 'uploads';
+    const themeKey = this.settingsManager.getTheme();
+    const statsFor = (month: number) =>
+      computeMonthStats(this.currentDailyData, year, month, {
+        today: new Date(),
+        metric,
+      });
+
+    if (isTouch) {
+      this.attachMonthLabelTouch(labels, statsFor, themeKey);
+      return;
+    }
+
+    labels.forEach((label, month) => {
+      label.style.cursor = 'pointer';
+      let dwell: ReturnType<typeof setTimeout> | null = null;
+      label.addEventListener('mouseover', () => {
+        keepGrassMonthPopoverOpen();
+        if (dwell !== null) clearTimeout(dwell);
+        dwell = setTimeout(() => {
+          showGrassMonthPopover({
+            anchor: label,
+            stats: statsFor(month),
+            themeKey,
+          });
+        }, 200);
+      });
+      label.addEventListener('mouseout', () => {
+        if (dwell !== null) {
+          clearTimeout(dwell);
+          dwell = null;
+        }
+        scheduleHideGrassMonthPopover();
+      });
+    });
+  }
+
+  /**
+   * Touch path for the month-label popover: tap a label to open, re-tap the
+   * same label (or tap outside) to dismiss. No two-step needed — the popover
+   * has no navigation target. Listeners are grouped under a fresh
+   * AbortController so re-renders never stack duplicates.
+   */
+  private attachMonthLabelTouch(
+    labels: NodeListOf<SVGTextElement>,
+    statsFor: (month: number) => MonthStats,
+    themeKey: string,
+  ): void {
+    this.monthLabelTouchAbort?.abort();
+    this.monthLabelTouchAbort = new AbortController();
+    const {signal} = this.monthLabelTouchAbort;
+    this.activeTapMonth = null;
+
+    labels.forEach((label, month) => {
+      label.style.cursor = 'pointer';
+      label.addEventListener(
+        'click',
+        (e: Event) => {
+          e.stopPropagation();
+          if (isGrassMonthPopoverVisible() && this.activeTapMonth === month) {
+            hideGrassMonthPopover();
+            this.activeTapMonth = null;
+          } else {
+            showGrassMonthPopover({
+              anchor: label,
+              stats: statsFor(month),
+              themeKey,
+            });
+            this.activeTapMonth = month;
+          }
+        },
+        {signal},
+      );
+    });
+
+    document.addEventListener(
+      'click',
+      (e: Event) => {
+        const target = e.target as Element | null;
+        if (target?.closest('#danbooru-grass-month-popover')) return;
+        if (isGrassMonthPopoverVisible()) {
+          hideGrassMonthPopover();
+          this.activeTapMonth = null;
+        }
+      },
+      {signal},
+    );
   }
 
   /**
