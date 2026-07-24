@@ -141,6 +141,43 @@ export interface MetricData {
   hourly: number[];
 }
 
+/**
+ * Per-month activity summary for the grass month-label hover popover.
+ * Computed purely from a single year's `daily` map (no DB/network) by
+ * `computeMonthStats` in `src/core/grass-month-stats.ts`.
+ */
+export interface MonthStats {
+  year: number;
+  /** 0-indexed month (0 = January). */
+  month: number;
+  metric: Metric;
+  /** Sum of the month's daily counts. */
+  total: number;
+  /** Days in the month with count > 0. */
+  activeDays: number;
+  /**
+   * Calendar-day denominator: full days-in-month for a past month, days
+   * elapsed for the in-progress month, 0 for a future month.
+   */
+  denominatorDays: number;
+  /** activeDays / denominatorDays (0 when denominatorDays is 0). */
+  activeRatio: number;
+  /** Highest-count day, ties broken toward the earliest date. Null if empty. */
+  busiest: {date: string; count: number} | null;
+  /** total / denominatorDays, rounded to 1 decimal (0 when denom is 0). */
+  average: number;
+  /**
+   * Month-over-month change vs the previous month, in percent. Null when it
+   * cannot be computed — January (previous month is last year, out of the
+   * in-memory year) or a zero previous total with no current activity.
+   */
+  momPct: number | null;
+  /** Previous total was 0 but this month has activity → show "new" not a %. */
+  momIsNew: boolean;
+  /** total === 0 → popover collapses to a "no activity" line. */
+  empty: boolean;
+}
+
 /** Danbooru post media variant (modern API). */
 export interface PostVariant {
   type: string;
