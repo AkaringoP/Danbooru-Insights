@@ -26,8 +26,17 @@ vi.mock('../src/ui/dashboard-footer', () => ({
   dashboardFooterHtml: vi.fn(() => '<div class="di-dashboard-footer"></div>'),
 }));
 vi.mock('../src/ui/toast', () => ({showToast: vi.fn()}));
+// isTouchDevice is the only two-step-tap export user-analytics-app reaches
+// (injectButton / buildMiniReportButton); the charts that use the rest are
+// themselves mocked above. Controllable per-test, default desktop (false).
+vi.mock('../src/ui/two-step-tap', async importOriginal => {
+  const actual =
+    await importOriginal<typeof import('../src/ui/two-step-tap')>();
+  return {...actual, isTouchDevice: vi.fn(() => false)};
+});
 
 import {UserAnalyticsApp} from '../src/apps/user-analytics-app';
+import {isTouchDevice} from '../src/ui/two-step-tap';
 import {AnalyticsDataManager} from '../src/core/analytics-data-manager';
 import {SettingsManager} from '../src/core/settings';
 import {RateLimitedFetch} from '../src/core/rate-limiter';
@@ -279,5 +288,48 @@ describe('UserAnalyticsApp.renderDashboard - quick-sync branch', () => {
     await app.renderDashboard().catch(() => {});
 
     expect(quickSync).not.toHaveBeenCalled();
+  });
+});
+
+describe('UserAnalyticsApp.buildMiniReportButton', () => {
+  afterEach(() => {
+    vi.mocked(isTouchDevice).mockReturnValue(false);
+  });
+
+  type PrivateApp = {
+    previewPopover: {show: Mock} | null;
+    buildMiniReportButton(): HTMLSpanElement | null;
+  };
+
+  it('returns null on desktop (no touch) even with a preview popover', () => {
+    vi.mocked(isTouchDevice).mockReturnValue(false);
+    const {app} = makeApp();
+    const priv = app as unknown as PrivateApp;
+    priv.previewPopover = {show: vi.fn()};
+    expect(priv.buildMiniReportButton()).toBeNull();
+  });
+
+  it('builds a 📋 wired to the pinned preview on touch', () => {
+    vi.mocked(isTouchDevice).mockReturnValue(true);
+    const {app} = makeApp();
+    const priv = app as unknown as PrivateApp;
+    const show = vi.fn();
+    priv.previewPopover = {show};
+
+    const btn = priv.buildMiniReportButton();
+    expect(btn).not.toBeNull();
+    expect(btn!.textContent).toBe('📋');
+    expect(btn!.style.fontSize).toBe('12px');
+
+    btn!.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+    expect(show).toHaveBeenCalledWith({pinned: true});
+  });
+
+  it('returns null on touch when the preview popover is not ready', () => {
+    vi.mocked(isTouchDevice).mockReturnValue(true);
+    const {app} = makeApp();
+    const priv = app as unknown as PrivateApp;
+    priv.previewPopover = null;
+    expect(priv.buildMiniReportButton()).toBeNull();
   });
 });

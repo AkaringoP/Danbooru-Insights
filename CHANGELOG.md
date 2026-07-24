@@ -4,6 +4,67 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.8.0 — Grass month-label hover popover
+
+### Added
+- **Month statistics popover on the contribution graph.** Hovering (or tapping
+  on touch) a month label in the grass heatmap opens a popover summarising that
+  month for the currently-selected metric (uploads / approvals / notes):
+  - **Total + month-over-month** delta in one headline (`▲/▼ %`, or `new` when
+    the previous month had no activity).
+  - **Active-day ratio** (active days / calendar days, with a mini bar).
+  - **Busiest day** (+ count) and **daily average** (calendar-day basis; the
+    in-progress month divides by days elapsed).
+
+  Computed entirely from the year's in-memory daily data — no extra API/DB
+  calls. January omits the MoM delta (its previous month is last December,
+  outside the loaded year); empty months collapse to a "no activity" line.
+  Theming follows the grass palette in both light and dark.
+
+### Changed
+- **Mobile mini-report button (📋) resized and relocated.** It now matches the
+  sync-settings gear (⚙️) and sits directly after it in the header status row,
+  rather than as a large icon beside the analytics entry (📊).
+
+### Fixed
+- **Grass interactions survive a theme change.** Switching grass theme
+  destroys and re-paints the heatmap SVG; the cell tooltips/clicks, legend
+  swatches, and the new month-label popover are now re-attached afterwards
+  instead of going inert until the next full re-render. The theme-change
+  listener is also de-duplicated so it no longer accumulates per render.
+- **Removed redundant top-score API calls on every sync.** A leftover
+  `getTopScorePost` (uncached, its result discarded) fired two API requests
+  per sync for nothing.
+
+---
+
+## v9.7.2 — Partial-sync staleness fixes
+
+### Fixed
+- **Recent / Most Popular posts now refresh on partial (incremental) sync.**
+  These API-driven widgets (`order:score`, `age:<1w`) were only re-fetched
+  during a full sync, so large users' incremental re-syncs left the cached
+  values stale — the post-sync dashboard render served pre-sync data and only
+  caught up one open later via SWR revalidate. `refreshAllStats` now refreshes
+  them (and the top-score posts) on every sync.
+- **Milestones widget no longer freezes at the first-render post count.** The
+  widget reads milestones with the default `auto` step, whose cache was never
+  warmed by any sync (only `step=1000` was) and had no TTL — so the list stuck
+  at whatever count the dashboard first saw while the live progress bar kept
+  advancing, corrupting the "% to next milestone" figure. The cache is now
+  count-stamped via a sidecar key and invalidated whenever the post count
+  changes; the entries payload stays a plain array so the history-chart star
+  overlay is unaffected.
+
+### Changed
+- **Full-refresh hint relaxed from 7 days to 30 days**
+  (`CONFIG.FULL_REFRESH_HINT_DAYS`). Now that partial syncs keep counts,
+  popular posts, and milestones fresh, the "full data refresh recommended"
+  nudge above the reset button only needs to cover slow older-post metadata
+  drift (score / rating / deleted) — a low-urgency, roughly-monthly cadence.
+
+---
+
 ## v9.7.1 — Mintag / abandoned upload detection + colour legend
 
 ### Added

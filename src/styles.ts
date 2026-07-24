@@ -1518,6 +1518,99 @@ const GLOBAL_CSS = `
       font-size: 0.9em;
     }
 
+    /* ----- Grass month-label popover ----- */
+    /* Base chrome (bg/border/shadow/padding/width) comes from
+       applyPopoverChrome; palette vars from applyPopoverPalette. The 200ms
+       here must match FADE_MS in grass-month-popover.ts. */
+    .di-grass-month-popover {
+      transition: opacity 200ms ease;
+      line-height: 1.45;
+    }
+    .di-grass-month-popover--fading {
+      opacity: 0;
+    }
+    .di-gmp-caret {
+      position: absolute;
+      top: -6px;
+      width: 12px;
+      height: 12px;
+      background: var(--di-bg, #fff);
+      border-left: 1px solid var(--di-border, #e1e4e8);
+      border-top: 1px solid var(--di-border, #e1e4e8);
+      transform: translateX(-50%) rotate(45deg);
+    }
+    .di-gmp-header {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--di-text-muted, #888);
+      margin-bottom: 8px;
+    }
+    .di-gmp-headline {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .di-gmp-total {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--di-text, #333);
+    }
+    .di-gmp-mom {
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .di-gmp-mom--up {
+      color: #2ea043;
+    }
+    .di-gmp-mom--down {
+      color: #cf222e;
+    }
+    .di-gmp-mom--flat,
+    .di-gmp-mom--new {
+      color: var(--di-text-muted, #888);
+    }
+    .di-gmp-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .di-gmp-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 11px;
+    }
+    .di-gmp-k {
+      color: var(--di-text-muted, #888);
+    }
+    .di-gmp-v {
+      color: var(--di-text, #333);
+      font-weight: 500;
+    }
+    .di-gmp-bar {
+      height: 4px;
+      border-radius: 2px;
+      background: var(--di-border-light, #eee);
+      overflow: hidden;
+      margin: 2px 0 4px;
+    }
+    .di-gmp-bar-fill {
+      height: 100%;
+      /* Bridge to the active grass palette (level 2 ≈ #40c463 in the default
+         theme) so the bar matches Sakura/Ember/etc. instead of a fixed green.
+         --grass-level-* live on :root, set by SettingsManager.setTheme. */
+      background: var(--grass-level-2, #40c463);
+    }
+    .di-gmp-empty {
+      font-size: 11px;
+      color: var(--di-text-muted, #888);
+      padding: 4px 0;
+    }
+
     /* ----- Dashboard preview popover ----- */
     /* Transient (hover) dismiss fades out; FADE_MS in the popover module must
        match this duration so display:none lands exactly as opacity hits 0. */

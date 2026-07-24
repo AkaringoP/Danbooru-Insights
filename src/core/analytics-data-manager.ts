@@ -651,20 +651,40 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return [];
 
-    // Cache key includes step and nsfw flag — thumbnails for NSFW posts are
-    // only fetched when the flag is on, so results differ per combination.
-    // Invalidated via piestats wipe on Full Sync (same pattern as distributions).
-    const cacheKey = `milestones_${customStep}_${isNsfwEnabled ? '1' : '0'}`;
-    if (!forceRefresh) {
-      const cached = await this.getStats(cacheKey, uploaderId);
-      if (cached) return cached as MilestoneEntry[];
-    }
-
     const total = await this.db.posts
       .where('uploader_id')
       .equals(uploaderId)
       .count();
     if (total === 0) return [];
+
+    // Cache key includes step and nsfw flag — thumbnails for NSFW posts are
+    // only fetched when the flag is on, so results differ per combination.
+    //
+    // Count-stamped: the milestone list is a pure function of (post count,
+    // step, nsfw), so a changed post count invalidates it. A sidecar
+    // `__count` key records the count the entries were computed for; on read
+    // a mismatch (or a missing/legacy stamp) forces a recompute. This is
+    // required because the widget's default 'auto' step is never warmed by a
+    // sync (refreshAllStats/SWR only warm step=1000) and getStats has no TTL —
+    // without the stamp the 'auto' list froze at the first-render count while
+    // the widget's live totalPosts/nextTarget kept advancing, corrupting the
+    // progress bar. The entries payload stays a plain MilestoneEntry[] so the
+    // milestones_1000 SWR direct-read (history-chart stars) is unaffected.
+    //
+    // Known edge (intentional): the stamp is the count alone, so a re-sync that
+    // deletes one older post and adds one (count unchanged, `no` positions
+    // shifted) reads as a hit and serves a slightly stale milestone post. It
+    // is rare and self-heals on the next count change; a {count, maxId} stamp
+    // would close it but adds a query to every cache-hit path — not worth it.
+    const cacheKey = `milestones_${customStep}_${isNsfwEnabled ? '1' : '0'}`;
+    const stampKey = `${cacheKey}__count`;
+    if (!forceRefresh) {
+      const [cached, stamp] = await Promise.all([
+        this.getStats(cacheKey, uploaderId),
+        this.getStats(stampKey, uploaderId) as Promise<number | null>,
+      ]);
+      if (cached && stamp === total) return cached as MilestoneEntry[];
+    }
 
     const targets = this.buildMilestoneTargets(total, customStep);
 
@@ -756,7 +776,11 @@ export class AnalyticsDataManager extends DataManager {
     // Let's sort strictly by milestone ASC.
     results.sort((a, b) => a.milestone - b.milestone);
 
-    await this.saveStats(cacheKey, uploaderId, results);
+    // Persist entries + the count they were computed for (sidecar stamp).
+    await Promise.all([
+      this.saveStats(cacheKey, uploaderId, results),
+      this.saveStats(stampKey, uploaderId, total),
+    ]);
     return results;
   }
 
@@ -2374,54 +2398,6 @@ export class AnalyticsDataManager extends DataManager {
     ]);
 
     return {sfw, nsfw};
-  }
-
-  /**
-   * Gets the post with the highest score and fetches its details.
-   * @param {Object} userInfo The user's info object.
-   * @param {string} [filterMode='sfw'] 'sfw' | 'nsfw' | 'all'.
-   * @return {Promise<Object|null>}
-   */
-  async getTopScorePost(
-    userInfo: TargetUser,
-    filterMode: string = 'sfw',
-  ): Promise<DanbooruPost | PostRecord | null> {
-    const uploaderId = parseInt(userInfo.id ?? '0');
-    if (!uploaderId) return null;
-
-    // Use compound index [uploader_id+score] to traverse posts from highest score downward.
-    // .reverse() on a between() range walks from the upper bound down, stopping at the first filter match.
-    const ratingFilter =
-      filterMode === 'sfw'
-        ? (p: PostRecord) => p.rating === 'g' || p.rating === 's'
-        : filterMode === 'nsfw'
-          ? (p: PostRecord) => p.rating === 'q' || p.rating === 'e'
-          : () => true;
-
-    const topLocal = await this.db.posts
-      .where('[uploader_id+score]')
-      .between([uploaderId, -Infinity], [uploaderId, Infinity])
-      .reverse()
-      .filter(ratingFilter)
-      .first();
-
-    if (!topLocal) return null;
-
-    // 2. Fetch details (thumbnail, fav_count)
-    try {
-      const url = `/posts/${topLocal.id}.json`;
-      const details = await this.rateLimiter.fetch(url).then(r => r.json());
-      if (details && details.id) {
-        return details; // Return full API object
-      }
-    } catch (e: unknown) {
-      log.warn('Failed to fetch top post details', {
-        postId: topLocal.id,
-        error: e,
-      });
-    }
-
-    return topLocal; // Fallback to local data (might miss thumb/favs)
   }
 
   /**
@@ -4419,23 +4395,18 @@ export class AnalyticsDataManager extends DataManager {
         perfLogger.wrap('dbi:db:refresh:tagCloudCharacter', () =>
           this.getTagCloudData(userInfo, 4, true),
         ),
-        // Refresh Popular Posts only on Full Sync
-        ...(isFullSync
-          ? [
-              perfLogger.wrap('dbi:db:refresh:topPostsByType', () =>
-                this.getTopPostsByType(userInfo, true),
-              ),
-              perfLogger.wrap('dbi:db:refresh:recentPopular', () =>
-                this.getRecentPopularPosts(userInfo, true),
-              ),
-              perfLogger.wrap('dbi:db:refresh:topScoreSfw', () =>
-                this.getTopScorePost(userInfo, 'sfw'),
-              ),
-              perfLogger.wrap('dbi:db:refresh:topScoreNsfw', () =>
-                this.getTopScorePost(userInfo, 'nsfw'),
-              ),
-            ]
-          : []),
+        // Popular posts are API-driven (order:score, age:<1w) and cached in
+        // piestats. Refresh on EVERY sync — a partial (incremental) sync must
+        // freshen them too, otherwise the post-sync dashboard render serves
+        // the pre-sync cache and the widgets only catch up one open later via
+        // SWR revalidate. (Previously gated to full sync only, which left
+        // large users' Recent/Most Popular stale after every re-sync.)
+        perfLogger.wrap('dbi:db:refresh:topPostsByType', () =>
+          this.getTopPostsByType(userInfo, true),
+        ),
+        perfLogger.wrap('dbi:db:refresh:recentPopular', () =>
+          this.getRecentPopularPosts(userInfo, true),
+        ),
       ]);
     } catch (e: unknown) {
       log.warn('Failed to refresh stats', {error: e});
