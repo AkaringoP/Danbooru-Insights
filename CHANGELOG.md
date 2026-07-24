@@ -4,6 +4,33 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.7.2 — Partial-sync staleness fixes
+
+### Fixed
+- **Recent / Most Popular posts now refresh on partial (incremental) sync.**
+  These API-driven widgets (`order:score`, `age:<1w`) were only re-fetched
+  during a full sync, so large users' incremental re-syncs left the cached
+  values stale — the post-sync dashboard render served pre-sync data and only
+  caught up one open later via SWR revalidate. `refreshAllStats` now refreshes
+  them (and the top-score posts) on every sync.
+- **Milestones widget no longer freezes at the first-render post count.** The
+  widget reads milestones with the default `auto` step, whose cache was never
+  warmed by any sync (only `step=1000` was) and had no TTL — so the list stuck
+  at whatever count the dashboard first saw while the live progress bar kept
+  advancing, corrupting the "% to next milestone" figure. The cache is now
+  count-stamped via a sidecar key and invalidated whenever the post count
+  changes; the entries payload stays a plain array so the history-chart star
+  overlay is unaffected.
+
+### Changed
+- **Full-refresh hint relaxed from 7 days to 30 days**
+  (`CONFIG.FULL_REFRESH_HINT_DAYS`). Now that partial syncs keep counts,
+  popular posts, and milestones fresh, the "full data refresh recommended"
+  nudge above the reset button only needs to cover slow older-post metadata
+  drift (score / rating / deleted) — a low-urgency, roughly-monthly cadence.
+
+---
+
 ## v9.7.1 — Mintag / abandoned upload detection + colour legend
 
 ### Added
