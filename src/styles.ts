@@ -1600,7 +1600,10 @@ const GLOBAL_CSS = `
     }
     .di-gmp-bar-fill {
       height: 100%;
-      background: #40c463;
+      /* Bridge to the active grass palette (level 2 ≈ #40c463 in the default
+         theme) so the bar matches Sakura/Ember/etc. instead of a fixed green.
+         --grass-level-* live on :root, set by SettingsManager.setTheme. */
+      background: var(--grass-level-2, #40c463);
     }
     .di-gmp-empty {
       font-size: 11px;

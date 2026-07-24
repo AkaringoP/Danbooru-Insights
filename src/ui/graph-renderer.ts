@@ -982,6 +982,11 @@ export class GraphRenderer {
   /** Month (0-11) whose month-popover is currently open on touch, so a
    *  re-tap of the same label toggles it closed. */
   private activeTapMonth: number | null = null;
+  /** The current `DanbooruInsights:ThemeChanged` handler. renderGraph runs on
+   *  every metric/year switch and each run wires a fresh closure, so the
+   *  previous one is removed before re-registering — otherwise theme changes
+   *  fan out to N stale handlers (each doing its own destroy()+paint()). */
+  private themeChangeHandler: (() => void) | null = null;
 
   /**
    * @param {SettingsManager} settingsManager The settings manager instance.
@@ -1866,6 +1871,49 @@ export class GraphRenderer {
   }
 
   /**
+   * Schedules the post-paint attachment of every heatmap interaction (cell
+   * tooltips/clicks, legend swatches, month-label popover) after CalHeatmap's
+   * SVG settles. Extracted so BOTH the initial paint and every theme re-paint
+   * re-attach them — a `destroy()+paint()` throws the old handlers away with
+   * the old SVG (R-01). The 300ms delay matches the original: CalHeatmap
+   * `.paint()` resolves before layout completes, and the selectors need real
+   * `.ch-*` nodes. The tracked timeout id lets a faster re-render cancel a
+   * stale run before it binds to a destroyed selection.
+   */
+  private schedulePostPaintInteractions(args: {
+    metric: string;
+    userIdVal: string | number;
+    getUrl: (date: string, count: number) => string | null;
+    skipScroll: boolean;
+  }): void {
+    if (this.postPaintTimeoutId !== null) {
+      clearTimeout(this.postPaintTimeoutId);
+    }
+    this.postPaintTimeoutId = setTimeout(() => {
+      this.postPaintTimeoutId = null;
+      const tooltip = d3.select('#danbooru-grass-tooltip');
+      const isTouch = isTouchDevice();
+
+      if (!args.skipScroll) this.scrollToCurrentMonth();
+
+      this.attachCellInteractions({
+        tooltip,
+        isTouch,
+        metric: args.metric,
+        userIdVal: args.userIdVal,
+        getUrl: args.getUrl,
+      });
+      this.attachLegendInteractions({
+        tooltip,
+        isTouch,
+        metric: args.metric,
+        userIdVal: args.userIdVal,
+      });
+      this.attachMonthLabelInteractions({isTouch});
+    }, 300);
+  }
+
+  /**
    * Wire mouseover / click / touch handlers on every painted `#cal-heatmap
    * rect` plus the matching tooltip swap. Called from renderGraph's
    * post-paint setTimeout once CalHeatmap has inserted its SVG into the
@@ -2738,45 +2786,42 @@ export class GraphRenderer {
               // Natural width may have shifted (cell size tweaks via theme)
               // so re-apply once the repaint settles.
               this.reapplyGraphConstraints?.();
+              // destroy()+paint() replaced the SVG, so cell/legend/month-label
+              // handlers must be re-attached — otherwise the grass goes inert
+              // after a theme change until the next full renderGraph (R-01).
+              // skipScroll: this path already restored scrollLeft above.
+              this.schedulePostPaintInteractions({
+                metric,
+                userIdVal,
+                getUrl,
+                skipScroll: true,
+              });
             });
           } catch (e) {
             log.debug('CalHeatmap re-paint failed', {error: e});
           }
           this.updateSummaryGrid(hourlyData, metric);
         };
+        // Only the latest renderGraph's handler stays registered (R-01).
+        if (this.themeChangeHandler) {
+          window.removeEventListener(
+            'DanbooruInsights:ThemeChanged',
+            this.themeChangeHandler,
+          );
+        }
+        this.themeChangeHandler = onThemeChange;
         window.addEventListener('DanbooruInsights:ThemeChanged', onThemeChange);
 
         // Render Summary Grid Heatmap
         this.updateSummaryGrid(hourlyData, metric);
 
         // Re-apply Styles and Interaction
-        if (this.postPaintTimeoutId !== null) {
-          clearTimeout(this.postPaintTimeoutId);
-        }
-        this.postPaintTimeoutId = setTimeout(() => {
-          this.postPaintTimeoutId = null;
-          const tooltip = d3.select('#danbooru-grass-tooltip');
-          const isTouch = isTouchDevice();
-
-          if (!skipScroll) this.scrollToCurrentMonth();
-
-          this.attachCellInteractions({
-            tooltip,
-            isTouch,
-            metric,
-            userIdVal,
-            getUrl,
-          });
-
-          this.attachLegendInteractions({
-            tooltip,
-            isTouch,
-            metric,
-            userIdVal,
-          });
-
-          this.attachMonthLabelInteractions({isTouch});
-        }, 300); // Increased timeout significantly to ensure render is done
+        this.schedulePostPaintInteractions({
+          metric,
+          userIdVal,
+          getUrl,
+          skipScroll,
+        });
       })
       .catch((err: unknown) => {
         log.error('CalHeatmap render failed', {error: err});
