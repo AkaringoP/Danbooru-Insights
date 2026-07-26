@@ -1050,7 +1050,9 @@ export class UserAnalyticsApp {
       rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
 
     this.dataManager = new AnalyticsDataManager(db, this.rateLimiter);
-    this.dataService = new UserAnalyticsDataService(db);
+    // Share the rate limiter so the dashboard fetch + post-paint SWR
+    // revalidate flood stay under TabCoordinator / 429-backoff control (H-1).
+    this.dataService = new UserAnalyticsDataService(db, this.rateLimiter);
 
     this.modalId = 'danbooru-grass-modal';
     this.btnId = 'danbooru-grass-analytics-btn';
@@ -1350,7 +1352,8 @@ export class UserAnalyticsApp {
       const syncTotal = await this.dataManager.getTotalPostCount(
         this.context.targetUser,
       );
-      // 0 uploads: nothing to sync, and refreshAllStats would 404 on /random.
+      // 0 uploads: nothing to sync, and the dashboard's random-post fetch
+      // would 404 on /random for a user with no posts.
       if (syncTotal === 0) {
         if (animInterval) clearInterval(animInterval);
         this.isFullySynced = true;
@@ -1930,6 +1933,8 @@ export class UserAnalyticsApp {
         recentPopularStartRevalidate,
         milestones1kStartRevalidate,
         levelChangesStartRevalidate,
+        distributionRevalidators,
+        tagCloudGeneralStartRevalidate,
       } = dashboardData;
 
       const {firstUploadDate} = summaryStats;
@@ -1982,8 +1987,11 @@ export class UserAnalyticsApp {
 
       // Fire SWR revalidations only now that the dashboard is painted. Any
       // network traffic these start no longer blocks render.total. The
-      // cached values are already on screen — revalidate just freshens
-      // piestats for the next open.
+      // cached values are already on screen — revalidate freshens piestats for
+      // the next open, and for the heavy distributions the forceRefresh
+      // re-fetch also fires DanbooruInsights:DataUpdated so the pie's
+      // thumbnails live-patch this session (audit R2). Starters are undefined
+      // when the cache was within TTL (nothing to do), so this is cheap.
       scheduleRevalidateAll([
         ['status', statusStartRevalidate],
         ['rating', ratingStartRevalidate],
@@ -1991,6 +1999,8 @@ export class UserAnalyticsApp {
         ['recentPopular', recentPopularStartRevalidate],
         ['milestones1k', milestones1kStartRevalidate],
         ['levelChanges', levelChangesStartRevalidate],
+        ...distributionRevalidators,
+        ['tagCloudGeneral', tagCloudGeneralStartRevalidate],
       ]);
     } finally {
       perfLogger.end('dbi:render:total', perfMeta);

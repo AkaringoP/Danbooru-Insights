@@ -3,6 +3,8 @@ import {perfLogger} from '../core/perf-logger';
 import {getCountCacheTtlMs, getNsfwEnabled} from '../core/settings';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
+import type {RateLimitedFetch} from '../core/rate-limiter';
+import type {DistributionItem, TagCloudItem, TargetUser} from '../types';
 import {createPhaseTracker, type ReportProgress} from './progress-tracker';
 import {SCATTER_MIN_UPLOADS, TAG_CLOUD_MIN_UPLOADS} from './widget-gates';
 
@@ -94,6 +96,158 @@ export async function swrStats<T>(
   return {data};
 }
 
+/** The nine heavy tag-distribution keys as they appear on the dashboard
+ *  `distributions` object. */
+type HeavyDistKey =
+  | 'character'
+  | 'copyright'
+  | 'fav_copyright'
+  | 'breasts'
+  | 'hair_length'
+  | 'hair_color'
+  | 'gender'
+  | 'commentary'
+  | 'translation';
+
+/**
+ * SWR-fetches the nine heavy tag distributions in parallel. Each returns its
+ * cached value immediately (stale allowed); when the cache is older than the
+ * count-cache TTL, `revalidators` carries a starter the caller runs post-paint.
+ *
+ * These used to be force-refreshed on the blocking sync path (the old
+ * `refreshAllStats`); moving them behind the same SWR machinery status/rating
+ * already use is what keeps a post-sync open fast. A top-10 distribution
+ * barely shifts when a few posts are added, so the previous sync's cache is
+ * shown at once and freshened in the background — thumbnails live-patch via the
+ * `DanbooruInsights:DataUpdated` event; slice proportions land on the next
+ * open. Audit R2. On a genuine cache miss (first-ever open) each fetch blocks,
+ * which is the one-time unavoidable cost.
+ */
+async function fetchHeavyDistributionsSwr(
+  dataManager: AnalyticsDataManager,
+  user: TargetUser,
+  uploaderId: number,
+  sub: (msg: string) => void,
+): Promise<{
+  distributions: Record<HeavyDistKey, DistributionItem[]>;
+  revalidators: Array<
+    [string, (() => Promise<DistributionItem[] | null>) | undefined]
+  >;
+}> {
+  const ttl = getCountCacheTtlMs();
+  const defs: Array<{
+    key: HeavyDistKey;
+    cacheKey: string;
+    label: string;
+    fetch: () => Promise<DistributionItem[]>;
+  }> = [
+    {
+      key: 'character',
+      cacheKey: 'character_dist',
+      label: 'dbi:net:fetchData:character',
+      fetch: () => {
+        sub('Loading character distribution…');
+        return dataManager.getCharacterDistribution(user, true, sub);
+      },
+    },
+    {
+      key: 'copyright',
+      cacheKey: 'copyright_dist',
+      label: 'dbi:net:fetchData:copyright',
+      fetch: () => {
+        sub('Loading copyright distribution…');
+        return dataManager.getCopyrightDistribution(user, true, sub);
+      },
+    },
+    {
+      key: 'fav_copyright',
+      cacheKey: 'fav_copyright_dist',
+      label: 'dbi:net:fetchData:favCopyright',
+      fetch: () => {
+        sub('Loading favourite-copyright distribution…');
+        return dataManager.getFavCopyrightDistribution(user, true, sub);
+      },
+    },
+    {
+      key: 'breasts',
+      cacheKey: 'breasts_dist',
+      label: 'dbi:net:fetchData:breasts',
+      fetch: () => {
+        sub('Loading breast-size distribution…');
+        return dataManager.getBreastsDistribution(user, true, sub);
+      },
+    },
+    {
+      key: 'hair_length',
+      cacheKey: 'hair_length_dist',
+      label: 'dbi:net:fetchData:hairLength',
+      fetch: () => {
+        sub('Loading hair-length distribution…');
+        return dataManager.getHairLengthDistribution(user, true, sub);
+      },
+    },
+    {
+      key: 'hair_color',
+      cacheKey: 'hair_color_dist',
+      label: 'dbi:net:fetchData:hairColor',
+      fetch: () => {
+        sub('Loading hair-color distribution…');
+        return dataManager.getHairColorDistribution(user, true, sub);
+      },
+    },
+    {
+      key: 'gender',
+      cacheKey: 'gender_dist',
+      label: 'dbi:net:fetchData:gender',
+      fetch: () => {
+        sub('Loading gender distribution…');
+        return dataManager.getGenderDistribution(user, true, sub);
+      },
+    },
+    {
+      key: 'commentary',
+      cacheKey: 'commentary_dist',
+      label: 'dbi:net:fetchData:commentary',
+      fetch: () => {
+        sub('Loading commentary distribution…');
+        return dataManager.getCommentaryDistribution(user, true, sub);
+      },
+    },
+    {
+      key: 'translation',
+      cacheKey: 'translation_dist',
+      label: 'dbi:net:fetchData:translation',
+      fetch: () => {
+        sub('Loading translation distribution…');
+        return dataManager.getTranslationDistribution(user, true, sub);
+      },
+    },
+  ];
+
+  const results = await Promise.all(
+    defs.map(d =>
+      swrStats<DistributionItem[]>(
+        dataManager,
+        d.cacheKey,
+        uploaderId,
+        d.fetch,
+        d.label,
+        ttl,
+      ),
+    ),
+  );
+
+  const distributions = {} as Record<HeavyDistKey, DistributionItem[]>;
+  const revalidators: Array<
+    [string, (() => Promise<DistributionItem[] | null>) | undefined]
+  > = [];
+  results.forEach((r, i) => {
+    distributions[defs[i].key] = r.data;
+    revalidators.push([defs[i].key, r.startRevalidate]);
+  });
+  return {distributions, revalidators};
+}
+
 /**
  * Discriminated union for `PieSlice.details`. Replaces the historic
  * `any` typing so click-handler / legend-link branching can be checked
@@ -151,9 +305,19 @@ export interface PieSlice {
  */
 export class UserAnalyticsDataService {
   private readonly db: Database;
+  private readonly rateLimiter: RateLimitedFetch | null;
 
-  constructor(db: Database) {
+  /**
+   * @param db The Dexie database instance.
+   * @param rateLimiter The app's shared rate limiter. Passing it keeps the
+   *   dashboard fetch (and the now-heavier post-paint SWR revalidate flood)
+   *   on the TabCoordinator-managed, 429-backoff-aware limiter instead of a
+   *   private bucket that would blow past Danbooru's server cap (audit H-1).
+   *   Optional so existing callers/tests that only need cache reads still work.
+   */
+  constructor(db: Database, rateLimiter: RateLimitedFetch | null = null) {
     this.db = db;
+    this.rateLimiter = rateLimiter;
   }
 
   /**
@@ -167,19 +331,14 @@ export class UserAnalyticsDataService {
    *   `renderDashboard` to update the loading spinner text live.
    * @return All data needed for the dashboard.
    */
-  // T-26 baseline: 210 LOC (10 over budget). Each of the 14 parallel
-  // top-level tasks needs a perfLogger.wrap + sub-status emit +
-  // tracker.step finalizer; splitting per-phase would either fragment
-  // the Promise.all shape that downstream destructures or invent a
-  // helper layer that hides the obvious one-to-one mapping. Borderline
-  // — revisit if it grows further.
-  // eslint-disable-next-line max-lines-per-function
+  // Fits within the 200-LOC budget since the nine heavy distributions were
+  // hoisted into `fetchHeavyDistributionsSwr` (SWR conversion, audit R2).
   async fetchDashboardData(
     context: ProfileContext,
     prefetched?: PrefetchedDashboardData,
     onProgress?: ReportProgress,
   ) {
-    const dataManager = new AnalyticsDataManager(this.db);
+    const dataManager = new AnalyticsDataManager(this.db, this.rateLimiter);
     // context.targetUser is guaranteed non-null when called from UserAnalyticsApp
     // (main.ts validates via isValidProfile() before instantiation).
 
@@ -220,7 +379,7 @@ export class UserAnalyticsDataService {
     const [
       stats,
       total,
-      otherDistributions,
+      distributionsSwr,
       statusSwr,
       ratingSwr,
       topPostsSwr,
@@ -229,7 +388,7 @@ export class UserAnalyticsDataService {
       scatterData,
       levelChangesSwr,
       timelineMilestones,
-      tagCloudGeneral,
+      tagCloudGeneralSwr,
       userStats,
       needsBackfill,
     ] = await Promise.all([
@@ -247,48 +406,14 @@ export class UserAnalyticsDataService {
             return dataManager.getTotalPostCount(user);
           })
       ).finally(() => tracker.step()),
-      // Distributions that were already cache-first before this work:
-      // they hit piestats immediately and need no SWR (their cache is
-      // only warmed on explicit sync, which is the existing behaviour).
-      // `sub` is passed to each method so per-tag count fetches appear
-      // in the spinner detail line.
-      perfLogger
-        .wrap('dbi:net:fetchData:distributions', () =>
-          Promise.all([
-            dataManager.getCharacterDistribution(user, false, sub),
-            dataManager.getCopyrightDistribution(user, false, sub),
-            dataManager.getFavCopyrightDistribution(user, false, sub),
-            dataManager.getBreastsDistribution(user, false, sub),
-            dataManager.getHairLengthDistribution(user, false, sub),
-            dataManager.getHairColorDistribution(user, false, sub),
-            dataManager.getGenderDistribution(user, false, sub),
-            dataManager.getCommentaryDistribution(user, false, sub),
-            dataManager.getTranslationDistribution(user, false, sub),
-          ]).then(
-            ([
-              char,
-              copy,
-              favCopy,
-              breasts,
-              hairL,
-              hairC,
-              gender,
-              commentary,
-              translation,
-            ]) => ({
-              character: char,
-              copyright: copy,
-              fav_copyright: favCopy,
-              breasts,
-              hair_length: hairL,
-              hair_color: hairC,
-              gender,
-              commentary,
-              translation,
-            }),
-          ),
-        )
-        .finally(() => tracker.step()),
+      // The nine heavy tag distributions — SWR (stale cache now, background
+      // revalidate post-paint). Moved off the blocking sync path so a
+      // post-sync open stays fast; see fetchHeavyDistributionsSwr. `sub` is
+      // passed through so a genuine cache-miss (first-ever open) still reports
+      // per-tag count fetches in the spinner detail line.
+      fetchHeavyDistributionsSwr(dataManager, user, uploaderId, sub).finally(
+        () => tracker.step(),
+      ),
       // Status + Rating previously fired 10 API calls on every open
       // (6 status + 4 rating). SWR-cached; v9.6.0 also passes the count
       // cache TTL so a sub-TTL cache hit skips the background revalidate
@@ -318,7 +443,11 @@ export class UserAnalyticsDataService {
       ).finally(() => tracker.step()),
       // SWR: return cached value now, revalidate in background. fresh fetch
       // uses forceRefresh=true so it bypasses the in-method cache and
-      // overwrites piestats via saveStats.
+      // overwrites piestats via saveStats. The count-cache TTL is now passed
+      // so a sub-TTL cache hit skips the background revalidate entirely —
+      // without it, `refreshCriticalStats` freshens these on sync and then the
+      // post-paint revalidate re-fetches the very same data seconds later
+      // (audit M-5). Matches the status/rating SWR calls above.
       swrStats(
         dataManager,
         'top_posts_by_type',
@@ -328,6 +457,7 @@ export class UserAnalyticsDataService {
           return dataManager.getTopPostsByType(user, true);
         },
         'dbi:net:fetchData:topPosts',
+        getCountCacheTtlMs(),
       ).finally(() => tracker.step()),
       swrStats(
         dataManager,
@@ -338,6 +468,7 @@ export class UserAnalyticsDataService {
           return dataManager.getRecentPopularPosts(user, true);
         },
         'dbi:net:fetchData:recentPopular',
+        getCountCacheTtlMs(),
       ).finally(() => tracker.step()),
       swrStats(
         dataManager,
@@ -348,6 +479,7 @@ export class UserAnalyticsDataService {
           return dataManager.getMilestones(user, isNsfwEnabled, 1000, true);
         },
         'dbi:net:fetchData:milestones1k',
+        getCountCacheTtlMs(),
       ).finally(() => tracker.step()),
       // Skip the scatter fetch entirely when the upload-count gate
       // (v9.6.0) will hide the widget anyway — the placeholder doesn't
@@ -368,6 +500,7 @@ export class UserAnalyticsDataService {
           return dataManager.getLevelChangeHistory(user, true);
         },
         'dbi:net:fetchData:levelChanges',
+        getCountCacheTtlMs(),
       ).finally(() => tracker.step()),
       perfLogger
         .wrap('dbi:net:fetchData:timelineMilestones', () => {
@@ -376,14 +509,23 @@ export class UserAnalyticsDataService {
         })
         .finally(() => tracker.step()),
       // Skip the tag-cloud fetch entirely when the upload-count gate
-      // (v9.6.0) will hide the widget anyway. Two cache + globals API
-      // calls saved per dashboard open for small users.
+      // (v9.6.0) will hide the widget anyway. Otherwise SWR: stale cache now,
+      // background revalidate post-paint (same as the heavy distributions).
       (prefetched && prefetched.totalCount < TAG_CLOUD_MIN_UPLOADS
-        ? Promise.resolve([])
-        : perfLogger.wrap('dbi:net:fetchData:tagCloudGeneral', () => {
-            sub('Loading tag cloud…');
-            return dataManager.getTagCloudData(user, 0);
-          })
+        ? Promise.resolve({data: [] as TagCloudItem[]} as SwrResult<
+            TagCloudItem[]
+          >)
+        : swrStats(
+            dataManager,
+            'tag_cloud_general',
+            uploaderId,
+            () => {
+              sub('Loading tag cloud…');
+              return dataManager.getTagCloudData(user, 0, true);
+            },
+            'dbi:net:fetchData:tagCloudGeneral',
+            getCountCacheTtlMs(),
+          )
       ).finally(() => tracker.step()),
       perfLogger
         .wrap('dbi:net:fetchData:userStats', () => {
@@ -404,11 +546,12 @@ export class UserAnalyticsDataService {
     // dashboard widgets replace the spinner DOM.
     tracker.finish();
 
-    // Recombine status + rating (SWR'd) with the other nine (cache-first).
+    // Recombine status + rating (SWR'd) with the nine heavy distributions
+    // (now SWR'd too — stale cache shown, revalidated post-paint).
     const distributions = {
       status: statusSwr.data,
       rating: ratingSwr.data,
-      ...otherDistributions,
+      ...distributionsSwr.distributions,
     };
 
     return {
@@ -418,6 +561,12 @@ export class UserAnalyticsDataService {
       distributions,
       statusStartRevalidate: statusSwr.startRevalidate,
       ratingStartRevalidate: ratingSwr.startRevalidate,
+      // Background revalidators for the nine heavy distributions + tag cloud.
+      // renderDashboard fires these post-paint via scheduleRevalidateAll; each
+      // forceRefresh re-fetch fires DanbooruInsights:DataUpdated so the pie's
+      // thumbnails live-patch (slice proportions land on the next open).
+      distributionRevalidators: distributionsSwr.revalidators,
+      tagCloudGeneralStartRevalidate: tagCloudGeneralSwr.startRevalidate,
       topPosts: topPostsSwr.data,
       topPostsStartRevalidate: topPostsSwr.startRevalidate,
       recentPopularPosts: recentPopularSwr.data,
@@ -429,7 +578,7 @@ export class UserAnalyticsDataService {
       levelChanges: levelChangesSwr.data,
       levelChangesStartRevalidate: levelChangesSwr.startRevalidate,
       timelineMilestones,
-      tagCloudGeneral,
+      tagCloudGeneral: tagCloudGeneralSwr.data,
       userStats,
       needsBackfill,
       dataManager,
