@@ -991,6 +991,8 @@ function renderResumeSyncView(
     // No-op progress callback — internal broadcast above handles UI updates.
     await app.dataManager.syncAllPosts(app.context.targetUser, () => {});
 
+    // A sync ran → force the deferred distributions to revalidate on re-render.
+    app.markSyncCompleted();
     void app.updateHeaderStatus();
     void app.renderDashboard();
   };
@@ -1054,6 +1056,12 @@ export class UserAnalyticsApp {
   /** Total upload count from the last updateHeaderStatus(); drives the
    *  ≤MAX_PREVIEW_ONLY_UPLOADS click→popover shortcut. null until first check. */
   private totalPostCount: number | null = null;
+
+  /** Set by any sync path and consumed by the next renderDashboard. When true,
+   *  the deferred pie distributions revalidate post-paint regardless of the
+   *  count-cache TTL, so their per-tag counts converge to fresh after a sync
+   *  (they are no longer force-refreshed on the blocking path — audit R2). */
+  private syncJustRan = false;
 
   /** The dashboard hover/pinned preview popover, created once in
    *  injectButton(). Hoisted to an instance field so updateHeaderStatus()
@@ -1410,6 +1418,11 @@ export class UserAnalyticsApp {
         );
       }
 
+      // A sync ran → the deferred pie distributions' per-tag counts may have
+      // moved. Flag it so the next renderDashboard forces their revalidate
+      // (past the count-cache TTL) and the live-patch converges them to fresh.
+      this.syncJustRan = true;
+
       if (animInterval) clearInterval(animInterval);
 
       // Final Status (Green)
@@ -1441,6 +1454,13 @@ export class UserAnalyticsApp {
       }
       void this.updateHeaderStatus('Sync Failed', '#ff4444');
     }
+  }
+
+  /** Flags that a sync completed outside performPartialSync (e.g. the
+   *  Resume-Sync view button) so the next renderDashboard forces the deferred
+   *  distributions to revalidate. */
+  markSyncCompleted(): void {
+    this.syncJustRan = true;
   }
 
   /**
@@ -1926,6 +1946,8 @@ export class UserAnalyticsApp {
         didQuickSync = true;
         await runQuickSync(content, this.dataManager, this.context.targetUser);
         this.isFullySynced = true;
+        // A sync ran → force deferred distributions to revalidate (see below).
+        this.syncJustRan = true;
         void this.updateHeaderStatus();
         // Restore the generic "Generating Report..." spinner before heavy
         // data fetch. The Quick Sync inner UI replaced the DOM, so capture
@@ -1942,6 +1964,12 @@ export class UserAnalyticsApp {
       const prefetched = didQuickSync
         ? undefined
         : {syncStats: preStats, totalCount: preTotal};
+      // Consume the sync flag (set by performPartialSync / quickSync branch /
+      // Resume-Sync button). When a sync ran, force the deferred distributions
+      // to revalidate post-paint so their per-tag counts converge to fresh
+      // regardless of the count-cache TTL.
+      const forceDistRevalidate = this.syncJustRan;
+      this.syncJustRan = false;
       const dashboardData = await perfLogger.wrap(
         'dbi:net:fetchData:total',
         () =>
@@ -1949,6 +1977,7 @@ export class UserAnalyticsApp {
             this.context,
             prefetched,
             reportProgress,
+            forceDistRevalidate,
           ),
       );
       // Only the values the main flow still touches — needsSync gate,

@@ -128,13 +128,21 @@ async function fetchHeavyDistributionsSwr(
   user: TargetUser,
   uploaderId: number,
   sub: (msg: string) => void,
+  forceRevalidate: boolean,
 ): Promise<{
   distributions: Record<HeavyDistKey, DistributionItem[]>;
   revalidators: Array<
     [string, (() => Promise<DistributionItem[] | null>) | undefined]
   >;
 }> {
-  const ttl = getCountCacheTtlMs();
+  // After a sync the per-tag counts may have moved (new uploads, deletions),
+  // so force a post-paint revalidate regardless of the count-cache TTL — the
+  // pie live-patch converges the shown counts to fresh within seconds without
+  // a reopen. On a plain browse-open (no sync) we honour the TTL so repeated
+  // opens don't re-run ~130 count fetches (audit R2 + M-5). Passing `undefined`
+  // to swrStats skips its fresh-cache short-circuit → always returns a
+  // revalidate starter.
+  const ttl = forceRevalidate ? undefined : getCountCacheTtlMs();
   const defs: Array<{
     key: HeavyDistKey;
     cacheKey: string;
@@ -335,10 +343,15 @@ export class UserAnalyticsDataService {
    */
   // Fits within the 200-LOC budget since the nine heavy distributions were
   // hoisted into `fetchHeavyDistributionsSwr` (SWR conversion, audit R2).
+  //
+  // `forceDistRevalidate` — set by renderDashboard when a sync just ran, so the
+  // deferred distributions revalidate post-paint regardless of TTL and their
+  // per-tag counts converge to fresh (the pie live-patches them in place).
   async fetchDashboardData(
     context: ProfileContext,
     prefetched?: PrefetchedDashboardData,
     onProgress?: ReportProgress,
+    forceDistRevalidate = false,
   ) {
     const dataManager = new AnalyticsDataManager(this.db, this.rateLimiter);
     // context.targetUser is guaranteed non-null when called from UserAnalyticsApp
@@ -413,9 +426,13 @@ export class UserAnalyticsDataService {
       // post-sync open stays fast; see fetchHeavyDistributionsSwr. `sub` is
       // passed through so a genuine cache-miss (first-ever open) still reports
       // per-tag count fetches in the spinner detail line.
-      fetchHeavyDistributionsSwr(dataManager, user, uploaderId, sub).finally(
-        () => tracker.step(),
-      ),
+      fetchHeavyDistributionsSwr(
+        dataManager,
+        user,
+        uploaderId,
+        sub,
+        forceDistRevalidate,
+      ).finally(() => tracker.step()),
       // Status + Rating previously fired 10 API calls on every open
       // (6 status + 4 rating). SWR-cached; v9.6.0 also passes the count
       // cache TTL so a sub-TTL cache hit skips the background revalidate
