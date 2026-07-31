@@ -172,6 +172,38 @@ function scheduleRevalidateAll(
 }
 
 /**
+ * Like scheduleRevalidateAll but for pie-relevant distributions. Each entry is
+ * `[cacheKey, starter]`; when a starter resolves with data that differs from
+ * what was painted (non-null), it dispatches DanbooruInsights:DataUpdated so
+ * the open pie live-patches that tab's proportions/counts/thumbs — no reopen
+ * needed (audit R2 follow-up). `null` (unchanged) or an absent starter (cache
+ * within TTL) dispatch nothing, so a fresh open costs no repaint.
+ */
+function schedulePieRevalidate(
+  entries: Array<[string, (() => Promise<unknown>) | undefined]>,
+): void {
+  for (const [cacheKey, starter] of entries) {
+    if (!starter) continue;
+    setTimeout(() => {
+      starter()
+        .then(fresh => {
+          // Starter resolves with fresh data only when it differs from what
+          // was painted; null means unchanged → nothing to repaint.
+          if (fresh === null) return;
+          window.dispatchEvent(
+            new CustomEvent('DanbooruInsights:DataUpdated', {
+              detail: {contentType: cacheKey, data: fresh},
+            }),
+          );
+        })
+        .catch((e: unknown) => {
+          log.warn(`Pie revalidate failed for ${cacheKey}`, {error: e});
+        });
+    }, 0);
+  }
+}
+
+/**
  * Renders the three summary cards (animated upload-stats pane, user
  * history with scrollable timeline, plus the per-card play/pause /
  * overflow-gradient wiring).
@@ -1985,21 +2017,28 @@ export class UserAnalyticsApp {
       // Update header status (ensure it's green if ready)
       void this.updateHeaderStatus();
 
-      // Fire SWR revalidations only now that the dashboard is painted. Any
-      // network traffic these start no longer blocks render.total. The
-      // cached values are already on screen — revalidate freshens piestats for
-      // the next open, and for the heavy distributions the forceRefresh
-      // re-fetch also fires DanbooruInsights:DataUpdated so the pie's
-      // thumbnails live-patch this session (audit R2). Starters are undefined
-      // when the cache was within TTL (nothing to do), so this is cheap.
+      // Fire SWR revalidations only now that the dashboard is painted — the
+      // cached values are already on screen, so this no longer blocks
+      // render.total. Starters are undefined when the cache was within TTL
+      // (nothing to do), so a fresh open costs nothing here.
+      //
+      // Pie-relevant distributions go through schedulePieRevalidate: when a
+      // revalidate returns changed data it dispatches DataUpdated and the open
+      // pie live-patches that tab's proportions/counts/thumbs in place (no
+      // reopen needed — audit R2 follow-up).
+      schedulePieRevalidate([
+        ['status_dist', statusStartRevalidate],
+        ['rating_dist', ratingStartRevalidate],
+        ...distributionRevalidators,
+      ]);
+      // The rest only warm piestats for the next open (top/recent posts,
+      // milestones, level history render from their own widgets; the tag cloud
+      // widget refreshes on tab switch).
       scheduleRevalidateAll([
-        ['status', statusStartRevalidate],
-        ['rating', ratingStartRevalidate],
         ['topPosts', topPostsStartRevalidate],
         ['recentPopular', recentPopularStartRevalidate],
         ['milestones1k', milestones1kStartRevalidate],
         ['levelChanges', levelChangesStartRevalidate],
-        ...distributionRevalidators,
         ['tagCloudGeneral', tagCloudGeneralStartRevalidate],
       ]);
     } finally {

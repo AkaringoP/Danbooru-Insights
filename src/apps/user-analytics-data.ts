@@ -238,12 +238,14 @@ async function fetchHeavyDistributionsSwr(
   );
 
   const distributions = {} as Record<HeavyDistKey, DistributionItem[]>;
+  // Keyed by piestats cacheKey (contentType) so renderDashboard can dispatch
+  // DanbooruInsights:DataUpdated with a key the pie widget's map understands.
   const revalidators: Array<
     [string, (() => Promise<DistributionItem[] | null>) | undefined]
   > = [];
   results.forEach((r, i) => {
     distributions[defs[i].key] = r.data;
-    revalidators.push([defs[i].key, r.startRevalidate]);
+    revalidators.push([defs[i].cacheKey, r.startRevalidate]);
   });
   return {distributions, revalidators};
 }
@@ -561,10 +563,11 @@ export class UserAnalyticsDataService {
       distributions,
       statusStartRevalidate: statusSwr.startRevalidate,
       ratingStartRevalidate: ratingSwr.startRevalidate,
-      // Background revalidators for the nine heavy distributions + tag cloud.
-      // renderDashboard fires these post-paint via scheduleRevalidateAll; each
-      // forceRefresh re-fetch fires DanbooruInsights:DataUpdated so the pie's
-      // thumbnails live-patch (slice proportions land on the next open).
+      // Background revalidators for the nine heavy distributions, keyed by
+      // piestats cacheKey. renderDashboard fires these post-paint via
+      // schedulePieRevalidate; when one returns fresh (changed) data it
+      // dispatches DanbooruInsights:DataUpdated so the open pie live-patches
+      // that tab's proportions/counts/thumbs in place — no reopen needed.
       distributionRevalidators: distributionsSwr.revalidators,
       tagCloudGeneralStartRevalidate: tagCloudGeneralSwr.startRevalidate,
       topPosts: topPostsSwr.data,

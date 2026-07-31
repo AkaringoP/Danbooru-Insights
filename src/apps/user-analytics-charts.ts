@@ -1949,7 +1949,27 @@ export function renderPieWidget(
     });
   };
 
-  // Listen for lazy-loaded thumbnail updates
+  // Live-patch: a background SWR revalidate (post-paint) or a lazy thumbnail
+  // fetch fires DanbooruInsights:DataUpdated carrying the tab's fresh full
+  // data. We replace that tab's slice data — proportions, counts AND thumbs —
+  // so a background refresh lands on the open dashboard without a reopen
+  // (audit R2 follow-up). The 11 pie tabs are covered; the app dispatches for
+  // status/rating/gender/commentary/translation (no thumbnails, so
+  // enrichThumbnails never fires for them) and the thumb-bearing tabs get a
+  // (coalesced) event from both enrichThumbnails and the app.
+  const PIE_KEY_BY_CONTENT: Record<string, string> = {
+    character_dist: 'character',
+    copyright_dist: 'copyright',
+    fav_copyright_dist: 'fav_copyright',
+    breasts_dist: 'breasts',
+    hair_length_dist: 'hair_length',
+    hair_color_dist: 'hair_color',
+    gender_dist: 'gender',
+    commentary_dist: 'commentary',
+    translation_dist: 'translation',
+    status_dist: 'status',
+    rating_dist: 'rating',
+  };
   const onPieDataUpdate = (e: Event) => {
     if (!document.body.contains(container)) {
       window.removeEventListener(
@@ -1959,42 +1979,54 @@ export function renderPieWidget(
       return;
     }
     const {contentType, data} = (e as CustomEvent).detail;
-    const keyMap: Record<string, string> = {
-      character_dist: 'character',
-      copyright_dist: 'copyright',
-      fav_copyright_dist: 'fav_copyright',
-      breasts_dist: 'breasts',
-      hair_length_dist: 'hair_length',
-      hair_color_dist: 'hair_color',
-      rating_dist: 'rating',
-    };
-    const key = keyMap[contentType as string];
+    const key = PIE_KEY_BY_CONTENT[contentType as string];
+    if (!key || !pieData[key] || !Array.isArray(data)) return;
 
-    if (key && pieData[key]) {
-      const incomingMap = new Map(
-        (data as PieTabItem[]).map((d: PieTabItem) => [d.name, d]),
-      );
-      const currentData = pieData[key];
+    // Normalize the incoming raw distribution exactly like the initial load /
+    // fetchDistributionForTab does, so a live-patched tab matches the lazy
+    // path (status needs its colour overlay; frequency tabs need value/pct
+    // preprocessing).
+    const incoming = data as PieTabItem[];
+    let next: PieTabItem[];
+    if (key === 'status') {
+      next = incoming.map((d: PieTabItem) => ({
+        ...d,
+        color:
+          STATUS_COLORS[
+            (d as {name?: string}).name as keyof typeof STATUS_COLORS
+          ] || '#888',
+      }));
+    } else if (
+      key === 'breasts' ||
+      key === 'gender' ||
+      key === 'commentary' ||
+      key === 'translation'
+    ) {
+      next = preprocessFrequencyTab(incoming);
+    } else {
+      next = incoming.map((d: PieTabItem) => ({...d}));
+    }
 
-      currentData.forEach((item: PieTabItem) => {
-        const update = incomingMap.get(item.name);
-        if (update && update.thumb && item.thumb !== update.thumb) {
-          item.thumb = update.thumb;
-          const withDetails = item as PieTabItem & {
-            details?: {thumb: string | null};
-          };
-          if (withDetails.details) withDetails.details.thumb = update.thumb;
-        }
-      });
-
-      if (currentPieTab === key) {
-        // Mutation above already lands on `pieData` (and the slices'
-        // details.thumb), so the next non-hover render will pick it up.
-        // Skip the render itself while the user is exploring a sub-chart
-        // so we don't snap the view back to the top-level pie mid-hover.
-        if (subChartIsActive) return;
-        requestRender();
+    // Preserve an existing thumbnail when the fresh row lacks one — a transient
+    // thumb-fetch miss on revalidate shouldn't blank an already-good thumb.
+    const prevByName = new Map(
+      pieData[key].map((it: PieTabItem) => [it.name, it]),
+    );
+    next.forEach((it: PieTabItem) => {
+      if (!it.thumb) {
+        const prev = prevByName.get(it.name);
+        if (prev?.thumb) it.thumb = prev.thumb;
       }
+    });
+
+    pieData[key] = next;
+
+    if (currentPieTab === key) {
+      // Skip the render itself while the user is exploring a sub-chart so we
+      // don't snap the view back to the top-level pie mid-hover; the mutated
+      // pieData is picked up by the next natural render.
+      if (subChartIsActive) return;
+      requestRender();
     }
   };
   window.addEventListener('DanbooruInsights:DataUpdated', onPieDataUpdate);
