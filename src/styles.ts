@@ -277,6 +277,26 @@ const GLOBAL_CSS = `
     .di-pie-tab:hover { background: var(--di-btn-hover-bg, #dddddd); }
     .di-pie-tab.active { background: var(--di-btn-active-bg, #555555); color: var(--di-btn-active-text, #ffffff); box-shadow: 0 1px 3px var(--di-shadow, rgba(0, 0, 0, 0.2)); }
     .di-pie-tab:not(.active):hover { background: var(--di-btn-hover-bg, #dddddd); }
+    /* "Refreshing counts" pill on the pie header — signals the current tab's
+       per-tag counts are being revalidated in the background so a briefly
+       stale cached value isn't mistaken for final. Toggled via .is-active. */
+    .di-pie-updating-badge {
+        display: none;
+        align-items: center;
+        gap: 5px;
+        font-size: 10px;
+        color: var(--di-text-muted, #888);
+        background: var(--di-bg-tertiary, #f0f0f0);
+        border-radius: 10px;
+        padding: 2px 8px;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+    .di-pie-updating-badge.is-active { display: inline-flex; }
+    .di-pie-updating-badge .di-pie-updating-spin {
+        display: inline-block;
+        animation: di-spin 0.9s linear infinite;
+    }
 
     /* -- User Rankings (Tag Analytics) -- */
     .di-ranking-username:hover { font-weight: bold; }

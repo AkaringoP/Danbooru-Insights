@@ -183,8 +183,18 @@ function schedulePieRevalidate(
   entries: Array<[string, (() => Promise<unknown>) | undefined]>,
   priorityCacheKey: string,
 ): void {
-  const fire = (cacheKey: string, starter: () => Promise<unknown>) =>
-    starter()
+  const fire = (cacheKey: string, starter: () => Promise<unknown>) => {
+    // Announce refresh start/end so the pie can show an "Updating…" badge on
+    // the current tab (a briefly-stale cached count then reads as pending, not
+    // final). Fires regardless of whether the data actually changed.
+    const setRefreshing = (active: boolean) =>
+      window.dispatchEvent(
+        new CustomEvent('DanbooruInsights:PieTabRefreshing', {
+          detail: {contentType: cacheKey, active},
+        }),
+      );
+    setRefreshing(true);
+    return starter()
       .then(fresh => {
         // Starter resolves with fresh data only when it differs from what
         // was painted; null means unchanged → nothing to repaint.
@@ -197,7 +207,9 @@ function schedulePieRevalidate(
       })
       .catch((e: unknown) => {
         log.warn(`Pie revalidate failed for ${cacheKey}`, {error: e});
-      });
+      })
+      .finally(() => setRefreshing(false));
+  };
 
   // Revalidate the *visible* tab first and await it, THEN fan the rest out.
   // The pie shows one tab at a time; without this, the tab the user is looking

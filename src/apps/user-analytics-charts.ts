@@ -2044,6 +2044,41 @@ export function renderPieWidget(
   };
   window.addEventListener('DanbooruInsights:DataUpdated', onPieDataUpdate);
 
+  // "Updating…" badge: shown while the *current* tab's per-tag counts are
+  // being revalidated in the background. The app dispatches PieTabRefreshing
+  // with active:true when a tab's revalidate starts and active:false when it
+  // settles (changed or not), so a briefly-stale cached count isn't mistaken
+  // for the final value. Only the visible tab's state drives the badge.
+  const refreshingTabs = new Set<string>();
+  const updatingBadge = container.querySelector(
+    '.di-pie-updating-badge',
+  ) as HTMLElement | null;
+  const updatePieUpdatingBadge = () => {
+    updatingBadge?.classList.toggle(
+      'is-active',
+      refreshingTabs.has(currentPieTab),
+    );
+  };
+  const onPieTabRefreshing = (e: Event) => {
+    if (!document.body.contains(container)) {
+      window.removeEventListener(
+        'DanbooruInsights:PieTabRefreshing',
+        onPieTabRefreshing,
+      );
+      return;
+    }
+    const {contentType, active} = (e as CustomEvent).detail;
+    const tab = PIE_KEY_BY_CONTENT[contentType as string];
+    if (!tab) return;
+    if (active) refreshingTabs.add(tab);
+    else refreshingTabs.delete(tab);
+    if (tab === currentPieTab) updatePieUpdatingBadge();
+  };
+  window.addEventListener(
+    'DanbooruInsights:PieTabRefreshing',
+    onPieTabRefreshing,
+  );
+
   /**
    * Handles click events on pie chart slices. Delegates the per-tab
    * URL branching to `buildSearchQuery` so the legend (which links to
@@ -2132,6 +2167,9 @@ export function renderPieWidget(
                      <button class="di-pie-tab" data-mode="hair_color" title="Hair Color">Hair_C</button>
                  </div>
              </div>
+             <span class="di-pie-updating-badge" title="Refreshing this tab's counts in the background">
+                 <span class="di-pie-updating-spin">⟳</span>Updating…
+             </span>
          </div>
          <div class="pie-content" style="flex:1; display:flex; justify-content:center; align-items:center; min-height:160px;">
              Loading...
@@ -2176,6 +2214,8 @@ export function renderPieWidget(
       if (mode && currentPieTab !== mode) {
         currentPieTab = mode;
         updatePieTabs();
+        // Reflect the newly-selected tab's background-refresh state.
+        updatePieUpdatingBadge();
 
         const pieContent = container.querySelector(
           '.pie-content',
