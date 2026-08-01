@@ -4,6 +4,24 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.8.6 — All dashboard traffic goes through the shared rate limiter
+
+### Fixed
+- **Four dashboard code paths bypassed rate limiting.** `DataManager` builds
+  its own private token bucket when no limiter is handed to it, and the header
+  status refresh, the random-post refresh button, the milestone widget and the
+  monthly activity chart each constructed a manager without one. Requests from
+  those paths ignored the multi-tab request split and kept firing while the
+  shared limiter was backing off from a 429 — most visibly right after a
+  dashboard render, when the header refresh overlapped the main data fetch.
+  They now reuse the app's manager, so every dashboard request is accounted
+  for in one place.
+
+  An architecture test now fails the build if a manager is constructed without
+  a limiter anywhere under `src/apps/`.
+
+---
+
 ## v9.8.5 — Faster dashboard open after a partial sync
 
 ### Changed
