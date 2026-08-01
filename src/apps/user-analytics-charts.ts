@@ -2392,7 +2392,7 @@ export function renderTopPostsWidget(
         label === 'Char' && tags.split(' ').length > 5
           ? tagList.split(' ').slice(0, 5).join(', ') + '...'
           : tagList;
-      return `<div>${icon} <strong>${label}:</strong> ${displayTags}</div>`;
+      return `<div>${icon} <strong>${label}:</strong> ${escapeHtml(displayTags)}</div>`;
     };
 
     const artistLine = createTagLine(

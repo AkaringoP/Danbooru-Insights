@@ -15,7 +15,7 @@ import {
 import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
 import type {ProgressState, ReportProgress} from './progress-tracker';
-import {getLevelClass} from '../utils';
+import {escapeHtml, getLevelClass} from '../utils';
 import {
   renderPieWidget,
   renderTopPostsWidget,
@@ -49,6 +49,7 @@ import {isTouchDevice} from '../ui/two-step-tap';
 import {showToast} from '../ui/toast';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
+import type {SyncOutcome} from '../types';
 
 const log = createLogger('UserAnalytics');
 
@@ -131,7 +132,7 @@ function renderZeroUploadsView(
   header.style.marginBottom = '25px';
   header.innerHTML = `
           <h2 style="margin-top:0; color:var(--di-text, #333); margin-bottom:4px;">Analytics Dashboard</h2>
-          <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(user.level_string)}">${user.name}</span></p>
+          <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(user.level_string)}">${escapeHtml(user.name)}</span></p>
         `;
   content.appendChild(header);
 
@@ -151,6 +152,22 @@ function renderZeroUploadsView(
 type DashboardData = Awaited<
   ReturnType<UserAnalyticsDataService['fetchDashboardData']>
 >;
+
+/**
+ * Surface a partial sync. A worker that exhausts its retries stops quietly, so
+ * the sync resolves normally with only some pages committed and the UI would
+ * otherwise paint a full-success state over partial data. The committed rows
+ * are prefix-consistent, so the next open resumes from where this one stopped
+ * — the user just needs to know the report isn't complete yet (audit M-2).
+ */
+function warnIfSyncIncomplete(outcome: SyncOutcome): void {
+  if (outcome.complete) return;
+  showToast({
+    type: 'warn',
+    message:
+      'Sync incomplete — some posts could not be fetched. It will resume next time you open the report.',
+  });
+}
 
 /**
  * Fire SWR-revalidate starters as detached microtasks so they don't block
@@ -833,7 +850,7 @@ function buildDashboardHeader(
   header.innerHTML = `
       <div>
          <h2 style="margin-top:0; color:var(--di-text, #333); margin-bottom:4px;">Analytics Dashboard</h2>
-         <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(user.level_string)}">${user.name}</span></p>
+         <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(user.level_string)}">${escapeHtml(user.name)}</span></p>
       </div>
        <div id="analytics-header-controls" style="display:none; align-items:center;">
          <label style="display:flex; align-items:center; margin-right:15px; font-size:13px; color:var(--di-text-secondary, #666); cursor:pointer; user-select:none;">
@@ -977,7 +994,7 @@ function renderResumeSyncView(
   if (total === 0 && stats.count > 0)
     msg = `We have <strong>${stats.count}</strong> posts synced. Total count unavailable.`;
   if (stats.count === 0)
-    msg = `To generate the report, we need to fetch all post metadata for <strong>${app.context.targetUser.name}</strong>.`;
+    msg = `To generate the report, we need to fetch all post metadata for <strong>${escapeHtml(app.context.targetUser.name)}</strong>.`;
 
   syncDiv.innerHTML = `
         <div style="font-size:48px; margin-bottom:20px;">💾</div>
@@ -1066,7 +1083,11 @@ function renderResumeSyncView(
     };
 
     // No-op progress callback — internal broadcast above handles UI updates.
-    await app.dataManager.syncAllPosts(app.context.targetUser, () => {});
+    const outcome = await app.dataManager.syncAllPosts(
+      app.context.targetUser,
+      () => {},
+    );
+    warnIfSyncIncomplete(outcome);
 
     // A sync ran → force the deferred distributions to revalidate on re-render.
     app.markSyncCompleted();
@@ -1483,16 +1504,21 @@ export class UserAnalyticsApp {
         if (shouldRender) this.toggleModal(true);
         return;
       }
+      // quickSync throws on any fetch failure, so reaching the code below on
+      // that path means it completed; only the worker-pool sync can finish
+      // partially.
+      let syncOutcome: SyncOutcome = {complete: true};
       if (syncTotal <= MAX_QUICK_SYNC_POSTS) {
         await this.dataManager.quickSyncAllPosts(
           this.context.targetUser,
           onProgress,
         );
       } else {
-        await this.dataManager.syncAllPosts(
+        syncOutcome = await this.dataManager.syncAllPosts(
           this.context.targetUser,
           onProgress,
         );
+        warnIfSyncIncomplete(syncOutcome);
       }
 
       // A sync ran → the deferred pie distributions' per-tag counts may have
@@ -1502,15 +1528,21 @@ export class UserAnalyticsApp {
 
       if (animInterval) clearInterval(animInterval);
 
-      // Final Status (Green)
+      // Final Status (Green) — but never claim "Synced" over a partial run
+      // the toast just flagged; the no-arg form recomputes an honest
+      // count-based status instead.
       if (shouldRender) {
-        const finalStats = await this.dataManager.getSyncStats(
-          this.context.targetUser,
-        );
-        void this.updateHeaderStatus(
-          `Synced: ${finalStats.count.toLocaleString()} / ${finalStats.count.toLocaleString()}`,
-          '#00ba7c',
-        );
+        if (syncOutcome.complete) {
+          const finalStats = await this.dataManager.getSyncStats(
+            this.context.targetUser,
+          );
+          void this.updateHeaderStatus(
+            `Synced: ${finalStats.count.toLocaleString()} / ${finalStats.count.toLocaleString()}`,
+            '#00ba7c',
+          );
+        } else {
+          void this.updateHeaderStatus();
+        }
       }
 
       if (btn) {
@@ -1528,6 +1560,13 @@ export class UserAnalyticsApp {
         btn.innerHTML = 'ERR';
         (btn as HTMLButtonElement).disabled = false;
         btn.style.cursor = 'pointer';
+        // Leave 'ERR' visible briefly, then restore the button's normal
+        // label — otherwise it's stuck reading "ERR" until a reload. Skip if
+        // a retry already re-labelled the button ("Fetching…"), so the
+        // timer can't clobber a run that started in the meantime.
+        setTimeout(() => {
+          if (btn?.innerHTML === 'ERR') btn.innerHTML = originalText;
+        }, 2000);
       }
       void this.updateHeaderStatus('Sync Failed', '#ff4444');
     }
