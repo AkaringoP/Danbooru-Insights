@@ -3628,17 +3628,51 @@ export class AnalyticsDataManager extends DataManager {
 
     // Method C: DOM Fallback
     try {
-      const statsLink = document.querySelector(
-        '#danbooru-grass-wrapper > div:nth-child(1) > table > tbody > tr:nth-child(6) > td > a:nth-child(1)',
-      );
-      if (statsLink) {
-        return parseInt((statsLink.textContent ?? '').replace(/,/g, ''), 10);
+      const parsed = this.parseUploadCountFromDom();
+      // A malformed/absent count parses to NaN; every comparison against
+      // NaN is false, which would put callers in a re-sync-on-every-click
+      // loop. Fall through to the "could not determine" return instead.
+      if (Number.isFinite(parsed)) {
+        return parsed;
       }
     } catch (_e3: unknown) {
       log.debug('Failed to parse DOM stats', {error: _e3});
     }
 
     return 0; // Failed
+  }
+
+  /**
+   * Reads the "Uploads" count out of the profile page's statistics table
+   * (rendered inside our `#danbooru-grass-wrapper`). Matches on the row's
+   * label text rather than a fixed row index — a positional selector
+   * silently reads a different row (e.g. "Deleted Uploads") if Danbooru
+   * reorders the table — and falls back to the previous positional selector
+   * if no labeled row is found, so currently-working pages don't regress.
+   * @return {number} Parsed count, or NaN if none could be determined.
+   */
+  private parseUploadCountFromDom(): number {
+    const rows = document.querySelectorAll('#danbooru-grass-wrapper table tr');
+    for (const row of rows) {
+      const labelCell = row.querySelector('th') ?? row.querySelector('td');
+      const label = (labelCell?.textContent ?? '').trim().toLowerCase();
+      if (!label.includes('upload') || label.includes('deleted')) continue;
+
+      const cells = row.querySelectorAll('td');
+      const valueCell = cells[cells.length - 1] ?? row.querySelector('td');
+      // The count is normally a link (to /posts?tags=user:<name>), but a
+      // plain-text cell is still worth parsing before giving up.
+      const valueText = (valueCell?.querySelector('a') ?? valueCell)
+        ?.textContent;
+      return parseInt((valueText ?? '').replace(/,/g, ''), 10);
+    }
+
+    const statsLink = document.querySelector(
+      '#danbooru-grass-wrapper > div:nth-child(1) > table > tbody > tr:nth-child(6) > td > a:nth-child(1)',
+    );
+    return statsLink
+      ? parseInt((statsLink.textContent ?? '').replace(/,/g, ''), 10)
+      : NaN;
   }
 
   /**

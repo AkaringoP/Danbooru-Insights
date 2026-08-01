@@ -1,6 +1,7 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
 import {createBodyTooltip} from './popover-utils';
+import {escapeHtml} from '../utils';
 import type {D3Any, TagCloudItem} from '../types';
 import {
   isTouchDevice,
@@ -290,7 +291,7 @@ export function renderTagCloudWidget(
           d3.select(this)
             .style('opacity', 1)
             .style('font-size', `${d.size * 1.08}px`);
-          cloudTooltip.innerHTML = `<strong>${d.text}</strong> — ${(d.frequency * 100).toFixed(2)}% · ${d.count.toLocaleString()} posts`;
+          cloudTooltip.innerHTML = `<strong>${escapeHtml(d.text)}</strong> — ${(d.frequency * 100).toFixed(2)}% · ${d.count.toLocaleString()} posts`;
           cloudTooltip.style.opacity = '1';
           const rect = (this as Element).getBoundingClientRect();
           cloudTooltip.style.left = `${rect.left + window.scrollX + rect.width / 2 - cloudTooltip.offsetWidth / 2}px`;

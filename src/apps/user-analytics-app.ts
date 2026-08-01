@@ -15,7 +15,7 @@ import {
 import {perfLogger} from '../core/perf-logger';
 import {UserAnalyticsDataService} from './user-analytics-data';
 import type {ProgressState, ReportProgress} from './progress-tracker';
-import {getLevelClass} from '../utils';
+import {escapeHtml, getLevelClass} from '../utils';
 import {
   renderPieWidget,
   renderTopPostsWidget,
@@ -131,7 +131,7 @@ function renderZeroUploadsView(
   header.style.marginBottom = '25px';
   header.innerHTML = `
           <h2 style="margin-top:0; color:var(--di-text, #333); margin-bottom:4px;">Analytics Dashboard</h2>
-          <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(user.level_string)}">${user.name}</span></p>
+          <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(user.level_string)}">${escapeHtml(user.name)}</span></p>
         `;
   content.appendChild(header);
 
@@ -833,7 +833,7 @@ function buildDashboardHeader(
   header.innerHTML = `
       <div>
          <h2 style="margin-top:0; color:var(--di-text, #333); margin-bottom:4px;">Analytics Dashboard</h2>
-         <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(user.level_string)}">${user.name}</span></p>
+         <p style="color:var(--di-text-secondary, #666); margin:0;">Detailed statistics and history for <span class="${getLevelClass(user.level_string)}">${escapeHtml(user.name)}</span></p>
       </div>
        <div id="analytics-header-controls" style="display:none; align-items:center;">
          <label style="display:flex; align-items:center; margin-right:15px; font-size:13px; color:var(--di-text-secondary, #666); cursor:pointer; user-select:none;">
@@ -977,7 +977,7 @@ function renderResumeSyncView(
   if (total === 0 && stats.count > 0)
     msg = `We have <strong>${stats.count}</strong> posts synced. Total count unavailable.`;
   if (stats.count === 0)
-    msg = `To generate the report, we need to fetch all post metadata for <strong>${app.context.targetUser.name}</strong>.`;
+    msg = `To generate the report, we need to fetch all post metadata for <strong>${escapeHtml(app.context.targetUser.name)}</strong>.`;
 
   syncDiv.innerHTML = `
         <div style="font-size:48px; margin-bottom:20px;">💾</div>
@@ -1528,6 +1528,13 @@ export class UserAnalyticsApp {
         btn.innerHTML = 'ERR';
         (btn as HTMLButtonElement).disabled = false;
         btn.style.cursor = 'pointer';
+        // Leave 'ERR' visible briefly, then restore the button's normal
+        // label — otherwise it's stuck reading "ERR" until a reload. Skip if
+        // a retry already re-labelled the button ("Fetching…"), so the
+        // timer can't clobber a run that started in the meantime.
+        setTimeout(() => {
+          if (btn?.innerHTML === 'ERR') btn.innerHTML = originalText;
+        }, 2000);
       }
       void this.updateHeaderStatus('Sync Failed', '#ff4444');
     }
