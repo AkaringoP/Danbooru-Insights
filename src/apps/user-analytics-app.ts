@@ -193,8 +193,10 @@ let lazyPieRevalidateListener: ((e: Event) => void) | null = null;
  * non-priority starter is registered *lazily*: the pie dispatches
  * `PieTabActivated` on a tab switch and we revalidate that tab then — once,
  * with its "Updating…" badge. A tab that is never viewed never revalidates.
+ *
+ * Exported for the eager/lazy split's regression tests.
  */
-function schedulePieRevalidate(
+export function schedulePieRevalidate(
   entries: Array<[string, (() => Promise<unknown>) | undefined]>,
   priorityCacheKey: string,
 ): void {

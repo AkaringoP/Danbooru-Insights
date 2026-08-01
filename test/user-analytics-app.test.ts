@@ -35,7 +35,10 @@ vi.mock('../src/ui/two-step-tap', async importOriginal => {
   return {...actual, isTouchDevice: vi.fn(() => false)};
 });
 
-import {UserAnalyticsApp} from '../src/apps/user-analytics-app';
+import {
+  UserAnalyticsApp,
+  schedulePieRevalidate,
+} from '../src/apps/user-analytics-app';
 import {isTouchDevice} from '../src/ui/two-step-tap';
 import {AnalyticsDataManager} from '../src/core/analytics-data-manager';
 import {SettingsManager} from '../src/core/settings';
@@ -331,5 +334,159 @@ describe('UserAnalyticsApp.buildMiniReportButton', () => {
     const priv = app as unknown as PrivateApp;
     priv.previewPopover = null;
     expect(priv.buildMiniReportButton()).toBeNull();
+  });
+});
+
+// ============================================================
+// schedulePieRevalidate — eager visible tab / lazy deferred tabs
+// ============================================================
+
+describe('schedulePieRevalidate', () => {
+  /** Lets the setTimeout(0) starter and its first .then run. */
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0));
+
+  const activate = (contentType: string) =>
+    window.dispatchEvent(
+      new CustomEvent('DanbooruInsights:PieTabActivated', {
+        detail: {contentType},
+      }),
+    );
+
+  it('revalidates the visible tab on open and no others', async () => {
+    const copyright = vi.fn().mockResolvedValue(null);
+    const character = vi.fn().mockResolvedValue(null);
+    const status = vi.fn().mockResolvedValue(null);
+
+    schedulePieRevalidate(
+      [
+        ['status_dist', status],
+        ['copyright_dist', copyright],
+        ['character_dist', character],
+      ],
+      'copyright_dist',
+    );
+    await flush();
+
+    // The tab the user is looking at converges immediately...
+    expect(copyright).toHaveBeenCalledTimes(1);
+    // ...the other eight stay unfetched (no ~250-call background flood).
+    expect(character).not.toHaveBeenCalled();
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it('announces refresh start/end for the visible tab so the badge shows', async () => {
+    const seen: Array<{contentType: string; active: boolean}> = [];
+    const onRefreshing = (e: Event) =>
+      seen.push((e as CustomEvent).detail as never);
+    window.addEventListener('DanbooruInsights:PieTabRefreshing', onRefreshing);
+
+    schedulePieRevalidate(
+      [['copyright_dist', vi.fn().mockResolvedValue(null)]],
+      'copyright_dist',
+    );
+    await flush();
+    await flush();
+
+    window.removeEventListener(
+      'DanbooruInsights:PieTabRefreshing',
+      onRefreshing,
+    );
+    expect(seen).toEqual([
+      {contentType: 'copyright_dist', active: true},
+      {contentType: 'copyright_dist', active: false},
+    ]);
+  });
+
+  it('live-patches the pie when the visible tab came back changed', async () => {
+    const fresh = [{name: 'idolmaster', count: 26856}];
+    const seen: Array<{contentType: string; data: unknown}> = [];
+    const onUpdate = (e: Event) =>
+      seen.push((e as CustomEvent).detail as never);
+    window.addEventListener('DanbooruInsights:DataUpdated', onUpdate);
+
+    schedulePieRevalidate(
+      [['copyright_dist', vi.fn().mockResolvedValue(fresh)]],
+      'copyright_dist',
+    );
+    await flush();
+    await flush();
+
+    window.removeEventListener('DanbooruInsights:DataUpdated', onUpdate);
+    expect(seen).toEqual([{contentType: 'copyright_dist', data: fresh}]);
+  });
+
+  it('revalidates a deferred tab once, when it is activated', async () => {
+    const character = vi.fn().mockResolvedValue(null);
+    schedulePieRevalidate(
+      [
+        ['copyright_dist', vi.fn().mockResolvedValue(null)],
+        ['character_dist', character],
+      ],
+      'copyright_dist',
+    );
+    await flush();
+    expect(character).not.toHaveBeenCalled();
+
+    activate('character_dist');
+    await flush();
+    expect(character).toHaveBeenCalledTimes(1);
+
+    // Switching back to an already-revalidated tab must not refetch.
+    activate('character_dist');
+    await flush();
+    expect(character).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores activation of a tab whose cache was within TTL', async () => {
+    schedulePieRevalidate(
+      [
+        ['copyright_dist', vi.fn().mockResolvedValue(null)],
+        ['character_dist', undefined],
+      ],
+      'copyright_dist',
+    );
+    await flush();
+
+    // No starter → nothing to fire, and no PieTabRefreshing (no phantom badge).
+    const seen: Event[] = [];
+    const onRefreshing = (e: Event) => seen.push(e);
+    window.addEventListener('DanbooruInsights:PieTabRefreshing', onRefreshing);
+    activate('character_dist');
+    await flush();
+    window.removeEventListener(
+      'DanbooruInsights:PieTabRefreshing',
+      onRefreshing,
+    );
+    expect(seen).toEqual([]);
+  });
+
+  it('does not stack lazy listeners across dashboard re-opens', async () => {
+    const firstOpen = vi.fn().mockResolvedValue(null);
+    schedulePieRevalidate(
+      [
+        ['copyright_dist', vi.fn().mockResolvedValue(null)],
+        ['character_dist', firstOpen],
+      ],
+      'copyright_dist',
+    );
+    await flush();
+
+    const secondOpen = vi.fn().mockResolvedValue(null);
+    schedulePieRevalidate(
+      [
+        ['copyright_dist', vi.fn().mockResolvedValue(null)],
+        ['character_dist', secondOpen],
+      ],
+      'copyright_dist',
+    );
+    await flush();
+
+    activate('character_dist');
+    await flush();
+
+    // Only the current open's starter runs; the previous open's listener was
+    // removed, so its stale closure never refires.
+    expect(secondOpen).toHaveBeenCalledTimes(1);
+    expect(firstOpen).not.toHaveBeenCalled();
   });
 });
