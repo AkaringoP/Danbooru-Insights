@@ -181,26 +181,41 @@ function scheduleRevalidateAll(
  */
 function schedulePieRevalidate(
   entries: Array<[string, (() => Promise<unknown>) | undefined]>,
+  priorityCacheKey: string,
 ): void {
-  for (const [cacheKey, starter] of entries) {
-    if (!starter) continue;
-    setTimeout(() => {
-      starter()
-        .then(fresh => {
-          // Starter resolves with fresh data only when it differs from what
-          // was painted; null means unchanged → nothing to repaint.
-          if (fresh === null) return;
-          window.dispatchEvent(
-            new CustomEvent('DanbooruInsights:DataUpdated', {
-              detail: {contentType: cacheKey, data: fresh},
-            }),
-          );
-        })
-        .catch((e: unknown) => {
-          log.warn(`Pie revalidate failed for ${cacheKey}`, {error: e});
-        });
-    }, 0);
-  }
+  const fire = (cacheKey: string, starter: () => Promise<unknown>) =>
+    starter()
+      .then(fresh => {
+        // Starter resolves with fresh data only when it differs from what
+        // was painted; null means unchanged → nothing to repaint.
+        if (fresh === null) return;
+        window.dispatchEvent(
+          new CustomEvent('DanbooruInsights:DataUpdated', {
+            detail: {contentType: cacheKey, data: fresh},
+          }),
+        );
+      })
+      .catch((e: unknown) => {
+        log.warn(`Pie revalidate failed for ${cacheKey}`, {error: e});
+      });
+
+  // Revalidate the *visible* tab first and await it, THEN fan the rest out.
+  // The pie shows one tab at a time; without this, the tab the user is looking
+  // at (default: copyright) queues behind the other eight heavy per-tag count
+  // fetches on the shared limiter and can take ~40s to converge on a large
+  // user. Priority-first drops that to a few seconds; the remaining tabs
+  // revalidate in the background (a switch shows cached data instantly and the
+  // fresh value lands when that tab's revalidate completes).
+  setTimeout(async () => {
+    const priority = entries.find(
+      ([k, s]) => k === priorityCacheKey && s !== undefined,
+    );
+    if (priority && priority[1]) await fire(priority[0], priority[1]);
+    for (const [cacheKey, starter] of entries) {
+      if (!starter || cacheKey === priorityCacheKey) continue;
+      void fire(cacheKey, starter);
+    }
+  }, 0);
 }
 
 /**
@@ -2055,11 +2070,16 @@ export class UserAnalyticsApp {
       // revalidate returns changed data it dispatches DataUpdated and the open
       // pie live-patches that tab's proportions/counts/thumbs in place (no
       // reopen needed — audit R2 follow-up).
-      schedulePieRevalidate([
-        ['status_dist', statusStartRevalidate],
-        ['rating_dist', ratingStartRevalidate],
-        ...distributionRevalidators,
-      ]);
+      schedulePieRevalidate(
+        [
+          ['status_dist', statusStartRevalidate],
+          ['rating_dist', ratingStartRevalidate],
+          ...distributionRevalidators,
+        ],
+        // The pie opens on the copyright tab (renderPieWidget's default), so
+        // converge its per-tag counts first.
+        'copyright_dist',
+      );
       // The rest only warm piestats for the next open (top/recent posts,
       // milestones, level history render from their own widgets; the tag cloud
       // widget refreshes on tab switch).
