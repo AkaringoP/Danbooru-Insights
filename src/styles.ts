@@ -1573,21 +1573,32 @@ const GLOBAL_CSS = `
       color: var(--di-text-muted, #888);
       margin-bottom: 8px;
     }
-    /* Months other than the hovered one recede, so the highlight reads as
-       "you are here" rather than competing with eleven neighbours. */
-    .di-gmp-trend rect.di-gmp-trend-off {
-      fill: var(--grass-level-1, #9be9a8);
+    /* The year's shape recedes so the hovered month's ring reads as "you are
+       here" rather than competing with eleven neighbours. */
+    .di-gmp-trend .di-gmp-trend-line {
+      fill: none;
+      stroke: var(--grass-level-2, #40c463);
+      stroke-width: 1.5;
+      stroke-linejoin: round;
+      stroke-linecap: round;
     }
-    .di-gmp-trend rect.di-gmp-trend-current {
-      fill: var(--grass-level-4, #216e39);
+    .di-gmp-trend .di-gmp-trend-dot {
+      fill: var(--grass-level-2, #40c463);
     }
-    /* Same two colours as .di-gmp-mom--up / --down: the bar and the
+    /* Hollow marker: the popover background shows through, so the ring reads
+       on top of the line instead of blotting it out. */
+    .di-gmp-trend .di-gmp-trend-now {
+      fill: var(--di-bg, #fff);
+      stroke-width: 2;
+      stroke: var(--grass-level-4, #216e39);
+    }
+    /* Same two colours as .di-gmp-mom--up / --down: the marker and the
        percentage beside it must never disagree. */
-    .di-gmp-trend rect.di-gmp-trend-up {
-      fill: #2ea043;
+    .di-gmp-trend .di-gmp-trend-now.di-gmp-trend-up {
+      stroke: #2ea043;
     }
-    .di-gmp-trend rect.di-gmp-trend-down {
-      fill: #cf222e;
+    .di-gmp-trend .di-gmp-trend-now.di-gmp-trend-down {
+      stroke: #cf222e;
     }
     /* Headline row: total + MoM on the left, sparkline on the right. */
     .di-gmp-headline {

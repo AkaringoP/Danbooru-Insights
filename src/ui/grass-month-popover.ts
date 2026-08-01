@@ -25,9 +25,13 @@ const BAR_STEP = 3;
 const BAR_W = 2;
 /** Floor so a non-zero day is never invisible against the baseline. */
 const MIN_BAR_H = 1.5;
-/** Year-trend chart: same footprint as the daily one, 12 fatter bars. */
-const TREND_STEP = 8;
-const TREND_BAR_W = 6;
+/**
+ * Year-trend chart: same footprint as the daily strip, drawn as a line.
+ * `TREND_PAD` keeps the stroke and the emphasised marker off the edges.
+ */
+const TREND_PAD = 4;
+const TREND_DOT_R = 1.2;
+const TREND_NOW_R = 3;
 /** Linger before the popover starts fading (cursor may return to it). */
 const HIDE_GRACE_MS = 400;
 /** Fade-out duration — must match the CSS opacity transition. */
@@ -77,14 +81,18 @@ function trendCurrentClass(stats: MonthStats): string {
 }
 
 /**
- * Inline SVG bar chart of every month in the year, sitting above the daily
+ * Inline SVG line chart of every month in the year, sitting above the daily
  * sparkline and answering the question that one cannot: where this month
  * sits among its siblings.
  *
- * Only the hovered month is emphasised — tinting all twelve by their own
- * deltas would put six reds and six greens on a 96px strip and say nothing.
- * The rest recede to a pale grass tone so the highlighted bar reads as "you
- * are here", and its colour is the same one the percentage text carries.
+ * A line rather than bars: this chart is read for direction — where the year
+ * rose and fell — while the strip below it measures one month's days. The
+ * different shape also keeps the two from being mistaken for each other.
+ *
+ * Only the hovered month is emphasised, with a hollow ring — tinting all
+ * twelve by their own deltas would put six reds and six greens on a 96px
+ * strip and say nothing. The ring's colour is the same one the percentage
+ * text carries.
  *
  * Returns '' when the year has no activity at all, so the header keeps its
  * original single-line layout.
@@ -96,28 +104,38 @@ export function yearTrendSvg(stats: MonthStats): string {
   const peak = yearSeries.reduce((max, v) => (v > max ? v : max), 0);
   if (yearSeries.length === 0 || peak <= 0) return '';
 
-  const used = yearSeries.length * TREND_STEP - (TREND_STEP - TREND_BAR_W);
-  const offsetX = Math.max(0, (SPARK_W - used) / 2);
-  const currentClass = trendCurrentClass(stats);
+  const innerW = SPARK_W - TREND_PAD * 2;
+  const innerH = SPARK_H - TREND_PAD * 2;
+  // A lone month has no span to spread across, so it sits centred.
+  const stepX = yearSeries.length > 1 ? innerW / (yearSeries.length - 1) : 0;
+  const xAt = (i: number) =>
+    yearSeries.length > 1 ? TREND_PAD + i * stepX : SPARK_W / 2;
+  const yAt = (v: number) => TREND_PAD + innerH - (v / peak) * innerH;
 
-  const bars = yearSeries
-    .map((count, i) => {
-      const isCurrent = i === stats.month;
-      // The hovered month keeps a stub even at zero, so "you are here" never
-      // vanishes; other empty months simply leave a gap.
-      if (count <= 0 && !isCurrent) return '';
-      const h = Math.max(MIN_BAR_H, (count / peak) * SPARK_H);
-      const x = offsetX + i * TREND_STEP;
-      const cls = isCurrent ? currentClass : 'di-gmp-trend-off';
-      return `<rect class="${cls}" x="${x.toFixed(1)}" y="${(
-        SPARK_H - h
-      ).toFixed(1)}" width="${TREND_BAR_W}" height="${h.toFixed(
-        1,
-      )}" rx="1"></rect>`;
-    })
+  const points = yearSeries
+    .map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`)
+    .join(' ');
+  // Vertices are drawn so twelve discrete months stay legible as months
+  // rather than reading like one continuous curve.
+  const dots = yearSeries
+    .map(
+      (v, i) =>
+        `<circle class="di-gmp-trend-dot" cx="${xAt(i).toFixed(1)}" cy="${yAt(
+          v,
+        ).toFixed(1)}" r="${TREND_DOT_R}"></circle>`,
+    )
     .join('');
+  // Hollow ring last so it sits above the line it marks.
+  const now =
+    stats.month < yearSeries.length
+      ? `<circle class="di-gmp-trend-now ${trendCurrentClass(
+          stats,
+        )}" cx="${xAt(stats.month).toFixed(1)}" cy="${yAt(
+          yearSeries[stats.month],
+        ).toFixed(1)}" r="${TREND_NOW_R}"></circle>`
+      : '';
 
-  return `<svg class="di-gmp-spark di-gmp-trend" width="${SPARK_W}" height="${SPARK_H}" viewBox="0 0 ${SPARK_W} ${SPARK_H}" aria-hidden="true">${bars}</svg>`;
+  return `<svg class="di-gmp-spark di-gmp-trend" width="${SPARK_W}" height="${SPARK_H}" viewBox="0 0 ${SPARK_W} ${SPARK_H}" aria-hidden="true"><polyline class="di-gmp-trend-line" points="${points}"></polyline>${dots}${now}</svg>`;
 }
 
 /**

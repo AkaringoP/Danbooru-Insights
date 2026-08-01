@@ -123,17 +123,34 @@ describe('momFragment', () => {
 });
 
 describe('yearTrendSvg', () => {
-  it('draws one bar per month and highlights the hovered one', () => {
+  const ringCount = (svg: string) =>
+    (svg.match(/di-gmp-trend-now/g) ?? []).length;
+  const dotCount = (svg: string) =>
+    (svg.match(/di-gmp-trend-dot/g) ?? []).length;
+
+  it('draws a line through every month with a vertex on each', () => {
     const svg = yearTrendSvg(
       stats({month: 2, yearSeries: [10, 20, 30, 40], momPct: null}),
     );
-    expect(barCount(svg)).toBe(4);
-    // Exactly one bar carries the highlight; the rest recede.
-    expect((svg.match(/di-gmp-trend-current/g) ?? []).length).toBe(1);
-    expect((svg.match(/di-gmp-trend-off/g) ?? []).length).toBe(3);
+    expect(svg).toContain('<polyline');
+    expect(dotCount(svg)).toBe(4);
+    // Exactly one month is emphasised.
+    expect(ringCount(svg)).toBe(1);
   });
 
-  it('tints the hovered bar with the same colour as the percentage text', () => {
+  it('spreads months evenly and inverts the value axis', () => {
+    // Two months, peak 100: the taller one sits at the top inset, the half
+    // -height one halfway down the 22px inner band.
+    const svg = yearTrendSvg(stats({month: 0, yearSeries: [50, 100]}));
+    expect(svg).toContain('points="4.0,15.0 92.0,4.0"');
+  });
+
+  it('centres a lone month instead of pinning it to the left edge', () => {
+    const svg = yearTrendSvg(stats({month: 0, yearSeries: [7]}));
+    expect(svg).toContain('points="48.0,4.0"');
+  });
+
+  it('tints the marker with the same colour as the percentage text', () => {
     const up = yearTrendSvg(stats({month: 1, yearSeries: [5, 9], momPct: 27}));
     expect(up).toContain('di-gmp-trend-up');
     expect(up).not.toContain('di-gmp-trend-down');
@@ -152,7 +169,7 @@ describe('yearTrendSvg', () => {
     expect(svg).toContain('di-gmp-trend-up');
   });
 
-  it('falls back to a neutral highlight with no comparison', () => {
+  it('falls back to a neutral marker with no comparison', () => {
     // January before its December lookup resolves.
     const svg = yearTrendSvg(
       stats({month: 0, yearSeries: [9, 4], momPct: null}),
@@ -162,24 +179,28 @@ describe('yearTrendSvg', () => {
     expect(svg).not.toContain('di-gmp-trend-down');
   });
 
-  it('keeps a stub for a hovered month with no activity', () => {
-    // Other empty months leave a gap, but "you are here" must stay visible.
-    const svg = yearTrendSvg(stats({month: 1, yearSeries: [10, 0, 0, 8]}));
-    expect(barCount(svg)).toBe(3);
-    expect(svg).toContain('di-gmp-trend-current');
+  it('marks a hovered month that has no activity, down on the baseline', () => {
+    // The line passes through zero; "you are here" must still be visible.
+    const svg = yearTrendSvg(stats({month: 1, yearSeries: [10, 0, 8]}));
+    expect(ringCount(svg)).toBe(1);
+    // Baseline = top inset + inner height.
+    expect(svg).toContain('cy="26.0" r="3"');
   });
 
-  it('scales to the busiest month of the year', () => {
-    const svg = yearTrendSvg(stats({month: 0, yearSeries: [50, 100]}));
-    const heights = [...svg.matchAll(/height="([\d.]+)"/g)]
-      .map(m => parseFloat(m[1]))
-      .slice(1);
-    expect(heights[1]).toBe(30);
-    expect(heights[0]).toBeCloseTo(15, 1);
+  it('omits the marker when the hovered month is outside the drawn span', () => {
+    // Hovering December of the current year, where only July has elapsed.
+    const svg = yearTrendSvg(stats({month: 11, yearSeries: [5, 9]}));
+    expect(svg).toContain('<polyline');
+    expect(ringCount(svg)).toBe(0);
   });
 
   it('draws nothing for a year with no activity', () => {
     expect(yearTrendSvg(stats({yearSeries: []}))).toBe('');
     expect(yearTrendSvg(stats({month: 0, yearSeries: [0, 0]}))).toBe('');
+  });
+
+  it('produces no NaN coordinates', () => {
+    const svg = yearTrendSvg(stats({month: 3, yearSeries: [0, 5, 0, 9, 2]}));
+    expect(svg).not.toContain('NaN');
   });
 });
