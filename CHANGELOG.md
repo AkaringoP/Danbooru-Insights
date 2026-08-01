@@ -4,6 +4,45 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.8.7 — Audit follow-ups: escaping, sync honesty, deleted-post reconcile
+
+### Fixed
+- **Tags with angle brackets no longer break the page.** Danbooru has real
+  tags like `>_<` and `<o>_<o>`, and they were interpolated straight into the
+  dashboard's markup — the top-post tag line, the tag-cloud tooltip, the
+  created-tags table and the profile-name headers. All of them are escaped
+  now, and wiki-page links encode the tag name (tags may contain `/`, as in
+  `fate/grand_order`, which silently produced a broken link).
+- **A failed sync no longer reports success.** When a page could not be
+  fetched after its retries, the sync stopped quietly, stamped itself as
+  complete and showed a green "Synced" — so the report was built on partial
+  data with no indication anything was missing, and because it looked
+  complete, it was never resumed. Such a run now withholds the completion
+  stamp and warns that it will resume the next time you open the report.
+- **Posts deleted on Danbooru are cleared from the local copy.** Sync
+  searches exclude deleted posts, so a post deleted since the last sync
+  simply stopped appearing — and its stale local row lingered, taking a
+  position number that a live post had since been given. That made milestone
+  lookups ambiguous, inflated the local post count above the real one, and
+  plotted a nonexistent post on the scatter chart. A clean sync now drops the
+  rows the server no longer returns. (Accounts over 1200 posts only; smaller
+  ones already rebuild from scratch.)
+- **The report button no longer stays stuck on "ERR"** after a failed sync.
+- **The upload count is read by label, not by table position.** It previously
+  read a fixed row of the profile statistics table, so a layout change would
+  silently substitute a different statistic, and an unparseable value produced
+  `NaN` — which compared false against everything and re-triggered a sync on
+  every single click.
+
+### Changed
+- **Fewer repeated API calls.** One report click asked the server for the same
+  total post count up to six times (each a separate ~half-second query); it is
+  now fetched once per interaction. Refreshing a tag distribution also re-derived
+  every thumbnail from scratch — around 30-50 requests a sync — and now reuses
+  the ones whose tag has not changed.
+
+---
+
 ## v9.8.6 — All dashboard traffic goes through the shared rate limiter
 
 ### Fixed

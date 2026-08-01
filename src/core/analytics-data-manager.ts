@@ -41,6 +41,23 @@ import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
 const workerLog = createLogger('Analytics:Worker');
+
+/**
+ * How long `getTotalPostCount` reuses an in-flight/just-resolved lookup.
+ * Sized to span one report click's fan-out (pre-check → sync → header →
+ * distributions), not to act as a cache — see getTotalPostCount.
+ */
+const TOTAL_COUNT_MEMO_MS = 30_000;
+
+/**
+ * Identity used to match a distribution row across refreshes. Which field
+ * carries the tag depends on the distribution: character/copyright/breasts
+ * fill `tagName`, the hair ones fill `originalTag`, and the rest only have a
+ * display `name`. Empty string means "no usable identity".
+ */
+function distributionItemKey(item: DistributionItem): string {
+  return item.tagName || item.originalTag || item.name || '';
+}
 import {isTopLevelTag, getBestThumbnailUrl} from '../utils';
 import type {
   TargetUser,
@@ -277,6 +294,16 @@ export class AnalyticsDataManager extends DataManager {
   static onProgressCallback:
     | ((current: number, total: number, message?: string) => void)
     | null = null;
+
+  /**
+   * Short-lived per-user memo for {@link getTotalPostCount}. Instance-scoped:
+   * the callers that pile up within one interaction share a manager, and
+   * keeping it off the class avoids leaking a count between page contexts.
+   */
+  private totalCountMemo = new Map<
+    string,
+    {at: number; promise: Promise<number>}
+  >();
 
   /**
    * @param {Database} db The Dexie database instance.
@@ -1473,6 +1500,8 @@ export class AnalyticsDataManager extends DataManager {
         });
       }
 
+      // Reuse unchanged thumbs before this write replaces the cache (L-2).
+      await this.carryOverThumbs(cacheKey, uploaderId, top10);
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
 
       // Lazy Load Thumbnails
@@ -1601,6 +1630,8 @@ export class AnalyticsDataManager extends DataManager {
         });
       }
 
+      // Reuse unchanged thumbs before this write replaces the cache (L-2).
+      await this.carryOverThumbs(cacheKey, uploaderId, top10);
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
 
       // Lazy Load
@@ -1849,6 +1880,8 @@ export class AnalyticsDataManager extends DataManager {
         });
       }
 
+      // Reuse unchanged thumbs before this write replaces the cache (L-2).
+      await this.carryOverThumbs(cacheKey, uploaderId, top10);
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
 
       await this.enrichThumbnails(
@@ -3352,6 +3385,8 @@ export class AnalyticsDataManager extends DataManager {
       .filter(r => r.count > 0)
       .sort((a, b) => b.count - a.count);
 
+    // Reuse unchanged thumbs before this write replaces the cache (L-2).
+    await this.carryOverThumbs(cacheKey, uploaderId, filtered);
     if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
 
     await this.enrichThumbnails(
@@ -3434,6 +3469,8 @@ export class AnalyticsDataManager extends DataManager {
     const filtered = results
       .filter(r => r.count > 0)
       .sort((a, b) => b.count - a.count);
+    // Reuse unchanged thumbs before this write replaces the cache (L-2).
+    await this.carryOverThumbs(cacheKey, uploaderId, filtered);
     if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
 
     await this.enrichThumbnails(
@@ -3514,6 +3551,8 @@ export class AnalyticsDataManager extends DataManager {
     const filtered = results
       .filter(r => r.count > 0)
       .sort((a, b) => b.count - a.count);
+    // Reuse unchanged thumbs before this write replaces the cache (L-2).
+    await this.carryOverThumbs(cacheKey, uploaderId, filtered);
     if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
 
     await this.enrichThumbnails(
@@ -3525,6 +3564,54 @@ export class AnalyticsDataManager extends DataManager {
     );
 
     return filtered;
+  }
+
+  /**
+   * Copy thumbnails from the previously cached distribution onto a freshly
+   * recomputed one, matching on tag.
+   *
+   * A forced refresh rebuilds the list with `thumb: null`, so `enrichThumbnails`
+   * re-fetched a representative post for every top-10 entry — 30-50 requests a
+   * sync spent re-deriving pictures that had not changed (audit L-2). The top
+   * tags are stable between syncs, so the previous thumb is almost always the
+   * same one we would fetch again.
+   *
+   * The trade-off is a thumb that lags its tag's current top-scoring post.
+   * That is the right side to err on: the picture is decoration, the counts
+   * beside it are the data, and a genuinely new tag has no cached thumb to
+   * inherit so it still gets fetched.
+   *
+   * Must run *before* the caller's `saveStats` — that write replaces the
+   * cached record this reads from.
+   *
+   * @param {string} cacheKey The piestats key for this distribution.
+   * @param {number} uploaderId The user the distribution belongs to.
+   * @param {DistributionItem[]} items Freshly computed items, mutated in place.
+   */
+  private async carryOverThumbs(
+    cacheKey: string,
+    uploaderId: number,
+    items: DistributionItem[],
+  ): Promise<void> {
+    if (!uploaderId) return;
+    const cached = (await this.getStats(cacheKey, uploaderId)) as
+      | DistributionItem[]
+      | null;
+    if (!cached) return;
+
+    const thumbByTag = new Map<string, string>();
+    for (const prev of cached) {
+      const key = distributionItemKey(prev);
+      if (key && prev.thumb) thumbByTag.set(key, prev.thumb);
+    }
+    if (thumbByTag.size === 0) return;
+
+    for (const item of items) {
+      if (item.isOther || item.thumb) continue;
+      // '' is never a stored key, so a keyless row simply misses.
+      const prev = thumbByTag.get(distributionItemKey(item));
+      if (prev) item.thumb = prev;
+    }
   }
 
   async enrichThumbnails(
@@ -3601,11 +3688,43 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * helper to get robust total count.
+   *
+   * One report click fans this out several times — the pre-check, the sync's
+   * own total, the header status, and the three distributions that size their
+   * candidate pool by it — and `fetchRemoteCount` has no cache, so each was a
+   * fresh 400-900ms count query (audit L-3). The in-flight promise is memoised
+   * per user for a short window so a single click's cascade collapses onto one
+   * request. The window is deliberately much shorter than the count-cache TTL:
+   * this is a de-duplicator for one interaction, not a cache, so a post
+   * uploaded a minute ago still shows up.
+   *
    * @param {Object} userInfo The user's info object.
    * @return {Promise<number>}
    */
   async getTotalPostCount(userInfo: TargetUser): Promise<number> {
     if (!userInfo.name) return 0;
+
+    const memoKey = userInfo.id ?? userInfo.name;
+    const memo = this.totalCountMemo.get(memoKey);
+    if (memo && Date.now() - memo.at < TOTAL_COUNT_MEMO_MS) {
+      return memo.promise;
+    }
+
+    const pending = this.fetchTotalPostCount(userInfo);
+    this.totalCountMemo.set(memoKey, {at: Date.now(), promise: pending});
+    // A failed lookup must not be remembered — the next caller should retry
+    // rather than inherit a 0 that means "unknown".
+    void pending.then(
+      value => {
+        if (!value) this.totalCountMemo.delete(memoKey);
+      },
+      () => this.totalCountMemo.delete(memoKey),
+    );
+    return pending;
+  }
+
+  /** Uncached body of {@link getTotalPostCount} — three fallbacks in order. */
+  private async fetchTotalPostCount(userInfo: TargetUser): Promise<number> {
     try {
       // Method A: Exact Search Count (API)
       const normalizedName = userInfo.name.replace(/ /g, '_');

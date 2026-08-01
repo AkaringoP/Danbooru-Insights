@@ -472,6 +472,120 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     vi.unstubAllGlobals();
   });
 
+  describe('carryOverThumbs', () => {
+    it('reuses cached thumbs so a forced refresh refetches only new tags', async () => {
+      // L-2 guard. A forced refresh rebuilds the distribution with thumb:null,
+      // so enrichThumbnails used to re-derive a representative post for every
+      // top-10 entry — 30-50 requests a sync for pictures that had not changed.
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        makeSyncRateLimiter() as never,
+      );
+      vi.spyOn(adm, 'getStats').mockResolvedValue([
+        {name: 'idolmaster', tagName: 'idolmaster', count: 9, thumb: 'a.jpg'},
+        {name: 'touhou', tagName: 'touhou', count: 8, thumb: 'b.jpg'},
+        {name: 'Others', tagName: '', count: 1, thumb: '', isOther: true},
+      ] as never);
+
+      const fresh = [
+        {name: 'idolmaster', tagName: 'idolmaster', count: 11, thumb: null},
+        {name: 'touhou', tagName: 'touhou', count: 8, thumb: 'kept.jpg'},
+        {name: 'newcomer', tagName: 'newcomer', count: 5, thumb: null},
+        {name: 'Others', tagName: '', count: 2, thumb: null, isOther: true},
+      ];
+      await (
+        adm as unknown as {
+          carryOverThumbs: (
+            k: string,
+            u: number,
+            i: unknown[],
+          ) => Promise<void>;
+        }
+      ).carryOverThumbs('copyright_dist', 42, fresh);
+
+      // Carried over by tag, leaving the refreshed counts alone.
+      expect(fresh[0].thumb).toBe('a.jpg');
+      // An already-present thumb is never overwritten.
+      expect(fresh[1].thumb).toBe('kept.jpg');
+      // A tag with no cached entry still needs a real fetch.
+      expect(fresh[2].thumb).toBeNull();
+      // "Others" is a synthetic bucket and never carries a picture.
+      expect(fresh[3].thumb).toBeNull();
+    });
+
+    it('is a no-op when there is no cached distribution yet', async () => {
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        makeSyncRateLimiter() as never,
+      );
+      vi.spyOn(adm, 'getStats').mockResolvedValue(null as never);
+
+      const fresh = [{name: 'a', tagName: 'a', count: 1, thumb: null}];
+      await (
+        adm as unknown as {
+          carryOverThumbs: (
+            k: string,
+            u: number,
+            i: unknown[],
+          ) => Promise<void>;
+        }
+      ).carryOverThumbs('copyright_dist', 42, fresh);
+
+      expect(fresh[0].thumb).toBeNull();
+    });
+  });
+
+  describe('getTotalPostCount memo', () => {
+    it("collapses one interaction's repeated lookups onto a single request", async () => {
+      // L-3 guard. A report click asks for the total from the pre-check, the
+      // sync, the header status and three distributions; fetchRemoteCount has no
+      // cache, so each was its own 400-900ms count query.
+      const rl = makeSyncRateLimiter(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({counts: {posts: 1234}}),
+      }));
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        rl as never,
+      );
+      const user = makeSyncUser({id: '42'});
+
+      const results = await Promise.all([
+        adm.getTotalPostCount(user),
+        adm.getTotalPostCount(user),
+        adm.getTotalPostCount(user),
+      ]);
+
+      expect(results).toEqual([1234, 1234, 1234]);
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not remember a failed lookup', async () => {
+      // 0 means "could not determine", not "this user has no posts" — caching it
+      // would strand the dashboard on a bad answer for the whole memo window.
+      let call = 0;
+      const rl = makeSyncRateLimiter(async () => {
+        call++;
+        if (call === 1) return {ok: false, status: 500, json: async () => ({})};
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 7}}),
+        };
+      });
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        rl as never,
+      );
+      // No id → the profile fallback is skipped too, so the first call yields 0.
+      const user = makeSyncUser({id: undefined});
+
+      expect(await adm.getTotalPostCount(user)).toBe(0);
+      expect(await adm.getTotalPostCount(user)).toBe(7);
+    });
+  });
+
   it('returns early without touching db when userInfo.id is missing', async () => {
     const postsTable = makePostsTable();
     const db = makeSyncDb(postsTable);
