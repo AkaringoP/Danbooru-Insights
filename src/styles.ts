@@ -1559,7 +1559,13 @@ const GLOBAL_CSS = `
       border-top: 1px solid var(--di-border, #e1e4e8);
       transform: translateX(-50%) rotate(45deg);
     }
+    /* Header row: month·metric on the left, year-trend chart on the right,
+       stacked directly above the headline's daily sparkline. */
     .di-gmp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
       font-size: 10px;
       font-weight: 600;
       letter-spacing: 0.03em;
@@ -1567,12 +1573,60 @@ const GLOBAL_CSS = `
       color: var(--di-text-muted, #888);
       margin-bottom: 8px;
     }
+    /* The year's shape recedes so the hovered month's ring reads as "you are
+       here" rather than competing with eleven neighbours. */
+    .di-gmp-trend .di-gmp-trend-line {
+      fill: none;
+      stroke: var(--grass-level-2, #40c463);
+      stroke-width: 1.5;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+    .di-gmp-trend .di-gmp-trend-dot {
+      fill: var(--grass-level-2, #40c463);
+    }
+    /* Hollow marker: the popover background shows through, so the ring reads
+       on top of the line instead of blotting it out. */
+    .di-gmp-trend .di-gmp-trend-now {
+      fill: var(--di-bg, #fff);
+      stroke-width: 2;
+      stroke: var(--grass-level-4, #216e39);
+    }
+    /* Same two colours as .di-gmp-mom--up / --down: the marker and the
+       percentage beside it must never disagree. */
+    .di-gmp-trend .di-gmp-trend-now.di-gmp-trend-up {
+      stroke: #2ea043;
+    }
+    .di-gmp-trend .di-gmp-trend-now.di-gmp-trend-down {
+      stroke: #cf222e;
+    }
+    /* Headline row: total + MoM on the left, sparkline on the right. */
     .di-gmp-headline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .di-gmp-headline-main {
       display: flex;
       align-items: baseline;
       flex-wrap: wrap;
       gap: 8px;
-      margin-bottom: 8px;
+      min-width: 0;
+    }
+    .di-gmp-spark {
+      flex: 0 0 auto;
+      display: block;
+      overflow: visible;
+    }
+    /* Same palette bridge as .di-gmp-bar-fill; the busiest day sits one level
+       darker so it matches the day named in the "Busiest" row. */
+    .di-gmp-spark rect {
+      fill: var(--grass-level-2, #40c463);
+    }
+    .di-gmp-spark rect.di-gmp-spark-peak {
+      fill: var(--grass-level-4, #216e39);
     }
     .di-gmp-total {
       font-size: 20px;

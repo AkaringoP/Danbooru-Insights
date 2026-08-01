@@ -228,6 +228,45 @@ export class DataManager {
   }
 
   /**
+   * Sum of a metric's cached daily counts over an inclusive date range.
+   *
+   * Rows are keyed `${userId}_${date}`, so a range read is a prefix scan on
+   * the primary key. Callers must decide for themselves whether the cache is
+   * trustworthy for the range — a 0 here means "no rows", which is only the
+   * same as "no activity" once the year is known complete.
+   *
+   * @param {Metric} metric Which daily table to read.
+   * @param {string} userId The `userId` half of the row key.
+   * @param {string} startDate Inclusive `YYYY-MM-DD` lower bound.
+   * @param {string} endDate Inclusive `YYYY-MM-DD` upper bound.
+   * @return {Promise<number>} Summed counts (0 when nothing is cached).
+   */
+  async sumDailyCounts(
+    metric: Metric,
+    userId: string,
+    startDate: string,
+    endDate: string,
+  ): Promise<number> {
+    const table = this.db[metric];
+    if (!table) return 0;
+    try {
+      const rows: DailyEntry[] = await table
+        .where('id')
+        .between(
+          `${userId}_${startDate}`,
+          `${userId}_${endDate}\uffff`,
+          true,
+          true,
+        )
+        .toArray();
+      return rows.reduce((sum, row) => sum + (row.count || 0), 0);
+    } catch (e: unknown) {
+      log.warn('Failed to sum daily counts', {error: e, metric});
+      return 0;
+    }
+  }
+
+  /**
    * Marks a year as complete for a specific user and metric.
    * @param {string} userId
    * @param {Metric} metric

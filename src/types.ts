@@ -176,6 +176,20 @@ export interface MonthStats {
   momIsNew: boolean;
   /** total === 0 → popover collapses to a "no activity" line. */
   empty: boolean;
+  /**
+   * Per-day counts for the popover's sparkline, index 0 = the 1st. Sized to
+   * the days that have actually happened: a full month for a past one, only
+   * the elapsed days for the in-progress one (so the chart doesn't end in a
+   * run of fake zeroes), and empty for a future month.
+   */
+  series: number[];
+  /**
+   * Per-month totals for the whole year, index 0 = January — the context the
+   * daily `series` lacks (where this month sits among its siblings). Sized
+   * like `series`: all twelve for a finished year, only the elapsed months
+   * for the current one.
+   */
+  yearSeries: number[];
 }
 
 /** Danbooru post media variant (modern API). */
