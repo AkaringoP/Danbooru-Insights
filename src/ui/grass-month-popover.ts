@@ -309,3 +309,19 @@ export function hideGrassMonthPopover(): void {
 export function isGrassMonthPopoverVisible(): boolean {
   return el !== null && document.body.contains(el);
 }
+
+/**
+ * True while a dismissal is already scheduled — the linger before the fade, or
+ * the fade itself. Still "visible" in both windows, so a caller that only
+ * checks {@link isGrassMonthPopoverVisible} cannot tell the popover is on its
+ * way out.
+ *
+ * Matters for anything that shows the popover *late*, after the interaction
+ * that opened it: `showGrassMonthPopover` starts with `clearTimers()`, so a
+ * re-show landing mid-dismissal cancels the pending hide and strands the
+ * popover on screen — the mouseout that scheduled it has long since fired and
+ * will not fire again. Such callers should drop their update instead.
+ */
+export function isGrassMonthPopoverHidePending(): boolean {
+  return hideTimer !== null || fadeTimer !== null;
+}

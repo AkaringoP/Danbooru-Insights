@@ -17,6 +17,7 @@ import {showApprovalsDetail} from './approval-detail-popover';
 import {computeMonthStats} from '../core/grass-month-stats';
 import {resolvePrevDecemberTotal} from '../core/grass-prev-month';
 import {
+  isGrassMonthPopoverHidePending,
   showGrassMonthPopover,
   scheduleHideGrassMonthPopover,
   keepGrassMonthPopoverOpen,
@@ -952,8 +953,9 @@ export class GraphRenderer {
   /** Whose graph is painted, kept so January's popover can look last
    *  December up (the previous year is outside `currentDailyData`). */
   private currentUserInfo: TargetUser | null = null;
-  /** Bumped on every month-label hover so a slow December lookup only
-   *  patches the popover it was started for. */
+  /** Bumped every time the month popover is opened, so a slow December
+   *  lookup can tell whether the popover it was started for is still the one
+   *  on screen. Owned by `openMonthPopover` — nothing else may touch it. */
   private monthPopoverGeneration = 0;
   /** Two-step tap controller for the Hourly Distribution grid on touch
    *  devices. Manages active-cell state + outside-tap dismissal so tooltips
@@ -2910,9 +2912,11 @@ export class GraphRenderer {
         keepGrassMonthPopoverOpen();
         if (dwell !== null) clearTimeout(dwell);
         dwell = setTimeout(() => {
-          const stats = statsFor(month);
-          showGrassMonthPopover({anchor: label, stats, themeKey});
-          this.patchJanuaryMom({anchor: label, stats, themeKey});
+          this.openMonthPopover({
+            anchor: label,
+            stats: statsFor(month),
+            themeKey,
+          });
         }, 200);
       });
       label.addEventListener('mouseout', () => {
@@ -2923,6 +2927,26 @@ export class GraphRenderer {
         scheduleHideGrassMonthPopover();
       });
     });
+  }
+
+  /**
+   * Open the month popover — the single entry point for both the hover and
+   * tap paths.
+   *
+   * Owns `monthPopoverGeneration`: every open invalidates whatever the
+   * previous one had in flight. Bumping here rather than inside
+   * `patchJanuaryMom` is the point — only January starts a lookup, but *any*
+   * month can be the one that replaces it, and a counter that only moves on
+   * January cannot see that it was superseded by February.
+   */
+  private openMonthPopover(args: {
+    anchor: Element;
+    stats: MonthStats;
+    themeKey: string;
+  }): void {
+    this.monthPopoverGeneration++;
+    showGrassMonthPopover(args);
+    this.patchJanuaryMom(args);
   }
 
   /**
@@ -2939,6 +2963,9 @@ export class GraphRenderer {
    * A no-op for every other month, for an empty January (the popover collapses
    * to a "no activity" line, so there is nothing to compare), and whenever the
    * lookup cannot establish a total.
+   *
+   * Call only via {@link openMonthPopover} — the generation read below is
+   * meaningless unless that bump already happened.
    */
   private patchJanuaryMom(args: {
     anchor: Element;
@@ -2949,19 +2976,23 @@ export class GraphRenderer {
     const user = this.currentUserInfo;
     if (stats.month !== 0 || stats.empty || !user || !this.dataManager) return;
 
-    const generation = ++this.monthPopoverGeneration;
+    const generation = this.monthPopoverGeneration;
     void resolvePrevDecemberTotal({
       dataManager: this.dataManager,
       user,
       metric: stats.metric,
       year: stats.year - 1,
     }).then(prevTotal => {
-      // Dropped if the pointer has since moved to another label or the
-      // popover was dismissed — patching then would rewrite someone else's
-      // content with January's numbers.
       if (prevTotal === null) return;
+      // Another label's popover has since opened — patching now would rewrite
+      // its content with January's numbers, under January's anchor.
       if (generation !== this.monthPopoverGeneration) return;
       if (!isGrassMonthPopoverVisible()) return;
+      // The popover is on screen but already dismissing. Re-showing it would
+      // cancel that pending hide (showGrassMonthPopover clears the timers) and
+      // leave it stuck open, since the mouseout that scheduled the hide is
+      // long gone. A delta nobody is looking at is not worth that.
+      if (isGrassMonthPopoverHidePending()) return;
 
       const patched: MonthStats =
         prevTotal > 0
@@ -3000,9 +3031,11 @@ export class GraphRenderer {
             hideGrassMonthPopover();
             this.activeTapMonth = null;
           } else {
-            const stats = statsFor(month);
-            showGrassMonthPopover({anchor: label, stats, themeKey});
-            this.patchJanuaryMom({anchor: label, stats, themeKey});
+            this.openMonthPopover({
+              anchor: label,
+              stats: statsFor(month),
+              themeKey,
+            });
             this.activeTapMonth = month;
           }
         },

@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
 
-import {describe, it, expect} from 'vitest';
+import {describe, it, expect, vi, afterEach} from 'vitest';
 import {
+  hideGrassMonthPopover,
+  isGrassMonthPopoverHidePending,
+  keepGrassMonthPopoverOpen,
   momFragment,
+  scheduleHideGrassMonthPopover,
+  showGrassMonthPopover,
   sparklineSvg,
   yearTrendSvg,
 } from '../src/ui/grass-month-popover';
@@ -202,5 +207,65 @@ describe('yearTrendSvg', () => {
   it('produces no NaN coordinates', () => {
     const svg = yearTrendSvg(stats({month: 3, yearSeries: [0, 5, 0, 9, 2]}));
     expect(svg).not.toContain('NaN');
+  });
+});
+
+describe('isGrassMonthPopoverHidePending', () => {
+  afterEach(() => {
+    hideGrassMonthPopover();
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  function open(): void {
+    const anchor = document.createElement('div');
+    document.body.appendChild(anchor);
+    showGrassMonthPopover({
+      anchor,
+      stats: stats({total: 5, series: [5], yearSeries: [5]}),
+      themeKey: 'light',
+    });
+  }
+
+  it('is false while the popover is simply open', () => {
+    open();
+    expect(isGrassMonthPopoverHidePending()).toBe(false);
+  });
+
+  it('is true through both dismissal phases — the linger and the fade', () => {
+    vi.useFakeTimers();
+    open();
+
+    scheduleHideGrassMonthPopover();
+    // Linger: still fully visible, but already on its way out. This is the
+    // window a naive isVisible() check reads as "safe to re-show".
+    expect(isGrassMonthPopoverHidePending()).toBe(true);
+
+    // Cross into the fade (HIDE_GRACE_MS = 400).
+    vi.advanceTimersByTime(400);
+    expect(
+      document.getElementById('danbooru-grass-month-popover'),
+    ).not.toBeNull();
+    expect(isGrassMonthPopoverHidePending()).toBe(true);
+
+    // FADE_MS = 200 later the node is gone.
+    vi.advanceTimersByTime(200);
+    expect(document.getElementById('danbooru-grass-month-popover')).toBeNull();
+    expect(isGrassMonthPopoverHidePending()).toBe(false);
+  });
+
+  it('goes back to false when the cursor returns and cancels the dismissal', () => {
+    vi.useFakeTimers();
+    open();
+    scheduleHideGrassMonthPopover();
+    expect(isGrassMonthPopoverHidePending()).toBe(true);
+
+    keepGrassMonthPopoverOpen();
+    expect(isGrassMonthPopoverHidePending()).toBe(false);
+    // And the popover really does survive the window it would have died in.
+    vi.advanceTimersByTime(1000);
+    expect(
+      document.getElementById('danbooru-grass-month-popover'),
+    ).not.toBeNull();
   });
 });

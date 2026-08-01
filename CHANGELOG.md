@@ -4,6 +4,32 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.9.1 — Month popover: fix a January lookup landing after you moved on
+
+### Fixed
+- **Hovering January and moving on could rewrite the wrong month's popover.**
+  When last December's total had to be fetched (the first time, before it is
+  remembered), the answer could arrive after the pointer had already moved to
+  another month. The popover then swapped that month's numbers for January's
+  and jumped back under January's label. The lookup is now tied to the popover
+  it was started for and is dropped if a different month has taken over.
+- **The same late answer could leave the popover stuck on screen.** If the
+  pointer left the graph entirely while the lookup was in flight, the reply
+  cancelled the dismissal that was already under way, and the popover stayed
+  open until another month was hovered and left. A dismissal in progress is
+  now left alone.
+- **"Sync incomplete" could appear when no sync had run.** A sync blocked
+  because another tab already had one running reported the same way as one
+  that fetched only part of its pages, so the warning claimed posts could not
+  be fetched when nothing had been attempted. The two are now distinguished,
+  and a blocked run no longer triggers a background refresh either.
+- **Two users could share one cached post-count.** The short-lived count
+  memo keyed on the user id, and treated an empty id as a real one — so
+  callers that pass a name without an id (the grass graph's legacy path) all
+  landed on the same entry. It now falls back to the name.
+
+---
+
 ## v9.9.0 — Month popover: daily sparkline, and January finally gets a delta
 
 ### Added

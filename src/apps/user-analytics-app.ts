@@ -159,9 +159,13 @@ type DashboardData = Awaited<
  * otherwise paint a full-success state over partial data. The committed rows
  * are prefix-consistent, so the next open resumes from where this one stopped
  * — the user just needs to know the report isn't complete yet (audit M-2).
+ *
+ * A run that never started (another tab holds the global sync lock) also
+ * reports `complete: false`, but nothing was fetched and nothing changed —
+ * telling the user "some posts could not be fetched" would be plainly untrue.
  */
 function warnIfSyncIncomplete(outcome: SyncOutcome): void {
-  if (outcome.complete) return;
+  if (!outcome.started || outcome.complete) return;
   showToast({
     type: 'warn',
     message:
@@ -1089,8 +1093,9 @@ function renderResumeSyncView(
     );
     warnIfSyncIncomplete(outcome);
 
-    // A sync ran → force the deferred distributions to revalidate on re-render.
-    app.markSyncCompleted();
+    // A sync ran → force the deferred distributions to revalidate on
+    // re-render. Skipped when the global lock turned this into a no-op.
+    if (outcome.started) app.markSyncCompleted();
     void app.updateHeaderStatus();
     void app.renderDashboard();
   };
@@ -1507,7 +1512,7 @@ export class UserAnalyticsApp {
       // quickSync throws on any fetch failure, so reaching the code below on
       // that path means it completed; only the worker-pool sync can finish
       // partially.
-      let syncOutcome: SyncOutcome = {complete: true};
+      let syncOutcome: SyncOutcome = {complete: true, started: true};
       if (syncTotal <= MAX_QUICK_SYNC_POSTS) {
         await this.dataManager.quickSyncAllPosts(
           this.context.targetUser,
@@ -1524,7 +1529,9 @@ export class UserAnalyticsApp {
       // A sync ran → the deferred pie distributions' per-tag counts may have
       // moved. Flag it so the next renderDashboard forces their revalidate
       // (past the count-cache TTL) and the live-patch converges them to fresh.
-      this.syncJustRan = true;
+      // A run blocked by the global lock fetched nothing, so there is nothing
+      // to converge and the TTL should keep its say.
+      if (syncOutcome.started) this.syncJustRan = true;
 
       if (animInterval) clearInterval(animInterval);
 
