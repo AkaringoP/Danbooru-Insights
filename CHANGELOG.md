@@ -14,6 +14,12 @@ All notable changes to Danbooru Insights are documented here.
   while the numbers underneath carry "how much". It follows the grass theme
   like the rest of the popover, and the in-progress month stops at today
   instead of trailing a run of empty days that haven't happened yet.
+- **A year-trend chart above it.** A second, chunkier strip shows every month
+  of the year so the one you're hovering has context: one bar per month, the
+  hovered month highlighted and the rest faded back. The highlight is tinted
+  with the same green or red as the percentage next to it — up from last
+  month is green, down is red — so the chart and the sentence always agree.
+  Like the daily strip, the current year stops at the month in progress.
 - **January now shows a month-over-month change.** It was the one month
   without one: its previous month lives in the year before, which the
   heatmap doesn't load. Hovering January now looks up just last December's

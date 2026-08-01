@@ -183,6 +183,13 @@ export interface MonthStats {
    * run of fake zeroes), and empty for a future month.
    */
   series: number[];
+  /**
+   * Per-month totals for the whole year, index 0 = January — the context the
+   * daily `series` lacks (where this month sits among its siblings). Sized
+   * like `series`: all twelve for a finished year, only the elapsed months
+   * for the current one.
+   */
+  yearSeries: number[];
 }
 
 /** Danbooru post media variant (modern API). */

@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 
 import {describe, it, expect} from 'vitest';
-import {momFragment, sparklineSvg} from '../src/ui/grass-month-popover';
+import {
+  momFragment,
+  sparklineSvg,
+  yearTrendSvg,
+} from '../src/ui/grass-month-popover';
 import type {MonthStats} from '../src/types';
 
 /** MonthStats stub carrying only the fields the sparkline reads. */
@@ -20,6 +24,7 @@ function stats(overrides: Partial<MonthStats> = {}): MonthStats {
     momIsNew: false,
     empty: false,
     series: [],
+    yearSeries: [],
     ...overrides,
   };
 }
@@ -114,5 +119,67 @@ describe('momFragment', () => {
 
   it('renders nothing when there is no delta to show', () => {
     expect(momFragment(stats({month: 0, momPct: null}))).toBe('');
+  });
+});
+
+describe('yearTrendSvg', () => {
+  it('draws one bar per month and highlights the hovered one', () => {
+    const svg = yearTrendSvg(
+      stats({month: 2, yearSeries: [10, 20, 30, 40], momPct: null}),
+    );
+    expect(barCount(svg)).toBe(4);
+    // Exactly one bar carries the highlight; the rest recede.
+    expect((svg.match(/di-gmp-trend-current/g) ?? []).length).toBe(1);
+    expect((svg.match(/di-gmp-trend-off/g) ?? []).length).toBe(3);
+  });
+
+  it('tints the hovered bar with the same colour as the percentage text', () => {
+    const up = yearTrendSvg(stats({month: 1, yearSeries: [5, 9], momPct: 27}));
+    expect(up).toContain('di-gmp-trend-up');
+    expect(up).not.toContain('di-gmp-trend-down');
+
+    const down = yearTrendSvg(
+      stats({month: 1, yearSeries: [9, 5], momPct: -51}),
+    );
+    expect(down).toContain('di-gmp-trend-down');
+    expect(down).not.toContain('di-gmp-trend-up');
+  });
+
+  it('treats a "new" month as an increase', () => {
+    const svg = yearTrendSvg(
+      stats({month: 1, yearSeries: [0, 9], momIsNew: true}),
+    );
+    expect(svg).toContain('di-gmp-trend-up');
+  });
+
+  it('falls back to a neutral highlight with no comparison', () => {
+    // January before its December lookup resolves.
+    const svg = yearTrendSvg(
+      stats({month: 0, yearSeries: [9, 4], momPct: null}),
+    );
+    expect(svg).toContain('di-gmp-trend-current');
+    expect(svg).not.toContain('di-gmp-trend-up');
+    expect(svg).not.toContain('di-gmp-trend-down');
+  });
+
+  it('keeps a stub for a hovered month with no activity', () => {
+    // Other empty months leave a gap, but "you are here" must stay visible.
+    const svg = yearTrendSvg(stats({month: 1, yearSeries: [10, 0, 0, 8]}));
+    expect(barCount(svg)).toBe(3);
+    expect(svg).toContain('di-gmp-trend-current');
+  });
+
+  it('scales to the busiest month of the year', () => {
+    const svg = yearTrendSvg(stats({month: 0, yearSeries: [50, 100]}));
+    const heights = [...svg.matchAll(/height="([\d.]+)"/g)]
+      .map(m => parseFloat(m[1]))
+      .slice(1);
+    expect(heights[1]).toBe(30);
+    expect(heights[0]).toBeCloseTo(15, 1);
+  });
+
+  it('draws nothing for a year with no activity', () => {
+    expect(yearTrendSvg(stats({yearSeries: []}))).toBe('');
+    expect(yearTrendSvg(stats({month: 0, yearSeries: [0, 0]}))).toBe('');
   });
 });

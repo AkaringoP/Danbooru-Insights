@@ -1559,13 +1559,35 @@ const GLOBAL_CSS = `
       border-top: 1px solid var(--di-border, #e1e4e8);
       transform: translateX(-50%) rotate(45deg);
     }
+    /* Header row: month·metric on the left, year-trend chart on the right,
+       stacked directly above the headline's daily sparkline. */
     .di-gmp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
       font-size: 10px;
       font-weight: 600;
       letter-spacing: 0.03em;
       text-transform: uppercase;
       color: var(--di-text-muted, #888);
       margin-bottom: 8px;
+    }
+    /* Months other than the hovered one recede, so the highlight reads as
+       "you are here" rather than competing with eleven neighbours. */
+    .di-gmp-trend rect.di-gmp-trend-off {
+      fill: var(--grass-level-1, #9be9a8);
+    }
+    .di-gmp-trend rect.di-gmp-trend-current {
+      fill: var(--grass-level-4, #216e39);
+    }
+    /* Same two colours as .di-gmp-mom--up / --down: the bar and the
+       percentage beside it must never disagree. */
+    .di-gmp-trend rect.di-gmp-trend-up {
+      fill: #2ea043;
+    }
+    .di-gmp-trend rect.di-gmp-trend-down {
+      fill: #cf222e;
     }
     /* Headline row: total + MoM on the left, sparkline on the right. */
     .di-gmp-headline {

@@ -25,6 +25,9 @@ const BAR_STEP = 3;
 const BAR_W = 2;
 /** Floor so a non-zero day is never invisible against the baseline. */
 const MIN_BAR_H = 1.5;
+/** Year-trend chart: same footprint as the daily one, 12 fatter bars. */
+const TREND_STEP = 8;
+const TREND_BAR_W = 6;
 /** Linger before the popover starts fading (cursor may return to it). */
 const HIDE_GRACE_MS = 400;
 /** Fade-out duration — must match the CSS opacity transition. */
@@ -56,6 +59,65 @@ function ensureEl(): HTMLDivElement {
   document.body.appendChild(node);
   el = node;
   return node;
+}
+
+/**
+ * Which tint the hovered month's bar takes in the year trend: the same
+ * up/down/flat split the "▲ 23% vs June" text uses, so the chart and the
+ * sentence beside it never disagree. Falls back to a neutral emphasis when
+ * there is no comparison — January before its December lookup lands, or a
+ * month whose predecessor was empty.
+ */
+function trendCurrentClass(stats: MonthStats): string {
+  if (stats.momIsNew) return 'di-gmp-trend-up';
+  if (stats.momPct === null) return 'di-gmp-trend-current';
+  if (stats.momPct > 0) return 'di-gmp-trend-up';
+  if (stats.momPct < 0) return 'di-gmp-trend-down';
+  return 'di-gmp-trend-current';
+}
+
+/**
+ * Inline SVG bar chart of every month in the year, sitting above the daily
+ * sparkline and answering the question that one cannot: where this month
+ * sits among its siblings.
+ *
+ * Only the hovered month is emphasised — tinting all twelve by their own
+ * deltas would put six reds and six greens on a 96px strip and say nothing.
+ * The rest recede to a pale grass tone so the highlighted bar reads as "you
+ * are here", and its colour is the same one the percentage text carries.
+ *
+ * Returns '' when the year has no activity at all, so the header keeps its
+ * original single-line layout.
+ *
+ * Exported for tests.
+ */
+export function yearTrendSvg(stats: MonthStats): string {
+  const {yearSeries} = stats;
+  const peak = yearSeries.reduce((max, v) => (v > max ? v : max), 0);
+  if (yearSeries.length === 0 || peak <= 0) return '';
+
+  const used = yearSeries.length * TREND_STEP - (TREND_STEP - TREND_BAR_W);
+  const offsetX = Math.max(0, (SPARK_W - used) / 2);
+  const currentClass = trendCurrentClass(stats);
+
+  const bars = yearSeries
+    .map((count, i) => {
+      const isCurrent = i === stats.month;
+      // The hovered month keeps a stub even at zero, so "you are here" never
+      // vanishes; other empty months simply leave a gap.
+      if (count <= 0 && !isCurrent) return '';
+      const h = Math.max(MIN_BAR_H, (count / peak) * SPARK_H);
+      const x = offsetX + i * TREND_STEP;
+      const cls = isCurrent ? currentClass : 'di-gmp-trend-off';
+      return `<rect class="${cls}" x="${x.toFixed(1)}" y="${(
+        SPARK_H - h
+      ).toFixed(1)}" width="${TREND_BAR_W}" height="${h.toFixed(
+        1,
+      )}" rx="1"></rect>`;
+    })
+    .join('');
+
+  return `<svg class="di-gmp-spark di-gmp-trend" width="${SPARK_W}" height="${SPARK_H}" viewBox="0 0 ${SPARK_W} ${SPARK_H}" aria-hidden="true">${bars}</svg>`;
 }
 
 /**
@@ -146,7 +208,10 @@ function renderContent(stats: MonthStats, caretLeft: number): string {
     Math.min(1, Math.max(0, stats.activeRatio)) * 100,
   );
   return `${caret}
-    <div class="di-gmp-header">${header}</div>
+    <div class="di-gmp-header">
+      <span>${header}</span>
+      ${yearTrendSvg(stats)}
+    </div>
     <div class="di-gmp-headline">
       <div class="di-gmp-headline-main">
         <span class="di-gmp-total">${stats.total.toLocaleString()}</span>

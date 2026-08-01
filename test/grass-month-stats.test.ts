@@ -236,6 +236,61 @@ describe('computeMonthStats — sparkline series', () => {
   });
 });
 
+describe('computeMonthStats — year trend series', () => {
+  it('finished year: one total per month, indexed from January', () => {
+    const daily = {
+      '2025-01-05': 10,
+      '2025-01-20': 5,
+      '2025-06-01': 7,
+      '2025-12-31': 3,
+    };
+    const s = computeMonthStats(daily, 2025, 5, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries).toHaveLength(12);
+    expect(s.yearSeries[0]).toBe(15); // January, both days summed
+    expect(s.yearSeries[5]).toBe(7);
+    expect(s.yearSeries[11]).toBe(3);
+    expect(s.yearSeries[2]).toBe(0);
+  });
+
+  it('current year stops at the month in progress', () => {
+    // TODAY is July 2026 — months after it have not happened.
+    const s = computeMonthStats({'2026-07-01': 4}, 2026, 6, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries).toHaveLength(7); // Jan..Jul
+  });
+
+  it('extends past the current month when a later one has data', () => {
+    const s = computeMonthStats({'2026-09-01': 4}, 2026, 6, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries).toHaveLength(9);
+    expect(s.yearSeries[8]).toBe(4);
+  });
+
+  it('ignores other years', () => {
+    const daily = {'2026-03-01': 5, '2025-03-01': 99};
+    const s = computeMonthStats(daily, 2026, 2, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries.reduce((a, b) => a + b, 0)).toBe(5);
+  });
+
+  it('future year has no trend to draw', () => {
+    const s = computeMonthStats({}, 2027, 0, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries).toEqual([]);
+  });
+});
+
 describe('label helpers', () => {
   it('metricLabel', () => {
     expect(metricLabel('uploads')).toBe('Uploads');

@@ -123,6 +123,41 @@ function buildSeries(
 }
 
 /**
+ * Per-month totals across the year, index 0 = January.
+ *
+ * Sized the same way {@link buildSeries} sizes its days: a finished year gets
+ * all twelve, the current one stops at the month in progress rather than
+ * trailing months that have not arrived. It extends past that when a later
+ * month carries activity, so a future-dated bucket is never silently dropped.
+ *
+ * @param daily The year's date→count map.
+ * @param year Full year being summarised.
+ * @param today Reference "now".
+ */
+function buildYearSeries(
+  daily: Record<string, number>,
+  year: number,
+  today: Date,
+): number[] {
+  if (year > today.getFullYear()) return [];
+
+  const totals = new Array<number>(12).fill(0);
+  let lastMonthWithData = -1;
+
+  for (const [date, count] of Object.entries(daily)) {
+    if (!date.startsWith(`${year}-`)) continue;
+    const index = parseInt(date.slice(5, 7), 10) - 1;
+    if (!(index >= 0 && index <= 11)) continue;
+    totals[index] += count;
+    if (count > 0) lastMonthWithData = Math.max(lastMonthWithData, index);
+  }
+
+  const elapsed = year === today.getFullYear() ? today.getMonth() + 1 : 12;
+  const months = Math.min(12, Math.max(elapsed, lastMonthWithData + 1));
+  return totals.slice(0, months);
+}
+
+/**
  * Computes the month summary shown in the grass month popover.
  * @param daily A single year's date→count map (the popover's whole data source).
  * @param year Full year of the hovered label.
@@ -168,6 +203,7 @@ export function computeMonthStats(
   denominatorDays = Math.max(denominatorDays, activeDays);
 
   const series = buildSeries(daily, year, month, today, denominatorDays);
+  const yearSeries = buildYearSeries(daily, year, today);
 
   const activeRatio = denominatorDays > 0 ? activeDays / denominatorDays : 0;
   const average =
@@ -201,5 +237,6 @@ export function computeMonthStats(
     momIsNew,
     empty: total === 0,
     series,
+    yearSeries,
   };
 }
