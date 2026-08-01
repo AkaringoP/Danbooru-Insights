@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import {describe, it, expect} from 'vitest';
-import {sparklineSvg} from '../src/ui/grass-month-popover';
+import {momFragment, sparklineSvg} from '../src/ui/grass-month-popover';
 import type {MonthStats} from '../src/types';
 
 /** MonthStats stub carrying only the fields the sparkline reads. */
@@ -89,5 +89,30 @@ describe('sparklineSvg', () => {
       stats({series: [0, 7, 0, 2], busiest: {date: '2026-07-02', count: 7}}),
     );
     expect(svg).not.toContain('NaN');
+  });
+});
+
+describe('momFragment', () => {
+  it("names December as January's predecessor", () => {
+    // month - 1 reached index -1 here and rendered a bare "vs ".
+    const html = momFragment(stats({month: 0, momPct: -51}));
+    expect(html).toContain('vs December');
+    expect(html).toContain('51%');
+    expect(html).toContain('▼');
+  });
+
+  it('names the in-year predecessor for every other month', () => {
+    expect(momFragment(stats({month: 6, momPct: 23}))).toContain('vs June');
+    expect(momFragment(stats({month: 11, momPct: 5}))).toContain('vs November');
+  });
+
+  it('shows "new" instead of a percentage when the previous month was empty', () => {
+    const html = momFragment(stats({month: 0, momIsNew: true}));
+    expect(html).toContain('new');
+    expect(html).not.toContain('vs');
+  });
+
+  it('renders nothing when there is no delta to show', () => {
+    expect(momFragment(stats({month: 0, momPct: null}))).toBe('');
   });
 });

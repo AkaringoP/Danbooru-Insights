@@ -4,6 +4,32 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.9.0 — Month popover: daily sparkline, and January finally gets a delta
+
+### Added
+- **A daily sparkline in the month popover.** Hovering a month label now
+  shows the shape of that month beside its total — one bar per day, with the
+  busiest day tinted darker so it matches the day named just below. Bars are
+  scaled to the month's own peak, so the chart answers "when was I active"
+  while the numbers underneath carry "how much". It follows the grass theme
+  like the rest of the popover, and the in-progress month stops at today
+  instead of trailing a run of empty days that haven't happened yet.
+- **January now shows a month-over-month change.** It was the one month
+  without one: its previous month lives in the year before, which the
+  heatmap doesn't load. Hovering January now looks up just last December's
+  total — from the local data if that year has already been synced, from a
+  remembered value if it was looked up before, and only otherwise from the
+  server (a single query for uploads). The popover opens immediately and the
+  delta appears as soon as it resolves; if it can't be established, the
+  popover reads exactly as it does today.
+
+### Fixed
+- **January's delta label read "vs " with no month.** The previous-month name
+  was looked up one index below January, which is nothing at all. It now
+  wraps around to December.
+
+---
+
 ## v9.8.7 — Audit follow-ups: escaping, sync honesty, deleted-post reconcile
 
 ### Fixed

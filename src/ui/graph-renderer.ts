@@ -15,6 +15,7 @@ import {SettingsManager} from '../core/settings';
 import {createSettingsPopover, applyPopoverPalette} from './settings-popover';
 import {showApprovalsDetail} from './approval-detail-popover';
 import {computeMonthStats} from '../core/grass-month-stats';
+import {resolvePrevDecemberTotal} from '../core/grass-prev-month';
 import {
   showGrassMonthPopover,
   scheduleHideGrassMonthPopover,
@@ -948,6 +949,12 @@ export class GraphRenderer {
    *  popover can compute per-month stats synchronously with no extra DB/API
    *  call (renderGraph's `dailyData` is otherwise a function local). */
   private currentDailyData: Record<string, number> = {};
+  /** Whose graph is painted, kept so January's popover can look last
+   *  December up (the previous year is outside `currentDailyData`). */
+  private currentUserInfo: TargetUser | null = null;
+  /** Bumped on every month-label hover so a slow December lookup only
+   *  patches the popover it was started for. */
+  private monthPopoverGeneration = 0;
   /** Two-step tap controller for the Hourly Distribution grid on touch
    *  devices. Manages active-cell state + outside-tap dismissal so tooltips
    *  don't get stuck the way synthetic mouseenter/mouseleave do on mobile.
@@ -2653,6 +2660,12 @@ export class GraphRenderer {
     // Stash for the month-label hover popover (computes per-month stats from
     // exactly this map — see attachMonthLabelInteractions).
     this.currentDailyData = dailyData || {};
+    // January's popover needs a user to look last December up for; the legacy
+    // string form carries no id, so synthesise one from the name.
+    this.currentUserInfo =
+      typeof userInfo === 'string'
+        ? ({name: userInfo, id: ''} as TargetUser)
+        : userInfo;
 
     // Update Header with Total Count and Embedded Year Selector
     const total = Object.values(dailyData || {}).reduce(
@@ -2897,11 +2910,9 @@ export class GraphRenderer {
         keepGrassMonthPopoverOpen();
         if (dwell !== null) clearTimeout(dwell);
         dwell = setTimeout(() => {
-          showGrassMonthPopover({
-            anchor: label,
-            stats: statsFor(month),
-            themeKey,
-          });
+          const stats = statsFor(month);
+          showGrassMonthPopover({anchor: label, stats, themeKey});
+          this.patchJanuaryMom({anchor: label, stats, themeKey});
         }, 200);
       });
       label.addEventListener('mouseout', () => {
@@ -2911,6 +2922,55 @@ export class GraphRenderer {
         }
         scheduleHideGrassMonthPopover();
       });
+    });
+  }
+
+  /**
+   * Fill in January's month-over-month delta once last December's total is
+   * known, re-rendering the popover in place.
+   *
+   * Every other month finds its predecessor inside `currentDailyData`, so
+   * `computeMonthStats` answers synchronously. January's sits in the year
+   * before, which the heatmap has not loaded — the popover therefore opens
+   * without a delta and gains one a moment later. A cached year or a memoised
+   * total resolves in under a frame; only a genuine lookup is visible, and
+   * even then the number the user came for is already on screen.
+   *
+   * A no-op for every other month, for an empty January (the popover collapses
+   * to a "no activity" line, so there is nothing to compare), and whenever the
+   * lookup cannot establish a total.
+   */
+  private patchJanuaryMom(args: {
+    anchor: Element;
+    stats: MonthStats;
+    themeKey: string;
+  }): void {
+    const {anchor, stats, themeKey} = args;
+    const user = this.currentUserInfo;
+    if (stats.month !== 0 || stats.empty || !user || !this.dataManager) return;
+
+    const generation = ++this.monthPopoverGeneration;
+    void resolvePrevDecemberTotal({
+      dataManager: this.dataManager,
+      user,
+      metric: stats.metric,
+      year: stats.year - 1,
+    }).then(prevTotal => {
+      // Dropped if the pointer has since moved to another label or the
+      // popover was dismissed — patching then would rewrite someone else's
+      // content with January's numbers.
+      if (prevTotal === null) return;
+      if (generation !== this.monthPopoverGeneration) return;
+      if (!isGrassMonthPopoverVisible()) return;
+
+      const patched: MonthStats =
+        prevTotal > 0
+          ? {
+              ...stats,
+              momPct: Math.round(((stats.total - prevTotal) / prevTotal) * 100),
+            }
+          : {...stats, momIsNew: true};
+      showGrassMonthPopover({anchor, stats: patched, themeKey});
     });
   }
 
@@ -2940,11 +3000,9 @@ export class GraphRenderer {
             hideGrassMonthPopover();
             this.activeTapMonth = null;
           } else {
-            showGrassMonthPopover({
-              anchor: label,
-              stats: statsFor(month),
-              themeKey,
-            });
+            const stats = statsFor(month);
+            showGrassMonthPopover({anchor: label, stats, themeKey});
+            this.patchJanuaryMom({anchor: label, stats, themeKey});
             this.activeTapMonth = month;
           }
         },

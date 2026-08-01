@@ -58,13 +58,19 @@ function ensureEl(): HTMLDivElement {
   return node;
 }
 
-/** The "▲ 23% vs June" / "new" fragment, or '' when there is nothing to show. */
-function momFragment(stats: MonthStats): string {
+/**
+ * The "▲ 23% vs June" / "new" fragment, or '' when there is nothing to show.
+ *
+ * Exported for tests.
+ */
+export function momFragment(stats: MonthStats): string {
   if (stats.momIsNew) {
     return '<span class="di-gmp-mom di-gmp-mom--new">new</span>';
   }
   if (stats.momPct === null) return '';
-  const prev = monthLongName(stats.month - 1);
+  // Wrap so January names December rather than reaching index -1 (which read
+  // as an empty name, printing a bare "vs ").
+  const prev = monthLongName((stats.month + 11) % 12);
   const up = stats.momPct > 0;
   const down = stats.momPct < 0;
   const arrow = up ? '▲' : down ? '▼' : '±';
