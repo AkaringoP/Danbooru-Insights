@@ -1939,6 +1939,14 @@ export function renderPieWidget(
   // visibly snap the single-slice / sub-breakdown view back to the
   // top-level pie mid-hover.
   let subChartIsActive = false;
+  // Set when a live-patch for the current tab arrives while a sub-chart is
+  // open (so the render was skipped). Without this the count the user is
+  // reading (e.g. copyright→idolmaster, which opens a sub-chart on hover)
+  // never refreshes in place: the skipped render leaves pieData fresh but the
+  // chart stale, and exiting the sub-chart restores renderPieFrame's *stale*
+  // validData snapshot — so only a full tab switch showed the new value. On
+  // sub-chart exit we now re-render from the fresh pieData instead.
+  let pendingFreshRender = false;
 
   const requestRender = () => {
     if (renderPending) return;
@@ -2023,9 +2031,14 @@ export function renderPieWidget(
 
     if (currentPieTab === key) {
       // Skip the render itself while the user is exploring a sub-chart so we
-      // don't snap the view back to the top-level pie mid-hover; the mutated
-      // pieData is picked up by the next natural render.
-      if (subChartIsActive) return;
+      // don't snap the view back to the top-level pie mid-hover — but remember
+      // to re-render from the fresh pieData once the sub-chart is dismissed
+      // (otherwise exitSubChartMode restores a stale validData snapshot and
+      // the tab appears frozen until a full tab switch).
+      if (subChartIsActive) {
+        pendingFreshRender = true;
+        return;
+      }
       requestRender();
     }
   };
@@ -2069,6 +2082,13 @@ export function renderPieWidget(
       handlePieClick,
       setSubChartActive: active => {
         subChartIsActive = active;
+        // Sub-chart just closed and a live-patch arrived while it was open →
+        // re-render now from the fresh pieData (supersedes exitSubChartMode's
+        // stale validData restore).
+        if (!active && pendingFreshRender) {
+          pendingFreshRender = false;
+          requestRender();
+        }
       },
     });
   };
