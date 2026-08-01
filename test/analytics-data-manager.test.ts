@@ -535,6 +535,67 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     });
   });
 
+  describe('parseUploadCountFromDom', () => {
+    // Minimal fake of the DOM surface the parser touches: rows with a <th>
+    // label and a <td> whose count usually sits inside an <a>.
+    type FakeEl = {
+      textContent: string;
+      querySelector: (sel: string) => FakeEl | null;
+      querySelectorAll: (sel: string) => FakeEl[];
+    };
+    const el = (
+      text: string,
+      children: Record<string, FakeEl[]> = {},
+    ): FakeEl => ({
+      textContent: text,
+      querySelector: sel => children[sel]?.[0] ?? null,
+      querySelectorAll: sel => children[sel] ?? [],
+    });
+    const row = (label: string, value: string, link = true): FakeEl =>
+      el(`${label} ${value}`, {
+        th: [el(label)],
+        td: [el(value, link ? {a: [el(value)]} : {})],
+      });
+    const stubTable = (rows: FakeEl[]) =>
+      vi.stubGlobal('document', {
+        querySelectorAll: (sel: string) =>
+          sel === '#danbooru-grass-wrapper table tr' ? rows : [],
+        querySelector: () => null,
+      });
+    const parse = (adm: AnalyticsDataManager) =>
+      (
+        adm as unknown as {parseUploadCountFromDom: () => number}
+      ).parseUploadCountFromDom();
+
+    it('reads the "Uploads" row — not "Upload Limit" or "Deleted Uploads"', () => {
+      // M-4 guard. The profile statistics table also carries an
+      // "Upload Limit" row; a substring match on 'upload' returned the
+      // account's upload allowance (a tiny number) as its total post count,
+      // and Number.isFinite happily accepted it.
+      stubTable([
+        row('Upload Limit', '10 / 15', false),
+        row('Uploads', '46,252'),
+        row('Deleted Uploads', '1,203'),
+      ]);
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        makeSyncRateLimiter() as never,
+      );
+      expect(parse(adm)).toBe(46252);
+    });
+
+    it('returns NaN when no row matches and the positional fallback misses', () => {
+      // The caller guards with Number.isFinite and falls through to 0
+      // ("could not determine") — never a NaN that poisons isSynced checks.
+      stubTable([row('Favorites', '99')]);
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        makeSyncRateLimiter() as never,
+      );
+      expect(Number.isNaN(parse(adm))).toBe(true);
+    });
+  });
+
   describe('getTotalPostCount memo', () => {
     it("collapses one interaction's repeated lookups onto a single request", async () => {
       // L-3 guard. A report click asks for the total from the pre-check, the

@@ -1504,18 +1504,21 @@ export class UserAnalyticsApp {
         if (shouldRender) this.toggleModal(true);
         return;
       }
+      // quickSync throws on any fetch failure, so reaching the code below on
+      // that path means it completed; only the worker-pool sync can finish
+      // partially.
+      let syncOutcome: SyncOutcome = {complete: true};
       if (syncTotal <= MAX_QUICK_SYNC_POSTS) {
         await this.dataManager.quickSyncAllPosts(
           this.context.targetUser,
           onProgress,
         );
       } else {
-        warnIfSyncIncomplete(
-          await this.dataManager.syncAllPosts(
-            this.context.targetUser,
-            onProgress,
-          ),
+        syncOutcome = await this.dataManager.syncAllPosts(
+          this.context.targetUser,
+          onProgress,
         );
+        warnIfSyncIncomplete(syncOutcome);
       }
 
       // A sync ran → the deferred pie distributions' per-tag counts may have
@@ -1525,15 +1528,21 @@ export class UserAnalyticsApp {
 
       if (animInterval) clearInterval(animInterval);
 
-      // Final Status (Green)
+      // Final Status (Green) — but never claim "Synced" over a partial run
+      // the toast just flagged; the no-arg form recomputes an honest
+      // count-based status instead.
       if (shouldRender) {
-        const finalStats = await this.dataManager.getSyncStats(
-          this.context.targetUser,
-        );
-        void this.updateHeaderStatus(
-          `Synced: ${finalStats.count.toLocaleString()} / ${finalStats.count.toLocaleString()}`,
-          '#00ba7c',
-        );
+        if (syncOutcome.complete) {
+          const finalStats = await this.dataManager.getSyncStats(
+            this.context.targetUser,
+          );
+          void this.updateHeaderStatus(
+            `Synced: ${finalStats.count.toLocaleString()} / ${finalStats.count.toLocaleString()}`,
+            '#00ba7c',
+          );
+        } else {
+          void this.updateHeaderStatus();
+        }
       }
 
       if (btn) {

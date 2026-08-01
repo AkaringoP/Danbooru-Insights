@@ -3776,7 +3776,11 @@ export class AnalyticsDataManager extends DataManager {
     for (const row of rows) {
       const labelCell = row.querySelector('th') ?? row.querySelector('td');
       const label = (labelCell?.textContent ?? '').trim().toLowerCase();
-      if (!label.includes('upload') || label.includes('deleted')) continue;
+      // Exact match only: the same table carries "Upload Limit" and
+      // "Deleted Uploads" rows, and a substring test would happily read the
+      // account's upload allowance as its total post count. No match at all
+      // → the positional fallback below.
+      if (label !== 'uploads') continue;
 
       const cells = row.querySelectorAll('td');
       const valueCell = cells[cells.length - 1] ?? row.querySelector('td');
@@ -4036,11 +4040,15 @@ export class AnalyticsDataManager extends DataManager {
     startId: number,
     seenIds: Set<number>,
   ): Promise<number> {
-    const ghostIds = (await this.db.posts
+    // Keys-only index scan: `id` IS the posts table's primary key, so the
+    // range/seen filtering can happen on the returned numbers. A
+    // filter().primaryKeys() combination would instantiate every row of what
+    // can be a 100k-row table just to read its id back out.
+    const allIds = (await this.db.posts
       .where('uploader_id')
       .equals(uploaderId)
-      .filter((p: ApiItem) => p['id'] > startId && !seenIds.has(p['id']))
       .primaryKeys()) as number[];
+    const ghostIds = allIds.filter(id => id > startId && !seenIds.has(id));
 
     if (ghostIds.length === 0) return 0;
 
