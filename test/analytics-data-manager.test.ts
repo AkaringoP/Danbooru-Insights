@@ -233,7 +233,11 @@ function makePostsChain(
     reverse: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
     until: vi.fn().mockReturnThis(),
-    filter: vi.fn().mockReturnThis(),
+    // Records the predicate instead of ignoring it, so `primaryKeys()` can
+    // answer faithfully (pruneGhostPosts filters then reads primary keys).
+    // Terminal ops that predate this (count/toArray) keep their old
+    // filter-blind behaviour so existing expectations are untouched.
+    filter: vi.fn(),
     equals: vi.fn().mockReturnThis(),
     anyOf: vi.fn().mockReturnThis(),
     each: vi.fn(async (cb: (row: Record<string, unknown>) => void) => {
@@ -248,12 +252,27 @@ function makePostsChain(
     delete: vi.fn(async () => rows.length),
     uniqueKeys: vi.fn(async () => []),
     orderBy: vi.fn().mockReturnThis(),
+    _filters: [] as Array<(row: Record<string, unknown>) => boolean>,
+    primaryKeys: vi.fn(async () =>
+      rows
+        .filter(r =>
+          (
+            chain._filters as Array<(row: Record<string, unknown>) => boolean>
+          ).every(f => f(r)),
+        )
+        .map(r => r['id']),
+    ),
   };
+  chain.filter = vi.fn((fn: (row: Record<string, unknown>) => boolean) => {
+    (chain._filters as Array<(row: Record<string, unknown>) => boolean>).push(
+      fn,
+    );
+    return chain;
+  });
   // Make all modifier fns return the chain itself
   (chain.reverse as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.limit as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.until as ReturnType<typeof vi.fn>).mockReturnValue(chain);
-  (chain.filter as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.equals as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.anyOf as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   return chain;
@@ -262,10 +281,17 @@ function makePostsChain(
 /** Build a posts table mock. */
 function makePostsTable(rows: Record<string, unknown>[] = []) {
   const chain = makePostsChain(rows);
+  // Each where() starts a fresh query, so recorded filter predicates from a
+  // previous one must not leak into it.
+  const startQuery = () => {
+    chain._filters = [];
+    return chain;
+  };
   return {
-    where: vi.fn().mockReturnValue(chain),
-    orderBy: vi.fn().mockReturnValue(chain),
+    where: vi.fn(startQuery),
+    orderBy: vi.fn(startQuery),
     bulkPut: vi.fn(async () => undefined),
+    bulkDelete: vi.fn(async () => undefined),
     _chain: chain,
   };
 }
@@ -737,6 +763,107 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
 
     const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
     expect(outcome.complete).toBe(true);
+  });
+
+  it('prunes rows the remote no longer returns after a clean run', async () => {
+    // M-3 guard. Sync searches carry no `status:any`, so a post deleted on
+    // Danbooru since the last run simply never appears in the re-fetched
+    // window. Its local row used to survive with is_deleted:false while the
+    // surviving posts were renumbered, so its stale `no` collided with a live
+    // post's — milestones by [uploader_id+no] became ambiguous and the local
+    // count drifted above the remote one.
+    const ghost = {id: 900, uploader_id: 42, no: 7, created_at: '2025-01-02'};
+    const live = {id: 901, uploader_id: 42, no: 8, created_at: '2025-01-03'};
+    const postsTable = makePostsTable([ghost, live]);
+    const db = makeSyncDb(postsTable);
+
+    let postsCallCount = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 1}}),
+        };
+      }
+      postsCallCount++;
+      // Only the live post comes back; the ghost is gone remotely.
+      if (postsCallCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: 901,
+              uploader_id: 42,
+              created_at: '2025-01-03T00:00:00Z',
+              up_score: 1,
+              down_score: 0,
+              rating: 'g',
+            },
+          ],
+        };
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(outcome.complete).toBe(true);
+    expect(postsTable.bulkDelete).toHaveBeenCalledWith([900]);
+  });
+
+  it('does not prune when the run was incomplete', async () => {
+    // A failed run has not seen every page, so a row missing from the seen set
+    // may just be one we never asked for. Pruning on that evidence would
+    // delete live data — the whole reason the reconcile runs after the fetch
+    // rather than as a delete-then-refetch before it.
+    const ghost = {id: 900, uploader_id: 42, no: 7, created_at: '2025-01-02'};
+    const postsTable = makePostsTable([ghost]);
+    const db = makeSyncDb(postsTable);
+
+    let postsCallCount = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 2}}),
+        };
+      }
+      postsCallCount++;
+      if (postsCallCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: 901,
+              uploader_id: 42,
+              created_at: '2025-01-03T00:00:00Z',
+              up_score: 1,
+              down_score: 0,
+              rating: 'g',
+            },
+          ],
+        };
+      }
+      // A later page dies (400 is not a 5xx → no retry backoff).
+      return {ok: false, status: 400, json: async () => []};
+    });
+
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(outcome.complete).toBe(false);
+    expect(postsTable.bulkDelete).not.toHaveBeenCalled();
   });
 
   it('partial sync: di_post_metadata_v2 NOT set when startId > 0', async () => {

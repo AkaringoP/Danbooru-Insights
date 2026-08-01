@@ -3748,6 +3748,7 @@ export class AnalyticsDataManager extends DataManager {
       let pageOffset = 1;
       let hasMore = true;
       let pageFailed = false;
+      const seenIds = new Set<number>();
       const buffer = new Map<number, DanbooruPost[]>();
       let nextExpectedPage = 1;
       const MAX_CONCURRENCY = 5;
@@ -3770,6 +3771,9 @@ export class AnalyticsDataManager extends DataManager {
         markFailed: () => {
           pageFailed = true;
         },
+        markSeen: ids => {
+          for (const id of ids) seenIds.add(id);
+        },
         reportProgress,
         perfStats,
       });
@@ -3779,6 +3783,13 @@ export class AnalyticsDataManager extends DataManager {
         workers.push(worker(i));
       }
       await Promise.all(workers);
+
+      // Reconcile the re-fetched window before the completion stamps: drop
+      // rows the remote no longer returns, so the local DB is a snapshot of
+      // the window rather than a union of every sync that ever ran.
+      if (!pageFailed && perfStats.pagesCommitted > 0) {
+        await this.pruneGhostPosts(uploaderId, startId, seenIds);
+      }
 
       await this.finalizeSyncMetadata({
         userInfo,
@@ -3874,6 +3885,56 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
+   * Drop this user's rows above `startId` that the just-completed sync did
+   * not return — posts deleted on Danbooru since the last run.
+   *
+   * Sync searches carry no `status:any`, so Danbooru's default excludes
+   * deleted posts and the re-fetched overlap window simply never mentions
+   * them. Without this pass the old row survives with `is_deleted:false`
+   * while the posts that outlived it are renumbered, so its stale `no`
+   * collides with a live post's: `[uploader_id+no]` milestone lookups pick
+   * whichever row Dexie hands back first, local counts drift above the
+   * remote count (making the needsSync check too lenient), and the scatter
+   * plots a post that no longer exists. Only the >1200-post worker path is
+   * affected — quickSync clears the user first, so it never accumulates ghosts.
+   *
+   * Ordering matters: this runs only after a clean run (`markFailed` never
+   * fired) and only when at least one page committed. A partial run has not
+   * seen every page, so a post missing from `seenIds` may simply be one we
+   * never asked for — pruning on that evidence would delete live data. This
+   * is also why the reconcile happens *after* the fetch rather than as a
+   * delete-then-refetch before it: nothing is removed until the replacement
+   * data is already committed, so an interrupted sync can never leave a hole.
+   *
+   * @param {number} uploaderId The user whose rows to reconcile.
+   * @param {number} startId Rows at or below this id were outside the
+   *   re-fetched window and are left alone.
+   * @param {Set<number>} seenIds Post ids the remote returned this run.
+   * @return {Promise<number>} How many ghost rows were deleted.
+   */
+  private async pruneGhostPosts(
+    uploaderId: number,
+    startId: number,
+    seenIds: Set<number>,
+  ): Promise<number> {
+    const ghostIds = (await this.db.posts
+      .where('uploader_id')
+      .equals(uploaderId)
+      .filter((p: ApiItem) => p['id'] > startId && !seenIds.has(p['id']))
+      .primaryKeys()) as number[];
+
+    if (ghostIds.length === 0) return 0;
+
+    await this.db.posts.bulkDelete(ghostIds);
+    log.debug('Pruned remotely-deleted posts', {
+      uploaderId,
+      startId,
+      pruned: ghostIds.length,
+    });
+    return ghostIds.length;
+  }
+
+  /**
    * Build the worker function used by the syncAllPosts worker pool.
    * Each worker:
    *   1. claims the next page via `claimPage` (shared atomic counter),
@@ -3904,6 +3965,7 @@ export class AnalyticsDataManager extends DataManager {
     getHasMore: () => boolean;
     setHasMore: (v: boolean) => void;
     markFailed: () => void;
+    markSeen: (ids: number[]) => void;
     reportProgress: (c: number, t: number, msg?: string) => void;
     perfStats: {pagesCommitted: number};
   }): (workerId: number) => Promise<void> {
@@ -3921,6 +3983,7 @@ export class AnalyticsDataManager extends DataManager {
       getHasMore,
       setHasMore,
       markFailed,
+      markSeen,
       reportProgress,
       perfStats,
     } = args;
@@ -4050,6 +4113,9 @@ export class AnalyticsDataManager extends DataManager {
                 await bulkPutSafe(this.db.posts, bulkData, () =>
                   evictOldestNonCurrentUser(this.db, uploaderId),
                 );
+                // Remember what the remote actually returned, so a clean run
+                // can prune rows the remote no longer has (see pruneGhostPosts).
+                markSeen(bulkData.map(r => r.id));
                 perfLogger.end(bulkPutLabel, {
                   workerId,
                   page: expected,
