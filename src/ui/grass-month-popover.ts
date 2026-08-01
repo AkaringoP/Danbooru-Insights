@@ -15,7 +15,16 @@ import {calcPopoverPositionBelow, applyPopoverChrome} from './popover-utils';
 import {applyPopoverPalette} from './settings-popover';
 
 const POPOVER_ID = 'danbooru-grass-month-popover';
-const WIDTH = 240;
+/** Wide enough to seat the sparkline beside the headline (31 bars ≈ 96px). */
+const WIDTH = 272;
+/** Sparkline box, in SVG user units (rendered 1:1 via width/height attrs). */
+const SPARK_W = 96;
+const SPARK_H = 30;
+/** A bar plus its gap; 31 days × 3 = 93 ≤ SPARK_W. */
+const BAR_STEP = 3;
+const BAR_W = 2;
+/** Floor so a non-zero day is never invisible against the baseline. */
+const MIN_BAR_H = 1.5;
 /** Linger before the popover starts fading (cursor may return to it). */
 const HIDE_GRACE_MS = 400;
 /** Fade-out duration — must match the CSS opacity transition. */
@@ -65,6 +74,49 @@ function momFragment(stats: MonthStats): string {
   )}% vs ${prev}</span>`;
 }
 
+/**
+ * Inline SVG bar chart of the month's daily counts, sized to sit beside the
+ * headline total. Heights are normalised to the month's own peak, so the
+ * shape reads as "how this month was distributed" rather than an absolute
+ * scale — the numbers underneath carry the magnitude.
+ *
+ * The busiest day is tinted a step darker so the eye lands on the same day
+ * the "Busiest" row names. Both colours bridge to the active grass palette,
+ * so the sparkline follows Sakura/Ember/etc. like the ratio bar does.
+ *
+ * Returns '' when there is nothing to draw (future month, or a month whose
+ * days are all zero) so the headline simply keeps its old layout.
+ *
+ * Exported for tests.
+ */
+export function sparklineSvg(stats: MonthStats): string {
+  const {series} = stats;
+  const peak = series.reduce((max, v) => (v > max ? v : max), 0);
+  if (series.length === 0 || peak <= 0) return '';
+
+  // Centre the row when a short month leaves slack (e.g. an in-progress
+  // month with only a few elapsed days).
+  const used = series.length * BAR_STEP - (BAR_STEP - BAR_W);
+  const offsetX = Math.max(0, (SPARK_W - used) / 2);
+  const peakDay = stats.busiest
+    ? parseInt(stats.busiest.date.slice(8, 10), 10)
+    : -1;
+
+  const bars = series
+    .map((count, i) => {
+      if (count <= 0) return '';
+      const h = Math.max(MIN_BAR_H, (count / peak) * SPARK_H);
+      const x = offsetX + i * BAR_STEP;
+      const cls = i + 1 === peakDay ? ' class="di-gmp-spark-peak"' : '';
+      return `<rect${cls} x="${x.toFixed(1)}" y="${(SPARK_H - h).toFixed(
+        1,
+      )}" width="${BAR_W}" height="${h.toFixed(1)}" rx="1"></rect>`;
+    })
+    .join('');
+
+  return `<svg class="di-gmp-spark" width="${SPARK_W}" height="${SPARK_H}" viewBox="0 0 ${SPARK_W} ${SPARK_H}" aria-hidden="true">${bars}</svg>`;
+}
+
 /** "July 12 — 34" for the busiest day, or '—' when the month is empty. */
 function busiestText(stats: MonthStats): string {
   if (!stats.busiest) return '—';
@@ -90,8 +142,11 @@ function renderContent(stats: MonthStats, caretLeft: number): string {
   return `${caret}
     <div class="di-gmp-header">${header}</div>
     <div class="di-gmp-headline">
-      <span class="di-gmp-total">${stats.total.toLocaleString()}</span>
-      ${momFragment(stats)}
+      <div class="di-gmp-headline-main">
+        <span class="di-gmp-total">${stats.total.toLocaleString()}</span>
+        ${momFragment(stats)}
+      </div>
+      ${sparklineSvg(stats)}
     </div>
     <div class="di-gmp-rows">
       <div class="di-gmp-row">

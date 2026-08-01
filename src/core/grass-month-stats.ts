@@ -78,6 +78,51 @@ function denominatorDaysFor(year: number, month: number, today: Date): number {
 }
 
 /**
+ * Per-day counts for the popover's sparkline, index 0 = the 1st.
+ *
+ * Sized to the days that have actually happened: a future month draws
+ * nothing, and the in-progress month stops at the elapsed day rather than
+ * trailing a run of zeroes that only mean "hasn't happened yet". It extends
+ * past that day when a bucket carries activity beyond it — the daily keys
+ * lean UTC, so a user behind it can already have tomorrow's bucket, the same
+ * skew `denominatorDays` clamps for.
+ *
+ * @param daily The year's date→count map.
+ * @param year Full year of the month.
+ * @param month 0-indexed month.
+ * @param today Reference "now".
+ * @param denominatorDays The (already clamped) elapsed-day count.
+ */
+function buildSeries(
+  daily: Record<string, number>,
+  year: number,
+  month: number,
+  today: Date,
+  denominatorDays: number,
+): number[] {
+  if (denominatorDaysFor(year, month, today) === 0) return [];
+
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const prefix = monthPrefix(year, month);
+  const dayCounts = new Array<number>(daysInMonth).fill(0);
+  let lastDayWithData = 0;
+
+  for (const [date, count] of Object.entries(daily)) {
+    if (!date.startsWith(prefix)) continue;
+    const day = parseInt(date.slice(8, 10), 10);
+    if (!(day >= 1 && day <= daysInMonth)) continue;
+    dayCounts[day - 1] = count;
+    if (count > 0) lastDayWithData = Math.max(lastDayWithData, day);
+  }
+
+  const days = Math.min(
+    daysInMonth,
+    Math.max(denominatorDays, lastDayWithData),
+  );
+  return dayCounts.slice(0, days);
+}
+
+/**
  * Computes the month summary shown in the grass month popover.
  * @param daily A single year's date→count map (the popover's whole data source).
  * @param year Full year of the hovered label.
@@ -122,6 +167,8 @@ export function computeMonthStats(
   // elapsed-day count — clamp so the ratio never reads e.g. "16 / 15 days".
   denominatorDays = Math.max(denominatorDays, activeDays);
 
+  const series = buildSeries(daily, year, month, today, denominatorDays);
+
   const activeRatio = denominatorDays > 0 ? activeDays / denominatorDays : 0;
   const average =
     denominatorDays > 0 ? Math.round((total / denominatorDays) * 10) / 10 : 0;
@@ -153,5 +200,6 @@ export function computeMonthStats(
     momPct,
     momIsNew,
     empty: total === 0,
+    series,
   };
 }

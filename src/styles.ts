@@ -1567,12 +1567,33 @@ const GLOBAL_CSS = `
       color: var(--di-text-muted, #888);
       margin-bottom: 8px;
     }
+    /* Headline row: total + MoM on the left, sparkline on the right. */
     .di-gmp-headline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .di-gmp-headline-main {
       display: flex;
       align-items: baseline;
       flex-wrap: wrap;
       gap: 8px;
-      margin-bottom: 8px;
+      min-width: 0;
+    }
+    .di-gmp-spark {
+      flex: 0 0 auto;
+      display: block;
+      overflow: visible;
+    }
+    /* Same palette bridge as .di-gmp-bar-fill; the busiest day sits one level
+       darker so it matches the day named in the "Busiest" row. */
+    .di-gmp-spark rect {
+      fill: var(--grass-level-2, #40c463);
+    }
+    .di-gmp-spark rect.di-gmp-spark-peak {
+      fill: var(--grass-level-4, #216e39);
     }
     .di-gmp-total {
       font-size: 20px;
