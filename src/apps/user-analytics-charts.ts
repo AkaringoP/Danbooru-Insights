@@ -2298,7 +2298,7 @@ export function renderTopPostsWidget(
   recentPopularPosts: TopPostsBySfw | null,
   randomPosts: TopPostsBySfw | Promise<TopPostsBySfw | null> | null,
   initialNsfwEnabled: boolean,
-  db: Database,
+  dataManager: AnalyticsDataManager,
   context: ChartContext,
 ): {onNsfwChange: (enabled: boolean) => void} {
   let isNsfwEnabled = initialNsfwEnabled;
@@ -2534,9 +2534,7 @@ export function renderTopPostsWidget(
       contentDiv.style.opacity = '0.5';
 
       try {
-        const newRandoms = await new AnalyticsDataManager(db).getRandomPosts(
-          context.targetUser,
-        );
+        const newRandoms = await dataManager.getRandomPosts(context.targetUser);
         topPostGroups['random'] = newRandoms;
         renderTopPostContent();
       } catch (err) {
@@ -2609,6 +2607,7 @@ export function renderTopPostsWidget(
 export async function renderMilestonesWidget(
   container: HTMLElement,
   db: Database,
+  dataManager: AnalyticsDataManager,
   context: ChartContext,
   initialNsfwEnabled: boolean,
 ): Promise<{onNsfwChange: (enabled: boolean) => Promise<void>}> {
@@ -2620,8 +2619,7 @@ export async function renderMilestonesWidget(
   // expand state × per-milestone post hydration × NSFW gating.
   // eslint-disable-next-line complexity
   const renderMilestones = async () => {
-    const dm = new AnalyticsDataManager(db);
-    const milestones = await dm.getMilestones(
+    const milestones = await dataManager.getMilestones(
       context.targetUser,
       isNsfwEnabled,
       currentMilestoneStep,
@@ -2632,7 +2630,10 @@ export async function renderMilestonesWidget(
     const totalPosts = uploaderId
       ? await db.posts.where('uploader_id').equals(uploaderId).count()
       : 0;
-    const nextTarget = dm.getNextMilestone(totalPosts, currentMilestoneStep);
+    const nextTarget = dataManager.getNextMilestone(
+      totalPosts,
+      currentMilestoneStep,
+    );
 
     let msHtml =
       '<div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--di-border-light, #eee); padding-bottom:8px; margin-bottom:10px;">';
@@ -2818,7 +2819,7 @@ export async function renderMilestonesWidget(
  */
 export async function renderHistoryChart(
   container: HTMLElement,
-  db: Database,
+  dataManager: AnalyticsDataManager,
   context: ChartContext,
   milestones1k: MilestoneEntry[],
   levelChanges: LevelChangeEvent[],
@@ -2830,7 +2831,7 @@ export async function renderHistoryChart(
 
   const isTouch2 = isTouchDevice();
 
-  const monthly = await new AnalyticsDataManager(db).getMonthlyStats(
+  const monthly = await dataManager.getMonthlyStats(
     context.targetUser,
     minDate,
   );

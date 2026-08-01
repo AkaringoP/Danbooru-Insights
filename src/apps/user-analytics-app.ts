@@ -668,7 +668,7 @@ async function renderDashboardWidgets(
     recentPopularPosts,
     randomPostsPromise,
     nsfw.enabled,
-    app.db,
+    app.dataManager,
     app.context,
   );
   perfLogger.end('dbi:render:widget:topPosts');
@@ -686,7 +686,13 @@ async function renderDashboardWidgets(
   const milestonesResult = await perfLogger.wrap(
     'dbi:render:widget:milestones',
     () =>
-      renderMilestonesWidget(milestonesDiv, app.db, app.context, nsfw.enabled),
+      renderMilestonesWidget(
+        milestonesDiv,
+        app.db,
+        app.dataManager,
+        app.context,
+        nsfw.enabled,
+      ),
   );
 
   // Wire the NSFW fan-out — the header's onchange handler reads
@@ -701,7 +707,13 @@ async function renderDashboardWidgets(
 
   // 4. Monthly Activity Chart
   await perfLogger.wrap('dbi:render:widget:history', () =>
-    renderHistoryChart(parent, app.db, app.context, milestones1k, levelChanges),
+    renderHistoryChart(
+      parent,
+      app.dataManager,
+      app.context,
+      milestones1k,
+      levelChanges,
+    ),
   );
 
   // 5. Created Tags Widget (lazy load) — after Monthly Activity
@@ -1548,11 +1560,16 @@ export class UserAnalyticsApp {
       return;
     }
 
-    const dataManager = new AnalyticsDataManager(this.db);
-    const stats = await dataManager.getSyncStats(this.context.targetUser);
+    // Reuse the app's manager: it carries the shared rate limiter, so these
+    // count queries stay under TabCoordinator's multi-tab split and the 429
+    // global backoff (H-1). A local `new AnalyticsDataManager(this.db)` would
+    // get its own token bucket and fire straight through both.
+    const stats = await this.dataManager.getSyncStats(this.context.targetUser);
 
     // Use Robust Total Fetching
-    const total = await dataManager.getTotalPostCount(this.context.targetUser);
+    const total = await this.dataManager.getTotalPostCount(
+      this.context.targetUser,
+    );
     this.totalPostCount = total;
 
     const count = stats.count;
