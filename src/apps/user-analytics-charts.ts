@@ -1939,6 +1939,14 @@ export function renderPieWidget(
   // visibly snap the single-slice / sub-breakdown view back to the
   // top-level pie mid-hover.
   let subChartIsActive = false;
+  // Set when a live-patch for the current tab arrives while a sub-chart is
+  // open (so the render was skipped). Without this the count the user is
+  // reading (e.g. copyright→idolmaster, which opens a sub-chart on hover)
+  // never refreshes in place: the skipped render leaves pieData fresh but the
+  // chart stale, and exiting the sub-chart restores renderPieFrame's *stale*
+  // validData snapshot — so only a full tab switch showed the new value. On
+  // sub-chart exit we now re-render from the fresh pieData instead.
+  let pendingFreshRender = false;
 
   const requestRender = () => {
     if (renderPending) return;
@@ -1949,7 +1957,32 @@ export function renderPieWidget(
     });
   };
 
-  // Listen for lazy-loaded thumbnail updates
+  // Live-patch: a background SWR revalidate (post-paint) or a lazy thumbnail
+  // fetch fires DanbooruInsights:DataUpdated carrying the tab's fresh full
+  // data. We replace that tab's slice data — proportions, counts AND thumbs —
+  // so a background refresh lands on the open dashboard without a reopen
+  // (audit R2 follow-up). The 11 pie tabs are covered; the app dispatches for
+  // status/rating/gender/commentary/translation (no thumbnails, so
+  // enrichThumbnails never fires for them) and the thumb-bearing tabs get a
+  // (coalesced) event from both enrichThumbnails and the app.
+  const PIE_KEY_BY_CONTENT: Record<string, string> = {
+    character_dist: 'character',
+    copyright_dist: 'copyright',
+    fav_copyright_dist: 'fav_copyright',
+    breasts_dist: 'breasts',
+    hair_length_dist: 'hair_length',
+    hair_color_dist: 'hair_color',
+    gender_dist: 'gender',
+    commentary_dist: 'commentary',
+    translation_dist: 'translation',
+    status_dist: 'status',
+    rating_dist: 'rating',
+  };
+  // Inverse (tab → cacheKey), used to tell the app which distribution to
+  // lazily revalidate when the user switches to a tab.
+  const PIE_CONTENT_BY_KEY: Record<string, string> = Object.fromEntries(
+    Object.entries(PIE_KEY_BY_CONTENT).map(([content, tab]) => [tab, content]),
+  );
   const onPieDataUpdate = (e: Event) => {
     if (!document.body.contains(container)) {
       window.removeEventListener(
@@ -1959,45 +1992,97 @@ export function renderPieWidget(
       return;
     }
     const {contentType, data} = (e as CustomEvent).detail;
-    const keyMap: Record<string, string> = {
-      character_dist: 'character',
-      copyright_dist: 'copyright',
-      fav_copyright_dist: 'fav_copyright',
-      breasts_dist: 'breasts',
-      hair_length_dist: 'hair_length',
-      hair_color_dist: 'hair_color',
-      rating_dist: 'rating',
-    };
-    const key = keyMap[contentType as string];
+    const key = PIE_KEY_BY_CONTENT[contentType as string];
+    if (!key || !pieData[key] || !Array.isArray(data)) return;
 
-    if (key && pieData[key]) {
-      const incomingMap = new Map(
-        (data as PieTabItem[]).map((d: PieTabItem) => [d.name, d]),
-      );
-      const currentData = pieData[key];
+    // Normalize the incoming raw distribution exactly like the initial load /
+    // fetchDistributionForTab does, so a live-patched tab matches the lazy
+    // path (status needs its colour overlay; frequency tabs need value/pct
+    // preprocessing).
+    const incoming = data as PieTabItem[];
+    let next: PieTabItem[];
+    if (key === 'status') {
+      next = incoming.map((d: PieTabItem) => ({
+        ...d,
+        color:
+          STATUS_COLORS[
+            (d as {name?: string}).name as keyof typeof STATUS_COLORS
+          ] || '#888',
+      }));
+    } else if (
+      key === 'breasts' ||
+      key === 'gender' ||
+      key === 'commentary' ||
+      key === 'translation'
+    ) {
+      next = preprocessFrequencyTab(incoming);
+    } else {
+      next = incoming.map((d: PieTabItem) => ({...d}));
+    }
 
-      currentData.forEach((item: PieTabItem) => {
-        const update = incomingMap.get(item.name);
-        if (update && update.thumb && item.thumb !== update.thumb) {
-          item.thumb = update.thumb;
-          const withDetails = item as PieTabItem & {
-            details?: {thumb: string | null};
-          };
-          if (withDetails.details) withDetails.details.thumb = update.thumb;
-        }
-      });
-
-      if (currentPieTab === key) {
-        // Mutation above already lands on `pieData` (and the slices'
-        // details.thumb), so the next non-hover render will pick it up.
-        // Skip the render itself while the user is exploring a sub-chart
-        // so we don't snap the view back to the top-level pie mid-hover.
-        if (subChartIsActive) return;
-        requestRender();
+    // Preserve an existing thumbnail when the fresh row lacks one — a transient
+    // thumb-fetch miss on revalidate shouldn't blank an already-good thumb.
+    const prevByName = new Map(
+      pieData[key].map((it: PieTabItem) => [it.name, it]),
+    );
+    next.forEach((it: PieTabItem) => {
+      if (!it.thumb) {
+        const prev = prevByName.get(it.name);
+        if (prev?.thumb) it.thumb = prev.thumb;
       }
+    });
+
+    pieData[key] = next;
+
+    if (currentPieTab === key) {
+      // Skip the render itself while the user is exploring a sub-chart so we
+      // don't snap the view back to the top-level pie mid-hover — but remember
+      // to re-render from the fresh pieData once the sub-chart is dismissed
+      // (otherwise exitSubChartMode restores a stale validData snapshot and
+      // the tab appears frozen until a full tab switch).
+      if (subChartIsActive) {
+        pendingFreshRender = true;
+        return;
+      }
+      requestRender();
     }
   };
   window.addEventListener('DanbooruInsights:DataUpdated', onPieDataUpdate);
+
+  // "Updating…" badge: shown while the *current* tab's per-tag counts are
+  // being revalidated in the background. The app dispatches PieTabRefreshing
+  // with active:true when a tab's revalidate starts and active:false when it
+  // settles (changed or not), so a briefly-stale cached count isn't mistaken
+  // for the final value. Only the visible tab's state drives the badge.
+  const refreshingTabs = new Set<string>();
+  const updatingBadge = container.querySelector(
+    '.di-pie-updating-badge',
+  ) as HTMLElement | null;
+  const updatePieUpdatingBadge = () => {
+    updatingBadge?.classList.toggle(
+      'is-active',
+      refreshingTabs.has(currentPieTab),
+    );
+  };
+  const onPieTabRefreshing = (e: Event) => {
+    if (!document.body.contains(container)) {
+      window.removeEventListener(
+        'DanbooruInsights:PieTabRefreshing',
+        onPieTabRefreshing,
+      );
+      return;
+    }
+    const {contentType, active} = (e as CustomEvent).detail;
+    const tab = PIE_KEY_BY_CONTENT[contentType as string];
+    if (!tab) return;
+    if (active) refreshingTabs.add(tab);
+    else refreshingTabs.delete(tab);
+    if (tab === currentPieTab) updatePieUpdatingBadge();
+  };
+  window.addEventListener(
+    'DanbooruInsights:PieTabRefreshing',
+    onPieTabRefreshing,
+  );
 
   /**
    * Handles click events on pie chart slices. Delegates the per-tab
@@ -2037,6 +2122,13 @@ export function renderPieWidget(
       handlePieClick,
       setSubChartActive: active => {
         subChartIsActive = active;
+        // Sub-chart just closed and a live-patch arrived while it was open →
+        // re-render now from the fresh pieData (supersedes exitSubChartMode's
+        // stale validData restore).
+        if (!active && pendingFreshRender) {
+          pendingFreshRender = false;
+          requestRender();
+        }
       },
     });
   };
@@ -2080,6 +2172,9 @@ export function renderPieWidget(
                      <button class="di-pie-tab" data-mode="hair_color" title="Hair Color">Hair_C</button>
                  </div>
              </div>
+             <span class="di-pie-updating-badge" title="Refreshing this tab's counts in the background">
+                 <span class="di-pie-updating-spin">⟳</span>Updating…
+             </span>
          </div>
          <div class="pie-content" style="flex:1; display:flex; justify-content:center; align-items:center; min-height:160px;">
              Loading...
@@ -2124,6 +2219,20 @@ export function renderPieWidget(
       if (mode && currentPieTab !== mode) {
         currentPieTab = mode;
         updatePieTabs();
+        // Ask the app to lazily revalidate this tab's per-tag counts (fire-once
+        // in schedulePieRevalidate; a no-op if already fresh or already fired).
+        // The "Updating…" badge appears via the PieTabRefreshing echo while it
+        // runs. Cached data stays on screen until the fresh value lands.
+        const contentKey = PIE_CONTENT_BY_KEY[mode];
+        if (contentKey) {
+          window.dispatchEvent(
+            new CustomEvent('DanbooruInsights:PieTabActivated', {
+              detail: {contentType: contentKey},
+            }),
+          );
+        }
+        // Reflect the newly-selected tab's background-refresh state.
+        updatePieUpdatingBadge();
 
         const pieContent = container.querySelector(
           '.pie-content',

@@ -4,6 +4,49 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.8.5 — Faster dashboard open after a partial sync
+
+### Changed
+- **The report opens much faster after a sync.** The nine heavy tag
+  distributions (character / copyright / hair colour / …) used to be
+  force-refreshed on the blocking path before the dashboard could paint —
+  hundreds of per-tag count queries the user had to wait through. They now
+  paint from cache immediately and freshen in the background. On a large
+  (~46k post) account the open dropped from roughly 30s to about 5s.
+
+  Data freshness is unchanged where it matters: post counts, sync stats,
+  milestones, rating/status splits and the other critical stats are still
+  refreshed before the dashboard paints, so nothing headline is stale.
+- **Background revalidation is lazy, per tab.** Only the pie tab you are
+  actually looking at revalidates when the dashboard opens; the other eight
+  revalidate the first time you switch to them, once each. Previously all
+  nine fired at once — around 250 API calls on a large account — to converge
+  tabs that may never be opened.
+
+### Added
+- **"⟳ Updating…" badge on the pie chart.** While a tab's per-tag counts are
+  being refreshed in the background, a small pill appears in the pie header so
+  a briefly-stale cached count reads as pending rather than final. It clears
+  as soon as the fresh values land.
+
+### Fixed
+- **Background refreshes now land on the open dashboard.** A completed
+  revalidate live-patches the pie's proportions, counts and thumbnails in
+  place; previously the fresh values only showed up after closing and
+  re-opening the report.
+- **Per-tag counts converge after a sync.** A sync now forces the deferred
+  distributions to revalidate regardless of the count-cache TTL, so a tag's
+  count no longer lags a sync by up to the full TTL window.
+- **The visible tab no longer converges last.** The tab on screen is
+  revalidated first instead of queuing behind the other eight on the shared
+  rate limiter, where it could take ~40s on a large account.
+- **The default tab no longer appears frozen.** A live-patch arriving while a
+  slice's sub-tag breakdown was being hovered used to be dropped, leaving the
+  tab stale until a full tab switch; the fresh data is now re-rendered when
+  the sub-chart is dismissed.
+
+---
+
 ## v9.8.0 — Grass month-label hover popover
 
 ### Added

@@ -172,6 +172,103 @@ function scheduleRevalidateAll(
 }
 
 /**
+ * Module-scoped so re-opening the dashboard replaces the previous open's lazy
+ * listener rather than stacking a new one every renderDashboard. The modal is
+ * a singleton — only one pie is live at a time — so a single slot is enough.
+ */
+let lazyPieRevalidateListener: ((e: Event) => void) | null = null;
+
+/**
+ * Like scheduleRevalidateAll but for pie-relevant distributions. Each entry is
+ * `[cacheKey, starter]`; when a starter resolves with data that differs from
+ * what was painted (non-null), it dispatches DanbooruInsights:DataUpdated so
+ * the open pie live-patches that tab's proportions/counts/thumbs — no reopen
+ * needed (audit R2 follow-up). `null` (unchanged) or an absent starter (cache
+ * within TTL) dispatch nothing, so a fresh open costs no repaint.
+ *
+ * Only the visible tab (`priorityCacheKey`) revalidates on open. The other
+ * eight heavy distributions each fetch N per-tag counts on the shared limiter,
+ * so firing all nine on every post-sync open floods the queue (~250 calls for
+ * a 46k-post user) to converge tabs the user may never open. Instead each
+ * non-priority starter is registered *lazily*: the pie dispatches
+ * `PieTabActivated` on a tab switch and we revalidate that tab then — once,
+ * with its "Updating…" badge. A tab that is never viewed never revalidates.
+ *
+ * Exported for the eager/lazy split's regression tests.
+ */
+export function schedulePieRevalidate(
+  entries: Array<[string, (() => Promise<unknown>) | undefined]>,
+  priorityCacheKey: string,
+): void {
+  const fire = (cacheKey: string, starter: () => Promise<unknown>) => {
+    // Announce refresh start/end so the pie can show an "Updating…" badge on
+    // the current tab (a briefly-stale cached count then reads as pending, not
+    // final). Fires regardless of whether the data actually changed.
+    const setRefreshing = (active: boolean) =>
+      window.dispatchEvent(
+        new CustomEvent('DanbooruInsights:PieTabRefreshing', {
+          detail: {contentType: cacheKey, active},
+        }),
+      );
+    setRefreshing(true);
+    return starter()
+      .then(fresh => {
+        // Starter resolves with fresh data only when it differs from what
+        // was painted; null means unchanged → nothing to repaint.
+        if (fresh === null) return;
+        window.dispatchEvent(
+          new CustomEvent('DanbooruInsights:DataUpdated', {
+            detail: {contentType: cacheKey, data: fresh},
+          }),
+        );
+      })
+      .catch((e: unknown) => {
+        log.warn(`Pie revalidate failed for ${cacheKey}`, {error: e});
+      })
+      .finally(() => setRefreshing(false));
+  };
+
+  // Register the non-priority starters as lazy: fired once, when the pie
+  // reports the user switched to that tab. `undefined` starters (cache within
+  // TTL, nothing to do) are skipped so switching to an already-fresh tab is a
+  // no-op.
+  const pending = new Map<string, () => Promise<unknown>>();
+  for (const [cacheKey, starter] of entries) {
+    if (!starter || cacheKey === priorityCacheKey) continue;
+    pending.set(cacheKey, starter);
+  }
+  if (lazyPieRevalidateListener) {
+    window.removeEventListener(
+      'DanbooruInsights:PieTabActivated',
+      lazyPieRevalidateListener,
+    );
+  }
+  const listener = (e: Event) => {
+    const detail = (e as CustomEvent).detail as
+      | {contentType?: string}
+      | undefined;
+    const cacheKey = detail?.contentType;
+    if (!cacheKey) return;
+    const starter = pending.get(cacheKey);
+    if (!starter) return; // already fired, or was within TTL — nothing to do
+    pending.delete(cacheKey);
+    void fire(cacheKey, starter);
+  };
+  lazyPieRevalidateListener = listener;
+  window.addEventListener('DanbooruInsights:PieTabActivated', listener);
+
+  // Fire only the *visible* tab's revalidate on open. The pie shows one tab at
+  // a time; converging just the tab the user is looking at (default: copyright)
+  // keeps the post-paint burst to that one distribution instead of nine.
+  setTimeout(() => {
+    const priority = entries.find(
+      ([k, s]) => k === priorityCacheKey && s !== undefined,
+    );
+    if (priority && priority[1]) void fire(priority[0], priority[1]);
+  }, 0);
+}
+
+/**
  * Renders the three summary cards (animated upload-stats pane, user
  * history with scrollable timeline, plus the per-card play/pause /
  * overflow-gradient wiring).
@@ -959,6 +1056,8 @@ function renderResumeSyncView(
     // No-op progress callback — internal broadcast above handles UI updates.
     await app.dataManager.syncAllPosts(app.context.targetUser, () => {});
 
+    // A sync ran → force the deferred distributions to revalidate on re-render.
+    app.markSyncCompleted();
     void app.updateHeaderStatus();
     void app.renderDashboard();
   };
@@ -1023,6 +1122,12 @@ export class UserAnalyticsApp {
    *  ≤MAX_PREVIEW_ONLY_UPLOADS click→popover shortcut. null until first check. */
   private totalPostCount: number | null = null;
 
+  /** Set by any sync path and consumed by the next renderDashboard. When true,
+   *  the deferred pie distributions revalidate post-paint regardless of the
+   *  count-cache TTL, so their per-tag counts converge to fresh after a sync
+   *  (they are no longer force-refreshed on the blocking path — audit R2). */
+  private syncJustRan = false;
+
   /** The dashboard hover/pinned preview popover, created once in
    *  injectButton(). Hoisted to an instance field so updateHeaderStatus()
    *  can wire the touch-only 📋 mini-report button next to the ⚙️ gear. */
@@ -1050,7 +1155,9 @@ export class UserAnalyticsApp {
       rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
 
     this.dataManager = new AnalyticsDataManager(db, this.rateLimiter);
-    this.dataService = new UserAnalyticsDataService(db);
+    // Share the rate limiter so the dashboard fetch + post-paint SWR
+    // revalidate flood stay under TabCoordinator / 429-backoff control (H-1).
+    this.dataService = new UserAnalyticsDataService(db, this.rateLimiter);
 
     this.modalId = 'danbooru-grass-modal';
     this.btnId = 'danbooru-grass-analytics-btn';
@@ -1350,7 +1457,8 @@ export class UserAnalyticsApp {
       const syncTotal = await this.dataManager.getTotalPostCount(
         this.context.targetUser,
       );
-      // 0 uploads: nothing to sync, and refreshAllStats would 404 on /random.
+      // 0 uploads: nothing to sync, and the dashboard's random-post fetch
+      // would 404 on /random for a user with no posts.
       if (syncTotal === 0) {
         if (animInterval) clearInterval(animInterval);
         this.isFullySynced = true;
@@ -1374,6 +1482,11 @@ export class UserAnalyticsApp {
           onProgress,
         );
       }
+
+      // A sync ran → the deferred pie distributions' per-tag counts may have
+      // moved. Flag it so the next renderDashboard forces their revalidate
+      // (past the count-cache TTL) and the live-patch converges them to fresh.
+      this.syncJustRan = true;
 
       if (animInterval) clearInterval(animInterval);
 
@@ -1406,6 +1519,13 @@ export class UserAnalyticsApp {
       }
       void this.updateHeaderStatus('Sync Failed', '#ff4444');
     }
+  }
+
+  /** Flags that a sync completed outside performPartialSync (e.g. the
+   *  Resume-Sync view button) so the next renderDashboard forces the deferred
+   *  distributions to revalidate. */
+  markSyncCompleted(): void {
+    this.syncJustRan = true;
   }
 
   /**
@@ -1891,6 +2011,8 @@ export class UserAnalyticsApp {
         didQuickSync = true;
         await runQuickSync(content, this.dataManager, this.context.targetUser);
         this.isFullySynced = true;
+        // A sync ran → force deferred distributions to revalidate (see below).
+        this.syncJustRan = true;
         void this.updateHeaderStatus();
         // Restore the generic "Generating Report..." spinner before heavy
         // data fetch. The Quick Sync inner UI replaced the DOM, so capture
@@ -1907,6 +2029,12 @@ export class UserAnalyticsApp {
       const prefetched = didQuickSync
         ? undefined
         : {syncStats: preStats, totalCount: preTotal};
+      // Consume the sync flag (set by performPartialSync / quickSync branch /
+      // Resume-Sync button). When a sync ran, force the deferred distributions
+      // to revalidate post-paint so their per-tag counts converge to fresh
+      // regardless of the count-cache TTL.
+      const forceDistRevalidate = this.syncJustRan;
+      this.syncJustRan = false;
       const dashboardData = await perfLogger.wrap(
         'dbi:net:fetchData:total',
         () =>
@@ -1914,6 +2042,7 @@ export class UserAnalyticsApp {
             this.context,
             prefetched,
             reportProgress,
+            forceDistRevalidate,
           ),
       );
       // Only the values the main flow still touches — needsSync gate,
@@ -1930,6 +2059,8 @@ export class UserAnalyticsApp {
         recentPopularStartRevalidate,
         milestones1kStartRevalidate,
         levelChangesStartRevalidate,
+        distributionRevalidators,
+        tagCloudGeneralStartRevalidate,
       } = dashboardData;
 
       const {firstUploadDate} = summaryStats;
@@ -1980,17 +2111,35 @@ export class UserAnalyticsApp {
       // Update header status (ensure it's green if ready)
       void this.updateHeaderStatus();
 
-      // Fire SWR revalidations only now that the dashboard is painted. Any
-      // network traffic these start no longer blocks render.total. The
-      // cached values are already on screen — revalidate just freshens
-      // piestats for the next open.
+      // Fire SWR revalidations only now that the dashboard is painted — the
+      // cached values are already on screen, so this no longer blocks
+      // render.total. Starters are undefined when the cache was within TTL
+      // (nothing to do), so a fresh open costs nothing here.
+      //
+      // Pie-relevant distributions go through schedulePieRevalidate: only the
+      // visible (copyright) tab revalidates on open; the rest revalidate lazily
+      // when the user switches to them. When a revalidate returns changed data
+      // it dispatches DataUpdated and the open pie live-patches that tab's
+      // proportions/counts/thumbs in place (no reopen needed — audit R2).
+      schedulePieRevalidate(
+        [
+          ['status_dist', statusStartRevalidate],
+          ['rating_dist', ratingStartRevalidate],
+          ...distributionRevalidators,
+        ],
+        // The pie opens on the copyright tab (renderPieWidget's default), so
+        // it is the only tab converged eagerly.
+        'copyright_dist',
+      );
+      // The rest only warm piestats for the next open (top/recent posts,
+      // milestones, level history render from their own widgets; the tag cloud
+      // widget refreshes on tab switch).
       scheduleRevalidateAll([
-        ['status', statusStartRevalidate],
-        ['rating', ratingStartRevalidate],
         ['topPosts', topPostsStartRevalidate],
         ['recentPopular', recentPopularStartRevalidate],
         ['milestones1k', milestones1kStartRevalidate],
         ['levelChanges', levelChangesStartRevalidate],
+        ['tagCloudGeneral', tagCloudGeneralStartRevalidate],
       ]);
     } finally {
       perfLogger.end('dbi:render:total', perfMeta);

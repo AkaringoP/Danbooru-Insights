@@ -665,7 +665,7 @@ export class AnalyticsDataManager extends DataManager {
     // `__count` key records the count the entries were computed for; on read
     // a mismatch (or a missing/legacy stamp) forces a recompute. This is
     // required because the widget's default 'auto' step is never warmed by a
-    // sync (refreshAllStats/SWR only warm step=1000) and getStats has no TTL —
+    // sync (refreshCriticalStats/SWR only warm step=1000) and getStats has no TTL —
     // without the stamp the 'auto' list froze at the first-render count while
     // the widget's live totalPosts/nextTarget kept advancing, corrupting the
     // progress bar. The entries payload stays a plain MilestoneEntry[] so the
@@ -988,10 +988,11 @@ export class AnalyticsDataManager extends DataManager {
    * Results are cached in the piestats table with a `tag_cloud_` prefix.
    *
    * Cache is TTL-gated by `getCountCacheTtlMs()` (default 10 min, same
-   * knob as count distributions). `refreshAllStats` passes
-   * `forceRefresh=true` so partial / full sync invalidates the cache —
-   * this matters most for the General tab's Lift filter, which would
-   * otherwise serve pre-filter results from before v9.6.0 indefinitely.
+   * knob as count distributions). No longer force-refreshed on the blocking
+   * sync path (removed from `refreshCriticalStats`); the General tab warms
+   * via `fetchDashboardData`'s SWR revalidate post-paint, and the widget's
+   * per-category tab switch re-fetches with `forceRefresh=true`. This keeps
+   * the General tab's Lift filter (v9.6.0) current without blocking the open.
    *
    * @param userInfo The target user.
    * @param categoryId Danbooru tag category (0=General, 1=Artist, 3=Copyright, 4=Character).
@@ -1866,7 +1867,7 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Fetches top posts per rating (G/S/Q/E) in parallel using API.
-   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * Cached in piestats; refreshCriticalStats() passes forceRefresh=true so the
    * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
    * @param {boolean} forceRefresh Bypass cache and re-fetch.
@@ -1930,7 +1931,7 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Fetches Recent Popular (age < 1w) posts for SFW and NSFW in parallel.
-   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * Cached in piestats; refreshCriticalStats() passes forceRefresh=true so the
    * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
    * @param {boolean} forceRefresh Bypass cache and re-fetch.
@@ -4084,9 +4085,10 @@ export class AnalyticsDataManager extends DataManager {
     // Signal UI: Processing Stats
     reportProgress(total, total, 'PREPARING');
 
-    // Refresh all stats after sync. If startId was 0, it was a Full Sync;
-    // otherwise it's a Partial Sync.
-    await this.refreshAllStats(userInfo, startId === 0);
+    // Refresh the critical (cheap, must-be-fresh) stats after sync. If startId
+    // was 0, it was a Full Sync; otherwise it's a Partial Sync. Heavy tag
+    // distributions freshen post-paint via fetchDashboardData's SWR revalidate.
+    await this.refreshCriticalStats(userInfo, startId === 0);
 
     // First successful sync = meaningful engagement signal. Ask the
     // browser for persistent storage so this user's analytics survive
@@ -4239,8 +4241,9 @@ export class AnalyticsDataManager extends DataManager {
       // 6. Signal UI: Processing Stats
       reportProgress(no, no, 'PREPARING');
 
-      // 7. Refresh all stats (full sync)
-      await this.refreshAllStats(userInfo, true);
+      // 7. Refresh critical stats (full sync). Heavy tag distributions
+      // freshen post-paint via fetchDashboardData's SWR revalidate.
+      await this.refreshCriticalStats(userInfo, true);
 
       // Engagement signal — see syncAllPosts for rationale.
       await requestPersistence();
@@ -4301,21 +4304,30 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Refreshes all cached statistics for the user.
+   * Refreshes the *critical* cached statistics for the user — the ones the
+   * dashboard must show fresh on the very first paint after a sync:
+   * status/rating counts, milestones, level history, and top/recent popular
+   * posts. Cheap set (~18 API calls, ~2-3s) so it stays on the blocking sync
+   * path.
+   *
+   * The heavy tag-distribution + tag-cloud fetchers (character/copyright/
+   * fav-copyright/breasts/hair×2 + 4 tag clouds, ~130-260 calls) are
+   * DELIBERATELY NOT refreshed here. Adding a handful of posts barely moves a
+   * top-10 distribution, so those render from the previous sync's piestats
+   * cache and freshen in the background via `fetchDashboardData`'s SWR
+   * revalidate (post-paint) — see [user-analytics-data.ts]. This is what took
+   * the post-sync dashboard open from ~30s down to ~3-6s (audit H-2 / R2).
+   *
+   * `getRandomPosts` was also dropped: the dashboard fetches its own random
+   * pick fresh on every open, so warming it here was pure waste (audit L-1).
+   *
    * @param {Object} userInfo The user's info object.
    * @return {Promise<void>}
    */
-  async refreshAllStats(
+  async refreshCriticalStats(
     userInfo: TargetUser,
     isFullSync: boolean = false,
   ): Promise<void> {
-    const forceRefresh = true;
-    const progressReporter = (msg: string) => {
-      const {current, total} = AnalyticsDataManager.syncProgress;
-      if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-        AnalyticsDataManager.onProgressCallback(current, total, msg);
-      }
-    };
     perfLogger.start('dbi:db:refresh:total');
     try {
       await Promise.all([
@@ -4325,47 +4337,9 @@ export class AnalyticsDataManager extends DataManager {
         perfLogger.wrap('dbi:db:refresh:rating', () =>
           this.getRatingDistribution(userInfo, null, true),
         ),
-        perfLogger.wrap('dbi:db:refresh:character', () =>
-          this.getCharacterDistribution(
-            userInfo,
-            forceRefresh,
-            progressReporter,
-          ),
-        ),
-        perfLogger.wrap('dbi:db:refresh:copyright', () =>
-          this.getCopyrightDistribution(
-            userInfo,
-            forceRefresh,
-            progressReporter,
-          ),
-        ),
-        perfLogger.wrap('dbi:db:refresh:favCopyright', () =>
-          this.getFavCopyrightDistribution(userInfo, forceRefresh),
-        ),
-        perfLogger.wrap('dbi:db:refresh:breasts', () =>
-          this.getBreastsDistribution(userInfo, forceRefresh, progressReporter),
-        ),
-        perfLogger.wrap('dbi:db:refresh:hairLength', () =>
-          this.getHairLengthDistribution(
-            userInfo,
-            forceRefresh,
-            progressReporter,
-          ),
-        ),
-        perfLogger.wrap('dbi:db:refresh:hairColor', () =>
-          this.getHairColorDistribution(
-            userInfo,
-            forceRefresh,
-            progressReporter,
-          ),
-        ),
-        // Always refresh Random Posts
-        perfLogger.wrap('dbi:db:refresh:randomPosts', () =>
-          this.getRandomPosts(userInfo),
-        ),
         // Warm the level-change-history cache on every sync — the dashboard
-        // always reads it, and the API is cheap compared to the distribution
-        // calls above (no per-user search combinatorics).
+        // always reads it, and the API is cheap (no per-user search
+        // combinatorics).
         perfLogger.wrap('dbi:db:refresh:levelChanges', () =>
           this.getLevelChangeHistory(userInfo, true),
         ),
@@ -4377,29 +4351,10 @@ export class AnalyticsDataManager extends DataManager {
         perfLogger.wrap('dbi:db:refresh:milestonesNsfw', () =>
           this.getMilestones(userInfo, true, 1000, true),
         ),
-        // Tag Cloud — without this, the General tab's Lift filter (added
-        // in v9.6.0) was serving pre-v9.6.0 unfiltered results from a
-        // long-lived cache. Refresh all four category tabs so each sync
-        // reflects the user's latest tag usage. 4 parallel /related_tag
-        // calls (general one is heavier because it also triggers the
-        // 24h-cached globals lookups).
-        perfLogger.wrap('dbi:db:refresh:tagCloudGeneral', () =>
-          this.getTagCloudData(userInfo, 0, true),
-        ),
-        perfLogger.wrap('dbi:db:refresh:tagCloudArtist', () =>
-          this.getTagCloudData(userInfo, 1, true),
-        ),
-        perfLogger.wrap('dbi:db:refresh:tagCloudCopyright', () =>
-          this.getTagCloudData(userInfo, 3, true),
-        ),
-        perfLogger.wrap('dbi:db:refresh:tagCloudCharacter', () =>
-          this.getTagCloudData(userInfo, 4, true),
-        ),
         // Popular posts are API-driven (order:score, age:<1w) and cached in
         // piestats. Refresh on EVERY sync — a partial (incremental) sync must
         // freshen them too, otherwise the post-sync dashboard render serves
-        // the pre-sync cache and the widgets only catch up one open later via
-        // SWR revalidate. (Previously gated to full sync only, which left
+        // the pre-sync cache. (Previously gated to full sync only, which left
         // large users' Recent/Most Popular stale after every re-sync.)
         perfLogger.wrap('dbi:db:refresh:topPostsByType', () =>
           this.getTopPostsByType(userInfo, true),
@@ -4409,7 +4364,7 @@ export class AnalyticsDataManager extends DataManager {
         ),
       ]);
     } catch (e: unknown) {
-      log.warn('Failed to refresh stats', {error: e});
+      log.warn('Failed to refresh critical stats', {error: e});
     } finally {
       perfLogger.end('dbi:db:refresh:total', {isFullSync});
     }

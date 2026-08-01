@@ -532,7 +532,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     });
 
     const adm = new AnalyticsDataManager(db as never, rl as never);
-    vi.spyOn(adm, 'refreshAllStats').mockResolvedValue();
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
     vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
 
     const progress = vi.fn();
@@ -613,7 +613,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     });
 
     const adm2 = new AnalyticsDataManager(db as never, rl2 as never);
-    vi.spyOn(adm2, 'refreshAllStats').mockResolvedValue();
+    vi.spyOn(adm2, 'refreshCriticalStats').mockResolvedValue();
     vi.spyOn(adm2, 'cleanupStaleData').mockResolvedValue();
 
     const progress = vi.fn();
@@ -660,9 +660,9 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     );
     expect(metaKeySet).toBe(true);
 
-    // cleanupStaleData and refreshAllStats were called
+    // cleanupStaleData and refreshCriticalStats were called
     expect(adm2.cleanupStaleData).toHaveBeenCalledWith('42');
-    expect(adm2.refreshAllStats).toHaveBeenCalledWith(
+    expect(adm2.refreshCriticalStats).toHaveBeenCalledWith(
       expect.objectContaining({id: '42'}),
       true, // full sync
     );
@@ -729,7 +729,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     });
 
     const adm = new AnalyticsDataManager(db as never, rl as never);
-    vi.spyOn(adm, 'refreshAllStats').mockResolvedValue();
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
     vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
 
     const progress = vi.fn();
@@ -742,8 +742,8 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     );
     expect(metaKeySet).toBe(false);
 
-    // refreshAllStats called with isFullSync=false
-    expect(adm.refreshAllStats).toHaveBeenCalledWith(
+    // refreshCriticalStats called with isFullSync=false
+    expect(adm.refreshCriticalStats).toHaveBeenCalledWith(
       expect.objectContaining({id: '42'}),
       false,
     );
@@ -1392,7 +1392,7 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
   });
 });
 
-describe('AnalyticsDataManager.refreshAllStats', () => {
+describe('AnalyticsDataManager.refreshCriticalStats', () => {
   beforeEach(() => {
     vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
   });
@@ -1401,32 +1401,42 @@ describe('AnalyticsDataManager.refreshAllStats', () => {
     vi.unstubAllGlobals();
   });
 
-  // Every getter refreshAllStats fans out to. Stubbed so the method's own
-  // orchestration is what's under test, not the getters' internals.
-  const REFRESH_GETTERS = [
+  // The critical (cheap, must-be-fresh-on-first-paint) getters
+  // refreshCriticalStats fans out to.
+  const CRITICAL_GETTERS = [
     'getStatusDistribution',
     'getRatingDistribution',
+    'getLevelChangeHistory',
+    'getMilestones',
+    'getTopPostsByType',
+    'getRecentPopularPosts',
+  ] as const;
+
+  // Heavy tag-distribution / tag-cloud getters that were REMOVED from the
+  // blocking sync path — they now freshen post-paint via fetchDashboardData's
+  // SWR revalidate. getRandomPosts was dropped entirely (result never read).
+  // The whole latency win (audit H-2 / R2 / L-1) depends on these NOT firing
+  // inside refreshCriticalStats.
+  const DEFERRED_GETTERS = [
     'getCharacterDistribution',
     'getCopyrightDistribution',
     'getFavCopyrightDistribution',
     'getBreastsDistribution',
     'getHairLengthDistribution',
     'getHairColorDistribution',
-    'getRandomPosts',
-    'getLevelChangeHistory',
-    'getMilestones',
     'getTagCloudData',
-    'getTopPostsByType',
-    'getRecentPopularPosts',
+    'getRandomPosts',
   ] as const;
 
+  // Stubbed so the method's own orchestration is what's under test, not the
+  // getters' internals. Both groups are spied so no real fetch escapes.
   function spyAllGetters(adm: AnalyticsDataManager) {
     const target = adm as unknown as Record<
       string,
       (...args: unknown[]) => Promise<unknown>
     >;
     const spies: Record<string, ReturnType<typeof vi.spyOn>> = {};
-    for (const m of REFRESH_GETTERS) {
+    for (const m of [...CRITICAL_GETTERS, ...DEFERRED_GETTERS]) {
       spies[m] = vi.spyOn(target, m).mockResolvedValue(undefined);
     }
     return spies;
@@ -1439,7 +1449,7 @@ describe('AnalyticsDataManager.refreshAllStats', () => {
     );
     const spies = spyAllGetters(adm);
 
-    await adm.refreshAllStats(makeSyncUser(), false);
+    await adm.refreshCriticalStats(makeSyncUser(), false);
 
     // The whole point of v9.7.2: these fire with forceRefresh=true even when
     // it is NOT a full sync (they used to be gated behind isFullSync).
@@ -1460,9 +1470,43 @@ describe('AnalyticsDataManager.refreshAllStats', () => {
     );
     const spies = spyAllGetters(adm);
 
-    await adm.refreshAllStats(makeSyncUser(), true);
+    await adm.refreshCriticalStats(makeSyncUser(), true);
 
     expect(spies.getTopPostsByType).toHaveBeenCalled();
     expect(spies.getRecentPopularPosts).toHaveBeenCalled();
+  });
+
+  it('refreshes the full critical set (counts, level, milestones×2, popular)', async () => {
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      makeSyncRateLimiter() as never,
+    );
+    const spies = spyAllGetters(adm);
+
+    await adm.refreshCriticalStats(makeSyncUser(), true);
+
+    for (const g of CRITICAL_GETTERS) {
+      expect(
+        spies[g],
+        `${g} should fire in critical refresh`,
+      ).toHaveBeenCalled();
+    }
+  });
+
+  it('does NOT refresh heavy tag distributions / random (deferred to SWR — R2/L-1)', async () => {
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      makeSyncRateLimiter() as never,
+    );
+    const spies = spyAllGetters(adm);
+
+    await adm.refreshCriticalStats(makeSyncUser(), true);
+
+    for (const g of DEFERRED_GETTERS) {
+      expect(
+        spies[g],
+        `${g} must NOT fire on the blocking sync path`,
+      ).not.toHaveBeenCalled();
+    }
   });
 });

@@ -193,38 +193,40 @@ describe('renderPieWidget - onNsfwChange callback', () => {
 });
 
 describe('renderPieWidget - DanbooruInsights:DataUpdated subscription', () => {
-  it('updates the thumb on a matching contentType when the user has not navigated away', () => {
+  it('live-patches the active tab: re-renders from a matching DataUpdated event', async () => {
+    // The live-patch handler replaces pieData[tab] with the event's fresh data
+    // and re-renders the active tab (audit R2 follow-up), so a background
+    // revalidate lands on the open dashboard without a reopen. d3 is mocked, so
+    // we stay on the pre-d3 path by sending a zero-count row: renderPieContent
+    // short-circuits to the distinctive "Total count is 0" message, proving the
+    // fresh data was ingested and the active tab re-rendered.
     const container = makeContainer();
-    const initial = [
-      {
-        name: 'Hatsune Miku',
-        tagName: 'hatsune_miku',
-        count: 5,
-        frequency: 0.5,
-        thumb: null,
-        isOther: false,
-      },
-    ];
     renderPieWidget(
       container,
-      {character: initial as never},
+      {},
       false,
       makeStubDataManager(),
       {targetUser: TARGET_USER},
       null,
     );
 
-    // Push a thumb update via the public event the widget listens on.
+    const pieContent = container.querySelector('.pie-content') as HTMLElement;
+    // Let the initial loadTab (stub → []) settle first (renders the generic
+    // "No data available"), so it doesn't clobber the event below.
+    await vi.waitFor(() =>
+      expect(pieContent.textContent).toContain('No data available'),
+    );
+
     window.dispatchEvent(
       new CustomEvent('DanbooruInsights:DataUpdated', {
         detail: {
-          contentType: 'character_dist',
+          contentType: 'copyright_dist', // default active tab
           data: [
             {
               name: 'Hatsune Miku',
               tagName: 'hatsune_miku',
-              count: 5,
-              frequency: 0.5,
+              count: 0,
+              frequency: 0,
               thumb: 'https://example.com/miku.webp',
               isOther: false,
             },
@@ -233,11 +235,29 @@ describe('renderPieWidget - DanbooruInsights:DataUpdated subscription', () => {
       }),
     );
 
-    // The widget mutates pieData in place; the closure-private state is
-    // observable only through DOM, but for an inactive tab no re-render
-    // fires — so the test settles on the in-place mutation by asserting
-    // on the same object reference passed in.
-    expect(initial[0].thumb).toBe('https://example.com/miku.webp');
+    await vi.waitFor(() =>
+      expect(pieContent.textContent).toContain('Total count is 0'),
+    );
+  });
+
+  it('ignores DataUpdated events for unknown contentTypes', () => {
+    const container = makeContainer();
+    renderPieWidget(
+      container,
+      {copyright: []},
+      false,
+      makeStubDataManager(),
+      {targetUser: TARGET_USER},
+      null,
+    );
+    // Should not throw / do anything for a contentType the pie doesn't map.
+    expect(() =>
+      window.dispatchEvent(
+        new CustomEvent('DanbooruInsights:DataUpdated', {
+          detail: {contentType: 'created_tags', data: [{name: 'x', count: 1}]},
+        }),
+      ),
+    ).not.toThrow();
   });
 });
 

@@ -8,7 +8,7 @@
  *    pre-v9.6.0 the cache was trust-until-reset, so users kept seeing
  *    unfiltered Lift results indefinitely).
  *  - Bypasses cache entirely when `forceRefresh=true` (the path used by
- *    `refreshAllStats` on partial/full sync).
+ *    the SWR revalidate / per-category tab switch).
  */
 import {describe, it, expect, vi, beforeEach, afterEach} from 'vitest';
 import {AnalyticsDataManager} from '../src/core/analytics-data-manager';
@@ -136,7 +136,7 @@ describe('getTagCloudData — cache TTL gate (v9.6.0 hotfix)', () => {
     expect(db.piestatsPut).toHaveBeenCalled();
   });
 
-  it('bypasses cache when forceRefresh=true (refreshAllStats path)', async () => {
+  it('bypasses cache when forceRefresh=true (SWR revalidate path)', async () => {
     const record: PiestatsRecord = {
       data: CACHED_ITEMS,
       // 1 min old — well within TTL. Cache would be a hit without force.
