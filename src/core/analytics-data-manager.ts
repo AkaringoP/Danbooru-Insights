@@ -58,6 +58,7 @@ import type {
   ActivityType,
   ActivitySegment,
   ActivityDistribution,
+  SyncOutcome,
 } from '../types';
 
 /**
@@ -3683,15 +3684,18 @@ export class AnalyticsDataManager extends DataManager {
    *
    * @param {Object} userInfo The user's info object.
    * @param {Function} onProgress Callback for progress updates (current, total).
-   * @return {Promise<void>}
+   * @return {Promise<SyncOutcome>} `complete: false` when the run did not
+   *   cover every page (a page failed, or the sync never started). Callers
+   *   should warn rather than report success — the data is prefix-consistent
+   *   but partial, and the next open resumes it.
    */
   async syncAllPosts(
     userInfo: TargetUser,
     onProgress: (current: number, total: number, message?: string) => void,
-  ): Promise<void> {
+  ): Promise<SyncOutcome> {
     if (!userInfo.id) {
       log.error('User ID required for sync');
-      return;
+      return {complete: false};
     }
 
     const uploaderId = parseInt(userInfo.id ?? '0');
@@ -3699,7 +3703,7 @@ export class AnalyticsDataManager extends DataManager {
     // Global Sync Lock
     if (AnalyticsDataManager.isGlobalSyncing) {
       log.warn('Sync already in progress');
-      return;
+      return {complete: false};
     }
     AnalyticsDataManager.isGlobalSyncing = true;
     AnalyticsDataManager.syncProgress = {current: 0, total: 0, message: ''};
@@ -3743,6 +3747,7 @@ export class AnalyticsDataManager extends DataManager {
       // 3. Worker pool — claim pages, fetch with retry, commit in order.
       let pageOffset = 1;
       let hasMore = true;
+      let pageFailed = false;
       const buffer = new Map<number, DanbooruPost[]>();
       let nextExpectedPage = 1;
       const MAX_CONCURRENCY = 5;
@@ -3762,6 +3767,9 @@ export class AnalyticsDataManager extends DataManager {
         setHasMore: v => {
           hasMore = v;
         },
+        markFailed: () => {
+          pageFailed = true;
+        },
         reportProgress,
         perfStats,
       });
@@ -3778,9 +3786,11 @@ export class AnalyticsDataManager extends DataManager {
         startId,
         total,
         reportProgress,
+        succeeded: !pageFailed,
       });
 
       perfStats.finalCurrentNo = currentNo;
+      return {complete: !pageFailed};
     } finally {
       perfLogger.end('dbi:db:sync:full:total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;
@@ -3893,6 +3903,7 @@ export class AnalyticsDataManager extends DataManager {
     claimPage: () => number;
     getHasMore: () => boolean;
     setHasMore: (v: boolean) => void;
+    markFailed: () => void;
     reportProgress: (c: number, t: number, msg?: string) => void;
     perfStats: {pagesCommitted: number};
   }): (workerId: number) => Promise<void> {
@@ -3909,6 +3920,7 @@ export class AnalyticsDataManager extends DataManager {
       claimPage,
       getHasMore,
       setHasMore,
+      markFailed,
       reportProgress,
       perfStats,
     } = args;
@@ -4059,6 +4071,11 @@ export class AnalyticsDataManager extends DataManager {
               page: currentPage,
               error: e,
             });
+            // Stopping here leaves the DB prefix-consistent (ordered commit),
+            // so the next sync resumes cleanly — but the run did NOT cover
+            // every page. Flag it so the caller skips the "synced" stamp and
+            // warns, instead of reporting success over partial data.
+            markFailed();
             setHasMore(false);
           } finally {
             perfLogger.end(pageLabel, {
@@ -4097,18 +4114,27 @@ export class AnalyticsDataManager extends DataManager {
     startId: number;
     total: number;
     reportProgress: (c: number, t: number, msg?: string) => void;
+    succeeded: boolean;
   }): Promise<void> {
-    const {userInfo, uploaderId, startId, total, reportProgress} = args;
+    const {userInfo, uploaderId, startId, total, reportProgress, succeeded} =
+      args;
 
-    // Save "Last Synced Date" metadata
-    const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
-    localStorage.setItem(lastSyncKey, new Date().toISOString());
+    // Completion claims are only written when every page landed. Stamping
+    // them after a failed page would tell the next open "this user is fully
+    // synced" over partial data, and the resume would never happen. The
+    // stats refresh below still runs — what we did commit is
+    // prefix-consistent and should be reflected in the UI.
+    if (succeeded) {
+      // Save "Last Synced Date" metadata
+      const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
+      localStorage.setItem(lastSyncKey, new Date().toISOString());
 
-    // Mark post metadata backfill complete for full (fresh) syncs.
-    // Incremental syncs only touch newer posts, so older posts may still
-    // lack the metadata — in that case the backfill mechanism handles them.
-    if (startId === 0) {
-      localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
+      // Mark post metadata backfill complete for full (fresh) syncs.
+      // Incremental syncs only touch newer posts, so older posts may still
+      // lack the metadata — in that case the backfill mechanism handles them.
+      if (startId === 0) {
+        localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
+      }
     }
 
     // Auto-cleanup other users' stale data (older than 14 days).

@@ -49,6 +49,7 @@ import {isTouchDevice} from '../ui/two-step-tap';
 import {showToast} from '../ui/toast';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
+import type {SyncOutcome} from '../types';
 
 const log = createLogger('UserAnalytics');
 
@@ -151,6 +152,22 @@ function renderZeroUploadsView(
 type DashboardData = Awaited<
   ReturnType<UserAnalyticsDataService['fetchDashboardData']>
 >;
+
+/**
+ * Surface a partial sync. A worker that exhausts its retries stops quietly, so
+ * the sync resolves normally with only some pages committed and the UI would
+ * otherwise paint a full-success state over partial data. The committed rows
+ * are prefix-consistent, so the next open resumes from where this one stopped
+ * — the user just needs to know the report isn't complete yet (audit M-2).
+ */
+function warnIfSyncIncomplete(outcome: SyncOutcome): void {
+  if (outcome.complete) return;
+  showToast({
+    type: 'warn',
+    message:
+      'Sync incomplete — some posts could not be fetched. It will resume next time you open the report.',
+  });
+}
 
 /**
  * Fire SWR-revalidate starters as detached microtasks so they don't block
@@ -1066,7 +1083,11 @@ function renderResumeSyncView(
     };
 
     // No-op progress callback — internal broadcast above handles UI updates.
-    await app.dataManager.syncAllPosts(app.context.targetUser, () => {});
+    const outcome = await app.dataManager.syncAllPosts(
+      app.context.targetUser,
+      () => {},
+    );
+    warnIfSyncIncomplete(outcome);
 
     // A sync ran → force the deferred distributions to revalidate on re-render.
     app.markSyncCompleted();
@@ -1489,9 +1510,11 @@ export class UserAnalyticsApp {
           onProgress,
         );
       } else {
-        await this.dataManager.syncAllPosts(
-          this.context.targetUser,
-          onProgress,
+        warnIfSyncIncomplete(
+          await this.dataManager.syncAllPosts(
+            this.context.targetUser,
+            onProgress,
+          ),
         );
       }
 

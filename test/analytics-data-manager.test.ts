@@ -671,6 +671,74 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     expect(quotaManager.requestPersistence).toHaveBeenCalled();
   });
 
+  it('a failed page reports complete:false and skips the completion stamps', async () => {
+    // M-2 guard. A worker that gives up stops quietly and leaves the DB
+    // prefix-consistent, so Promise.all resolves normally. Before, that path
+    // still stamped last-sync + the backfill-complete flag and the caller
+    // painted a green "Synced" — the user saw a full-success UI over partial
+    // data, and the completion stamp meant the resume never happened.
+    const postsTable = makePostsTable([]);
+    const db = makeSyncDb(postsTable);
+
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 3}}),
+        };
+      }
+      // HTTP 400 is not a 5xx, so the worker throws on the first attempt
+      // instead of burning the retry backoff.
+      return {ok: false, status: 400, json: async () => []};
+    });
+
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(outcome.complete).toBe(false);
+
+    const ls = vi.mocked(localStorage.setItem);
+    expect(
+      ls.mock.calls.some((c: string[]) =>
+        c[0].startsWith('danbooru_grass_last_sync_'),
+      ),
+    ).toBe(false);
+    expect(
+      ls.mock.calls.some((c: string[]) => c[0] === 'di_post_metadata_v2_42'),
+    ).toBe(false);
+
+    // Stats still refresh: what did commit is prefix-consistent and should be
+    // reflected, so only the completion *claims* are withheld.
+    expect(adm.refreshCriticalStats).toHaveBeenCalled();
+    expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
+  });
+
+  it('a clean run reports complete:true', async () => {
+    const postsTable = makePostsTable([]);
+    const db = makeSyncDb(postsTable);
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 0}}),
+        };
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+    expect(outcome.complete).toBe(true);
+  });
+
   it('partial sync: di_post_metadata_v2 NOT set when startId > 0', async () => {
     // Give the posts table a "newest" post from 2 months ago so the cutoff
     // search finds a post older than 1 month → startId will be set > 0.

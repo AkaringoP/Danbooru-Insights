@@ -751,6 +751,17 @@ export interface TagImplicationCacheRecord {
   schemaVersion?: number;
 }
 
+/**
+ * Result of a post sync. A worker that exhausts its retries stops quietly and
+ * leaves the DB prefix-consistent, so the run resolves normally even though it
+ * did not cover every page — this carries that distinction out to the caller,
+ * which decides whether to report success or warn (audit M-2).
+ */
+export interface SyncOutcome {
+  /** True only when every page was fetched and committed. */
+  complete: boolean;
+}
+
 /** Complete tag analytics metadata. */
 export interface TagAnalyticsMeta {
   name: string;
