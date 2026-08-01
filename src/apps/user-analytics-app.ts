@@ -172,12 +172,27 @@ function scheduleRevalidateAll(
 }
 
 /**
+ * Module-scoped so re-opening the dashboard replaces the previous open's lazy
+ * listener rather than stacking a new one every renderDashboard. The modal is
+ * a singleton — only one pie is live at a time — so a single slot is enough.
+ */
+let lazyPieRevalidateListener: ((e: Event) => void) | null = null;
+
+/**
  * Like scheduleRevalidateAll but for pie-relevant distributions. Each entry is
  * `[cacheKey, starter]`; when a starter resolves with data that differs from
  * what was painted (non-null), it dispatches DanbooruInsights:DataUpdated so
  * the open pie live-patches that tab's proportions/counts/thumbs — no reopen
  * needed (audit R2 follow-up). `null` (unchanged) or an absent starter (cache
  * within TTL) dispatch nothing, so a fresh open costs no repaint.
+ *
+ * Only the visible tab (`priorityCacheKey`) revalidates on open. The other
+ * eight heavy distributions each fetch N per-tag counts on the shared limiter,
+ * so firing all nine on every post-sync open floods the queue (~250 calls for
+ * a 46k-post user) to converge tabs the user may never open. Instead each
+ * non-priority starter is registered *lazily*: the pie dispatches
+ * `PieTabActivated` on a tab switch and we revalidate that tab then — once,
+ * with its "Updating…" badge. A tab that is never viewed never revalidates.
  */
 function schedulePieRevalidate(
   entries: Array<[string, (() => Promise<unknown>) | undefined]>,
@@ -211,22 +226,43 @@ function schedulePieRevalidate(
       .finally(() => setRefreshing(false));
   };
 
-  // Revalidate the *visible* tab first and await it, THEN fan the rest out.
-  // The pie shows one tab at a time; without this, the tab the user is looking
-  // at (default: copyright) queues behind the other eight heavy per-tag count
-  // fetches on the shared limiter and can take ~40s to converge on a large
-  // user. Priority-first drops that to a few seconds; the remaining tabs
-  // revalidate in the background (a switch shows cached data instantly and the
-  // fresh value lands when that tab's revalidate completes).
-  setTimeout(async () => {
+  // Register the non-priority starters as lazy: fired once, when the pie
+  // reports the user switched to that tab. `undefined` starters (cache within
+  // TTL, nothing to do) are skipped so switching to an already-fresh tab is a
+  // no-op.
+  const pending = new Map<string, () => Promise<unknown>>();
+  for (const [cacheKey, starter] of entries) {
+    if (!starter || cacheKey === priorityCacheKey) continue;
+    pending.set(cacheKey, starter);
+  }
+  if (lazyPieRevalidateListener) {
+    window.removeEventListener(
+      'DanbooruInsights:PieTabActivated',
+      lazyPieRevalidateListener,
+    );
+  }
+  const listener = (e: Event) => {
+    const detail = (e as CustomEvent).detail as
+      | {contentType?: string}
+      | undefined;
+    const cacheKey = detail?.contentType;
+    if (!cacheKey) return;
+    const starter = pending.get(cacheKey);
+    if (!starter) return; // already fired, or was within TTL — nothing to do
+    pending.delete(cacheKey);
+    void fire(cacheKey, starter);
+  };
+  lazyPieRevalidateListener = listener;
+  window.addEventListener('DanbooruInsights:PieTabActivated', listener);
+
+  // Fire only the *visible* tab's revalidate on open. The pie shows one tab at
+  // a time; converging just the tab the user is looking at (default: copyright)
+  // keeps the post-paint burst to that one distribution instead of nine.
+  setTimeout(() => {
     const priority = entries.find(
       ([k, s]) => k === priorityCacheKey && s !== undefined,
     );
-    if (priority && priority[1]) await fire(priority[0], priority[1]);
-    for (const [cacheKey, starter] of entries) {
-      if (!starter || cacheKey === priorityCacheKey) continue;
-      void fire(cacheKey, starter);
-    }
+    if (priority && priority[1]) void fire(priority[0], priority[1]);
   }, 0);
 }
 
@@ -2078,10 +2114,11 @@ export class UserAnalyticsApp {
       // render.total. Starters are undefined when the cache was within TTL
       // (nothing to do), so a fresh open costs nothing here.
       //
-      // Pie-relevant distributions go through schedulePieRevalidate: when a
-      // revalidate returns changed data it dispatches DataUpdated and the open
-      // pie live-patches that tab's proportions/counts/thumbs in place (no
-      // reopen needed — audit R2 follow-up).
+      // Pie-relevant distributions go through schedulePieRevalidate: only the
+      // visible (copyright) tab revalidates on open; the rest revalidate lazily
+      // when the user switches to them. When a revalidate returns changed data
+      // it dispatches DataUpdated and the open pie live-patches that tab's
+      // proportions/counts/thumbs in place (no reopen needed — audit R2).
       schedulePieRevalidate(
         [
           ['status_dist', statusStartRevalidate],
@@ -2089,7 +2126,7 @@ export class UserAnalyticsApp {
           ...distributionRevalidators,
         ],
         // The pie opens on the copyright tab (renderPieWidget's default), so
-        // converge its per-tag counts first.
+        // it is the only tab converged eagerly.
         'copyright_dist',
       );
       // The rest only warm piestats for the next open (top/recent posts,

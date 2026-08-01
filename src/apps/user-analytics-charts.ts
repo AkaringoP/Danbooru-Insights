@@ -1978,6 +1978,11 @@ export function renderPieWidget(
     status_dist: 'status',
     rating_dist: 'rating',
   };
+  // Inverse (tab → cacheKey), used to tell the app which distribution to
+  // lazily revalidate when the user switches to a tab.
+  const PIE_CONTENT_BY_KEY: Record<string, string> = Object.fromEntries(
+    Object.entries(PIE_KEY_BY_CONTENT).map(([content, tab]) => [tab, content]),
+  );
   const onPieDataUpdate = (e: Event) => {
     if (!document.body.contains(container)) {
       window.removeEventListener(
@@ -2214,6 +2219,18 @@ export function renderPieWidget(
       if (mode && currentPieTab !== mode) {
         currentPieTab = mode;
         updatePieTabs();
+        // Ask the app to lazily revalidate this tab's per-tag counts (fire-once
+        // in schedulePieRevalidate; a no-op if already fresh or already fired).
+        // The "Updating…" badge appears via the PieTabRefreshing echo while it
+        // runs. Cached data stays on screen until the fresh value lands.
+        const contentKey = PIE_CONTENT_BY_KEY[mode];
+        if (contentKey) {
+          window.dispatchEvent(
+            new CustomEvent('DanbooruInsights:PieTabActivated', {
+              detail: {contentType: contentKey},
+            }),
+          );
+        }
         // Reflect the newly-selected tab's background-refresh state.
         updatePieUpdatingBadge();
 
