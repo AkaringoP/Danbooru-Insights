@@ -3704,7 +3704,10 @@ export class AnalyticsDataManager extends DataManager {
   async getTotalPostCount(userInfo: TargetUser): Promise<number> {
     if (!userInfo.name) return 0;
 
-    const memoKey = userInfo.id ?? userInfo.name;
+    // `||`, not `??`: an absent id is sometimes '' rather than undefined (the
+    // grass renderer synthesises that for its legacy string user form), and
+    // '' would key every such user onto the same memo entry.
+    const memoKey = userInfo.id || userInfo.name;
     const memo = this.totalCountMemo.get(memoKey);
     if (memo && Date.now() - memo.at < TOTAL_COUNT_MEMO_MS) {
       return memo.promise;
@@ -3808,9 +3811,11 @@ export class AnalyticsDataManager extends DataManager {
    * @param {Object} userInfo The user's info object.
    * @param {Function} onProgress Callback for progress updates (current, total).
    * @return {Promise<SyncOutcome>} `complete: false` when the run did not
-   *   cover every page (a page failed, or the sync never started). Callers
-   *   should warn rather than report success — the data is prefix-consistent
-   *   but partial, and the next open resumes it.
+   *   cover every page: the data is prefix-consistent but partial, so callers
+   *   should warn rather than report success, and the next open resumes it.
+   *   The two early returns below never fetched anything at all — they carry
+   *   `started: false` so callers can tell "nothing changed" apart from
+   *   "changed, but only partly".
    */
   async syncAllPosts(
     userInfo: TargetUser,
@@ -3818,7 +3823,7 @@ export class AnalyticsDataManager extends DataManager {
   ): Promise<SyncOutcome> {
     if (!userInfo.id) {
       log.error('User ID required for sync');
-      return {complete: false};
+      return {complete: false, started: false};
     }
 
     const uploaderId = parseInt(userInfo.id ?? '0');
@@ -3826,7 +3831,7 @@ export class AnalyticsDataManager extends DataManager {
     // Global Sync Lock
     if (AnalyticsDataManager.isGlobalSyncing) {
       log.warn('Sync already in progress');
-      return {complete: false};
+      return {complete: false, started: false};
     }
     AnalyticsDataManager.isGlobalSyncing = true;
     AnalyticsDataManager.syncProgress = {current: 0, total: 0, message: ''};
@@ -3924,7 +3929,7 @@ export class AnalyticsDataManager extends DataManager {
       });
 
       perfStats.finalCurrentNo = currentNo;
-      return {complete: !pageFailed};
+      return {complete: !pageFailed, started: true};
     } finally {
       perfLogger.end('dbi:db:sync:full:total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;

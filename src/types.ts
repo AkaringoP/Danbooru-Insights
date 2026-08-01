@@ -774,6 +774,14 @@ export interface TagImplicationCacheRecord {
 export interface SyncOutcome {
   /** True only when every page was fetched and committed. */
   complete: boolean;
+  /**
+   * False when the run never began — no user id, or another sync already
+   * holds the global lock. Nothing was fetched and nothing changed, which is
+   * a different thing from "fetched part of it": there is no partial data to
+   * warn about and no reason to force a post-paint revalidate. Callers must
+   * check this before treating `complete: false` as an incomplete *fetch*.
+   */
+  started: boolean;
 }
 
 /** Complete tag analytics metadata. */

@@ -645,6 +645,26 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       expect(await adm.getTotalPostCount(user)).toBe(0);
       expect(await adm.getTotalPostCount(user)).toBe(7);
     });
+
+    it('keys the memo per user even when the id is an empty string', async () => {
+      // The grass renderer synthesises `{name, id: ''}` for its legacy string
+      // user form. `??` treats '' as a present id, so every such user collapsed
+      // onto one memo entry and the second one read the first one's count.
+      const rl = makeSyncRateLimiter(async (url: string) => ({
+        ok: true,
+        status: 200,
+        json: async () => ({counts: {posts: url.includes('alice') ? 11 : 22}}),
+      }));
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        rl as never,
+      );
+
+      const alice = makeSyncUser({id: '', name: 'alice'});
+      const bob = makeSyncUser({id: '', name: 'bob'});
+      expect(await adm.getTotalPostCount(alice)).toBe(11);
+      expect(await adm.getTotalPostCount(bob)).toBe(22);
+    });
   });
 
   it('returns early without touching db when userInfo.id is missing', async () => {
@@ -654,10 +674,16 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     const adm = new AnalyticsDataManager(db as never, rl as never);
 
     const progress = vi.fn();
-    await adm.syncAllPosts(makeSyncUser({id: undefined}), progress);
+    const outcome = await adm.syncAllPosts(
+      makeSyncUser({id: undefined}),
+      progress,
+    );
 
     expect(postsTable.where).not.toHaveBeenCalled();
     expect(rl.fetch).not.toHaveBeenCalled();
+    // Nothing ran, so there is no partial data to warn about — callers must be
+    // able to tell this apart from a run that fetched some of the pages.
+    expect(outcome).toEqual({complete: false, started: false});
     // Lock must remain false (it was never set to true)
     expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
   });
@@ -670,11 +696,13 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     const adm = new AnalyticsDataManager(db as never, rl as never);
 
     const progress = vi.fn();
-    await adm.syncAllPosts(makeSyncUser(), progress);
+    const outcome = await adm.syncAllPosts(makeSyncUser(), progress);
 
     // Nothing should happen — lock was already held
     expect(postsTable.where).not.toHaveBeenCalled();
     expect(rl.fetch).not.toHaveBeenCalled();
+    // Blocked before fetching anything: not a partial sync.
+    expect(outcome).toEqual({complete: false, started: false});
     // Clean up the flag we set
     AnalyticsDataManager.isGlobalSyncing = false;
   });
@@ -901,6 +929,9 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
 
     expect(outcome.complete).toBe(false);
+    // It did run and did commit — this is the case that must warn, unlike the
+    // two early returns above.
+    expect(outcome.started).toBe(true);
 
     const ls = vi.mocked(localStorage.setItem);
     expect(
@@ -937,7 +968,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
 
     const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
-    expect(outcome.complete).toBe(true);
+    expect(outcome).toEqual({complete: true, started: true});
   });
 
   it('prunes rows the remote no longer returns after a clean run', async () => {

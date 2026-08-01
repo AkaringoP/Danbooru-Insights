@@ -40,6 +40,7 @@ import {
   schedulePieRevalidate,
 } from '../src/apps/user-analytics-app';
 import {isTouchDevice} from '../src/ui/two-step-tap';
+import {showToast} from '../src/ui/toast';
 import {AnalyticsDataManager} from '../src/core/analytics-data-manager';
 import {SettingsManager} from '../src/core/settings';
 import {RateLimitedFetch} from '../src/core/rate-limiter';
@@ -488,5 +489,62 @@ describe('schedulePieRevalidate', () => {
     // removed, so its stale closure never refires.
     expect(secondOpen).toHaveBeenCalledTimes(1);
     expect(firstOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe('UserAnalyticsApp.performPartialSync — sync outcome reporting', () => {
+  /** Force the worker-pool branch: quickSync handles <= 1200 posts. */
+  const BIG_USER_TOTAL = 5000;
+
+  function stubForFullSync(
+    app: UserAnalyticsApp,
+    outcome: {complete: boolean; started: boolean},
+  ): Mock {
+    const syncAllPosts = vi.fn(async () => outcome);
+    app.dataManager.getTotalPostCount = vi.fn(
+      async () => BIG_USER_TOTAL,
+    ) as unknown as AnalyticsDataManager['getTotalPostCount'];
+    app.dataManager.getSyncStats = vi.fn(async () => ({
+      count: BIG_USER_TOTAL,
+      lastDate: null,
+    })) as unknown as AnalyticsDataManager['getSyncStats'];
+    app.dataManager.syncAllPosts =
+      syncAllPosts as unknown as AnalyticsDataManager['syncAllPosts'];
+    return syncAllPosts as unknown as Mock;
+  }
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+  });
+
+  it('warns when a run committed only part of its pages', async () => {
+    const {app} = makeApp();
+    stubForFullSync(app, {complete: false, started: true});
+
+    await app.performPartialSync(null, false);
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(showToast).mock.calls[0][0]).toMatchObject({type: 'warn'});
+  });
+
+  it('stays silent when the run never started', async () => {
+    // Blocked by the global lock: nothing was fetched, so "some posts could
+    // not be fetched" would be plainly untrue. Both cases report
+    // complete:false — only `started` tells them apart.
+    const {app} = makeApp();
+    stubForFullSync(app, {complete: false, started: false});
+
+    await app.performPartialSync(null, false);
+
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('stays silent on a clean run', async () => {
+    const {app} = makeApp();
+    stubForFullSync(app, {complete: true, started: true});
+
+    await app.performPartialSync(null, false);
+
+    expect(showToast).not.toHaveBeenCalled();
   });
 });
