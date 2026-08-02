@@ -188,8 +188,10 @@ describe('yearTrendSvg', () => {
     // The line passes through zero; "you are here" must still be visible.
     const svg = yearTrendSvg(stats({month: 1, yearSeries: [10, 0, 8]}));
     expect(ringCount(svg)).toBe(1);
-    // Baseline = top inset + inner height.
-    expect(svg).toContain('cy="26.0" r="3"');
+    // Baseline = top inset + inner height. r pins the solid marker's size —
+    // its hollow predecessor was r=3 with a 2px stroke (8px visually), and
+    // the solid version is ~10% smaller at 7.2px.
+    expect(svg).toContain('cy="26.0" r="3.6"');
   });
 
   it('omits the marker when the hovered month is outside the drawn span', () => {
