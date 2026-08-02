@@ -4,7 +4,7 @@
 ![typescript](https://img.shields.io/badge/typescript-✓-blue)
 ![platform](https://img.shields.io/badge/platform-Userscript-orange)
 ![build](https://img.shields.io/badge/build-Vite-646CFF)
-![version](https://img.shields.io/badge/version-9.7.1-blueviolet)
+![version](https://img.shields.io/badge/version-9.9.0-blueviolet)
 
 **Danbooru Insights** (formerly **Danbooru Grass**) is a comprehensive analytics suite for Danbooru users and tags. It injects GitHub-style contribution graphs and advanced dashboards directly into profile, wiki, and artist pages — no account-level requirements, no Gold-only features, works for everyone.
 
@@ -27,11 +27,12 @@ The script consists of three main components:
 
 ---
 
-## Features (v9.6)
+## Features (v9.9)
 
 ### Grass / Contribution Graph
 * **3 metrics**: Uploads, Approvals, Notes — switch via the metric selector in the graph header. Clicking a cell jumps to the corresponding Danbooru search (e.g. Notes cell → `/note_versions` filtered by updater + date).
 * **Hourly activity heatmap**: Click the clock icon to overlay a 24-hour distribution showing what time of day the user is most active.
+* **Month popover** (v9.8–9.9): hover (desktop) or tap (mobile) a month label for that month's summary — total, active days, busiest day, daily average, and a month-over-month delta. January compares against *last* December via a one-off lookup (local data → remembered value → single server query). A daily sparkline and a year-trend line chart give the month its shape and its context, both following the active grass palette.
 * **Resizable / movable layout**: Drag the corner handle to resize, drag the header to reposition (inline vs below the profile stats). Per-user settings persist in IndexedDB.
 * **12 themes × 4 grass color palettes each**: 48 color combinations. Each theme remembers its own grass color.
 * **Customizable thresholds**: Manual thresholds or one-click auto-tune (percentile-based, with a preview modal showing per-row source — `P40` / `P70` / `P90`).
@@ -40,6 +41,8 @@ The script consists of three main components:
 ### User Analytics Dashboard
 Open via the **📊 Button** next to the username.
 
+* **Preview popover** (v9.7): hovering the 📊 icon shows a mini-report before you commit to the full dashboard — a recent-uploads grid with status borders and suspicious / mintag / abandoned-upload labels, plus a colour-coded strip of the user's last 200 activities across 11 feed types, every legend entry linking out to the exact page. Touch devices get a 📋 mini-report button instead of hover.
+* **Fast open after a sync** (v9.9): heavy tag distributions paint from cache and refresh in the background, so the dashboard opens in seconds even on 40k+ post accounts (was ~30s). Only the visible pie tab revalidates on open — the rest on first visit — with a "⟳ Updating…" badge while counts converge and in-place live patching when they land.
 * **Live loading progress** (v9.6): real-time phase counter (`Loading dashboard · N/14`) plus rotating substatus showing what the data layer is currently doing.
 * **Pie Chart (11 tabs)**: Copyright, Character, Favorite Copyright, Status, Rating, Commentary, Translation, Gender, Breast Size (NSFW-gated), Hair Length, Hair Color.
   * **Sub-chart mode** (v9.6, Copy / Fav_Copy / Char): Hover (desktop) or tap (mobile) a legend row — the pie redraws to show the parent's sub-tag breakdown, with a tooltip listing percentages and `/posts?tags=user:...+sub_tag` links.
@@ -79,13 +82,14 @@ Visit any Wiki page (`/wiki_pages/TAG_NAME`) or Artist page (`/artists/NUMERIC_I
 * **Auto mode**: follows Danbooru's own dark-mode toggle.
 
 ### Performance & Reliability
-* **Rate-limited fetcher**: 9 req/sec, 8-concurrency token bucket with multi-tab coordination — stays under Danbooru's 10 req/s server cap even with multiple tabs open.
+* **Rate-limited fetcher**: 9 req/sec, 8-concurrency token bucket with multi-tab coordination — stays under Danbooru's 10 req/s server cap even with multiple tabs open. Every dashboard code path goes through the one shared limiter (enforced by an architecture test since v9.9).
 * **IndexedDB persistence**: post history, daily counts, piestats, and tag analytics cached locally. Quota-safe writes — least-recently-used non-current-user data is evicted on `QuotaExceededError`, never the current user's.
+* **Honest syncs** (v9.9): a sync that could not fetch every page warns and resumes on the next open instead of claiming success over partial data, and posts deleted on Danbooru since the last sync are pruned from the local mirror so milestones and counts don't drift.
 * **Persistent storage opt-in** (v9.4+): after first successful sync, requests `navigator.storage.persist()` to survive Safari ITP / Chrome heuristic eviction.
 
 ### Engineering
-* **759 Vitest unit tests** + **7 Playwright e2e tests** (visual baselines for grass, pie widget, settings popover).
-* **Architecture fitness tests**: layer-direction enforcement, raw `fetch()` ban, NSFW localStorage key consolidation, `/counts/posts.json` URL consolidation, popover-position formula consolidation.
+* **893 Vitest unit tests** + **7 Playwright e2e tests** (visual baselines for grass, pie widget, settings popover; a mandatory pre-merge gate).
+* **Architecture fitness tests**: layer-direction enforcement, raw `fetch()` ban, NSFW localStorage key consolidation, `/counts/posts.json` URL consolidation, popover-position formula consolidation, wiki-link tag-name encoding, shared-rate-limiter construction.
 * **Pre-commit hook**: `npm run build` → `npm run lint` → `npm run check:dead` (knip) chained. Blocks regressions before commit.
 
 ---
@@ -154,6 +158,27 @@ The dashboard appears below the page header automatically. You'll see:
 ## Version History
 
 See [CHANGELOG.md](CHANGELOG.md) for the full per-release notes.
+
+### v9.9 — Faster dashboard, month popover charts, hardening
+
+* **Dashboard opens in seconds after a sync** (~30s → ~5s on a 46k-post
+  account): heavy tag distributions defer to the background with lazy
+  per-tab revalidation, an "⟳ Updating…" badge, and in-place live patching.
+* **Month popover charts**: daily sparkline + year-trend line, and January
+  finally gets a month-over-month delta (vs last December, via a one-off
+  cached lookup).
+* **Hardening pass** from a full self-audit: angle-bracket tag escaping,
+  failed syncs warn-and-resume instead of claiming success, remotely-deleted
+  posts pruned from the local mirror, all dashboard traffic on the shared
+  rate limiter, repeated count queries memoised, thumbnails carried across
+  refreshes. Unit suite 759 → 893.
+
+### v9.8 — Grass month-label popover
+
+* Hover/tap a month label → per-month stats popover: total, active days,
+  busiest day, daily average, month-over-month delta.
+* v9.7.2 staleness fixes folded in: popular-post / milestone caches refresh
+  on every partial sync instead of one open later.
 
 ### v9.7 — Dashboard preview popover + mintag detection
 
@@ -246,7 +271,7 @@ npm install                    # also wires the pre-commit hook automatically
 
 # develop
 npm run dev                    # Vite dev server with HMR
-npm run test                   # Vitest unit tests (759 cases)
+npm run test                   # Vitest unit tests (893 cases)
 npm run test:e2e               # Playwright e2e (visual baselines)
 npm run lint                   # GTS lint
 npm run fix                    # auto-fix lint

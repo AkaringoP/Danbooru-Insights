@@ -4,6 +4,104 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.9.0 — Faster dashboard, month popover charts, and a hardening pass
+
+### Performance
+- **The report opens much faster after a sync.** The nine heavy tag
+  distributions (character / copyright / hair colour / …) used to be
+  force-refreshed on the blocking path before the dashboard could paint —
+  hundreds of per-tag count queries the user had to sit through. They now
+  paint from the previous sync's cache immediately and freshen in the
+  background, lazily: only the pie tab on screen revalidates when the
+  dashboard opens, and each of the other eight the first time it is switched
+  to. On a large (~46k post) account the open dropped from roughly 30s to
+  about 5s. Freshness is unchanged where it matters — post counts, sync
+  stats, milestones and the rating/status splits are still refreshed before
+  the dashboard paints.
+- **Background refreshes land on the open dashboard.** While a tab's counts
+  are being refreshed, a small "⟳ Updating…" pill sits in the pie header so a
+  briefly-stale number reads as pending rather than final; when the fresh
+  values arrive they are patched into the visible pie in place — proportions,
+  counts and thumbnails — with no need to close and reopen the report.
+- **Fewer repeated API calls.** One report click used to ask the server for
+  the same total post count up to six times (each a separate ~half-second
+  query); it is now fetched once per interaction. Refreshing a tag
+  distribution also re-derived every thumbnail from scratch — around 30-50
+  requests a sync — and now reuses the ones whose tag has not changed.
+- **All dashboard traffic goes through the shared rate limiter.** Four code
+  paths (the header status refresh, the random-post button, the milestone
+  widget and the monthly chart) built private token buckets that ignored the
+  multi-tab request split and kept firing while the shared limiter was
+  backing off from a 429. They now reuse the app's manager, and an
+  architecture test fails the build if a manager is ever constructed without
+  the shared limiter under `src/apps/`.
+
+### Added
+- **A daily sparkline in the month popover.** Hovering a month label now
+  shows the shape of that month beside its total — one bar per day, with the
+  busiest day tinted darker so it matches the day named just below. Bars are
+  scaled to the month's own peak, follow the active grass palette, and the
+  in-progress month stops at today instead of trailing days that have not
+  happened yet.
+- **A year-trend line above it.** A second chart traces every month of the
+  year, so the hovered month has context: where the year rose and fell, with
+  a solid dot marking where you are. The dot takes the same green or red as
+  the percentage next to it — up from last month is green, down is red — so
+  the chart and the sentence always agree.
+- **January now shows a month-over-month change.** It was the one month
+  without one: its previous month lives in the year before, which the heatmap
+  does not load. Hovering January now looks up just last December's total —
+  from local data if that year is already synced, from a remembered value if
+  it was resolved before, and only otherwise from the server (a single query
+  for uploads). The popover opens immediately and the delta is patched in
+  when it resolves — and only while January is still the month on screen, so
+  a slow lookup can neither rewrite another month's popover nor hold open one
+  that is already dismissing.
+
+### Fixed
+- **Tags with angle brackets no longer break the page.** Danbooru has real
+  tags like `>_<` and `<o>_<o>`, and they were interpolated straight into the
+  dashboard's markup — the top-post tag line, the tag-cloud tooltip, the
+  created-tags table and the profile-name headers. All of them are escaped
+  now, and wiki-page links encode the tag name (tags may contain `/`, as in
+  `fate/grand_order`, which silently produced a broken link).
+- **A failed sync no longer reports success.** When a page could not be
+  fetched after its retries, the sync stopped quietly, stamped itself as
+  complete and showed a green "Synced" — so the report was built on partial
+  data with no indication anything was missing, and because it looked
+  complete, it was never resumed. Such a run now withholds the completion
+  stamp and warns that it will resume the next time you open the report. A
+  run that never started at all (another tab already syncing) stays quiet
+  instead of claiming posts could not be fetched.
+- **Posts deleted on Danbooru are cleared from the local copy.** Sync
+  searches exclude deleted posts, so a post deleted since the last sync
+  simply stopped appearing — and its stale local row lingered, taking a
+  position number that a live post had since been given. That made milestone
+  lookups ambiguous, inflated the local post count above the real one, and
+  plotted a nonexistent post on the scatter chart. A clean sync now drops the
+  rows the server no longer returns. (Accounts over 1200 posts only; smaller
+  ones already rebuild from scratch.)
+- **The report button no longer stays stuck on "ERR"** after a failed sync.
+- **The upload count is read by label, not by table position.** It previously
+  read a fixed row of the profile statistics table, so a layout change would
+  silently substitute a different statistic, and an unparseable value produced
+  `NaN` — which compared false against everything and re-triggered a sync on
+  every single click.
+
+### Internal
+- The unit suite grew from 782 to 893 tests: new coverage for the Quick Sync
+  path (including the wipe-before-refetch step the larger sync's bookkeeping
+  depends on), the events the pie widget and the dashboard use to talk to
+  each other, the date-range read behind January's month-over-month, the
+  month popover's touch behaviour, and every theme's colour ramps rather
+  than two of the twelve. Writing the event-contract tests is what surfaced
+  the "Updating…" badge wiring bug fixed above them.
+- Playwright e2e (7 visual baselines) is now an explicit pre-merge gate
+  instead of an unwritten habit, and a config constant nothing read was
+  removed along with the test that pinned it.
+
+---
+
 ## v9.8.0 — Grass month-label hover popover
 
 ### Added

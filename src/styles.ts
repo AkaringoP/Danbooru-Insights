@@ -277,6 +277,38 @@ const GLOBAL_CSS = `
     .di-pie-tab:hover { background: var(--di-btn-hover-bg, #dddddd); }
     .di-pie-tab.active { background: var(--di-btn-active-bg, #555555); color: var(--di-btn-active-text, #ffffff); box-shadow: 0 1px 3px var(--di-shadow, rgba(0, 0, 0, 0.2)); }
     .di-pie-tab:not(.active):hover { background: var(--di-btn-hover-bg, #dddddd); }
+    /* "Refreshing counts" pill on the pie header — signals the current tab's
+       per-tag counts are being revalidated in the background so a briefly
+       stale cached value isn't mistaken for final. Toggled via .is-active.
+
+       Overlaid (absolute, right-centred in the tab header) rather than laid
+       out: as a flex sibling its appearance narrowed the tab column, so every
+       toggle re-wrapped the tab rows and the whole header jumped. Out of the
+       flow, the tabs keep one arrangement whether it is showing or not. The
+       trade-off is that on narrow widths it can sit over a tab's right edge —
+       it is opaque enough to stay readable, transient, and pointer-events:none
+       so the tab underneath still takes the click. */
+    .di-pie-updating-badge {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        align-items: center;
+        gap: 5px;
+        font-size: 10px;
+        color: var(--di-text-muted, #888);
+        background: var(--di-bg-tertiary, #f0f0f0);
+        border-radius: 10px;
+        padding: 2px 8px;
+        white-space: nowrap;
+        pointer-events: none;
+    }
+    .di-pie-updating-badge.is-active { display: inline-flex; }
+    .di-pie-updating-badge .di-pie-updating-spin {
+        display: inline-block;
+        animation: di-spin 0.9s linear infinite;
+    }
 
     /* -- User Rankings (Tag Analytics) -- */
     .di-ranking-username:hover { font-weight: bold; }
@@ -1539,7 +1571,13 @@ const GLOBAL_CSS = `
       border-top: 1px solid var(--di-border, #e1e4e8);
       transform: translateX(-50%) rotate(45deg);
     }
+    /* Header row: month·metric on the left, year-trend chart on the right,
+       stacked directly above the headline's daily sparkline. */
     .di-gmp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
       font-size: 10px;
       font-weight: 600;
       letter-spacing: 0.03em;
@@ -1547,12 +1585,58 @@ const GLOBAL_CSS = `
       color: var(--di-text-muted, #888);
       margin-bottom: 8px;
     }
+    /* The year's shape recedes so the hovered month's marker reads as "you
+       are here" rather than competing with eleven neighbours. */
+    .di-gmp-trend .di-gmp-trend-line {
+      fill: none;
+      stroke: var(--grass-level-2, #40c463);
+      stroke-width: 1.5;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+    .di-gmp-trend .di-gmp-trend-dot {
+      fill: var(--grass-level-2, #40c463);
+    }
+    /* Solid marker, sized past the line's vertices so it still reads on top
+       of them. */
+    .di-gmp-trend .di-gmp-trend-now {
+      fill: var(--grass-level-4, #216e39);
+    }
+    /* Same two colours as .di-gmp-mom--up / --down: the marker and the
+       percentage beside it must never disagree. */
+    .di-gmp-trend .di-gmp-trend-now.di-gmp-trend-up {
+      fill: #2ea043;
+    }
+    .di-gmp-trend .di-gmp-trend-now.di-gmp-trend-down {
+      fill: #cf222e;
+    }
+    /* Headline row: total + MoM on the left, sparkline on the right. */
     .di-gmp-headline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .di-gmp-headline-main {
       display: flex;
       align-items: baseline;
       flex-wrap: wrap;
       gap: 8px;
-      margin-bottom: 8px;
+      min-width: 0;
+    }
+    .di-gmp-spark {
+      flex: 0 0 auto;
+      display: block;
+      overflow: visible;
+    }
+    /* Same palette bridge as .di-gmp-bar-fill; the busiest day sits one level
+       darker so it matches the day named in the "Busiest" row. */
+    .di-gmp-spark rect {
+      fill: var(--grass-level-2, #40c463);
+    }
+    .di-gmp-spark rect.di-gmp-spark-peak {
+      fill: var(--grass-level-4, #216e39);
     }
     .di-gmp-total {
       font-size: 20px;

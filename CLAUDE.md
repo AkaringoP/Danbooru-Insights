@@ -73,7 +73,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run dev` — Vite dev 서버 (HMR)
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 759 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 893 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 포함)
 
@@ -153,6 +153,9 @@ pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), `prepare` 스�
 gate 실패 시 root cause 를 고쳐 — whitelist, suppress, work around 금지. 기계적 gate 의 존재 이유는 이런 체크에 LLM 판단을 못 믿어서임 ("Never send an LLM to do a linter's job").
 
 Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 실행" 규칙은 자동화됨. 작업 도중에는 여전히 개별 gate 돌려가며 left-shifted feedback 유지하되, 최종 보증은 hook 이 함
+
+### Gate 8 — e2e (머지 전 수동)
+`npm run test:e2e` (Playwright, ~8초). **pre-commit hook 에 없음** — dev 서버를 띄워야 해서 매 커밋마다 돌리기엔 무겁다. 대신 **브랜치 머지 직전에 반드시 1회 실행**. 안 그러면 시각 회귀 baseline 이 썩어도 아무도 모른다 (gate 밖에 있는 유일한 검증 구역)
 
 ## 참조 (Level-3 문서 — 필요 시 로드)
 - [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) — Danbooru API 엔드포인트 카탈로그

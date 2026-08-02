@@ -2,6 +2,7 @@ import type {CreatedTagItem} from '../types';
 import type {AnalyticsDataManager} from '../core/analytics-data-manager';
 import type {TargetUser} from '../types';
 import {createLogger} from '../core/logger';
+import {escapeHtml} from '../utils';
 
 const log = createLogger('CreatedTags');
 
@@ -61,7 +62,8 @@ export function renderCreatedTagsWidget(
   const getStatusHtml = (item: CreatedTagItem): string => {
     if (item.aliasedTo) {
       const aliasDisplay = item.aliasedTo.replace(/_/g, ' ');
-      return `<span class="di-created-tags-status" style="color:#8250df;background:#f3e8ff;">🔀 <a href="/wiki_pages/${item.aliasedTo}" target="_blank" style="color:#8250df;">${aliasDisplay}</a></span>`;
+      const aliasHref = encodeURIComponent(item.aliasedTo);
+      return `<span class="di-created-tags-status" style="color:#8250df;background:#f3e8ff;">🔀 <a href="/wiki_pages/${aliasHref}" target="_blank" style="color:#8250df;">${escapeHtml(aliasDisplay)}</a></span>`;
     }
     if (item.isDeprecated) {
       return '<span class="di-created-tags-status" style="color:#cf222e;background:#ffebe9;">⚠️ Deprecated</span>';
@@ -125,9 +127,9 @@ export function renderCreatedTagsWidget(
     for (const item of pageItems) {
       // For aliased tags, link to the alias target wiki page (the original
       // tag's wiki is empty); otherwise link to the tag's own wiki page.
-      const wikiTarget = item.aliasedTo ?? item.tagName;
+      const wikiTarget = encodeURIComponent(item.aliasedTo ?? item.tagName);
       html += `<tr class="di-created-tags-row">
-        <td><a href="/wiki_pages/${wikiTarget}" target="_blank" style="color:#0075f8;">${item.displayName}</a></td>
+        <td><a href="/wiki_pages/${wikiTarget}" target="_blank" style="color:#0075f8;">${escapeHtml(item.displayName)}</a></td>
         <td style="text-align:right;font-variant-numeric:tabular-nums;">${item.postCount.toLocaleString()}</td>
         <td>${getStatusHtml(item)}</td>
         <td style="color:var(--di-text-muted, #888);font-size:0.85em;">${item.reportDate}</td>

@@ -27,11 +27,31 @@ vi.mock('../src/ui/approval-detail-popover', () => ({
   showApprovalsDetail: vi.fn(),
 }));
 
+// JSDOM's window carries `ontouchstart`, so isTouchDevice() reports true and
+// the renderer would always wire its tap path. Drive it explicitly instead:
+// desktop (false) by default, flipped by the tap-path suite. The two paths
+// differ in more than input — hover has a linger→fade dismissal that tap
+// does not — so each needs its own coverage.
+const {touchMode} = vi.hoisted(() => ({touchMode: {value: false}}));
+vi.mock('../src/ui/two-step-tap', async importActual => {
+  const actual = await importActual<typeof import('../src/ui/two-step-tap')>();
+  return {...actual, isTouchDevice: () => touchMode.value};
+});
+
+// January's popover asks core for last December's total. Held under test
+// control so the "lookup still in flight while the user moves on" window —
+// the whole point of the generation / dismissal guards — can be opened at will.
+const {resolvePrevDecemberTotal} = vi.hoisted(() => ({
+  resolvePrevDecemberTotal: vi.fn(),
+}));
+vi.mock('../src/core/grass-prev-month', () => ({resolvePrevDecemberTotal}));
+
 import {GraphRenderer} from '../src/ui/graph-renderer';
 import {SettingsManager} from '../src/core/settings';
+import {hideGrassMonthPopover} from '../src/ui/grass-month-popover';
 import type {DataManager} from '../src/core/data-manager';
 import type {Database} from '../src/core/database';
-import type {MetricData} from '../src/types';
+import type {MetricData, TargetUser} from '../src/types';
 
 function makeDataManager(): DataManager {
   return {
@@ -255,5 +275,288 @@ describe('GraphRenderer.renderGraph with mocked CalHeatmap', () => {
     expect(firstCal.destroy).toHaveBeenCalledTimes(1);
     expect(secondCal).not.toBe(firstCal);
     expect(secondCal.paint).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('GraphRenderer month popover — late December lookup', () => {
+  const POPOVER_ID = '#danbooru-grass-month-popover';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  /** Matches HIDE_GRACE_MS + FADE_MS in grass-month-popover.ts. */
+  const DISMISSAL_MS = 400 + 200;
+
+  /** A promise the test resolves by hand, standing in for a slow lookup. */
+  function deferred<T>(): {promise: Promise<T>; resolve: (v: T) => void} {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>(r => {
+      resolve = r;
+    });
+    return {promise, resolve};
+  }
+
+  /** Drain the microtask queue so a resolved lookup's .then() has run. */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  }
+
+  function headerText(): string | null {
+    return (
+      document.querySelector(`${POPOVER_ID} .di-gmp-header`)?.textContent ??
+      null
+    );
+  }
+
+  /**
+   * Paint a graph, then stand in for the month labels CalHeatmap would have
+   * inserted and let the post-paint wiring (300ms) find them.
+   */
+  async function paintWithLabels(
+    daily: Record<string, number>,
+  ): Promise<SVGTextElement[]> {
+    buildProfileDom();
+    const gr = new GraphRenderer(new SettingsManager(), {} as Database);
+    await gr.injectSkeleton(makeDataManager(), '42');
+    await gr.renderGraph(
+      {daily, hourly: new Array(24).fill(0)},
+      2026,
+      'uploads',
+      {name: 'fixture_user', id: '42'} as TargetUser,
+      [2026],
+      () => {},
+      () => {},
+    );
+    // renderGraph resolves before paint()'s .then() runs, and that callback is
+    // what schedules the post-paint wiring — so drain microtasks first, or the
+    // 300ms timer does not exist yet to be advanced.
+    await flush();
+
+    const scroll = document.getElementById('cal-heatmap-scroll')!;
+    const labels: SVGTextElement[] = [];
+    for (let m = 0; m < 12; m++) {
+      const label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('class', 'ch-domain-text');
+      scroll.appendChild(label);
+      labels.push(label as SVGTextElement);
+    }
+    vi.advanceTimersByTime(300);
+    return labels;
+  }
+
+  /** Hover a label and wait out the 200ms dwell that opens the popover. */
+  function hover(label: SVGTextElement): void {
+    label.dispatchEvent(new MouseEvent('mouseover'));
+    vi.advanceTimersByTime(200);
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // 2026 is wholly in the past relative to this clock, so every month gets a
+    // complete series no matter when the suite actually runs.
+    vi.setSystemTime(new Date('2026-08-15T12:00:00Z'));
+  });
+
+  afterEach(() => {
+    hideGrassMonthPopover();
+    vi.useRealTimers();
+  });
+
+  it('patches January in place once December resolves', async () => {
+    resolvePrevDecemberTotal.mockResolvedValue(4);
+    const labels = await paintWithLabels({'2026-01-10': 5});
+
+    hover(labels[0]);
+    // Opens with the total only — December is not in the loaded year.
+    expect(headerText()).toContain('January 2026');
+    expect(document.querySelector(`${POPOVER_ID} .di-gmp-mom`)).toBeNull();
+
+    await flush();
+
+    // 5 vs 4 → +25%. The guards must not block the case they exist for.
+    const mom = document.querySelector(`${POPOVER_ID} .di-gmp-mom`);
+    expect(mom?.textContent).toContain('25%');
+    expect(mom?.textContent).toContain('vs December');
+  });
+
+  it('drops the patch when another month has taken over the popover', async () => {
+    const december = deferred<number | null>();
+    resolvePrevDecemberTotal.mockReturnValue(december.promise);
+    const labels = await paintWithLabels({'2026-01-10': 5, '2026-03-10': 9});
+
+    hover(labels[0]);
+    expect(headerText()).toContain('January 2026');
+
+    // Pointer moves on before the lookup lands. Re-hovering cancels the
+    // pending dismissal, so only the generation guard can catch this.
+    labels[0].dispatchEvent(new MouseEvent('mouseout'));
+    hover(labels[2]);
+    expect(headerText()).toContain('March 2026');
+
+    december.resolve(3);
+    await flush();
+
+    // March's popover must not be rewritten with January's numbers, under
+    // January's anchor.
+    expect(headerText()).toContain('March 2026');
+    expect(headerText()).not.toContain('January');
+  });
+
+  it('lets a dismissal finish instead of resurrecting the popover', async () => {
+    const december = deferred<number | null>();
+    resolvePrevDecemberTotal.mockReturnValue(december.promise);
+    const labels = await paintWithLabels({'2026-01-10': 5});
+
+    hover(labels[0]);
+    expect(document.querySelector(POPOVER_ID)).not.toBeNull();
+
+    // Pointer leaves: linger → fade → removal is now scheduled, and the
+    // mouseout that scheduled it will never fire again.
+    labels[0].dispatchEvent(new MouseEvent('mouseout'));
+    december.resolve(3);
+    await flush();
+
+    // Re-showing here would clear those timers and strand the popover open.
+    vi.advanceTimersByTime(DISMISSAL_MS);
+    expect(document.querySelector(POPOVER_ID)).toBeNull();
+  });
+});
+
+describe('GraphRenderer month popover — tap path', () => {
+  const POPOVER_ID = '#danbooru-grass-month-popover';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  }
+
+  function headerText(): string | null {
+    return (
+      document.querySelector(`${POPOVER_ID} .di-gmp-header`)?.textContent ??
+      null
+    );
+  }
+
+  function popover(): HTMLElement | null {
+    return document.querySelector(POPOVER_ID);
+  }
+
+  async function paintWithLabels(
+    daily: Record<string, number>,
+  ): Promise<SVGTextElement[]> {
+    buildProfileDom();
+    const gr = new GraphRenderer(new SettingsManager(), {} as Database);
+    await gr.injectSkeleton(makeDataManager(), '42');
+    await gr.renderGraph(
+      {daily, hourly: new Array(24).fill(0)},
+      2026,
+      'uploads',
+      {name: 'fixture_user', id: '42'} as TargetUser,
+      [2026],
+      () => {},
+      () => {},
+    );
+    await flush();
+
+    const scroll = document.getElementById('cal-heatmap-scroll')!;
+    const labels: SVGTextElement[] = [];
+    for (let m = 0; m < 12; m++) {
+      const label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('class', 'ch-domain-text');
+      scroll.appendChild(label);
+      labels.push(label as SVGTextElement);
+    }
+    vi.advanceTimersByTime(300);
+    return labels;
+  }
+
+  /** A real bubbling click, so the document-level outside-tap handler sees it. */
+  function tap(el: Element): void {
+    el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+  }
+
+  beforeEach(() => {
+    touchMode.value = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T12:00:00Z'));
+    resolvePrevDecemberTotal.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    touchMode.value = false;
+    hideGrassMonthPopover();
+    vi.useRealTimers();
+  });
+
+  it('opens on the tapped month', async () => {
+    const labels = await paintWithLabels({'2026-03-10': 9});
+
+    tap(labels[2]);
+
+    expect(headerText()).toContain('March 2026');
+  });
+
+  it('closes when the same month is tapped again', async () => {
+    // No hover to dismiss it on mobile, so the label has to toggle.
+    const labels = await paintWithLabels({'2026-03-10': 9});
+
+    tap(labels[2]);
+    expect(popover()).not.toBeNull();
+
+    tap(labels[2]);
+    expect(popover()).toBeNull();
+  });
+
+  it('switches rather than closes when a different month is tapped', async () => {
+    const labels = await paintWithLabels({'2026-03-10': 9, '2026-05-04': 3});
+
+    tap(labels[2]);
+    tap(labels[4]);
+
+    expect(popover()).not.toBeNull();
+    expect(headerText()).toContain('May 2026');
+  });
+
+  it('closes on a tap outside the popover', async () => {
+    const labels = await paintWithLabels({'2026-03-10': 9});
+    tap(labels[2]);
+
+    tap(document.body);
+
+    expect(popover()).toBeNull();
+  });
+
+  it('stays open when the popover itself is tapped', async () => {
+    // Reading the numbers is a tap too; dismissing then would make the
+    // popover unreadable on touch.
+    const labels = await paintWithLabels({'2026-03-10': 9});
+    tap(labels[2]);
+
+    const inner = document.querySelector(`${POPOVER_ID} .di-gmp-header`)!;
+    tap(inner);
+
+    expect(popover()).not.toBeNull();
+    expect(headerText()).toContain('March 2026');
+  });
+
+  it('drops a late December lookup after another month was tapped', async () => {
+    // Same guard as the hover path — the tap path reaches it through the
+    // same openMonthPopover, and this pins that it still goes through it.
+    let resolveDec!: (v: number | null) => void;
+    resolvePrevDecemberTotal.mockReturnValue(
+      new Promise<number | null>(r => {
+        resolveDec = r;
+      }),
+    );
+    const labels = await paintWithLabels({'2026-01-10': 5, '2026-03-10': 9});
+
+    tap(labels[0]);
+    expect(headerText()).toContain('January 2026');
+
+    tap(labels[2]);
+    expect(headerText()).toContain('March 2026');
+
+    resolveDec(3);
+    await flush();
+
+    expect(headerText()).toContain('March 2026');
+    expect(headerText()).not.toContain('January');
   });
 });

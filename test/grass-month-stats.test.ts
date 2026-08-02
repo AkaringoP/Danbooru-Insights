@@ -154,6 +154,143 @@ describe('computeMonthStats — month-over-month', () => {
   });
 });
 
+describe('computeMonthStats — sparkline series', () => {
+  it('past month: one slot per calendar day, indexed from the 1st', () => {
+    const daily = {'2026-06-01': 5, '2026-06-10': 10, '2026-06-30': 2};
+    const s = computeMonthStats(daily, 2026, 5, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.series).toHaveLength(30); // June
+    expect(s.series[0]).toBe(5); // the 1st
+    expect(s.series[9]).toBe(10); // the 10th
+    expect(s.series[29]).toBe(2); // the 30th
+    expect(s.series[4]).toBe(0); // a day with no entry
+  });
+
+  it('in-progress month stops at today instead of trailing fake zeroes', () => {
+    // TODAY is July 15 — drawing all 31 slots would end the chart with a
+    // fortnight of zeroes that only mean "hasn't happened yet".
+    const daily = {'2026-07-01': 4, '2026-07-15': 9};
+    const s = computeMonthStats(daily, 2026, 6, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.series).toHaveLength(15);
+    expect(s.series[14]).toBe(9);
+  });
+
+  it('keeps a day whose data runs ahead of the local date', () => {
+    // Daily keys lean UTC, so a user behind UTC can already have tomorrow's
+    // bucket; the series must not clip a day that has activity.
+    const daily = {'2026-07-16': 3};
+    const s = computeMonthStats(daily, 2026, 6, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.series).toHaveLength(16);
+    expect(s.series[15]).toBe(3);
+  });
+
+  it('sizes February by the actual year (leap vs common)', () => {
+    const leap = computeMonthStats({'2024-02-29': 1}, 2024, 1, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(leap.series).toHaveLength(29);
+    expect(leap.series[28]).toBe(1);
+
+    const common = computeMonthStats({'2025-02-10': 1}, 2025, 1, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(common.series).toHaveLength(28);
+  });
+
+  it('future month has nothing to draw', () => {
+    const s = computeMonthStats({}, 2026, 11, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.series).toEqual([]);
+  });
+
+  it('empty past month still yields a full row of zeroes', () => {
+    // `empty` gates the popover, not the series: the shape stays honest.
+    const s = computeMonthStats({}, 2026, 5, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.series).toHaveLength(30);
+    expect(s.series.every(v => v === 0)).toBe(true);
+  });
+
+  it('ignores days belonging to other months', () => {
+    const daily = {'2026-06-10': 10, '2026-07-10': 99, '2025-06-10': 77};
+    const s = computeMonthStats(daily, 2026, 5, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.series[9]).toBe(10);
+    expect(s.series.reduce((a, b) => a + b, 0)).toBe(10);
+  });
+});
+
+describe('computeMonthStats — year trend series', () => {
+  it('finished year: one total per month, indexed from January', () => {
+    const daily = {
+      '2025-01-05': 10,
+      '2025-01-20': 5,
+      '2025-06-01': 7,
+      '2025-12-31': 3,
+    };
+    const s = computeMonthStats(daily, 2025, 5, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries).toHaveLength(12);
+    expect(s.yearSeries[0]).toBe(15); // January, both days summed
+    expect(s.yearSeries[5]).toBe(7);
+    expect(s.yearSeries[11]).toBe(3);
+    expect(s.yearSeries[2]).toBe(0);
+  });
+
+  it('current year stops at the month in progress', () => {
+    // TODAY is July 2026 — months after it have not happened.
+    const s = computeMonthStats({'2026-07-01': 4}, 2026, 6, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries).toHaveLength(7); // Jan..Jul
+  });
+
+  it('extends past the current month when a later one has data', () => {
+    const s = computeMonthStats({'2026-09-01': 4}, 2026, 6, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries).toHaveLength(9);
+    expect(s.yearSeries[8]).toBe(4);
+  });
+
+  it('ignores other years', () => {
+    const daily = {'2026-03-01': 5, '2025-03-01': 99};
+    const s = computeMonthStats(daily, 2026, 2, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries.reduce((a, b) => a + b, 0)).toBe(5);
+  });
+
+  it('future year has no trend to draw', () => {
+    const s = computeMonthStats({}, 2027, 0, {
+      today: TODAY,
+      metric: 'uploads',
+    });
+    expect(s.yearSeries).toEqual([]);
+  });
+});
+
 describe('label helpers', () => {
   it('metricLabel', () => {
     expect(metricLabel('uploads')).toBe('Uploads');

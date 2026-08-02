@@ -41,6 +41,23 @@ import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
 const workerLog = createLogger('Analytics:Worker');
+
+/**
+ * How long `getTotalPostCount` reuses an in-flight/just-resolved lookup.
+ * Sized to span one report click's fan-out (pre-check → sync → header →
+ * distributions), not to act as a cache — see getTotalPostCount.
+ */
+const TOTAL_COUNT_MEMO_MS = 30_000;
+
+/**
+ * Identity used to match a distribution row across refreshes. Which field
+ * carries the tag depends on the distribution: character/copyright/breasts
+ * fill `tagName`, the hair ones fill `originalTag`, and the rest only have a
+ * display `name`. Empty string means "no usable identity".
+ */
+function distributionItemKey(item: DistributionItem): string {
+  return item.tagName || item.originalTag || item.name || '';
+}
 import {isTopLevelTag, getBestThumbnailUrl} from '../utils';
 import type {
   TargetUser,
@@ -58,6 +75,7 @@ import type {
   ActivityType,
   ActivitySegment,
   ActivityDistribution,
+  SyncOutcome,
 } from '../types';
 
 /**
@@ -276,6 +294,16 @@ export class AnalyticsDataManager extends DataManager {
   static onProgressCallback:
     | ((current: number, total: number, message?: string) => void)
     | null = null;
+
+  /**
+   * Short-lived per-user memo for {@link getTotalPostCount}. Instance-scoped:
+   * the callers that pile up within one interaction share a manager, and
+   * keeping it off the class avoids leaking a count between page contexts.
+   */
+  private totalCountMemo = new Map<
+    string,
+    {at: number; promise: Promise<number>}
+  >();
 
   /**
    * @param {Database} db The Dexie database instance.
@@ -665,7 +693,7 @@ export class AnalyticsDataManager extends DataManager {
     // `__count` key records the count the entries were computed for; on read
     // a mismatch (or a missing/legacy stamp) forces a recompute. This is
     // required because the widget's default 'auto' step is never warmed by a
-    // sync (refreshAllStats/SWR only warm step=1000) and getStats has no TTL —
+    // sync (refreshCriticalStats/SWR only warm step=1000) and getStats has no TTL —
     // without the stamp the 'auto' list froze at the first-render count while
     // the widget's live totalPosts/nextTarget kept advancing, corrupting the
     // progress bar. The entries payload stays a plain MilestoneEntry[] so the
@@ -988,10 +1016,11 @@ export class AnalyticsDataManager extends DataManager {
    * Results are cached in the piestats table with a `tag_cloud_` prefix.
    *
    * Cache is TTL-gated by `getCountCacheTtlMs()` (default 10 min, same
-   * knob as count distributions). `refreshAllStats` passes
-   * `forceRefresh=true` so partial / full sync invalidates the cache —
-   * this matters most for the General tab's Lift filter, which would
-   * otherwise serve pre-filter results from before v9.6.0 indefinitely.
+   * knob as count distributions). No longer force-refreshed on the blocking
+   * sync path (removed from `refreshCriticalStats`); the General tab warms
+   * via `fetchDashboardData`'s SWR revalidate post-paint, and the widget's
+   * per-category tab switch re-fetches with `forceRefresh=true`. This keeps
+   * the General tab's Lift filter (v9.6.0) current without blocking the open.
    *
    * @param userInfo The target user.
    * @param categoryId Danbooru tag category (0=General, 1=Artist, 3=Copyright, 4=Character).
@@ -1471,6 +1500,8 @@ export class AnalyticsDataManager extends DataManager {
         });
       }
 
+      // Reuse unchanged thumbs before this write replaces the cache (L-2).
+      await this.carryOverThumbs(cacheKey, uploaderId, top10);
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
 
       // Lazy Load Thumbnails
@@ -1599,6 +1630,8 @@ export class AnalyticsDataManager extends DataManager {
         });
       }
 
+      // Reuse unchanged thumbs before this write replaces the cache (L-2).
+      await this.carryOverThumbs(cacheKey, uploaderId, top10);
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
 
       // Lazy Load
@@ -1847,6 +1880,8 @@ export class AnalyticsDataManager extends DataManager {
         });
       }
 
+      // Reuse unchanged thumbs before this write replaces the cache (L-2).
+      await this.carryOverThumbs(cacheKey, uploaderId, top10);
       if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
 
       await this.enrichThumbnails(
@@ -1866,7 +1901,7 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Fetches top posts per rating (G/S/Q/E) in parallel using API.
-   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * Cached in piestats; refreshCriticalStats() passes forceRefresh=true so the
    * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
    * @param {boolean} forceRefresh Bypass cache and re-fetch.
@@ -1930,7 +1965,7 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Fetches Recent Popular (age < 1w) posts for SFW and NSFW in parallel.
-   * Cached in piestats; refreshAllStats() passes forceRefresh=true so the
+   * Cached in piestats; refreshCriticalStats() passes forceRefresh=true so the
    * cache is populated on every sync and dashboard reads are free.
    * @param {!Object} userInfo The user's info object.
    * @param {boolean} forceRefresh Bypass cache and re-fetch.
@@ -3350,6 +3385,8 @@ export class AnalyticsDataManager extends DataManager {
       .filter(r => r.count > 0)
       .sort((a, b) => b.count - a.count);
 
+    // Reuse unchanged thumbs before this write replaces the cache (L-2).
+    await this.carryOverThumbs(cacheKey, uploaderId, filtered);
     if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
 
     await this.enrichThumbnails(
@@ -3432,6 +3469,8 @@ export class AnalyticsDataManager extends DataManager {
     const filtered = results
       .filter(r => r.count > 0)
       .sort((a, b) => b.count - a.count);
+    // Reuse unchanged thumbs before this write replaces the cache (L-2).
+    await this.carryOverThumbs(cacheKey, uploaderId, filtered);
     if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
 
     await this.enrichThumbnails(
@@ -3512,6 +3551,8 @@ export class AnalyticsDataManager extends DataManager {
     const filtered = results
       .filter(r => r.count > 0)
       .sort((a, b) => b.count - a.count);
+    // Reuse unchanged thumbs before this write replaces the cache (L-2).
+    await this.carryOverThumbs(cacheKey, uploaderId, filtered);
     if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
 
     await this.enrichThumbnails(
@@ -3523,6 +3564,54 @@ export class AnalyticsDataManager extends DataManager {
     );
 
     return filtered;
+  }
+
+  /**
+   * Copy thumbnails from the previously cached distribution onto a freshly
+   * recomputed one, matching on tag.
+   *
+   * A forced refresh rebuilds the list with `thumb: null`, so `enrichThumbnails`
+   * re-fetched a representative post for every top-10 entry — 30-50 requests a
+   * sync spent re-deriving pictures that had not changed (audit L-2). The top
+   * tags are stable between syncs, so the previous thumb is almost always the
+   * same one we would fetch again.
+   *
+   * The trade-off is a thumb that lags its tag's current top-scoring post.
+   * That is the right side to err on: the picture is decoration, the counts
+   * beside it are the data, and a genuinely new tag has no cached thumb to
+   * inherit so it still gets fetched.
+   *
+   * Must run *before* the caller's `saveStats` — that write replaces the
+   * cached record this reads from.
+   *
+   * @param {string} cacheKey The piestats key for this distribution.
+   * @param {number} uploaderId The user the distribution belongs to.
+   * @param {DistributionItem[]} items Freshly computed items, mutated in place.
+   */
+  private async carryOverThumbs(
+    cacheKey: string,
+    uploaderId: number,
+    items: DistributionItem[],
+  ): Promise<void> {
+    if (!uploaderId) return;
+    const cached = (await this.getStats(cacheKey, uploaderId)) as
+      | DistributionItem[]
+      | null;
+    if (!cached) return;
+
+    const thumbByTag = new Map<string, string>();
+    for (const prev of cached) {
+      const key = distributionItemKey(prev);
+      if (key && prev.thumb) thumbByTag.set(key, prev.thumb);
+    }
+    if (thumbByTag.size === 0) return;
+
+    for (const item of items) {
+      if (item.isOther || item.thumb) continue;
+      // '' is never a stored key, so a keyless row simply misses.
+      const prev = thumbByTag.get(distributionItemKey(item));
+      if (prev) item.thumb = prev;
+    }
   }
 
   async enrichThumbnails(
@@ -3599,11 +3688,46 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * helper to get robust total count.
+   *
+   * One report click fans this out several times — the pre-check, the sync's
+   * own total, the header status, and the three distributions that size their
+   * candidate pool by it — and `fetchRemoteCount` has no cache, so each was a
+   * fresh 400-900ms count query (audit L-3). The in-flight promise is memoised
+   * per user for a short window so a single click's cascade collapses onto one
+   * request. The window is deliberately much shorter than the count-cache TTL:
+   * this is a de-duplicator for one interaction, not a cache, so a post
+   * uploaded a minute ago still shows up.
+   *
    * @param {Object} userInfo The user's info object.
    * @return {Promise<number>}
    */
   async getTotalPostCount(userInfo: TargetUser): Promise<number> {
     if (!userInfo.name) return 0;
+
+    // `||`, not `??`: an absent id is sometimes '' rather than undefined (the
+    // grass renderer synthesises that for its legacy string user form), and
+    // '' would key every such user onto the same memo entry.
+    const memoKey = userInfo.id || userInfo.name;
+    const memo = this.totalCountMemo.get(memoKey);
+    if (memo && Date.now() - memo.at < TOTAL_COUNT_MEMO_MS) {
+      return memo.promise;
+    }
+
+    const pending = this.fetchTotalPostCount(userInfo);
+    this.totalCountMemo.set(memoKey, {at: Date.now(), promise: pending});
+    // A failed lookup must not be remembered — the next caller should retry
+    // rather than inherit a 0 that means "unknown".
+    void pending.then(
+      value => {
+        if (!value) this.totalCountMemo.delete(memoKey);
+      },
+      () => this.totalCountMemo.delete(memoKey),
+    );
+    return pending;
+  }
+
+  /** Uncached body of {@link getTotalPostCount} — three fallbacks in order. */
+  private async fetchTotalPostCount(userInfo: TargetUser): Promise<number> {
     try {
       // Method A: Exact Search Count (API)
       const normalizedName = userInfo.name.replace(/ /g, '_');
@@ -3627,17 +3751,55 @@ export class AnalyticsDataManager extends DataManager {
 
     // Method C: DOM Fallback
     try {
-      const statsLink = document.querySelector(
-        '#danbooru-grass-wrapper > div:nth-child(1) > table > tbody > tr:nth-child(6) > td > a:nth-child(1)',
-      );
-      if (statsLink) {
-        return parseInt((statsLink.textContent ?? '').replace(/,/g, ''), 10);
+      const parsed = this.parseUploadCountFromDom();
+      // A malformed/absent count parses to NaN; every comparison against
+      // NaN is false, which would put callers in a re-sync-on-every-click
+      // loop. Fall through to the "could not determine" return instead.
+      if (Number.isFinite(parsed)) {
+        return parsed;
       }
     } catch (_e3: unknown) {
       log.debug('Failed to parse DOM stats', {error: _e3});
     }
 
     return 0; // Failed
+  }
+
+  /**
+   * Reads the "Uploads" count out of the profile page's statistics table
+   * (rendered inside our `#danbooru-grass-wrapper`). Matches on the row's
+   * label text rather than a fixed row index — a positional selector
+   * silently reads a different row (e.g. "Deleted Uploads") if Danbooru
+   * reorders the table — and falls back to the previous positional selector
+   * if no labeled row is found, so currently-working pages don't regress.
+   * @return {number} Parsed count, or NaN if none could be determined.
+   */
+  private parseUploadCountFromDom(): number {
+    const rows = document.querySelectorAll('#danbooru-grass-wrapper table tr');
+    for (const row of rows) {
+      const labelCell = row.querySelector('th') ?? row.querySelector('td');
+      const label = (labelCell?.textContent ?? '').trim().toLowerCase();
+      // Exact match only: the same table carries "Upload Limit" and
+      // "Deleted Uploads" rows, and a substring test would happily read the
+      // account's upload allowance as its total post count. No match at all
+      // → the positional fallback below.
+      if (label !== 'uploads') continue;
+
+      const cells = row.querySelectorAll('td');
+      const valueCell = cells[cells.length - 1] ?? row.querySelector('td');
+      // The count is normally a link (to /posts?tags=user:<name>), but a
+      // plain-text cell is still worth parsing before giving up.
+      const valueText = (valueCell?.querySelector('a') ?? valueCell)
+        ?.textContent;
+      return parseInt((valueText ?? '').replace(/,/g, ''), 10);
+    }
+
+    const statsLink = document.querySelector(
+      '#danbooru-grass-wrapper > div:nth-child(1) > table > tbody > tr:nth-child(6) > td > a:nth-child(1)',
+    );
+    return statsLink
+      ? parseInt((statsLink.textContent ?? '').replace(/,/g, ''), 10)
+      : NaN;
   }
 
   /**
@@ -3648,15 +3810,20 @@ export class AnalyticsDataManager extends DataManager {
    *
    * @param {Object} userInfo The user's info object.
    * @param {Function} onProgress Callback for progress updates (current, total).
-   * @return {Promise<void>}
+   * @return {Promise<SyncOutcome>} `complete: false` when the run did not
+   *   cover every page: the data is prefix-consistent but partial, so callers
+   *   should warn rather than report success, and the next open resumes it.
+   *   The two early returns below never fetched anything at all — they carry
+   *   `started: false` so callers can tell "nothing changed" apart from
+   *   "changed, but only partly".
    */
   async syncAllPosts(
     userInfo: TargetUser,
     onProgress: (current: number, total: number, message?: string) => void,
-  ): Promise<void> {
+  ): Promise<SyncOutcome> {
     if (!userInfo.id) {
       log.error('User ID required for sync');
-      return;
+      return {complete: false, started: false};
     }
 
     const uploaderId = parseInt(userInfo.id ?? '0');
@@ -3664,7 +3831,7 @@ export class AnalyticsDataManager extends DataManager {
     // Global Sync Lock
     if (AnalyticsDataManager.isGlobalSyncing) {
       log.warn('Sync already in progress');
-      return;
+      return {complete: false, started: false};
     }
     AnalyticsDataManager.isGlobalSyncing = true;
     AnalyticsDataManager.syncProgress = {current: 0, total: 0, message: ''};
@@ -3708,6 +3875,8 @@ export class AnalyticsDataManager extends DataManager {
       // 3. Worker pool — claim pages, fetch with retry, commit in order.
       let pageOffset = 1;
       let hasMore = true;
+      let pageFailed = false;
+      const seenIds = new Set<number>();
       const buffer = new Map<number, DanbooruPost[]>();
       let nextExpectedPage = 1;
       const MAX_CONCURRENCY = 5;
@@ -3727,6 +3896,12 @@ export class AnalyticsDataManager extends DataManager {
         setHasMore: v => {
           hasMore = v;
         },
+        markFailed: () => {
+          pageFailed = true;
+        },
+        markSeen: ids => {
+          for (const id of ids) seenIds.add(id);
+        },
         reportProgress,
         perfStats,
       });
@@ -3737,15 +3912,24 @@ export class AnalyticsDataManager extends DataManager {
       }
       await Promise.all(workers);
 
+      // Reconcile the re-fetched window before the completion stamps: drop
+      // rows the remote no longer returns, so the local DB is a snapshot of
+      // the window rather than a union of every sync that ever ran.
+      if (!pageFailed && perfStats.pagesCommitted > 0) {
+        await this.pruneGhostPosts(uploaderId, startId, seenIds);
+      }
+
       await this.finalizeSyncMetadata({
         userInfo,
         uploaderId,
         startId,
         total,
         reportProgress,
+        succeeded: !pageFailed,
       });
 
       perfStats.finalCurrentNo = currentNo;
+      return {complete: !pageFailed, started: true};
     } finally {
       perfLogger.end('dbi:db:sync:full:total', perfStats);
       AnalyticsDataManager.isGlobalSyncing = false;
@@ -3829,6 +4013,60 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
+   * Drop this user's rows above `startId` that the just-completed sync did
+   * not return — posts deleted on Danbooru since the last run.
+   *
+   * Sync searches carry no `status:any`, so Danbooru's default excludes
+   * deleted posts and the re-fetched overlap window simply never mentions
+   * them. Without this pass the old row survives with `is_deleted:false`
+   * while the posts that outlived it are renumbered, so its stale `no`
+   * collides with a live post's: `[uploader_id+no]` milestone lookups pick
+   * whichever row Dexie hands back first, local counts drift above the
+   * remote count (making the needsSync check too lenient), and the scatter
+   * plots a post that no longer exists. Only the >1200-post worker path is
+   * affected — quickSync clears the user first, so it never accumulates ghosts.
+   *
+   * Ordering matters: this runs only after a clean run (`markFailed` never
+   * fired) and only when at least one page committed. A partial run has not
+   * seen every page, so a post missing from `seenIds` may simply be one we
+   * never asked for — pruning on that evidence would delete live data. This
+   * is also why the reconcile happens *after* the fetch rather than as a
+   * delete-then-refetch before it: nothing is removed until the replacement
+   * data is already committed, so an interrupted sync can never leave a hole.
+   *
+   * @param {number} uploaderId The user whose rows to reconcile.
+   * @param {number} startId Rows at or below this id were outside the
+   *   re-fetched window and are left alone.
+   * @param {Set<number>} seenIds Post ids the remote returned this run.
+   * @return {Promise<number>} How many ghost rows were deleted.
+   */
+  private async pruneGhostPosts(
+    uploaderId: number,
+    startId: number,
+    seenIds: Set<number>,
+  ): Promise<number> {
+    // Keys-only index scan: `id` IS the posts table's primary key, so the
+    // range/seen filtering can happen on the returned numbers. A
+    // filter().primaryKeys() combination would instantiate every row of what
+    // can be a 100k-row table just to read its id back out.
+    const allIds = (await this.db.posts
+      .where('uploader_id')
+      .equals(uploaderId)
+      .primaryKeys()) as number[];
+    const ghostIds = allIds.filter(id => id > startId && !seenIds.has(id));
+
+    if (ghostIds.length === 0) return 0;
+
+    await this.db.posts.bulkDelete(ghostIds);
+    log.debug('Pruned remotely-deleted posts', {
+      uploaderId,
+      startId,
+      pruned: ghostIds.length,
+    });
+    return ghostIds.length;
+  }
+
+  /**
    * Build the worker function used by the syncAllPosts worker pool.
    * Each worker:
    *   1. claims the next page via `claimPage` (shared atomic counter),
@@ -3858,6 +4096,8 @@ export class AnalyticsDataManager extends DataManager {
     claimPage: () => number;
     getHasMore: () => boolean;
     setHasMore: (v: boolean) => void;
+    markFailed: () => void;
+    markSeen: (ids: number[]) => void;
     reportProgress: (c: number, t: number, msg?: string) => void;
     perfStats: {pagesCommitted: number};
   }): (workerId: number) => Promise<void> {
@@ -3874,6 +4114,8 @@ export class AnalyticsDataManager extends DataManager {
       claimPage,
       getHasMore,
       setHasMore,
+      markFailed,
+      markSeen,
       reportProgress,
       perfStats,
     } = args;
@@ -4003,6 +4245,9 @@ export class AnalyticsDataManager extends DataManager {
                 await bulkPutSafe(this.db.posts, bulkData, () =>
                   evictOldestNonCurrentUser(this.db, uploaderId),
                 );
+                // Remember what the remote actually returned, so a clean run
+                // can prune rows the remote no longer has (see pruneGhostPosts).
+                markSeen(bulkData.map(r => r.id));
                 perfLogger.end(bulkPutLabel, {
                   workerId,
                   page: expected,
@@ -4024,6 +4269,11 @@ export class AnalyticsDataManager extends DataManager {
               page: currentPage,
               error: e,
             });
+            // Stopping here leaves the DB prefix-consistent (ordered commit),
+            // so the next sync resumes cleanly — but the run did NOT cover
+            // every page. Flag it so the caller skips the "synced" stamp and
+            // warns, instead of reporting success over partial data.
+            markFailed();
             setHasMore(false);
           } finally {
             perfLogger.end(pageLabel, {
@@ -4062,18 +4312,27 @@ export class AnalyticsDataManager extends DataManager {
     startId: number;
     total: number;
     reportProgress: (c: number, t: number, msg?: string) => void;
+    succeeded: boolean;
   }): Promise<void> {
-    const {userInfo, uploaderId, startId, total, reportProgress} = args;
+    const {userInfo, uploaderId, startId, total, reportProgress, succeeded} =
+      args;
 
-    // Save "Last Synced Date" metadata
-    const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
-    localStorage.setItem(lastSyncKey, new Date().toISOString());
+    // Completion claims are only written when every page landed. Stamping
+    // them after a failed page would tell the next open "this user is fully
+    // synced" over partial data, and the resume would never happen. The
+    // stats refresh below still runs — what we did commit is
+    // prefix-consistent and should be reflected in the UI.
+    if (succeeded) {
+      // Save "Last Synced Date" metadata
+      const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
+      localStorage.setItem(lastSyncKey, new Date().toISOString());
 
-    // Mark post metadata backfill complete for full (fresh) syncs.
-    // Incremental syncs only touch newer posts, so older posts may still
-    // lack the metadata — in that case the backfill mechanism handles them.
-    if (startId === 0) {
-      localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
+      // Mark post metadata backfill complete for full (fresh) syncs.
+      // Incremental syncs only touch newer posts, so older posts may still
+      // lack the metadata — in that case the backfill mechanism handles them.
+      if (startId === 0) {
+        localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
+      }
     }
 
     // Auto-cleanup other users' stale data (older than 14 days).
@@ -4084,9 +4343,10 @@ export class AnalyticsDataManager extends DataManager {
     // Signal UI: Processing Stats
     reportProgress(total, total, 'PREPARING');
 
-    // Refresh all stats after sync. If startId was 0, it was a Full Sync;
-    // otherwise it's a Partial Sync.
-    await this.refreshAllStats(userInfo, startId === 0);
+    // Refresh the critical (cheap, must-be-fresh) stats after sync. If startId
+    // was 0, it was a Full Sync; otherwise it's a Partial Sync. Heavy tag
+    // distributions freshen post-paint via fetchDashboardData's SWR revalidate.
+    await this.refreshCriticalStats(userInfo, startId === 0);
 
     // First successful sync = meaningful engagement signal. Ask the
     // browser for persistent storage so this user's analytics survive
@@ -4239,8 +4499,9 @@ export class AnalyticsDataManager extends DataManager {
       // 6. Signal UI: Processing Stats
       reportProgress(no, no, 'PREPARING');
 
-      // 7. Refresh all stats (full sync)
-      await this.refreshAllStats(userInfo, true);
+      // 7. Refresh critical stats (full sync). Heavy tag distributions
+      // freshen post-paint via fetchDashboardData's SWR revalidate.
+      await this.refreshCriticalStats(userInfo, true);
 
       // Engagement signal — see syncAllPosts for rationale.
       await requestPersistence();
@@ -4301,21 +4562,30 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Refreshes all cached statistics for the user.
+   * Refreshes the *critical* cached statistics for the user — the ones the
+   * dashboard must show fresh on the very first paint after a sync:
+   * status/rating counts, milestones, level history, and top/recent popular
+   * posts. Cheap set (~18 API calls, ~2-3s) so it stays on the blocking sync
+   * path.
+   *
+   * The heavy tag-distribution + tag-cloud fetchers (character/copyright/
+   * fav-copyright/breasts/hair×2 + 4 tag clouds, ~130-260 calls) are
+   * DELIBERATELY NOT refreshed here. Adding a handful of posts barely moves a
+   * top-10 distribution, so those render from the previous sync's piestats
+   * cache and freshen in the background via `fetchDashboardData`'s SWR
+   * revalidate (post-paint) — see [user-analytics-data.ts]. This is what took
+   * the post-sync dashboard open from ~30s down to ~3-6s (audit H-2 / R2).
+   *
+   * `getRandomPosts` was also dropped: the dashboard fetches its own random
+   * pick fresh on every open, so warming it here was pure waste (audit L-1).
+   *
    * @param {Object} userInfo The user's info object.
    * @return {Promise<void>}
    */
-  async refreshAllStats(
+  async refreshCriticalStats(
     userInfo: TargetUser,
     isFullSync: boolean = false,
   ): Promise<void> {
-    const forceRefresh = true;
-    const progressReporter = (msg: string) => {
-      const {current, total} = AnalyticsDataManager.syncProgress;
-      if (typeof AnalyticsDataManager.onProgressCallback === 'function') {
-        AnalyticsDataManager.onProgressCallback(current, total, msg);
-      }
-    };
     perfLogger.start('dbi:db:refresh:total');
     try {
       await Promise.all([
@@ -4325,47 +4595,9 @@ export class AnalyticsDataManager extends DataManager {
         perfLogger.wrap('dbi:db:refresh:rating', () =>
           this.getRatingDistribution(userInfo, null, true),
         ),
-        perfLogger.wrap('dbi:db:refresh:character', () =>
-          this.getCharacterDistribution(
-            userInfo,
-            forceRefresh,
-            progressReporter,
-          ),
-        ),
-        perfLogger.wrap('dbi:db:refresh:copyright', () =>
-          this.getCopyrightDistribution(
-            userInfo,
-            forceRefresh,
-            progressReporter,
-          ),
-        ),
-        perfLogger.wrap('dbi:db:refresh:favCopyright', () =>
-          this.getFavCopyrightDistribution(userInfo, forceRefresh),
-        ),
-        perfLogger.wrap('dbi:db:refresh:breasts', () =>
-          this.getBreastsDistribution(userInfo, forceRefresh, progressReporter),
-        ),
-        perfLogger.wrap('dbi:db:refresh:hairLength', () =>
-          this.getHairLengthDistribution(
-            userInfo,
-            forceRefresh,
-            progressReporter,
-          ),
-        ),
-        perfLogger.wrap('dbi:db:refresh:hairColor', () =>
-          this.getHairColorDistribution(
-            userInfo,
-            forceRefresh,
-            progressReporter,
-          ),
-        ),
-        // Always refresh Random Posts
-        perfLogger.wrap('dbi:db:refresh:randomPosts', () =>
-          this.getRandomPosts(userInfo),
-        ),
         // Warm the level-change-history cache on every sync — the dashboard
-        // always reads it, and the API is cheap compared to the distribution
-        // calls above (no per-user search combinatorics).
+        // always reads it, and the API is cheap (no per-user search
+        // combinatorics).
         perfLogger.wrap('dbi:db:refresh:levelChanges', () =>
           this.getLevelChangeHistory(userInfo, true),
         ),
@@ -4377,29 +4609,10 @@ export class AnalyticsDataManager extends DataManager {
         perfLogger.wrap('dbi:db:refresh:milestonesNsfw', () =>
           this.getMilestones(userInfo, true, 1000, true),
         ),
-        // Tag Cloud — without this, the General tab's Lift filter (added
-        // in v9.6.0) was serving pre-v9.6.0 unfiltered results from a
-        // long-lived cache. Refresh all four category tabs so each sync
-        // reflects the user's latest tag usage. 4 parallel /related_tag
-        // calls (general one is heavier because it also triggers the
-        // 24h-cached globals lookups).
-        perfLogger.wrap('dbi:db:refresh:tagCloudGeneral', () =>
-          this.getTagCloudData(userInfo, 0, true),
-        ),
-        perfLogger.wrap('dbi:db:refresh:tagCloudArtist', () =>
-          this.getTagCloudData(userInfo, 1, true),
-        ),
-        perfLogger.wrap('dbi:db:refresh:tagCloudCopyright', () =>
-          this.getTagCloudData(userInfo, 3, true),
-        ),
-        perfLogger.wrap('dbi:db:refresh:tagCloudCharacter', () =>
-          this.getTagCloudData(userInfo, 4, true),
-        ),
         // Popular posts are API-driven (order:score, age:<1w) and cached in
         // piestats. Refresh on EVERY sync — a partial (incremental) sync must
         // freshen them too, otherwise the post-sync dashboard render serves
-        // the pre-sync cache and the widgets only catch up one open later via
-        // SWR revalidate. (Previously gated to full sync only, which left
+        // the pre-sync cache. (Previously gated to full sync only, which left
         // large users' Recent/Most Popular stale after every re-sync.)
         perfLogger.wrap('dbi:db:refresh:topPostsByType', () =>
           this.getTopPostsByType(userInfo, true),
@@ -4409,7 +4622,7 @@ export class AnalyticsDataManager extends DataManager {
         ),
       ]);
     } catch (e: unknown) {
-      log.warn('Failed to refresh stats', {error: e});
+      log.warn('Failed to refresh critical stats', {error: e});
     } finally {
       perfLogger.end('dbi:db:refresh:total', {isFullSync});
     }

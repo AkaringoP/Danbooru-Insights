@@ -276,6 +276,87 @@ describe('Architecture constraints', () => {
     ).toEqual([]);
   });
 
+  it('"/wiki_pages/" hrefs must encode the interpolated tag name', () => {
+    // M-1 recurrence guard. Unlike the many `/posts/${id}` links (numeric ids,
+    // inherently safe), a wiki-page path carries a TAG NAME — third-party text
+    // that really does contain `/` (fate/grand_order) and angle brackets
+    // (`>_<`, `<o>_<o>`). Unencoded, those break the link and the surrounding
+    // markup. Two sites shipped that way before this rule existed.
+    const violations: string[] = [];
+    const hrefRe = /\/wiki_pages\/\$\{([^}]*)\}/g;
+
+    for (const file of allFiles) {
+      const lines = file.content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        hrefRe.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = hrefRe.exec(lines[i])) !== null) {
+          // Either encoded inline, or a variable an encode call already built.
+          if (m[1].includes('encodeURIComponent')) continue;
+          const declRe = new RegExp(
+            `(?:const|let)\\s+${m[1].trim()}\\s*=[^;]*encodeURIComponent`,
+          );
+          if (declRe.test(file.content)) continue;
+          violations.push(
+            `${path.relative(SRC_DIR, file.path)}:${i + 1}: ${lines[i].trim()}`,
+          );
+        }
+      }
+    }
+
+    expect(
+      violations,
+      'Wrap the tag name in encodeURIComponent() before putting it in a ' +
+        '/wiki_pages/ href.',
+    ).toEqual([]);
+  });
+
+  it('apps/ must construct DataManager subclasses with the shared rate limiter', () => {
+    // H-1 recurrence guard. DataManager's constructor falls back to a brand
+    // new RateLimitedFetch when none is passed (core/data-manager.ts:86), so
+    // a limiter-less `new AnalyticsDataManager(db)` gets a private token
+    // bucket: it ignores TabCoordinator's multi-tab rps/concurrency split and
+    // keeps firing while the shared limiter is in 429 backoff. Every
+    // construction under apps/ must therefore pass a second argument.
+    //
+    // ui/settings-popover.ts is exempt: its manager only calls getCacheStats()
+    // (IndexedDB-only, no network), so its unused limiter never issues traffic.
+    const violations: string[] = [];
+    const ctorRe = /new\s+(?:\w*DataManager)\s*\(([^)]*)\)/g;
+
+    for (const file of allFiles) {
+      const rel = path.relative(SRC_DIR, file.path);
+      if (!rel.startsWith('apps/')) continue;
+
+      const lines = file.content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (
+          trimmed.startsWith('//') ||
+          trimmed.startsWith('*') ||
+          trimmed.startsWith('/*')
+        ) {
+          continue;
+        }
+        ctorRe.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = ctorRe.exec(lines[i])) !== null) {
+          // A second constructor argument is the rate limiter.
+          if (!m[1].includes(',')) {
+            violations.push(`${rel}:${i + 1}: ${trimmed}`);
+          }
+        }
+      }
+    }
+
+    expect(
+      violations,
+      'Pass the shared RateLimitedFetch as the second constructor argument ' +
+        '(e.g. `new AnalyticsDataManager(db, this.rateLimiter)`), or reuse an ' +
+        'existing manager such as `app.dataManager`.',
+    ).toEqual([]);
+  });
+
   it('popover position formula (getBoundingClientRect + pageYOffset/pageXOffset) belongs to ui/popover-utils.ts', () => {
     // F-UNDER-4 recurrence guard. Four sites originally hand-rolled the
     // "target.getBoundingClientRect() + window.pageYOffset" combo for

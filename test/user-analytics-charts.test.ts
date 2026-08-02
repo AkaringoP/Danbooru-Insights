@@ -193,38 +193,40 @@ describe('renderPieWidget - onNsfwChange callback', () => {
 });
 
 describe('renderPieWidget - DanbooruInsights:DataUpdated subscription', () => {
-  it('updates the thumb on a matching contentType when the user has not navigated away', () => {
+  it('live-patches the active tab: re-renders from a matching DataUpdated event', async () => {
+    // The live-patch handler replaces pieData[tab] with the event's fresh data
+    // and re-renders the active tab (audit R2 follow-up), so a background
+    // revalidate lands on the open dashboard without a reopen. d3 is mocked, so
+    // we stay on the pre-d3 path by sending a zero-count row: renderPieContent
+    // short-circuits to the distinctive "Total count is 0" message, proving the
+    // fresh data was ingested and the active tab re-rendered.
     const container = makeContainer();
-    const initial = [
-      {
-        name: 'Hatsune Miku',
-        tagName: 'hatsune_miku',
-        count: 5,
-        frequency: 0.5,
-        thumb: null,
-        isOther: false,
-      },
-    ];
     renderPieWidget(
       container,
-      {character: initial as never},
+      {},
       false,
       makeStubDataManager(),
       {targetUser: TARGET_USER},
       null,
     );
 
-    // Push a thumb update via the public event the widget listens on.
+    const pieContent = container.querySelector('.pie-content') as HTMLElement;
+    // Let the initial loadTab (stub → []) settle first (renders the generic
+    // "No data available"), so it doesn't clobber the event below.
+    await vi.waitFor(() =>
+      expect(pieContent.textContent).toContain('No data available'),
+    );
+
     window.dispatchEvent(
       new CustomEvent('DanbooruInsights:DataUpdated', {
         detail: {
-          contentType: 'character_dist',
+          contentType: 'copyright_dist', // default active tab
           data: [
             {
               name: 'Hatsune Miku',
               tagName: 'hatsune_miku',
-              count: 5,
-              frequency: 0.5,
+              count: 0,
+              frequency: 0,
               thumb: 'https://example.com/miku.webp',
               isOther: false,
             },
@@ -233,11 +235,29 @@ describe('renderPieWidget - DanbooruInsights:DataUpdated subscription', () => {
       }),
     );
 
-    // The widget mutates pieData in place; the closure-private state is
-    // observable only through DOM, but for an inactive tab no re-render
-    // fires — so the test settles on the in-place mutation by asserting
-    // on the same object reference passed in.
-    expect(initial[0].thumb).toBe('https://example.com/miku.webp');
+    await vi.waitFor(() =>
+      expect(pieContent.textContent).toContain('Total count is 0'),
+    );
+  });
+
+  it('ignores DataUpdated events for unknown contentTypes', () => {
+    const container = makeContainer();
+    renderPieWidget(
+      container,
+      {copyright: []},
+      false,
+      makeStubDataManager(),
+      {targetUser: TARGET_USER},
+      null,
+    );
+    // Should not throw / do anything for a contentType the pie doesn't map.
+    expect(() =>
+      window.dispatchEvent(
+        new CustomEvent('DanbooruInsights:DataUpdated', {
+          detail: {contentType: 'created_tags', data: [{name: 'x', count: 1}]},
+        }),
+      ),
+    ).not.toThrow();
   });
 });
 
@@ -277,5 +297,128 @@ describe('renderPieWidget - tab click handler', () => {
 
     expect(charBtn.style.background).toContain('di-text-secondary');
     expect(copyBtn.style.background).toContain('di-bg-tertiary');
+  });
+});
+
+describe('renderPieWidget — lazy-revalidate event contract', () => {
+  /**
+   * The pie and the app talk over three CustomEvents. Both endpoints are
+   * plain strings — the tab name, the piestats cacheKey, the event name —
+   * so TypeScript cannot catch a rename on one side. The app's half
+   * (schedulePieRevalidate) is covered in user-analytics-app.test.ts; this
+   * pins the pie's half so the pair cannot drift apart silently.
+   */
+  function mountPie(): HTMLElement {
+    const container = makeContainer();
+    renderPieWidget(
+      container,
+      {},
+      false,
+      makeStubDataManager(),
+      {targetUser: TARGET_USER},
+      null,
+    );
+    return container;
+  }
+
+  function clickTab(container: HTMLElement, mode: string): void {
+    const tab = container.querySelector(
+      `.di-pie-tab[data-mode="${mode}"]`,
+    ) as HTMLElement;
+    expect(tab, `tab "${mode}" should exist`).not.toBeNull();
+    tab.click();
+  }
+
+  it('announces a tab switch with the piestats cacheKey, not the tab name', async () => {
+    // schedulePieRevalidate looks the starter up by cacheKey ('copyright_dist'),
+    // so emitting the bare tab name would silently match nothing and that
+    // tab would never revalidate.
+    const container = mountPie();
+    const seen: string[] = [];
+    const onActivated = (e: Event) => {
+      seen.push((e as CustomEvent).detail?.contentType);
+    };
+    window.addEventListener('DanbooruInsights:PieTabActivated', onActivated);
+
+    clickTab(container, 'character');
+    clickTab(container, 'status');
+
+    window.removeEventListener('DanbooruInsights:PieTabActivated', onActivated);
+    expect(seen).toEqual(['character_dist', 'status_dist']);
+  });
+
+  it('does not re-announce the tab already showing', async () => {
+    // The pie opens on copyright; clicking it is not a switch, and firing
+    // anyway would burn the app's fire-once starter for no reason.
+    const container = mountPie();
+    const onActivated = vi.fn();
+    window.addEventListener('DanbooruInsights:PieTabActivated', onActivated);
+
+    clickTab(container, 'copyright');
+
+    window.removeEventListener('DanbooruInsights:PieTabActivated', onActivated);
+    expect(onActivated).not.toHaveBeenCalled();
+  });
+
+  it('shows the Updating badge only while the visible tab is refreshing', async () => {
+    const container = mountPie();
+    const badge = container.querySelector(
+      '.di-pie-updating-badge',
+    ) as HTMLElement;
+    expect(badge).not.toBeNull();
+    expect(badge.classList.contains('is-active')).toBe(false);
+
+    const refreshing = (contentType: string, active: boolean) =>
+      window.dispatchEvent(
+        new CustomEvent('DanbooruInsights:PieTabRefreshing', {
+          detail: {contentType, active},
+        }),
+      );
+
+    // A background refresh of a tab the user is not looking at must stay
+    // invisible — otherwise the badge claims the shown counts are pending.
+    refreshing('character_dist', true);
+    expect(badge.classList.contains('is-active')).toBe(false);
+
+    refreshing('copyright_dist', true);
+    expect(badge.classList.contains('is-active')).toBe(true);
+
+    refreshing('copyright_dist', false);
+    expect(badge.classList.contains('is-active')).toBe(false);
+  });
+
+  it('carries the badge over when switching to a tab still refreshing', async () => {
+    const container = mountPie();
+    const badge = container.querySelector(
+      '.di-pie-updating-badge',
+    ) as HTMLElement;
+
+    window.dispatchEvent(
+      new CustomEvent('DanbooruInsights:PieTabRefreshing', {
+        detail: {contentType: 'character_dist', active: true},
+      }),
+    );
+    expect(badge.classList.contains('is-active')).toBe(false);
+
+    // Switching to it must adopt its in-flight state; the refresh started
+    // before the switch and no further event is coming until it settles.
+    clickTab(container, 'character');
+    expect(badge.classList.contains('is-active')).toBe(true);
+  });
+
+  it('ignores refresh events for content types the pie does not show', () => {
+    const container = mountPie();
+    const badge = container.querySelector(
+      '.di-pie-updating-badge',
+    ) as HTMLElement;
+
+    expect(() =>
+      window.dispatchEvent(
+        new CustomEvent('DanbooruInsights:PieTabRefreshing', {
+          detail: {contentType: 'tag_cloud_general', active: true},
+        }),
+      ),
+    ).not.toThrow();
+    expect(badge.classList.contains('is-active')).toBe(false);
   });
 });

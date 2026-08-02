@@ -233,7 +233,11 @@ function makePostsChain(
     reverse: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
     until: vi.fn().mockReturnThis(),
-    filter: vi.fn().mockReturnThis(),
+    // Records the predicate instead of ignoring it, so `primaryKeys()` can
+    // answer faithfully (pruneGhostPosts filters then reads primary keys).
+    // Terminal ops that predate this (count/toArray) keep their old
+    // filter-blind behaviour so existing expectations are untouched.
+    filter: vi.fn(),
     equals: vi.fn().mockReturnThis(),
     anyOf: vi.fn().mockReturnThis(),
     each: vi.fn(async (cb: (row: Record<string, unknown>) => void) => {
@@ -248,12 +252,27 @@ function makePostsChain(
     delete: vi.fn(async () => rows.length),
     uniqueKeys: vi.fn(async () => []),
     orderBy: vi.fn().mockReturnThis(),
+    _filters: [] as Array<(row: Record<string, unknown>) => boolean>,
+    primaryKeys: vi.fn(async () =>
+      rows
+        .filter(r =>
+          (
+            chain._filters as Array<(row: Record<string, unknown>) => boolean>
+          ).every(f => f(r)),
+        )
+        .map(r => r['id']),
+    ),
   };
+  chain.filter = vi.fn((fn: (row: Record<string, unknown>) => boolean) => {
+    (chain._filters as Array<(row: Record<string, unknown>) => boolean>).push(
+      fn,
+    );
+    return chain;
+  });
   // Make all modifier fns return the chain itself
   (chain.reverse as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.limit as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.until as ReturnType<typeof vi.fn>).mockReturnValue(chain);
-  (chain.filter as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.equals as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.anyOf as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   return chain;
@@ -262,10 +281,17 @@ function makePostsChain(
 /** Build a posts table mock. */
 function makePostsTable(rows: Record<string, unknown>[] = []) {
   const chain = makePostsChain(rows);
+  // Each where() starts a fresh query, so recorded filter predicates from a
+  // previous one must not leak into it.
+  const startQuery = () => {
+    chain._filters = [];
+    return chain;
+  };
   return {
-    where: vi.fn().mockReturnValue(chain),
-    orderBy: vi.fn().mockReturnValue(chain),
+    where: vi.fn(startQuery),
+    orderBy: vi.fn(startQuery),
     bulkPut: vi.fn(async () => undefined),
+    bulkDelete: vi.fn(async () => undefined),
     _chain: chain,
   };
 }
@@ -446,6 +472,201 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     vi.unstubAllGlobals();
   });
 
+  describe('carryOverThumbs', () => {
+    it('reuses cached thumbs so a forced refresh refetches only new tags', async () => {
+      // L-2 guard. A forced refresh rebuilds the distribution with thumb:null,
+      // so enrichThumbnails used to re-derive a representative post for every
+      // top-10 entry — 30-50 requests a sync for pictures that had not changed.
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        makeSyncRateLimiter() as never,
+      );
+      vi.spyOn(adm, 'getStats').mockResolvedValue([
+        {name: 'idolmaster', tagName: 'idolmaster', count: 9, thumb: 'a.jpg'},
+        {name: 'touhou', tagName: 'touhou', count: 8, thumb: 'b.jpg'},
+        {name: 'Others', tagName: '', count: 1, thumb: '', isOther: true},
+      ] as never);
+
+      const fresh = [
+        {name: 'idolmaster', tagName: 'idolmaster', count: 11, thumb: null},
+        {name: 'touhou', tagName: 'touhou', count: 8, thumb: 'kept.jpg'},
+        {name: 'newcomer', tagName: 'newcomer', count: 5, thumb: null},
+        {name: 'Others', tagName: '', count: 2, thumb: null, isOther: true},
+      ];
+      await (
+        adm as unknown as {
+          carryOverThumbs: (
+            k: string,
+            u: number,
+            i: unknown[],
+          ) => Promise<void>;
+        }
+      ).carryOverThumbs('copyright_dist', 42, fresh);
+
+      // Carried over by tag, leaving the refreshed counts alone.
+      expect(fresh[0].thumb).toBe('a.jpg');
+      // An already-present thumb is never overwritten.
+      expect(fresh[1].thumb).toBe('kept.jpg');
+      // A tag with no cached entry still needs a real fetch.
+      expect(fresh[2].thumb).toBeNull();
+      // "Others" is a synthetic bucket and never carries a picture.
+      expect(fresh[3].thumb).toBeNull();
+    });
+
+    it('is a no-op when there is no cached distribution yet', async () => {
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        makeSyncRateLimiter() as never,
+      );
+      vi.spyOn(adm, 'getStats').mockResolvedValue(null as never);
+
+      const fresh = [{name: 'a', tagName: 'a', count: 1, thumb: null}];
+      await (
+        adm as unknown as {
+          carryOverThumbs: (
+            k: string,
+            u: number,
+            i: unknown[],
+          ) => Promise<void>;
+        }
+      ).carryOverThumbs('copyright_dist', 42, fresh);
+
+      expect(fresh[0].thumb).toBeNull();
+    });
+  });
+
+  describe('parseUploadCountFromDom', () => {
+    // Minimal fake of the DOM surface the parser touches: rows with a <th>
+    // label and a <td> whose count usually sits inside an <a>.
+    type FakeEl = {
+      textContent: string;
+      querySelector: (sel: string) => FakeEl | null;
+      querySelectorAll: (sel: string) => FakeEl[];
+    };
+    const el = (
+      text: string,
+      children: Record<string, FakeEl[]> = {},
+    ): FakeEl => ({
+      textContent: text,
+      querySelector: sel => children[sel]?.[0] ?? null,
+      querySelectorAll: sel => children[sel] ?? [],
+    });
+    const row = (label: string, value: string, link = true): FakeEl =>
+      el(`${label} ${value}`, {
+        th: [el(label)],
+        td: [el(value, link ? {a: [el(value)]} : {})],
+      });
+    const stubTable = (rows: FakeEl[]) =>
+      vi.stubGlobal('document', {
+        querySelectorAll: (sel: string) =>
+          sel === '#danbooru-grass-wrapper table tr' ? rows : [],
+        querySelector: () => null,
+      });
+    const parse = (adm: AnalyticsDataManager) =>
+      (
+        adm as unknown as {parseUploadCountFromDom: () => number}
+      ).parseUploadCountFromDom();
+
+    it('reads the "Uploads" row — not "Upload Limit" or "Deleted Uploads"', () => {
+      // M-4 guard. The profile statistics table also carries an
+      // "Upload Limit" row; a substring match on 'upload' returned the
+      // account's upload allowance (a tiny number) as its total post count,
+      // and Number.isFinite happily accepted it.
+      stubTable([
+        row('Upload Limit', '10 / 15', false),
+        row('Uploads', '46,252'),
+        row('Deleted Uploads', '1,203'),
+      ]);
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        makeSyncRateLimiter() as never,
+      );
+      expect(parse(adm)).toBe(46252);
+    });
+
+    it('returns NaN when no row matches and the positional fallback misses', () => {
+      // The caller guards with Number.isFinite and falls through to 0
+      // ("could not determine") — never a NaN that poisons isSynced checks.
+      stubTable([row('Favorites', '99')]);
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        makeSyncRateLimiter() as never,
+      );
+      expect(Number.isNaN(parse(adm))).toBe(true);
+    });
+  });
+
+  describe('getTotalPostCount memo', () => {
+    it("collapses one interaction's repeated lookups onto a single request", async () => {
+      // L-3 guard. A report click asks for the total from the pre-check, the
+      // sync, the header status and three distributions; fetchRemoteCount has no
+      // cache, so each was its own 400-900ms count query.
+      const rl = makeSyncRateLimiter(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({counts: {posts: 1234}}),
+      }));
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        rl as never,
+      );
+      const user = makeSyncUser({id: '42'});
+
+      const results = await Promise.all([
+        adm.getTotalPostCount(user),
+        adm.getTotalPostCount(user),
+        adm.getTotalPostCount(user),
+      ]);
+
+      expect(results).toEqual([1234, 1234, 1234]);
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not remember a failed lookup', async () => {
+      // 0 means "could not determine", not "this user has no posts" — caching it
+      // would strand the dashboard on a bad answer for the whole memo window.
+      let call = 0;
+      const rl = makeSyncRateLimiter(async () => {
+        call++;
+        if (call === 1) return {ok: false, status: 500, json: async () => ({})};
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 7}}),
+        };
+      });
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        rl as never,
+      );
+      // No id → the profile fallback is skipped too, so the first call yields 0.
+      const user = makeSyncUser({id: undefined});
+
+      expect(await adm.getTotalPostCount(user)).toBe(0);
+      expect(await adm.getTotalPostCount(user)).toBe(7);
+    });
+
+    it('keys the memo per user even when the id is an empty string', async () => {
+      // The grass renderer synthesises `{name, id: ''}` for its legacy string
+      // user form. `??` treats '' as a present id, so every such user collapsed
+      // onto one memo entry and the second one read the first one's count.
+      const rl = makeSyncRateLimiter(async (url: string) => ({
+        ok: true,
+        status: 200,
+        json: async () => ({counts: {posts: url.includes('alice') ? 11 : 22}}),
+      }));
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable()) as never,
+        rl as never,
+      );
+
+      const alice = makeSyncUser({id: '', name: 'alice'});
+      const bob = makeSyncUser({id: '', name: 'bob'});
+      expect(await adm.getTotalPostCount(alice)).toBe(11);
+      expect(await adm.getTotalPostCount(bob)).toBe(22);
+    });
+  });
+
   it('returns early without touching db when userInfo.id is missing', async () => {
     const postsTable = makePostsTable();
     const db = makeSyncDb(postsTable);
@@ -453,10 +674,16 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     const adm = new AnalyticsDataManager(db as never, rl as never);
 
     const progress = vi.fn();
-    await adm.syncAllPosts(makeSyncUser({id: undefined}), progress);
+    const outcome = await adm.syncAllPosts(
+      makeSyncUser({id: undefined}),
+      progress,
+    );
 
     expect(postsTable.where).not.toHaveBeenCalled();
     expect(rl.fetch).not.toHaveBeenCalled();
+    // Nothing ran, so there is no partial data to warn about — callers must be
+    // able to tell this apart from a run that fetched some of the pages.
+    expect(outcome).toEqual({complete: false, started: false});
     // Lock must remain false (it was never set to true)
     expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
   });
@@ -469,11 +696,13 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     const adm = new AnalyticsDataManager(db as never, rl as never);
 
     const progress = vi.fn();
-    await adm.syncAllPosts(makeSyncUser(), progress);
+    const outcome = await adm.syncAllPosts(makeSyncUser(), progress);
 
     // Nothing should happen — lock was already held
     expect(postsTable.where).not.toHaveBeenCalled();
     expect(rl.fetch).not.toHaveBeenCalled();
+    // Blocked before fetching anything: not a partial sync.
+    expect(outcome).toEqual({complete: false, started: false});
     // Clean up the flag we set
     AnalyticsDataManager.isGlobalSyncing = false;
   });
@@ -532,7 +761,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     });
 
     const adm = new AnalyticsDataManager(db as never, rl as never);
-    vi.spyOn(adm, 'refreshAllStats').mockResolvedValue();
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
     vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
 
     const progress = vi.fn();
@@ -613,7 +842,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     });
 
     const adm2 = new AnalyticsDataManager(db as never, rl2 as never);
-    vi.spyOn(adm2, 'refreshAllStats').mockResolvedValue();
+    vi.spyOn(adm2, 'refreshCriticalStats').mockResolvedValue();
     vi.spyOn(adm2, 'cleanupStaleData').mockResolvedValue();
 
     const progress = vi.fn();
@@ -660,15 +889,187 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     );
     expect(metaKeySet).toBe(true);
 
-    // cleanupStaleData and refreshAllStats were called
+    // cleanupStaleData and refreshCriticalStats were called
     expect(adm2.cleanupStaleData).toHaveBeenCalledWith('42');
-    expect(adm2.refreshAllStats).toHaveBeenCalledWith(
+    expect(adm2.refreshCriticalStats).toHaveBeenCalledWith(
       expect.objectContaining({id: '42'}),
       true, // full sync
     );
 
     // requestPersistence was called
     expect(quotaManager.requestPersistence).toHaveBeenCalled();
+  });
+
+  it('a failed page reports complete:false and skips the completion stamps', async () => {
+    // M-2 guard. A worker that gives up stops quietly and leaves the DB
+    // prefix-consistent, so Promise.all resolves normally. Before, that path
+    // still stamped last-sync + the backfill-complete flag and the caller
+    // painted a green "Synced" — the user saw a full-success UI over partial
+    // data, and the completion stamp meant the resume never happened.
+    const postsTable = makePostsTable([]);
+    const db = makeSyncDb(postsTable);
+
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 3}}),
+        };
+      }
+      // HTTP 400 is not a 5xx, so the worker throws on the first attempt
+      // instead of burning the retry backoff.
+      return {ok: false, status: 400, json: async () => []};
+    });
+
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(outcome.complete).toBe(false);
+    // It did run and did commit — this is the case that must warn, unlike the
+    // two early returns above.
+    expect(outcome.started).toBe(true);
+
+    const ls = vi.mocked(localStorage.setItem);
+    expect(
+      ls.mock.calls.some((c: string[]) =>
+        c[0].startsWith('danbooru_grass_last_sync_'),
+      ),
+    ).toBe(false);
+    expect(
+      ls.mock.calls.some((c: string[]) => c[0] === 'di_post_metadata_v2_42'),
+    ).toBe(false);
+
+    // Stats still refresh: what did commit is prefix-consistent and should be
+    // reflected, so only the completion *claims* are withheld.
+    expect(adm.refreshCriticalStats).toHaveBeenCalled();
+    expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
+  });
+
+  it('a clean run reports complete:true', async () => {
+    const postsTable = makePostsTable([]);
+    const db = makeSyncDb(postsTable);
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 0}}),
+        };
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+    expect(outcome).toEqual({complete: true, started: true});
+  });
+
+  it('prunes rows the remote no longer returns after a clean run', async () => {
+    // M-3 guard. Sync searches carry no `status:any`, so a post deleted on
+    // Danbooru since the last run simply never appears in the re-fetched
+    // window. Its local row used to survive with is_deleted:false while the
+    // surviving posts were renumbered, so its stale `no` collided with a live
+    // post's — milestones by [uploader_id+no] became ambiguous and the local
+    // count drifted above the remote one.
+    const ghost = {id: 900, uploader_id: 42, no: 7, created_at: '2025-01-02'};
+    const live = {id: 901, uploader_id: 42, no: 8, created_at: '2025-01-03'};
+    const postsTable = makePostsTable([ghost, live]);
+    const db = makeSyncDb(postsTable);
+
+    let postsCallCount = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 1}}),
+        };
+      }
+      postsCallCount++;
+      // Only the live post comes back; the ghost is gone remotely.
+      if (postsCallCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: 901,
+              uploader_id: 42,
+              created_at: '2025-01-03T00:00:00Z',
+              up_score: 1,
+              down_score: 0,
+              rating: 'g',
+            },
+          ],
+        };
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(outcome.complete).toBe(true);
+    expect(postsTable.bulkDelete).toHaveBeenCalledWith([900]);
+  });
+
+  it('does not prune when the run was incomplete', async () => {
+    // A failed run has not seen every page, so a row missing from the seen set
+    // may just be one we never asked for. Pruning on that evidence would
+    // delete live data — the whole reason the reconcile runs after the fetch
+    // rather than as a delete-then-refetch before it.
+    const ghost = {id: 900, uploader_id: 42, no: 7, created_at: '2025-01-02'};
+    const postsTable = makePostsTable([ghost]);
+    const db = makeSyncDb(postsTable);
+
+    let postsCallCount = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 2}}),
+        };
+      }
+      postsCallCount++;
+      if (postsCallCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: 901,
+              uploader_id: 42,
+              created_at: '2025-01-03T00:00:00Z',
+              up_score: 1,
+              down_score: 0,
+              rating: 'g',
+            },
+          ],
+        };
+      }
+      // A later page dies (400 is not a 5xx → no retry backoff).
+      return {ok: false, status: 400, json: async () => []};
+    });
+
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(outcome.complete).toBe(false);
+    expect(postsTable.bulkDelete).not.toHaveBeenCalled();
   });
 
   it('partial sync: di_post_metadata_v2 NOT set when startId > 0', async () => {
@@ -729,7 +1130,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     });
 
     const adm = new AnalyticsDataManager(db as never, rl as never);
-    vi.spyOn(adm, 'refreshAllStats').mockResolvedValue();
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
     vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
 
     const progress = vi.fn();
@@ -742,8 +1143,8 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     );
     expect(metaKeySet).toBe(false);
 
-    // refreshAllStats called with isFullSync=false
-    expect(adm.refreshAllStats).toHaveBeenCalledWith(
+    // refreshCriticalStats called with isFullSync=false
+    expect(adm.refreshCriticalStats).toHaveBeenCalledWith(
       expect.objectContaining({id: '42'}),
       false,
     );
@@ -1392,7 +1793,7 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
   });
 });
 
-describe('AnalyticsDataManager.refreshAllStats', () => {
+describe('AnalyticsDataManager.refreshCriticalStats', () => {
   beforeEach(() => {
     vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
   });
@@ -1401,32 +1802,42 @@ describe('AnalyticsDataManager.refreshAllStats', () => {
     vi.unstubAllGlobals();
   });
 
-  // Every getter refreshAllStats fans out to. Stubbed so the method's own
-  // orchestration is what's under test, not the getters' internals.
-  const REFRESH_GETTERS = [
+  // The critical (cheap, must-be-fresh-on-first-paint) getters
+  // refreshCriticalStats fans out to.
+  const CRITICAL_GETTERS = [
     'getStatusDistribution',
     'getRatingDistribution',
+    'getLevelChangeHistory',
+    'getMilestones',
+    'getTopPostsByType',
+    'getRecentPopularPosts',
+  ] as const;
+
+  // Heavy tag-distribution / tag-cloud getters that were REMOVED from the
+  // blocking sync path — they now freshen post-paint via fetchDashboardData's
+  // SWR revalidate. getRandomPosts was dropped entirely (result never read).
+  // The whole latency win (audit H-2 / R2 / L-1) depends on these NOT firing
+  // inside refreshCriticalStats.
+  const DEFERRED_GETTERS = [
     'getCharacterDistribution',
     'getCopyrightDistribution',
     'getFavCopyrightDistribution',
     'getBreastsDistribution',
     'getHairLengthDistribution',
     'getHairColorDistribution',
-    'getRandomPosts',
-    'getLevelChangeHistory',
-    'getMilestones',
     'getTagCloudData',
-    'getTopPostsByType',
-    'getRecentPopularPosts',
+    'getRandomPosts',
   ] as const;
 
+  // Stubbed so the method's own orchestration is what's under test, not the
+  // getters' internals. Both groups are spied so no real fetch escapes.
   function spyAllGetters(adm: AnalyticsDataManager) {
     const target = adm as unknown as Record<
       string,
       (...args: unknown[]) => Promise<unknown>
     >;
     const spies: Record<string, ReturnType<typeof vi.spyOn>> = {};
-    for (const m of REFRESH_GETTERS) {
+    for (const m of [...CRITICAL_GETTERS, ...DEFERRED_GETTERS]) {
       spies[m] = vi.spyOn(target, m).mockResolvedValue(undefined);
     }
     return spies;
@@ -1439,7 +1850,7 @@ describe('AnalyticsDataManager.refreshAllStats', () => {
     );
     const spies = spyAllGetters(adm);
 
-    await adm.refreshAllStats(makeSyncUser(), false);
+    await adm.refreshCriticalStats(makeSyncUser(), false);
 
     // The whole point of v9.7.2: these fire with forceRefresh=true even when
     // it is NOT a full sync (they used to be gated behind isFullSync).
@@ -1460,9 +1871,300 @@ describe('AnalyticsDataManager.refreshAllStats', () => {
     );
     const spies = spyAllGetters(adm);
 
-    await adm.refreshAllStats(makeSyncUser(), true);
+    await adm.refreshCriticalStats(makeSyncUser(), true);
 
     expect(spies.getTopPostsByType).toHaveBeenCalled();
     expect(spies.getRecentPopularPosts).toHaveBeenCalled();
+  });
+
+  it('refreshes the full critical set (counts, level, milestones×2, popular)', async () => {
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      makeSyncRateLimiter() as never,
+    );
+    const spies = spyAllGetters(adm);
+
+    await adm.refreshCriticalStats(makeSyncUser(), true);
+
+    for (const g of CRITICAL_GETTERS) {
+      expect(
+        spies[g],
+        `${g} should fire in critical refresh`,
+      ).toHaveBeenCalled();
+    }
+  });
+
+  it('does NOT refresh heavy tag distributions / random (deferred to SWR — R2/L-1)', async () => {
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      makeSyncRateLimiter() as never,
+    );
+    const spies = spyAllGetters(adm);
+
+    await adm.refreshCriticalStats(makeSyncUser(), true);
+
+    for (const g of DEFERRED_GETTERS) {
+      expect(
+        spies[g],
+        `${g} must NOT fire on the blocking sync path`,
+      ).not.toHaveBeenCalled();
+    }
+  });
+});
+
+// ============================================================
+// AnalyticsDataManager.quickSyncAllPosts (<=1200-post path)
+// ============================================================
+//
+// The worker-pool sync has broad coverage above; this path had none, even
+// though it owns an invariant the *other* path depends on: it wipes the
+// user's rows before re-fetching, which is precisely why pruneGhostPosts
+// exempts it (a Quick-Synced user can never accumulate ghosts). An
+// untested invariant that another module reasons about is the dangerous
+// kind, so it is pinned here.
+
+describe('AnalyticsDataManager.quickSyncAllPosts', () => {
+  /** Danbooru's cursor page size for this path. */
+  const PAGE_LIMIT = 200;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    AnalyticsDataManager.onProgressCallback = null;
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.mocked(quotaManager.requestPersistence).mockClear();
+  });
+
+  afterEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** A post row as the API returns it, ascending ids from `startId`. */
+  function makeApiPosts(count: number, startId = 1000) {
+    return Array.from({length: count}, (_, i) => ({
+      id: startId + i,
+      uploader_id: 42,
+      created_at: '2025-01-01T00:00:00Z',
+      up_score: 5,
+      down_score: -1,
+      rating: 's',
+      tag_count_general: 10,
+    }));
+  }
+
+  type ApiPost = ReturnType<typeof makeApiPosts>[number];
+
+  /**
+   * Rate limiter that answers the count query with `total` and then serves
+   * `pages` in cursor order. Records every /posts.json cursor it was asked
+   * for so the pagination walk can be asserted.
+   */
+  function makeQuickLimiter(total: number, pages: ApiPost[][]) {
+    const cursors: string[] = [];
+    let pageIndex = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: total}}),
+        };
+      }
+      cursors.push(new URLSearchParams(url.split('?')[1]).get('page') ?? '');
+      const batch = pages[pageIndex++] ?? [];
+      return {ok: true, status: 200, json: async () => batch};
+    });
+    return {rl, cursors};
+  }
+
+  /** Silence the post-sync work that has its own coverage. */
+  function quietTail(adm: AnalyticsDataManager) {
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+  }
+
+  it('wipes the user rows before re-fetching — the reason ghosts cannot accrue', async () => {
+    // pruneGhostPosts (syncAllPosts) skips this path on the strength of this
+    // delete. If it ever stopped happening, Quick Sync would start
+    // accumulating remotely-deleted posts with nothing to reconcile them.
+    const postsTable = makePostsTable([]);
+    const {rl} = makeQuickLimiter(3, [makeApiPosts(3)]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(postsTable) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    expect(postsTable.where).toHaveBeenCalledWith('uploader_id');
+    expect(postsTable._chain.equals).toHaveBeenCalledWith(42);
+    expect(postsTable._chain.delete).toHaveBeenCalled();
+
+    // Ordering matters as much as the call: a delete that landed *after* the
+    // fetch would throw the freshly written rows away.
+    // `/counts/posts.json?` contains `/posts.json?` as a substring, so the
+    // count query has to be excluded explicitly — it legitimately precedes
+    // the wipe and would make this assertion pass for the wrong reason.
+    const firstPostsFetch = rl.fetch.mock.calls.findIndex(
+      (c: unknown[]) =>
+        String(c[0]).includes('/posts.json?') &&
+        !String(c[0]).includes('/counts/'),
+    );
+    expect(firstPostsFetch).toBeGreaterThanOrEqual(0);
+    const deleteMock = postsTable._chain.delete as ReturnType<typeof vi.fn>;
+    expect(deleteMock.mock.invocationCallOrder[0]).toBeLessThan(
+      rl.fetch.mock.invocationCallOrder[firstPostsFetch],
+    );
+  });
+
+  it('walks the cursor from a0 and stops on a short page', async () => {
+    const full = makeApiPosts(PAGE_LIMIT, 1000);
+    const tail = makeApiPosts(5, 2000);
+    const {rl, cursors} = makeQuickLimiter(PAGE_LIMIT + 5, [full, tail]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    // Second cursor is keyed to the last id of the first page; a short page
+    // ends the walk without an extra empty round-trip.
+    expect(cursors).toEqual(['a0', `a${1000 + PAGE_LIMIT - 1}`]);
+  });
+
+  it('numbers posts sequentially across pages, oldest first', async () => {
+    const full = makeApiPosts(PAGE_LIMIT, 1000);
+    const tail = makeApiPosts(3, 5000);
+    const {rl} = makeQuickLimiter(PAGE_LIMIT + 3, [full, tail]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    const written = vi
+      .mocked(quotaManager.bulkPutSafe)
+      .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
+    expect(written).toHaveLength(PAGE_LIMIT + 3);
+    // `no` is the user's own upload ordinal — it must run 1..N unbroken
+    // across the page boundary, since milestones look up [uploader_id+no].
+    expect(written.map(r => r.no)).toEqual(
+      Array.from({length: PAGE_LIMIT + 3}, (_, i) => i + 1),
+    );
+    expect(written[0].id).toBe(1000);
+    expect(written[written.length - 1].id).toBe(5002);
+  });
+
+  it('reverses a descending batch so no follows upload order', async () => {
+    // Danbooru can answer newest-first; numbering that as-is would make post
+    // #1 the newest upload and invert every milestone.
+    const descending = makeApiPosts(3, 1000).reverse();
+    const {rl} = makeQuickLimiter(3, [descending]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    const written = vi.mocked(quotaManager.bulkPutSafe).mock
+      .calls[0][1] as Array<{id: number; no: number}>;
+    expect(written.map(r => [r.id, r.no])).toEqual([
+      [1000, 1],
+      [1001, 2],
+      [1002, 3],
+    ]);
+  });
+
+  it('stamps completion only after the walk finishes', async () => {
+    const {rl} = makeQuickLimiter(2, [makeApiPosts(2)]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    const ls = vi.mocked(localStorage.setItem);
+    const keys = ls.mock.calls.map((c: string[]) => c[0]);
+    expect(keys).toContain('danbooru_grass_last_sync_42');
+    // quickSync writes every metadata field straight from the API, so the
+    // backfill is complete by definition.
+    expect(keys).toContain('di_post_metadata_v2_42');
+    expect(quotaManager.requestPersistence).toHaveBeenCalled();
+  });
+
+  it('does not touch the DB when the user is unidentifiable', async () => {
+    const postsTable = makePostsTable([]);
+    const rl = makeSyncRateLimiter();
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(postsTable) as never,
+      rl as never,
+    );
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: undefined}));
+    await adm.quickSyncAllPosts(makeSyncUser({name: ''}));
+
+    expect(postsTable._chain.delete).not.toHaveBeenCalled();
+    expect(rl.fetch).not.toHaveBeenCalled();
+  });
+
+  it('a lock-blocked run deletes nothing', async () => {
+    // The early return sits above the wipe. If it ever moved below it, a
+    // second tab's click would clear the rows the running sync is writing.
+    AnalyticsDataManager.isGlobalSyncing = true;
+    const postsTable = makePostsTable([]);
+    const rl = makeSyncRateLimiter();
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(postsTable) as never,
+      rl as never,
+    );
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    expect(postsTable._chain.delete).not.toHaveBeenCalled();
+    expect(rl.fetch).not.toHaveBeenCalled();
+    // The lock belongs to the run that took it — this one must not clear it.
+    expect(AnalyticsDataManager.isGlobalSyncing).toBe(true);
+  });
+
+  it('releases the lock when a page fetch throws', async () => {
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 5}}),
+        };
+      }
+      throw new Error('network down');
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await expect(
+      adm.quickSyncAllPosts(makeSyncUser({id: '42'})),
+    ).rejects.toThrow('network down');
+
+    // Otherwise every later sync in this tab is refused by a lock nobody holds.
+    expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
+    expect(AnalyticsDataManager.onProgressCallback).toBeNull();
   });
 });

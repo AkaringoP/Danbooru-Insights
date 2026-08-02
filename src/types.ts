@@ -176,6 +176,20 @@ export interface MonthStats {
   momIsNew: boolean;
   /** total === 0 → popover collapses to a "no activity" line. */
   empty: boolean;
+  /**
+   * Per-day counts for the popover's sparkline, index 0 = the 1st. Sized to
+   * the days that have actually happened: a full month for a past one, only
+   * the elapsed days for the in-progress one (so the chart doesn't end in a
+   * run of fake zeroes), and empty for a future month.
+   */
+  series: number[];
+  /**
+   * Per-month totals for the whole year, index 0 = January — the context the
+   * daily `series` lacks (where this month sits among its siblings). Sized
+   * like `series`: all twelve for a finished year, only the elapsed months
+   * for the current one.
+   */
+  yearSeries: number[];
 }
 
 /** Danbooru post media variant (modern API). */
@@ -749,6 +763,25 @@ export interface TagImplicationCacheRecord {
    * the field; absence is treated as a mismatch and forces a re-fetch.
    */
   schemaVersion?: number;
+}
+
+/**
+ * Result of a post sync. A worker that exhausts its retries stops quietly and
+ * leaves the DB prefix-consistent, so the run resolves normally even though it
+ * did not cover every page — this carries that distinction out to the caller,
+ * which decides whether to report success or warn (audit M-2).
+ */
+export interface SyncOutcome {
+  /** True only when every page was fetched and committed. */
+  complete: boolean;
+  /**
+   * False when the run never began — no user id, or another sync already
+   * holds the global lock. Nothing was fetched and nothing changed, which is
+   * a different thing from "fetched part of it": there is no partial data to
+   * warn about and no reason to force a post-paint revalidate. Callers must
+   * check this before treating `complete: false` as an incomplete *fetch*.
+   */
+  started: boolean;
 }
 
 /** Complete tag analytics metadata. */
