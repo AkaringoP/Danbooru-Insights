@@ -4,89 +4,59 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
-## v9.9.2 — The "Updating…" badge finally appears
+## v9.9.0 — Faster dashboard, month popover charts, and a hardening pass
 
-### Fixed
-- **The pie chart's "Updating…" badge never showed.** It was looked up before
-  the widget had drawn it, so the reference was empty for the widget's whole
-  life and every attempt to show it did nothing. The badge has therefore been
-  invisible since it was added in v9.8.5 — when a tab's counts refresh in the
-  background you will now actually see it, instead of a stale number with no
-  indication that a fresher one is on the way. Found while writing tests for
-  the event that drives it.
-
-### Internal
-- Test coverage for four areas that had none: the Quick Sync path used by
-  accounts under 1200 uploads (including the wipe-before-refetch step that the
-  larger sync's bookkeeping depends on), the events the pie chart and the
-  dashboard use to talk to each other, the date-range read behind January's
-  month-over-month, and the month popover's touch behaviour. Every theme's
-  colour ramp is now checked rather than two of the twelve.
-- Dropped an unused configuration constant that a test was still pinning.
-
----
-
-## v9.9.1 — Month popover: fix a January lookup landing after you moved on
-
-### Fixed
-- **Hovering January and moving on could rewrite the wrong month's popover.**
-  When last December's total had to be fetched (the first time, before it is
-  remembered), the answer could arrive after the pointer had already moved to
-  another month. The popover then swapped that month's numbers for January's
-  and jumped back under January's label. The lookup is now tied to the popover
-  it was started for and is dropped if a different month has taken over.
-- **The same late answer could leave the popover stuck on screen.** If the
-  pointer left the graph entirely while the lookup was in flight, the reply
-  cancelled the dismissal that was already under way, and the popover stayed
-  open until another month was hovered and left. A dismissal in progress is
-  now left alone.
-- **"Sync incomplete" could appear when no sync had run.** A sync blocked
-  because another tab already had one running reported the same way as one
-  that fetched only part of its pages, so the warning claimed posts could not
-  be fetched when nothing had been attempted. The two are now distinguished,
-  and a blocked run no longer triggers a background refresh either.
-- **Two users could share one cached post-count.** The short-lived count
-  memo keyed on the user id, and treated an empty id as a real one — so
-  callers that pass a name without an id (the grass graph's legacy path) all
-  landed on the same entry. It now falls back to the name.
-
----
-
-## v9.9.0 — Month popover: daily sparkline, and January finally gets a delta
+### Performance
+- **The report opens much faster after a sync.** The nine heavy tag
+  distributions (character / copyright / hair colour / …) used to be
+  force-refreshed on the blocking path before the dashboard could paint —
+  hundreds of per-tag count queries the user had to sit through. They now
+  paint from the previous sync's cache immediately and freshen in the
+  background, lazily: only the pie tab on screen revalidates when the
+  dashboard opens, and each of the other eight the first time it is switched
+  to. On a large (~46k post) account the open dropped from roughly 30s to
+  about 5s. Freshness is unchanged where it matters — post counts, sync
+  stats, milestones and the rating/status splits are still refreshed before
+  the dashboard paints.
+- **Background refreshes land on the open dashboard.** While a tab's counts
+  are being refreshed, a small "⟳ Updating…" pill sits in the pie header so a
+  briefly-stale number reads as pending rather than final; when the fresh
+  values arrive they are patched into the visible pie in place — proportions,
+  counts and thumbnails — with no need to close and reopen the report.
+- **Fewer repeated API calls.** One report click used to ask the server for
+  the same total post count up to six times (each a separate ~half-second
+  query); it is now fetched once per interaction. Refreshing a tag
+  distribution also re-derived every thumbnail from scratch — around 30-50
+  requests a sync — and now reuses the ones whose tag has not changed.
+- **All dashboard traffic goes through the shared rate limiter.** Four code
+  paths (the header status refresh, the random-post button, the milestone
+  widget and the monthly chart) built private token buckets that ignored the
+  multi-tab request split and kept firing while the shared limiter was
+  backing off from a 429. They now reuse the app's manager, and an
+  architecture test fails the build if a manager is ever constructed without
+  the shared limiter under `src/apps/`.
 
 ### Added
 - **A daily sparkline in the month popover.** Hovering a month label now
   shows the shape of that month beside its total — one bar per day, with the
   busiest day tinted darker so it matches the day named just below. Bars are
-  scaled to the month's own peak, so the chart answers "when was I active"
-  while the numbers underneath carry "how much". It follows the grass theme
-  like the rest of the popover, and the in-progress month stops at today
-  instead of trailing a run of empty days that haven't happened yet.
+  scaled to the month's own peak, follow the active grass palette, and the
+  in-progress month stops at today instead of trailing days that have not
+  happened yet.
 - **A year-trend line above it.** A second chart traces every month of the
-  year, so the month you're hovering has context: where the year rose and
-  fell, with a ring marking where you are. The ring takes the same green or
-  red as the percentage next to it — up from last month is green, down is
-  red — so the chart and the sentence always agree. Drawn as a line rather
-  than bars because it is read for direction, which also keeps it from being
-  confused with the daily strip below. Like that strip, the current year
-  stops at the month in progress.
+  year, so the hovered month has context: where the year rose and fell, with
+  a solid dot marking where you are. The dot takes the same green or red as
+  the percentage next to it — up from last month is green, down is red — so
+  the chart and the sentence always agree.
 - **January now shows a month-over-month change.** It was the one month
-  without one: its previous month lives in the year before, which the
-  heatmap doesn't load. Hovering January now looks up just last December's
-  total — from the local data if that year has already been synced, from a
-  remembered value if it was looked up before, and only otherwise from the
-  server (a single query for uploads). The popover opens immediately and the
-  delta appears as soon as it resolves; if it can't be established, the
-  popover reads exactly as it does today.
-
-### Fixed
-- **January's delta label read "vs " with no month.** The previous-month name
-  was looked up one index below January, which is nothing at all. It now
-  wraps around to December.
-
----
-
-## v9.8.7 — Audit follow-ups: escaping, sync honesty, deleted-post reconcile
+  without one: its previous month lives in the year before, which the heatmap
+  does not load. Hovering January now looks up just last December's total —
+  from local data if that year is already synced, from a remembered value if
+  it was resolved before, and only otherwise from the server (a single query
+  for uploads). The popover opens immediately and the delta is patched in
+  when it resolves — and only while January is still the month on screen, so
+  a slow lookup can neither rewrite another month's popover nor hold open one
+  that is already dismissing.
 
 ### Fixed
 - **Tags with angle brackets no longer break the page.** Danbooru has real
@@ -100,7 +70,9 @@ All notable changes to Danbooru Insights are documented here.
   complete and showed a green "Synced" — so the report was built on partial
   data with no indication anything was missing, and because it looked
   complete, it was never resumed. Such a run now withholds the completion
-  stamp and warns that it will resume the next time you open the report.
+  stamp and warns that it will resume the next time you open the report. A
+  run that never started at all (another tab already syncing) stays quiet
+  instead of claiming posts could not be fetched.
 - **Posts deleted on Danbooru are cleared from the local copy.** Sync
   searches exclude deleted posts, so a post deleted since the last sync
   simply stopped appearing — and its stale local row lingered, taking a
@@ -116,73 +88,17 @@ All notable changes to Danbooru Insights are documented here.
   `NaN` — which compared false against everything and re-triggered a sync on
   every single click.
 
-### Changed
-- **Fewer repeated API calls.** One report click asked the server for the same
-  total post count up to six times (each a separate ~half-second query); it is
-  now fetched once per interaction. Refreshing a tag distribution also re-derived
-  every thumbnail from scratch — around 30-50 requests a sync — and now reuses
-  the ones whose tag has not changed.
-
----
-
-## v9.8.6 — All dashboard traffic goes through the shared rate limiter
-
-### Fixed
-- **Four dashboard code paths bypassed rate limiting.** `DataManager` builds
-  its own private token bucket when no limiter is handed to it, and the header
-  status refresh, the random-post refresh button, the milestone widget and the
-  monthly activity chart each constructed a manager without one. Requests from
-  those paths ignored the multi-tab request split and kept firing while the
-  shared limiter was backing off from a 429 — most visibly right after a
-  dashboard render, when the header refresh overlapped the main data fetch.
-  They now reuse the app's manager, so every dashboard request is accounted
-  for in one place.
-
-  An architecture test now fails the build if a manager is constructed without
-  a limiter anywhere under `src/apps/`.
-
----
-
-## v9.8.5 — Faster dashboard open after a partial sync
-
-### Changed
-- **The report opens much faster after a sync.** The nine heavy tag
-  distributions (character / copyright / hair colour / …) used to be
-  force-refreshed on the blocking path before the dashboard could paint —
-  hundreds of per-tag count queries the user had to wait through. They now
-  paint from cache immediately and freshen in the background. On a large
-  (~46k post) account the open dropped from roughly 30s to about 5s.
-
-  Data freshness is unchanged where it matters: post counts, sync stats,
-  milestones, rating/status splits and the other critical stats are still
-  refreshed before the dashboard paints, so nothing headline is stale.
-- **Background revalidation is lazy, per tab.** Only the pie tab you are
-  actually looking at revalidates when the dashboard opens; the other eight
-  revalidate the first time you switch to them, once each. Previously all
-  nine fired at once — around 250 API calls on a large account — to converge
-  tabs that may never be opened.
-
-### Added
-- **"⟳ Updating…" badge on the pie chart.** While a tab's per-tag counts are
-  being refreshed in the background, a small pill appears in the pie header so
-  a briefly-stale cached count reads as pending rather than final. It clears
-  as soon as the fresh values land.
-
-### Fixed
-- **Background refreshes now land on the open dashboard.** A completed
-  revalidate live-patches the pie's proportions, counts and thumbnails in
-  place; previously the fresh values only showed up after closing and
-  re-opening the report.
-- **Per-tag counts converge after a sync.** A sync now forces the deferred
-  distributions to revalidate regardless of the count-cache TTL, so a tag's
-  count no longer lags a sync by up to the full TTL window.
-- **The visible tab no longer converges last.** The tab on screen is
-  revalidated first instead of queuing behind the other eight on the shared
-  rate limiter, where it could take ~40s on a large account.
-- **The default tab no longer appears frozen.** A live-patch arriving while a
-  slice's sub-tag breakdown was being hovered used to be dropped, leaving the
-  tab stale until a full tab switch; the fresh data is now re-rendered when
-  the sub-chart is dismissed.
+### Internal
+- The unit suite grew from 782 to 893 tests: new coverage for the Quick Sync
+  path (including the wipe-before-refetch step the larger sync's bookkeeping
+  depends on), the events the pie widget and the dashboard use to talk to
+  each other, the date-range read behind January's month-over-month, the
+  month popover's touch behaviour, and every theme's colour ramps rather
+  than two of the twelve. Writing the event-contract tests is what surfaced
+  the "Updating…" badge wiring bug fixed above them.
+- Playwright e2e (7 visual baselines) is now an explicit pre-merge gate
+  instead of an unwritten habit, and a config constant nothing read was
+  removed along with the test that pinned it.
 
 ---
 
