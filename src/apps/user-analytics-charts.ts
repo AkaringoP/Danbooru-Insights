@@ -2154,7 +2154,7 @@ export function renderPieWidget(
   // Render initial HTML structure
   container.innerHTML = `
      <div style="width:100%; display:flex; flex-direction:column;">
-         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; width:100%;">
+         <div style="position:relative; display:flex; align-items:center; margin-bottom:10px; width:100%;">
              <div style="display:flex; flex-direction:column; gap:4px; max-width:100%;">
                  <div style="display:flex; flex-wrap:wrap; gap:4px;">
                      <button class="di-pie-tab" data-mode="copyright" title="Copyright">Copy</button>

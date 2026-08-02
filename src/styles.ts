@@ -279,9 +279,21 @@ const GLOBAL_CSS = `
     .di-pie-tab:not(.active):hover { background: var(--di-btn-hover-bg, #dddddd); }
     /* "Refreshing counts" pill on the pie header — signals the current tab's
        per-tag counts are being revalidated in the background so a briefly
-       stale cached value isn't mistaken for final. Toggled via .is-active. */
+       stale cached value isn't mistaken for final. Toggled via .is-active.
+
+       Overlaid (absolute, right-centred in the tab header) rather than laid
+       out: as a flex sibling its appearance narrowed the tab column, so every
+       toggle re-wrapped the tab rows and the whole header jumped. Out of the
+       flow, the tabs keep one arrangement whether it is showing or not. The
+       trade-off is that on narrow widths it can sit over a tab's right edge —
+       it is opaque enough to stay readable, transient, and pointer-events:none
+       so the tab underneath still takes the click. */
     .di-pie-updating-badge {
         display: none;
+        position: absolute;
+        right: 0;
+        top: 50%;
+        transform: translateY(-50%);
         align-items: center;
         gap: 5px;
         font-size: 10px;
@@ -290,7 +302,7 @@ const GLOBAL_CSS = `
         border-radius: 10px;
         padding: 2px 8px;
         white-space: nowrap;
-        flex-shrink: 0;
+        pointer-events: none;
     }
     .di-pie-updating-badge.is-active { display: inline-flex; }
     .di-pie-updating-badge .di-pie-updating-spin {
