@@ -31,7 +31,9 @@ const MIN_BAR_H = 1.5;
  */
 const TREND_PAD = 4;
 const TREND_DOT_R = 1.2;
-const TREND_NOW_R = 3;
+/** The solid you-are-here dot. Its predecessor was a hollow ring — r=3 with a
+ *  2px stroke, so an 8px visual diameter; solid and ~10% smaller lands at 7.2. */
+const TREND_NOW_R = 3.6;
 /** Linger before the popover starts fading (cursor may return to it). */
 const HIDE_GRACE_MS = 400;
 /** Fade-out duration — must match the CSS opacity transition. */
@@ -89,10 +91,10 @@ function trendCurrentClass(stats: MonthStats): string {
  * rose and fell — while the strip below it measures one month's days. The
  * different shape also keeps the two from being mistaken for each other.
  *
- * Only the hovered month is emphasised, with a hollow ring — tinting all
- * twelve by their own deltas would put six reds and six greens on a 96px
- * strip and say nothing. The ring's colour is the same one the percentage
- * text carries.
+ * Only the hovered month is emphasised, with a solid dot a step larger than
+ * the vertices — tinting all twelve by their own deltas would put six reds
+ * and six greens on a 96px strip and say nothing. The dot's colour is the
+ * same one the percentage text carries.
  *
  * Returns '' when the year has no activity at all, so the header keeps its
  * original single-line layout.
@@ -125,7 +127,7 @@ export function yearTrendSvg(stats: MonthStats): string {
         ).toFixed(1)}" r="${TREND_DOT_R}"></circle>`,
     )
     .join('');
-  // Hollow ring last so it sits above the line it marks.
+  // Marker last so it sits above the line it marks.
   const now =
     stats.month < yearSeries.length
       ? `<circle class="di-gmp-trend-now ${trendCurrentClass(

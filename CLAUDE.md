@@ -73,7 +73,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run dev` — Vite dev 서버 (HMR)
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 759 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 893 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 포함)
 
