@@ -2055,14 +2055,14 @@ export function renderPieWidget(
   // settles (changed or not), so a briefly-stale cached count isn't mistaken
   // for the final value. Only the visible tab's state drives the badge.
   const refreshingTabs = new Set<string>();
-  const updatingBadge = container.querySelector(
-    '.di-pie-updating-badge',
-  ) as HTMLElement | null;
   const updatePieUpdatingBadge = () => {
-    updatingBadge?.classList.toggle(
-      'is-active',
-      refreshingTabs.has(currentPieTab),
-    );
+    // Resolved per call, not captured once: this runs *above* the
+    // `container.innerHTML` that creates the badge, so a hoisted reference
+    // would be null for the widget's whole life — and the optional chain
+    // would swallow it, so the badge simply never appeared. Re-querying also
+    // survives any later rebuild of the container's markup.
+    const badge = container.querySelector('.di-pie-updating-badge');
+    badge?.classList.toggle('is-active', refreshingTabs.has(currentPieTab));
   };
   const onPieTabRefreshing = (e: Event) => {
     if (!document.body.contains(container)) {

@@ -4,6 +4,28 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.9.2 — The "Updating…" badge finally appears
+
+### Fixed
+- **The pie chart's "Updating…" badge never showed.** It was looked up before
+  the widget had drawn it, so the reference was empty for the widget's whole
+  life and every attempt to show it did nothing. The badge has therefore been
+  invisible since it was added in v9.8.5 — when a tab's counts refresh in the
+  background you will now actually see it, instead of a stale number with no
+  indication that a fresher one is on the way. Found while writing tests for
+  the event that drives it.
+
+### Internal
+- Test coverage for four areas that had none: the Quick Sync path used by
+  accounts under 1200 uploads (including the wipe-before-refetch step that the
+  larger sync's bookkeeping depends on), the events the pie chart and the
+  dashboard use to talk to each other, the date-range read behind January's
+  month-over-month, and the month popover's touch behaviour. Every theme's
+  colour ramp is now checked rather than two of the twelve.
+- Dropped an unused configuration constant that a test was still pinning.
+
+---
+
 ## v9.9.1 — Month popover: fix a January lookup landing after you moved on
 
 ### Fixed

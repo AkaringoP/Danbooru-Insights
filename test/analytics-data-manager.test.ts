@@ -1911,3 +1911,260 @@ describe('AnalyticsDataManager.refreshCriticalStats', () => {
     }
   });
 });
+
+// ============================================================
+// AnalyticsDataManager.quickSyncAllPosts (<=1200-post path)
+// ============================================================
+//
+// The worker-pool sync has broad coverage above; this path had none, even
+// though it owns an invariant the *other* path depends on: it wipes the
+// user's rows before re-fetching, which is precisely why pruneGhostPosts
+// exempts it (a Quick-Synced user can never accumulate ghosts). An
+// untested invariant that another module reasons about is the dangerous
+// kind, so it is pinned here.
+
+describe('AnalyticsDataManager.quickSyncAllPosts', () => {
+  /** Danbooru's cursor page size for this path. */
+  const PAGE_LIMIT = 200;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    AnalyticsDataManager.onProgressCallback = null;
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.mocked(quotaManager.requestPersistence).mockClear();
+  });
+
+  afterEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** A post row as the API returns it, ascending ids from `startId`. */
+  function makeApiPosts(count: number, startId = 1000) {
+    return Array.from({length: count}, (_, i) => ({
+      id: startId + i,
+      uploader_id: 42,
+      created_at: '2025-01-01T00:00:00Z',
+      up_score: 5,
+      down_score: -1,
+      rating: 's',
+      tag_count_general: 10,
+    }));
+  }
+
+  type ApiPost = ReturnType<typeof makeApiPosts>[number];
+
+  /**
+   * Rate limiter that answers the count query with `total` and then serves
+   * `pages` in cursor order. Records every /posts.json cursor it was asked
+   * for so the pagination walk can be asserted.
+   */
+  function makeQuickLimiter(total: number, pages: ApiPost[][]) {
+    const cursors: string[] = [];
+    let pageIndex = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: total}}),
+        };
+      }
+      cursors.push(new URLSearchParams(url.split('?')[1]).get('page') ?? '');
+      const batch = pages[pageIndex++] ?? [];
+      return {ok: true, status: 200, json: async () => batch};
+    });
+    return {rl, cursors};
+  }
+
+  /** Silence the post-sync work that has its own coverage. */
+  function quietTail(adm: AnalyticsDataManager) {
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+  }
+
+  it('wipes the user rows before re-fetching — the reason ghosts cannot accrue', async () => {
+    // pruneGhostPosts (syncAllPosts) skips this path on the strength of this
+    // delete. If it ever stopped happening, Quick Sync would start
+    // accumulating remotely-deleted posts with nothing to reconcile them.
+    const postsTable = makePostsTable([]);
+    const {rl} = makeQuickLimiter(3, [makeApiPosts(3)]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(postsTable) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    expect(postsTable.where).toHaveBeenCalledWith('uploader_id');
+    expect(postsTable._chain.equals).toHaveBeenCalledWith(42);
+    expect(postsTable._chain.delete).toHaveBeenCalled();
+
+    // Ordering matters as much as the call: a delete that landed *after* the
+    // fetch would throw the freshly written rows away.
+    // `/counts/posts.json?` contains `/posts.json?` as a substring, so the
+    // count query has to be excluded explicitly — it legitimately precedes
+    // the wipe and would make this assertion pass for the wrong reason.
+    const firstPostsFetch = rl.fetch.mock.calls.findIndex(
+      (c: unknown[]) =>
+        String(c[0]).includes('/posts.json?') &&
+        !String(c[0]).includes('/counts/'),
+    );
+    expect(firstPostsFetch).toBeGreaterThanOrEqual(0);
+    const deleteMock = postsTable._chain.delete as ReturnType<typeof vi.fn>;
+    expect(deleteMock.mock.invocationCallOrder[0]).toBeLessThan(
+      rl.fetch.mock.invocationCallOrder[firstPostsFetch],
+    );
+  });
+
+  it('walks the cursor from a0 and stops on a short page', async () => {
+    const full = makeApiPosts(PAGE_LIMIT, 1000);
+    const tail = makeApiPosts(5, 2000);
+    const {rl, cursors} = makeQuickLimiter(PAGE_LIMIT + 5, [full, tail]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    // Second cursor is keyed to the last id of the first page; a short page
+    // ends the walk without an extra empty round-trip.
+    expect(cursors).toEqual(['a0', `a${1000 + PAGE_LIMIT - 1}`]);
+  });
+
+  it('numbers posts sequentially across pages, oldest first', async () => {
+    const full = makeApiPosts(PAGE_LIMIT, 1000);
+    const tail = makeApiPosts(3, 5000);
+    const {rl} = makeQuickLimiter(PAGE_LIMIT + 3, [full, tail]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    const written = vi
+      .mocked(quotaManager.bulkPutSafe)
+      .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
+    expect(written).toHaveLength(PAGE_LIMIT + 3);
+    // `no` is the user's own upload ordinal — it must run 1..N unbroken
+    // across the page boundary, since milestones look up [uploader_id+no].
+    expect(written.map(r => r.no)).toEqual(
+      Array.from({length: PAGE_LIMIT + 3}, (_, i) => i + 1),
+    );
+    expect(written[0].id).toBe(1000);
+    expect(written[written.length - 1].id).toBe(5002);
+  });
+
+  it('reverses a descending batch so no follows upload order', async () => {
+    // Danbooru can answer newest-first; numbering that as-is would make post
+    // #1 the newest upload and invert every milestone.
+    const descending = makeApiPosts(3, 1000).reverse();
+    const {rl} = makeQuickLimiter(3, [descending]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    const written = vi.mocked(quotaManager.bulkPutSafe).mock
+      .calls[0][1] as Array<{id: number; no: number}>;
+    expect(written.map(r => [r.id, r.no])).toEqual([
+      [1000, 1],
+      [1001, 2],
+      [1002, 3],
+    ]);
+  });
+
+  it('stamps completion only after the walk finishes', async () => {
+    const {rl} = makeQuickLimiter(2, [makeApiPosts(2)]);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    const ls = vi.mocked(localStorage.setItem);
+    const keys = ls.mock.calls.map((c: string[]) => c[0]);
+    expect(keys).toContain('danbooru_grass_last_sync_42');
+    // quickSync writes every metadata field straight from the API, so the
+    // backfill is complete by definition.
+    expect(keys).toContain('di_post_metadata_v2_42');
+    expect(quotaManager.requestPersistence).toHaveBeenCalled();
+  });
+
+  it('does not touch the DB when the user is unidentifiable', async () => {
+    const postsTable = makePostsTable([]);
+    const rl = makeSyncRateLimiter();
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(postsTable) as never,
+      rl as never,
+    );
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: undefined}));
+    await adm.quickSyncAllPosts(makeSyncUser({name: ''}));
+
+    expect(postsTable._chain.delete).not.toHaveBeenCalled();
+    expect(rl.fetch).not.toHaveBeenCalled();
+  });
+
+  it('a lock-blocked run deletes nothing', async () => {
+    // The early return sits above the wipe. If it ever moved below it, a
+    // second tab's click would clear the rows the running sync is writing.
+    AnalyticsDataManager.isGlobalSyncing = true;
+    const postsTable = makePostsTable([]);
+    const rl = makeSyncRateLimiter();
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(postsTable) as never,
+      rl as never,
+    );
+
+    await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+    expect(postsTable._chain.delete).not.toHaveBeenCalled();
+    expect(rl.fetch).not.toHaveBeenCalled();
+    // The lock belongs to the run that took it — this one must not clear it.
+    expect(AnalyticsDataManager.isGlobalSyncing).toBe(true);
+  });
+
+  it('releases the lock when a page fetch throws', async () => {
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 5}}),
+        };
+      }
+      throw new Error('network down');
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await expect(
+      adm.quickSyncAllPosts(makeSyncUser({id: '42'})),
+    ).rejects.toThrow('network down');
+
+    // Otherwise every later sync in this tab is refused by a lock nobody holds.
+    expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
+    expect(AnalyticsDataManager.onProgressCallback).toBeNull();
+  });
+});

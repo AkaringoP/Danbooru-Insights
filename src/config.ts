@@ -6,7 +6,6 @@ export const DAY_MS = 86_400_000;
 
 export const CONFIG: {
   STORAGE_PREFIX: string;
-  CLEANUP_THRESHOLD_MS: number;
   MAX_OPTIMIZED_POSTS: number;
   MAX_PREVIEW_ONLY_UPLOADS: number;
   REPORT_COOLDOWN_MS: number;
@@ -24,7 +23,6 @@ export const CONFIG: {
   THEMES: Record<string, Theme>;
 } = {
   STORAGE_PREFIX: 'danbooru_contrib_',
-  CLEANUP_THRESHOLD_MS: 7 * DAY_MS, // 7 Days
   /** Max posts for small-tag/quick-sync optimization path. */
   MAX_OPTIMIZED_POSTS: 1200,
   /** Total-uploads cap below which the icon click shows the preview popover

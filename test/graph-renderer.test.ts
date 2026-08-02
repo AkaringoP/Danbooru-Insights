@@ -28,12 +28,14 @@ vi.mock('../src/ui/approval-detail-popover', () => ({
 }));
 
 // JSDOM's window carries `ontouchstart`, so isTouchDevice() reports true and
-// the renderer wires its tap path. Pin it to false: these tests cover the
-// desktop hover/dwell interaction, which has a dismissal lifecycle (linger →
-// fade) that the tap path does not.
+// the renderer would always wire its tap path. Drive it explicitly instead:
+// desktop (false) by default, flipped by the tap-path suite. The two paths
+// differ in more than input — hover has a linger→fade dismissal that tap
+// does not — so each needs its own coverage.
+const {touchMode} = vi.hoisted(() => ({touchMode: {value: false}}));
 vi.mock('../src/ui/two-step-tap', async importActual => {
   const actual = await importActual<typeof import('../src/ui/two-step-tap')>();
-  return {...actual, isTouchDevice: () => false};
+  return {...actual, isTouchDevice: () => touchMode.value};
 });
 
 // January's popover asks core for last December's total. Held under test
@@ -414,5 +416,147 @@ describe('GraphRenderer month popover — late December lookup', () => {
     // Re-showing here would clear those timers and strand the popover open.
     vi.advanceTimersByTime(DISMISSAL_MS);
     expect(document.querySelector(POPOVER_ID)).toBeNull();
+  });
+});
+
+describe('GraphRenderer month popover — tap path', () => {
+  const POPOVER_ID = '#danbooru-grass-month-popover';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  }
+
+  function headerText(): string | null {
+    return (
+      document.querySelector(`${POPOVER_ID} .di-gmp-header`)?.textContent ??
+      null
+    );
+  }
+
+  function popover(): HTMLElement | null {
+    return document.querySelector(POPOVER_ID);
+  }
+
+  async function paintWithLabels(
+    daily: Record<string, number>,
+  ): Promise<SVGTextElement[]> {
+    buildProfileDom();
+    const gr = new GraphRenderer(new SettingsManager(), {} as Database);
+    await gr.injectSkeleton(makeDataManager(), '42');
+    await gr.renderGraph(
+      {daily, hourly: new Array(24).fill(0)},
+      2026,
+      'uploads',
+      {name: 'fixture_user', id: '42'} as TargetUser,
+      [2026],
+      () => {},
+      () => {},
+    );
+    await flush();
+
+    const scroll = document.getElementById('cal-heatmap-scroll')!;
+    const labels: SVGTextElement[] = [];
+    for (let m = 0; m < 12; m++) {
+      const label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('class', 'ch-domain-text');
+      scroll.appendChild(label);
+      labels.push(label as SVGTextElement);
+    }
+    vi.advanceTimersByTime(300);
+    return labels;
+  }
+
+  /** A real bubbling click, so the document-level outside-tap handler sees it. */
+  function tap(el: Element): void {
+    el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+  }
+
+  beforeEach(() => {
+    touchMode.value = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T12:00:00Z'));
+    resolvePrevDecemberTotal.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    touchMode.value = false;
+    hideGrassMonthPopover();
+    vi.useRealTimers();
+  });
+
+  it('opens on the tapped month', async () => {
+    const labels = await paintWithLabels({'2026-03-10': 9});
+
+    tap(labels[2]);
+
+    expect(headerText()).toContain('March 2026');
+  });
+
+  it('closes when the same month is tapped again', async () => {
+    // No hover to dismiss it on mobile, so the label has to toggle.
+    const labels = await paintWithLabels({'2026-03-10': 9});
+
+    tap(labels[2]);
+    expect(popover()).not.toBeNull();
+
+    tap(labels[2]);
+    expect(popover()).toBeNull();
+  });
+
+  it('switches rather than closes when a different month is tapped', async () => {
+    const labels = await paintWithLabels({'2026-03-10': 9, '2026-05-04': 3});
+
+    tap(labels[2]);
+    tap(labels[4]);
+
+    expect(popover()).not.toBeNull();
+    expect(headerText()).toContain('May 2026');
+  });
+
+  it('closes on a tap outside the popover', async () => {
+    const labels = await paintWithLabels({'2026-03-10': 9});
+    tap(labels[2]);
+
+    tap(document.body);
+
+    expect(popover()).toBeNull();
+  });
+
+  it('stays open when the popover itself is tapped', async () => {
+    // Reading the numbers is a tap too; dismissing then would make the
+    // popover unreadable on touch.
+    const labels = await paintWithLabels({'2026-03-10': 9});
+    tap(labels[2]);
+
+    const inner = document.querySelector(`${POPOVER_ID} .di-gmp-header`)!;
+    tap(inner);
+
+    expect(popover()).not.toBeNull();
+    expect(headerText()).toContain('March 2026');
+  });
+
+  it('drops a late December lookup after another month was tapped', async () => {
+    // Same guard as the hover path — the tap path reaches it through the
+    // same openMonthPopover, and this pins that it still goes through it.
+    let resolveDec!: (v: number | null) => void;
+    resolvePrevDecemberTotal.mockReturnValue(
+      new Promise<number | null>(r => {
+        resolveDec = r;
+      }),
+    );
+    const labels = await paintWithLabels({'2026-01-10': 5, '2026-03-10': 9});
+
+    tap(labels[0]);
+    expect(headerText()).toContain('January 2026');
+
+    tap(labels[2]);
+    expect(headerText()).toContain('March 2026');
+
+    resolveDec(3);
+    await flush();
+
+    expect(headerText()).toContain('March 2026');
+    expect(headerText()).not.toContain('January');
   });
 });

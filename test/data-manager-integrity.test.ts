@@ -1471,3 +1471,173 @@ describe('getStats — maxAgeMs TTL guard (v9.6)', () => {
     expect(result).toEqual({legacy: true});
   });
 });
+
+// ---------------------------------------------------------------------------
+// sumDailyCounts — the range read behind January's month-over-month
+// ---------------------------------------------------------------------------
+//
+// grass-prev-month resolves last December from this, and its own spec stubs
+// it out — so nothing exercised the key arithmetic. Daily rows are keyed
+// `${userId}_${date}`, which makes a date range a *string* prefix scan; the
+// tests below use a range mock that really compares keys rather than
+// recording the call, because the failure modes here are all off-by-a-
+// character.
+
+/** A daily table whose range read rejects, for the fail-soft path. Lives at
+ *  module scope so the nested-callback depth stays inside the T-26 cap. */
+function makeFailingRangeTable() {
+  const toArray = async () => {
+    throw new Error('IDB unavailable');
+  };
+  const between = () => ({toArray});
+  return {where: () => ({between})};
+}
+
+describe('sumDailyCounts', () => {
+  /**
+   * A table whose `.between()` actually filters, so bound inclusivity and
+   * prefix behaviour are observable rather than merely asserted-upon.
+   */
+  function makeRangeTable(rows: Array<{id: string; count: number}>) {
+    const between = vi.fn(
+      (
+        lower: string,
+        upper: string,
+        incLower: boolean = true,
+        incUpper: boolean = true,
+      ) => ({
+        toArray: vi.fn(async () =>
+          rows.filter(r => {
+            const aboveLower = incLower ? r.id >= lower : r.id > lower;
+            const belowUpper = incUpper ? r.id <= upper : r.id < upper;
+            return aboveLower && belowUpper;
+          }),
+        ),
+      }),
+    );
+    return {where: vi.fn(() => ({between})), _between: between};
+  }
+
+  function managerFor(table: unknown): DataManager {
+    return new DataManager({uploads: table} as never);
+  }
+
+  it('sums the rows inside an inclusive date range', async () => {
+    const table = makeRangeTable([
+      {id: '42_2025-11-30', count: 100}, // day before — excluded
+      {id: '42_2025-12-01', count: 1}, // lower bound — included
+      {id: '42_2025-12-15', count: 2},
+      {id: '42_2025-12-31', count: 4}, // upper bound — included
+      {id: '42_2026-01-01', count: 200}, // day after — excluded
+    ]);
+
+    const total = await managerFor(table).sumDailyCounts(
+      'uploads',
+      '42',
+      '2025-12-01',
+      '2025-12-31',
+    );
+
+    // Both endpoints count: a December total that silently dropped the 31st
+    // would read as a plausible-but-wrong month-over-month delta.
+    expect(total).toBe(7);
+  });
+
+  it('keeps the upper bound open-ended past the date string', async () => {
+    // The `￿` sentinel is what lets a key carrying anything after the
+    // date still fall inside the range; a bare date bound would cut it off.
+    const table = makeRangeTable([
+      {id: '42_2025-12-31', count: 5},
+      {id: '42_2025-12-31T23:59', count: 6},
+    ]);
+
+    const total = await managerFor(table).sumDailyCounts(
+      'uploads',
+      '42',
+      '2025-12-01',
+      '2025-12-31',
+    );
+
+    expect(total).toBe(11);
+    expect(table._between).toHaveBeenCalledWith(
+      '42_2025-12-01',
+      '42_2025-12-31￿',
+      true,
+      true,
+    );
+  });
+
+  it("does not pick up a different user whose id starts with this one's", async () => {
+    // `${userId}_${date}` is only unambiguous because '_' (95) sorts above
+    // every digit (48-57), which puts 123_… below 12_… instead of inside it.
+    // A separator below the digits (e.g. '-') would silently merge users.
+    const table = makeRangeTable([
+      {id: '1_2025-12-10', count: 1000},
+      {id: '12_2025-12-10', count: 7},
+      {id: '12_2025-12-20', count: 8},
+      {id: '123_2025-12-10', count: 2000},
+      {id: '1234_2025-12-10', count: 4000},
+    ]);
+
+    const total = await managerFor(table).sumDailyCounts(
+      'uploads',
+      '12',
+      '2025-12-01',
+      '2025-12-31',
+    );
+
+    expect(total).toBe(15);
+  });
+
+  it('reads the table the metric names', async () => {
+    const uploads = makeRangeTable([{id: '42_2025-12-05', count: 3}]);
+    const notes = makeRangeTable([{id: '42_2025-12-05', count: 99}]);
+    const dm = new DataManager({uploads, notes} as never);
+
+    expect(
+      await dm.sumDailyCounts('notes', '42', '2025-12-01', '2025-12-31'),
+    ).toBe(99);
+    expect(uploads.where).not.toHaveBeenCalled();
+  });
+
+  it('returns 0 for an unknown metric instead of throwing', async () => {
+    const dm = new DataManager({} as never);
+    expect(
+      await dm.sumDailyCounts(
+        'uploads' as Metric,
+        '42',
+        '2025-12-01',
+        '2025-12-31',
+      ),
+    ).toBe(0);
+  });
+
+  it('returns 0 when the read fails', async () => {
+    // Callers treat 0 as "nothing cached" and fall through to their next
+    // tier; a thrown error would take the whole popover down with it.
+    await expect(
+      managerFor(makeFailingRangeTable()).sumDailyCounts(
+        'uploads',
+        '42',
+        '2025-12-01',
+        '2025-12-31',
+      ),
+    ).resolves.toBe(0);
+  });
+
+  it('treats a row with no count as zero', async () => {
+    const table = makeRangeTable([
+      {id: '42_2025-12-01', count: 4},
+      {id: '42_2025-12-02'} as {id: string; count: number},
+    ]);
+
+    await expect(
+      managerFor(table).sumDailyCounts(
+        'uploads',
+        '42',
+        '2025-12-01',
+        '2025-12-31',
+      ),
+    ).resolves.toBe(4);
+  });
+});
