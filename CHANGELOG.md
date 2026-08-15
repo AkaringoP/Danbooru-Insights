@@ -4,6 +4,34 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.9.2 — Grass race on rapid metric/year switching (issue #4)
+
+### Fixed
+- **Switching contribution type or year mid-load no longer mislabels the
+  graph.** Changing the metric (say, approvals → uploads) while the previous
+  selection was still fetching let the slower fetch finish last and repaint
+  the grass with its own data under the *new* dropdown labels — an
+  uploads-titled graph whose cells and tooltips held approvals counts
+  (GitHub issue #4). Each view refresh now snapshots the selection it serves
+  and carries a generation token; a run that resumes from a fetch to find a
+  newer selection underway discards its result instead of painting it. The
+  newest selection always wins, no matter how the fetches interleave, and a
+  stale run can no longer clear the newer run's loading spinner out from
+  under it.
+- **The "activity doesn't fit the current thresholds" prompt no longer
+  multiplies.** Every stacked refresh used to run its own post-render
+  auto-tune check, so rapid switching stacked duplicate prompts. Only the
+  current run reaches that step now.
+
+### Internal
+- The superseded fetch is deliberately *not* aborted: its pages keep flowing
+  into the IndexedDB cache, so returning to that metric/year later paints
+  instantly. Regression coverage in `test/grass-app-supersede.test.ts`
+  (3 cases: stale-run discard, no-switch happy path, last-selection-wins
+  across rapid switches), verified to fail against the pre-fix code.
+
+---
+
 ## v9.9.1 — Windows dashboard stutter + a silently-disabled architecture rule
 
 ### Fixed

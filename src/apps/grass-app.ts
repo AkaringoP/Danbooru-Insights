@@ -78,18 +78,38 @@ export class GrassApp {
     const startYear = Math.max(joinYear, 2005);
     for (let y = currentYear; y >= startYear; y--) years.push(y);
 
+    // Supersede token for updateView (issue #4). Every run captures its
+    // generation up front; selecting another metric/year starts a fresh
+    // run with a higher one. A run that resumes from an await and finds
+    // itself superseded stops touching the DOM — without this, the slower
+    // fetch repainted the grass with the previous selection's data under
+    // the new dropdown labels, and the post-render auto-tune prompt fired
+    // once per stacked run. The superseded fetch is deliberately not
+    // aborted: its pages keep flowing into the IndexedDB cache, so
+    // returning to that metric/year later paints instantly.
+    let viewGeneration = 0;
+
     const updateView = async () => {
+      const gen = ++viewGeneration;
+      const isCurrent = () => gen === viewGeneration;
+      // Snapshot the selection this run serves — the shared bindings are
+      // mutated by the dropdown handlers while this run is awaiting.
+      const metric = currentMetric;
+      let year = currentYear;
+
       let availableYears = [...years]; // Default full list
 
       // Filter years for Approvals based on promotion date (UI Only)
-      if (currentMetric === 'approvals') {
+      if (metric === 'approvals') {
         const promoDate = await dataManager.fetchPromotionDate(targetUser.name);
+        if (!isCurrent()) return;
         if (promoDate) {
           const promoYear = parseInt(promoDate.slice(0, 4), 10);
           availableYears = availableYears.filter(y => y >= promoYear);
-          // Safety: If currentYear is older than promoYear, switch to promoYear
-          if (currentYear < promoYear) {
-            currentYear = promoYear;
+          // Safety: If the year is older than promoYear, switch to promoYear
+          if (year < promoYear) {
+            year = promoYear;
+            currentYear = promoYear; // keep the shared dropdown state in sync
           }
         }
       }
@@ -104,8 +124,8 @@ export class GrassApp {
         // Initial render for layout (skeleton — scroll deferred to final render)
         await renderer.renderGraph(
           {},
-          currentYear,
-          currentMetric,
+          year,
+          metric,
           targetUser,
           availableYears,
           onYearChange,
@@ -116,11 +136,12 @@ export class GrassApp {
           },
           /* skipScroll */ true,
         );
+        if (!isCurrent()) return;
 
         renderer.updateControls(
           availableYears,
-          currentYear,
-          currentMetric,
+          year,
+          metric,
           onYearChange,
           newMetric => {
             currentMetric = newMetric as Metric;
@@ -137,20 +158,24 @@ export class GrassApp {
         );
 
         const onProgress = (count: number) => {
-          renderer.setLoading(true, `Fetching... ${count} items`);
+          // A superseded run's progress must not overwrite the newer
+          // run's loading message.
+          if (isCurrent())
+            renderer.setLoading(true, `Fetching... ${count} items`);
         };
 
         const data = await dataManager.getMetricData(
-          currentMetric,
+          metric,
           targetUser,
-          currentYear,
+          year,
           onProgress,
         );
+        if (!isCurrent()) return;
 
         await renderer.renderGraph(
           data,
-          currentYear,
-          currentMetric,
+          year,
+          metric,
           targetUser,
           availableYears,
           onYearChange,
@@ -160,6 +185,7 @@ export class GrassApp {
             void updateView();
           },
         );
+        if (!isCurrent()) return;
 
         // Signal the diagnostic panel (if gated on) that the cache
         // is now up to date so it can read post-sync DB state. The
@@ -175,18 +201,18 @@ export class GrassApp {
             updateView(),
           );
           if (!ran) {
-            await this.maybeSuggestAutoTune(userId, currentMetric, () =>
-              updateView(),
-            );
+            await this.maybeSuggestAutoTune(userId, metric, () => updateView());
           }
         })();
       } catch (e: unknown) {
         log.error('Failed to render grass graph', {error: e});
+        if (!isCurrent()) return;
         const message =
           e instanceof Error ? e.message : 'Unknown error occurred';
         renderer.renderError(message, () => updateView());
       } finally {
-        renderer.setLoading(false);
+        // A superseded run must not clear the spinner the newer run owns.
+        if (isCurrent()) renderer.setLoading(false);
       }
     };
 
