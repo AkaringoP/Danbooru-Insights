@@ -110,7 +110,6 @@ const GLOBAL_CSS = `
       display: none;
       justify-content: center;
       align-items: center;
-      backdrop-filter: blur(2px);
       opacity: 0;
       transition: opacity 0.2s ease;
     }
@@ -133,7 +132,6 @@ const GLOBAL_CSS = `
       background: var(--di-bg-glass, rgba(255, 255, 255, 0.9));
       border-radius: 12px;
       box-shadow: 0 10px 30px var(--di-shadow, rgba(0, 0, 0, 0.2));
-      backdrop-filter: blur(10px);
       display: flex;
       flex-direction: column;
       position: relative;

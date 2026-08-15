@@ -4,6 +4,35 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.9.1 — Windows dashboard stutter + a silently-disabled architecture rule
+
+### Fixed
+- **The dashboard no longer stutters and leaves trails on Windows.** The modal
+  overlay and the modal window each ran a `backdrop-filter` blur (2px and
+  10px) left over from when the overlay was translucent. The overlay has been
+  opaque for a while now, so both blurs were compositing a flat colour into
+  the same flat colour — no visual effect, full GPU cost. Everything inside
+  them keeps the blurred region invalidating every frame: the 15s summary-card
+  animation, the spinners, the preview skeleton pulses, the 500ms header
+  refresh during a sync, and the scrolling report body. On Windows Chromium
+  that surfaced as ghosting and general sluggishness; macOS and mobile
+  composite differently and never showed it. Both blurs are gone, and because
+  what sat behind them was a solid colour, nothing looks different.
+
+### Internal
+- **An architecture rule was passing on Windows without checking anything.**
+  `test/architecture.test.ts` selected files with `rel.startsWith('apps/')`,
+  but `path.relative` emits backslashes on Windows (`apps\foo.ts`) — so the
+  filter matched nothing, the loop body never ran, and zero violations read as
+  a pass. The v9.9.0 rule that every `DataManager` under `apps/` must be
+  constructed with the shared rate limiter was therefore unenforced on
+  Windows: 0 files scanned instead of 12, 0 constructor sites checked instead
+  of 4. Four other rules failed outright for the same reason. Paths now go
+  through a `relFromSrc()` helper that normalises separators before any
+  comparison, so all 13 rules run identically on both platforms.
+
+---
+
 ## v9.9.0 — Faster dashboard, month popover charts, and a hardening pass
 
 ### Performance

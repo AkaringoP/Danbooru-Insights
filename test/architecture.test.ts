@@ -12,10 +12,24 @@ function collectTsFiles(dir: string): {path: string; content: string}[] {
     if (entry.isDirectory()) {
       results.push(...collectTsFiles(full));
     } else if (entry.name.endsWith('.ts')) {
-      results.push({path: full, content: fs.readFileSync(full, 'utf-8')});
+      // Normalize to forward slashes so the '/core/'-style path matching
+      // below behaves identically on Windows (path.join emits backslashes).
+      results.push({
+        path: full.replace(/\\/g, '/'),
+        content: fs.readFileSync(full, 'utf-8'),
+      });
     }
   }
   return results;
+}
+
+/**
+ * Path of `filePath` relative to src/, always forward-slashed. `path.relative`
+ * emits backslashes on Windows, which silently breaks `'apps/'`-style prefix
+ * checks — a skipped filter reads as a passing test.
+ */
+function relFromSrc(filePath: string): string {
+  return path.relative(SRC_DIR, filePath).replace(/\\/g, '/');
 }
 
 /** Extracts relative import paths from a file's content. */
@@ -35,9 +49,7 @@ describe('Architecture constraints', () => {
       const imports = extractImports(file.content);
       for (const imp of imports) {
         if (imp.includes('/apps/') || imp.includes('../apps/')) {
-          violations.push(
-            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
-          );
+          violations.push(`${relFromSrc(file.path)} imports "${imp}"`);
         }
       }
     }
@@ -56,9 +68,7 @@ describe('Architecture constraints', () => {
       const imports = extractImports(file.content);
       for (const imp of imports) {
         if (imp.includes('/ui/') || imp.includes('../ui/')) {
-          violations.push(
-            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
-          );
+          violations.push(`${relFromSrc(file.path)} imports "${imp}"`);
         }
       }
     }
@@ -77,9 +87,7 @@ describe('Architecture constraints', () => {
       const imports = extractImports(file.content);
       for (const imp of imports) {
         if (imp.includes('/apps/') || imp.includes('../apps/')) {
-          violations.push(
-            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
-          );
+          violations.push(`${relFromSrc(file.path)} imports "${imp}"`);
         }
       }
     }
@@ -100,9 +108,7 @@ describe('Architecture constraints', () => {
         // Match '../main' or './main' but not '../main/...' (which would be
         // a subdirectory, currently nonexistent but kept for safety).
         if (imp === '../main' || imp === './main') {
-          violations.push(
-            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
-          );
+          violations.push(`${relFromSrc(file.path)} imports "${imp}"`);
         }
       }
     }
@@ -120,7 +126,7 @@ describe('Architecture constraints', () => {
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {
         if (lines[i].includes('[key: string]: any')) {
-          violations.push(`${path.relative(SRC_DIR, file.path)}:${i + 1}`);
+          violations.push(`${relFromSrc(file.path)}:${i + 1}`);
         }
       }
     }
@@ -152,9 +158,7 @@ describe('Architecture constraints', () => {
           !line.trim().startsWith('//') &&
           !line.trim().startsWith('*')
         ) {
-          violations.push(
-            `${path.relative(SRC_DIR, file.path)}:${i + 1}: ${line.trim()}`,
-          );
+          violations.push(`${relFromSrc(file.path)}:${i + 1}: ${line.trim()}`);
         }
       }
     }
@@ -186,9 +190,7 @@ describe('Architecture constraints', () => {
           !line.trim().startsWith('//') &&
           !line.trim().startsWith('*')
         ) {
-          violations.push(
-            `${path.relative(SRC_DIR, file.path)}:${i + 1}: ${line.trim()}`,
-          );
+          violations.push(`${relFromSrc(file.path)}:${i + 1}: ${line.trim()}`);
         }
       }
     }
@@ -221,7 +223,7 @@ describe('Architecture constraints', () => {
         for (const key of LEGACY_KEYS) {
           if (lines[i].includes(key)) {
             violations.push(
-              `${path.relative(SRC_DIR, file.path)}:${i + 1}: ${lines[i].trim()}`,
+              `${relFromSrc(file.path)}:${i + 1}: ${lines[i].trim()}`,
             );
           }
         }
@@ -243,7 +245,7 @@ describe('Architecture constraints', () => {
     const violations: string[] = [];
 
     for (const file of allFiles) {
-      const rel = path.relative(SRC_DIR, file.path);
+      const rel = relFromSrc(file.path);
       // core/data-manager.ts owns the helper; dev/diagnostic.ts is
       // app-independent by design (see dev/ isolation rule above).
       if (
@@ -298,7 +300,7 @@ describe('Architecture constraints', () => {
           );
           if (declRe.test(file.content)) continue;
           violations.push(
-            `${path.relative(SRC_DIR, file.path)}:${i + 1}: ${lines[i].trim()}`,
+            `${relFromSrc(file.path)}:${i + 1}: ${lines[i].trim()}`,
           );
         }
       }
@@ -325,7 +327,7 @@ describe('Architecture constraints', () => {
     const ctorRe = /new\s+(?:\w*DataManager)\s*\(([^)]*)\)/g;
 
     for (const file of allFiles) {
-      const rel = path.relative(SRC_DIR, file.path);
+      const rel = relFromSrc(file.path);
       if (!rel.startsWith('apps/')) continue;
 
       const lines = file.content.split('\n');
@@ -384,7 +386,7 @@ describe('Architecture constraints', () => {
       const usesBoundingRect = /\bgetBoundingClientRect\s*\(/.test(content);
       if (usesPageOffset && usesBoundingRect) {
         violations.push(
-          `${path.relative(SRC_DIR, file.path)}: combines ` +
+          `${relFromSrc(file.path)}: combines ` +
             'getBoundingClientRect() with pageXOffset/pageYOffset',
         );
       }
@@ -412,9 +414,7 @@ describe('Architecture constraints', () => {
           imp.includes('/apps/') ||
           imp.includes('../apps/')
         ) {
-          violations.push(
-            `${path.relative(SRC_DIR, file.path)} imports "${imp}"`,
-          );
+          violations.push(`${relFromSrc(file.path)} imports "${imp}"`);
         }
       }
     }
