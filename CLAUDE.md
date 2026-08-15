@@ -24,11 +24,13 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 ## Multi-Model 워크플로우
 
-**기본**: main 세션은 **Opus 4.6** 으로 동작. Opus 가 오케스트레이션, 결정, 리뷰, 작은~중간 구현 직접 처리. **Sonnet 4.6** 은 아래 위임 기준에 맞을 때만 subagent 로 호출 (`Agent` 툴, `model="sonnet"`).
+**기본**: main 세션은 **Opus 5** 로 동작. Opus 가 오케스트레이션, 결정, 리뷰, 작은~중간 구현 직접 처리. **Sonnet 5** 는 아래 위임 기준에 맞을 때만 subagent 로 호출 (`Agent` 툴, `model="sonnet"`).
+
+더 무거운 작업이 필요하면 **Fable 5** (Mythos-class, Opus 상위 티어) 를 main 으로 쓸 수 있음 — `/model claude-fable-5`. 아래 위임 기준은 main 이 Opus 든 Fable 이든 동일하게 적용.
 
 근거: 이건 Claude Code 구독 환경이지 측정형 API 가 아님. Opus 토큰은 rate-limit quota 에서 빠짐 — per-token 과금이 아님. quota 위험이 없는 한 main loop 에 최강 모델 유지해도 비용 추가 없음. 위임의 목적은 **Opus quota 절약** 과 **main context 정리** 이지 비용 절감 아님.
 
-### Opus (main) 가 직접 처리하는 경우
+### main 세션 (Opus/Fable) 이 직접 처리하는 경우
 - 아키텍처, 알고리즘, 설계 결정
 - 디버깅 (가설 → 검증 → 수정 루프)
 - 어떤 변경이든 끝나면 코드 리뷰
@@ -72,10 +74,15 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 ## Build & Dev
 - `npm run dev` — Vite dev 서버 (HMR)
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
+- `npm run compile` — `tsc` 단독 (타입 체크만, 번들 없음)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
 - `npm run test` — Vitest 단위 테스트 (현재 893 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
-- `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 포함)
+- `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 7 개)
+- `npm run test:e2e:update` — e2e 스냅샷 baseline 갱신 (의도한 시각 변경일 때만)
+- `npm run clean` — gts clean
+
+`scripts/` 의 벤치 도구는 npm script 가 아니라 직접 실행: `node scripts/bench-collect.ts <log-file> > out.json` 으로 perf 로그를 집계하고 `bench-compare.ts` 로 두 결과를 비교 (perf-logger 출력이 입력 — [.claude/rules/perf-logging.md](.claude/rules/perf-logging.md) 참조)
 
 ## 도메인 용어집
 | 용어 | 의미 |
@@ -103,8 +110,8 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 | 레이어 | 역할 | 예시 |
 |---|---|---|
-| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts` |
-| `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts` |
+| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts` |
+| `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts`, `dashboard-preview-popover.ts`, `grass-month-popover.ts` |
 | `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
 | `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts` |
 | `src/` (루트) | Entry, 공유 types/utils/config | `main.ts`, `types.ts`, `utils.ts`, `config.ts`, `styles.ts`, `version.ts` |
@@ -145,10 +152,24 @@ pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), `prepare` 스�
 | 1 | Type safety | `tsc --noEmit` (또는 `npm run build`) | TypeScript strict mode |
 | 2 | Lint/style | `npm run lint` | GTS (Google TS style) |
 | 3 | 테스트 통과 | `npx vitest run` | Vitest |
-| 4 | 아키텍처 invariant | (gate 3 가 커버) | [test/architecture.test.ts](test/architecture.test.ts) — 의존 방향, `[key: string]: any` 금지, raw `fetch()` 금지, core/settings.ts 외부에서 legacy NSFW 키 금지, `/counts/posts.json` URL 재롤 금지, ui/popover-utils.ts 외부에서 popover 위치 공식 금지 |
+| 4 | 아키텍처 invariant | (gate 3 가 커버) | [test/architecture.test.ts](test/architecture.test.ts) — 현재 13 개 규칙 (아래 목록) |
 | 5 | 빌드 성공 | `npm run build` | Pre-commit hook (gate 1+3 도 같이 실행) |
 | 6 | 복잡도 cap | `npm run lint` | T-26 ESLint 규칙 — `max-lines-per-function: 200` (skipBlankLines+skipComments), `max-depth: 6`, `complexity: 15`, `max-nested-callbacks: 4`. 기존 위반은 inline `// T-26 baseline:` disable; 신규 위반은 차단 |
 | 7 | Dead code 없음 | `npm run check:dead` | knip — entry points / project globs / `cal-heatmap` + `eslint` ignored. 미사용 파일/export/type/devDependency 잡음 |
+
+### Gate 4 상세 — architecture.test.ts 의 13 개 규칙
+1–4. 의존 방향: `core/ ↛ apps/`, `core/ ↛ ui/`, `ui/ ↚ apps/`, `apps/ ↛ main`
+5. `[key: string]: any` index signature 금지
+6. raw `fetch()` 금지 — `rateLimiter.fetch()` 사용 (예외: `rate-limiter.ts`, `dev/`)
+7. raw `console.*` 금지 — `createLogger()` 사용 (예외: `logger.ts`, `perf-logger.ts`, `dev/`)
+8. legacy NSFW localStorage 키는 `core/settings.ts` 마이그레이션 코드에만
+9. `/counts/posts.json` URL 은 `fetchRemoteCount()` 로만 — 인라인 재롤 금지
+10. `/wiki_pages/` href 는 태그명을 반드시 encode (태그에 `/` 포함 가능 — `fate/grand_order`)
+11. `apps/` 에서 DataManager 계열 생성 시 **공유 rate limiter 를 인자로 전달 필수** (v9.9.0 — private token bucket 이 멀티탭 분배와 429 백오프를 무시하던 문제)
+12. popover 위치 공식 (`getBoundingClientRect` + `pageXOffset/pageYOffset`) 은 `ui/popover-utils.ts` 에만
+13. `dev/` 는 `core/`, `ui/`, `apps/` 를 import 하지 않음 (진단 모듈 격리)
+
+**주의 — 빈 통과 (vacuous pass)**: 이 테스트들은 파일 경로를 문자열로 필터링한다. 필터가 0 건을 매칭해도 위반 0 건이라 **통과로 보인다**. 경로 비교는 반드시 `relFromSrc()` / forward-slash 정규화된 값으로 할 것 (Windows `path.relative` 는 백슬래시를 뱉어 `'apps/'` 매칭이 전부 빗나감 — 실제로 규칙 11 이 Windows 에서 0 개 파일만 검사하며 통과하고 있었음). 새 규칙 추가 시 검사 대상 건수가 0 이 아닌지 확인해라
 
 gate 실패 시 root cause 를 고쳐 — whitelist, suppress, work around 금지. 기계적 gate 의 존재 이유는 이런 체크에 LLM 판단을 못 믿어서임 ("Never send an LLM to do a linter's job").
 
@@ -162,17 +183,22 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [.claude/rules/database-schema.md](.claude/rules/database-schema.md) — Dexie.js 테이블 레이아웃 & compound index
 - [.claude/rules/sync-strategies.md](.claude/rules/sync-strategies.md) — Grass / User / Tag 동기화 알고리즘
 - [.claude/rules/perf-logging.md](.claude/rules/perf-logging.md) — perf-logger 사용법, enable/disable, label namespace
+- [docs/debugging.md](docs/debugging.md) — 진단 패널 (`#di_diag` 해시 또는 `di.diag.enabled` localStorage) 사용법, 데스크톱/모바일 이슈 진단 절차
 - [test/architecture.test.ts](test/architecture.test.ts) — 아키텍처 규칙의 canonical source
 - [docs/audit-remediation.md](docs/audit-remediation.md) — v9.6 audit 6-phase 회고록 (Phase 1-6 helper / guardrail 의 도입 근거)
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
-## Active Issues
-- (없음) — 대시보드 preview popover 는 **v9.7.0 출시 완료**, mintag/abandoned 감지 + 색상 범례는 **v9.7.1 출시 완료**. 설계 회고는 `.archive/` (로컬), 동작 카탈로그는 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Activity distribution feed" 섹션 참조.
+## 현재 릴리즈 상태
+현재 버전 **v9.9.1** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
 
-### Preview popover 핵심 요약 (shipped)
-- **섹션 A — 최근 업로드 그리드** (10개@80px, 5×2): status 테두리, **악성 업로드 빨간 라벨**(`isSuspiciousUpload`: 이제 **score≤-3 단독**), **mintag 주황 라벨**(`isMintagged`: uploader 가 v1 에서 추가한 태그 `added_tags.length ≤ 10` — post 의 현재 total 이 아님), **abandoned 빨강 escalation**(mintag 인데 v2 가 v1 후 ≥15분 → `isAbandonedByGap`, 백그라운드 비차단 패스 `getAbandonedPostIds`, generation-guard), 우상단 NSFW 블러 토글(통합 `getNsfwEnabled` 재사용), **`?` 색상 범례**(테두리 status + 라벨 색 설명, hover/tap).
-- **섹션 B — 활동 분포 스트립** (200 세그먼트, 11 타입 `mapConcurrent` 병렬): suspicious 재분류(deleted/banned OR score≤-3 업로드/코멘트), 범례 link-out(`&limit=200` + 가장 오래된 행 `#anchor`), suspicious 정확매칭 link-out(`suspiciousPostsUrl`, `id:<csv> status:any`), commentary 업로드-커플링 필터(±1초).
-- **공통**: hover dismiss linger+fade(`HIDE_GRACE_MS`/`FADE_MS`), 캐시/inflight dedupe(`createCachedFetcher<T>`), 다크모드(`syncPopoverTheme`), 모바일 3계층(📋 미니보고서 버튼 / 통합 로딩 / two-step-tap 범례), peer-highlight(pointer 이벤트 기반).
+최근 출시분 요약 (상세는 [CHANGELOG.md](CHANGELOG.md)):
+- **v9.9.1** (핫픽스) — 모달의 `backdrop-filter` 2 개 제거 (Windows 잔상/버벅임), architecture.test.ts 경로 정규화 (Windows 에서 규칙 1 개가 0 건 검사로 통과하던 문제)
+- **v9.9.0** — 대시보드 오픈 속도 개선 (무거운 태그 분포 9 개를 blocking path 에서 제거, 캐시 즉시 페인트 + 화면에 보이는 pie 탭만 lazy revalidate → ~46k 계정 기준 30s → 5s), 월 popover 차트 (일별 스파크라인 + 연간 추세선), `<`/`>` 포함 태그 이스케이프, 실패한 sync 가 성공으로 보고되던 문제, 삭제된 포스트의 로컬 ghost row 정리 (`pruneGhostPosts`), 모든 대시보드 트래픽을 공유 rate limiter 로 통일 (+ gate 4 규칙 11 신설). 테스트 782 → 893
+- **v9.8.0** — grass 월 라벨 hover popover (월 합계/MoM/활동일 비율/최다일, 연내 in-memory 데이터로 계산 — 추가 API 없음)
+- **v9.7.2** — 부분 sync 시 Recent/Most Popular/milestone 이 갱신 안 되던 staleness 수정, full-refresh 힌트 7 일 → 30 일
+- **v9.7.0 / v9.7.1** — 대시보드 preview popover (최근 업로드 그리드 + 활동 분포 스트립), mintag/abandoned 감지 + 색상 범례
+
+preview popover 의 동작 카탈로그 (mintag/abandoned 판정 기준, 활동 분포 11 타입, suspicious 재분류, anchor prefix) 는 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Mintag / abandoned detection" 및 "Activity distribution feed" 섹션이 canonical — 여기 중복 기재하지 말 것
 
 ## 메모
 - `CONFIG.THEMES` 에 테마 추가 시 light/dark 섹션 코멘트 유지 (현재 12 개 테마 — Light 6: Light/Solarized Light/Sakura/Lavender/Ice/Aurora, Dark 6: Midnight/Solarized Dark/Dracula/Ocean/Monokai/Ember)
