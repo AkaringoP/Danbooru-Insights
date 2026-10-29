@@ -193,10 +193,10 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
 ## 현재 릴리즈 상태
-현재 버전 **v9.11.0** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
+현재 버전 **v9.11.1** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
 
 최근 출시분 요약 (상세는 [CHANGELOG.md](CHANGELOG.md)):
-- **v9.11.0** — "At a glance" 요약: 대시보드 상단 카드 (동기화된 전체 업로드 기준 — 주력 작품·캐릭터 비율, deleted/banned/pending 개수 + 전체 대비 %, 태깅 건전성, 30일 속도·연속일·연도 정점·반응 변화, **추가 요청 0**) + preview popover 상단 섹션 (최근 200 기준, 평소와 비교, `/posts.json` 1 요청 piestats `recent_window` 캐시). 순수 빌더 `core/profile-summary.ts` (`scope: 'lifetime' | 'recent'`), 렌더 `ui/profile-summary-view.ts` (DOM 노드 — HTML 문자열 금지). 업로드 카드 일시정지 버튼 다크모드 색, User History 스크롤바 (Chrome 이 표준 `scrollbar-width` 있으면 커스텀 스크롤바 무시) 수정
+- **v9.11.1** — "At a glance" 요약: 대시보드 상단 카드 (동기화된 전체 업로드 기준 — 주력 작품·캐릭터 비율, deleted/banned/pending 개수 + 전체 대비 %, 태깅 건전성, 30일 속도·연속일·연도 정점·반응 변화, **추가 요청 0**) + preview popover 상단 섹션 (최근 200 기준, 평소와 비교, `/posts.json` 1 요청 piestats `recent_window` 캐시). 순수 빌더 `core/profile-summary.ts` (`scope: 'lifetime' | 'recent'`), 렌더 `ui/profile-summary-view.ts` (DOM 노드 — HTML 문자열 금지). 업로드 카드 일시정지 버튼 다크모드 색, User History 스크롤바 (Chrome 이 표준 `scrollbar-width` 있으면 커스텀 스크롤바 무시) 수정
 - **v9.10.0** — 큰 계정 full sync 가 429 한 번에 멈추던 문제 (429·타임아웃·네트워크 재시도, 대기 끝난 뒤 재시도), rate limiter 재설계 (slow start, 적응형 rate + 회복 상한, 정지 직후 429 는 정지 2 배, `X-Rate-Limit`/`Retry-After` 추종 — 46k 계정 재 sync + 첫 대시보드 기준 페이지 재시도만 있을 때 429 약 45 → 이 장치들로 4), 실패한 카운트를 0 으로 캐시하던 문제 (`countBatch` 1 회 재시도 + `cacheUnlessPartial`), related-tag pie 3 개의 implication 조회를 일괄 + 캐시로 공유 (`core/top-level-tags.ts`, 119 → ≤4 건), cold open 시 부가 pie 탭 6 개는 열 때 로딩, rate-limit 대기 중 진행 표시 주황, 진단 패널 Logs 섹션 + Refresh. 테스트 896 → 954
 - **v9.9.2** — grass 에서 metric/year 를 빠르게 바꿀 때 늦게 끝난 fetch 가 새 라벨 아래 옛 데이터를 그리던 race (issue #4), threshold 안내 중복
 - **v9.9.1** (핫픽스) — 모달의 `backdrop-filter` 2 개 제거 (Windows 잔상/버벅임), architecture.test.ts 경로 정규화 (Windows 에서 규칙 1 개가 0 건 검사로 통과하던 문제)
