@@ -233,3 +233,119 @@ describe('server-driven 429 backoff', () => {
     expect(rl.backoffRemainingMs()).toBe(0);
   });
 });
+
+// After a pause the backlog used to leave as one burst (full bucket + every
+// queued dispatch timer firing together), drawing the next 429 within a
+// second or two. These pin the slow start and the adaptive throttle.
+describe('post-429 recovery', () => {
+  /** fetch double whose responses resolve only when the test says so. */
+  function controllableFetch(status = 200) {
+    const state = {inFlight: 0, peak: 0, release: [] as Array<() => void>};
+    global.fetch = vi.fn(
+      () =>
+        new Promise(resolve => {
+          state.inFlight++;
+          state.peak = Math.max(state.peak, state.inFlight);
+          state.release.push(() => {
+            state.inFlight--;
+            resolve({status, ok: status < 400});
+          });
+        }),
+    ) as unknown as typeof fetch;
+    const releaseAll = () => {
+      const pending = state.release.splice(0);
+      pending.forEach(r => r());
+    };
+    return {state, releaseAll};
+  }
+
+  it('resumes a backlog with one token and two in flight, then widens', async () => {
+    const {state, releaseAll} = controllableFetch();
+    const rl = new RateLimitedFetch(8, [0, 0], 9);
+    rl.setBackoff(Date.now() + 5000);
+    const all = Array.from({length: 12}, () => rl.fetch('/posts.json'));
+
+    // Pause over, inside the 5 s slow-start window.
+    await vi.advanceTimersByTimeAsync(5000 + 2000);
+    expect(state.peak).toBe(2);
+    expect(state.inFlight).toBe(2);
+
+    // Slow start over: completions refill the in-flight set past two.
+    await vi.advanceTimersByTimeAsync(4000);
+    releaseAll();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(state.inFlight).toBeGreaterThan(2);
+
+    for (let i = 0; i < 10 && state.release.length > 0; i++) {
+      releaseAll();
+      await vi.advanceTimersByTimeAsync(500);
+    }
+    await Promise.all(all);
+  });
+
+  it('a pause broadcast by another tab slows the restart but keeps full rate', () => {
+    const rl = new RateLimitedFetch(8, [0, 0], 9);
+    rl.setBackoff(Date.now() + 5000);
+    expect(rl.tokens).toBe(0);
+    expect(rl.getThrottle()).toBe(1);
+  });
+
+  it('halves the rate once per 429 episode, down to a quarter', async () => {
+    global.fetch = vi.fn().mockResolvedValue({status: 429, ok: false});
+    const rl = new RateLimitedFetch(8, [0, 0], 9);
+
+    // Three requests in flight together all come back 429: one episode.
+    await Promise.all([rl.fetch('/a'), rl.fetch('/b'), rl.fetch('/c')]);
+    expect(rl.getThrottle()).toBe(0.5);
+
+    // A 429 after the pause (and slow start) is a new episode.
+    await vi.advanceTimersByTimeAsync(10_000);
+    const p = rl.fetch('/d');
+    await vi.advanceTimersByTimeAsync(1000);
+    await p;
+    expect(rl.getThrottle()).toBe(0.25);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const q = rl.fetch('/e');
+    await vi.advanceTimersByTimeAsync(2000);
+    await q;
+    expect(rl.getThrottle()).toBe(0.25);
+  });
+
+  it('steps the rate back up after each quiet period', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({status: 429, ok: false});
+    const rl = new RateLimitedFetch(8, [0, 0], 9);
+    await rl.fetch('/a');
+    expect(rl.getThrottle()).toBe(0.5);
+
+    global.fetch = vi.fn().mockResolvedValue({status: 200, ok: true});
+    const send = async () => {
+      const p = rl.fetch('/b');
+      await vi.advanceTimersByTimeAsync(1000);
+      await p;
+    };
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await send();
+    expect(rl.getThrottle()).toBe(0.75);
+    await send(); // too soon for another step
+    expect(rl.getThrottle()).toBe(0.75);
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await send();
+    expect(rl.getThrottle()).toBe(1);
+  });
+
+  it('refills more slowly while throttled', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce({status: 429, ok: false});
+    const rl = new RateLimitedFetch(6, [0, 0], 5); // 200 ms/token at full rate
+    await rl.fetch('/a');
+    await vi.advanceTimersByTimeAsync(10_000); // past pause + slow start
+
+    rl.tokens = 0;
+    rl.lastRefill = Date.now() - 600;
+    rl.refillTokens();
+    // 400 ms/token at half rate → 1 token, not 3.
+    expect(rl.tokens).toBe(1);
+  });
+});
