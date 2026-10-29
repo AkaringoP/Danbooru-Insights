@@ -27,7 +27,7 @@ The script consists of three main components:
 
 ---
 
-## Features (v9.9)
+## Features (v9.11)
 
 ### Grass / Contribution Graph
 * **3 metrics**: Uploads, Approvals, Notes — switch via the metric selector in the graph header. Clicking a cell jumps to the corresponding Danbooru search (e.g. Notes cell → `/note_versions` filtered by updater + date).
@@ -41,7 +41,8 @@ The script consists of three main components:
 ### User Analytics Dashboard
 Open via the **📊 Button** next to the username.
 
-* **Preview popover** (v9.7): hovering the 📊 icon shows a mini-report before you commit to the full dashboard — a recent-uploads grid with status borders and suspicious / mintag / abandoned-upload labels, plus a colour-coded strip of the user's last 200 activities across 11 feed types, every legend entry linking out to the exact page. Touch devices get a 📋 mini-report button instead of hover.
+* **At a glance** (v9.11): a two-line summary card at the top of the dashboard, built from every synced upload with no extra requests — when they started and what they mainly upload (copyright / character shares, each linking to `user:<name> <tag>`), deleted / banned / pending counts with their share of all uploads, tagging health, and the long-term arc (30-day pace, current streak, busiest year, recent reception). Wording is coloured by tone (green / amber / red).
+* **Preview popover** (v9.7): hovering the 📊 icon shows a mini-report before you commit to the full dashboard — an **At a glance** summary of the newest 200 uploads compared with the user's record (v9.11), a recent-uploads grid with status borders and suspicious / mintag / abandoned-upload labels, plus a colour-coded strip of the user's last 200 activities across 11 feed types, every legend entry linking out to the exact page. Touch devices get a 📋 mini-report button instead of hover.
 * **Fast open after a sync** (v9.9): heavy tag distributions paint from cache and refresh in the background, so the dashboard opens in seconds even on 40k+ post accounts (was ~30s). Only the visible pie tab revalidates on open — the rest on first visit — with a "⟳ Updating…" badge while counts converge and in-place live patching when they land.
 * **Live loading progress** (v9.6): real-time phase counter (`Loading dashboard · N/14`) plus rotating substatus showing what the data layer is currently doing.
 * **Pie Chart (11 tabs)**: Copyright, Character, Favorite Copyright, Status, Rating, Commentary, Translation, Gender, Breast Size (NSFW-gated), Hair Length, Hair Color.
@@ -82,13 +83,13 @@ Visit any Wiki page (`/wiki_pages/TAG_NAME`) or Artist page (`/artists/NUMERIC_I
 * **Auto mode**: follows Danbooru's own dark-mode toggle.
 
 ### Performance & Reliability
-* **Rate-limited fetcher**: 9 req/sec, 8-concurrency token bucket with multi-tab coordination — stays under Danbooru's 10 req/s server cap even with multiple tabs open. Every dashboard code path goes through the one shared limiter (enforced by an architecture test since v9.9).
+* **Rate-limited fetcher**: 9 req/sec, 8-concurrency token bucket with multi-tab coordination — stays under Danbooru's 10 req/s server cap even with multiple tabs open. Every dashboard code path goes through the one shared limiter (enforced by an architecture test since v9.9). Since v9.10 it adapts to Danbooru's 429s — a gentle restart after a pause, a halved rate that recovers below the rate that drew the 429, doubling pauses when a 429 lands right after resuming, and `X-Rate-Limit` / `Retry-After` honoured when present.
 * **IndexedDB persistence**: post history, daily counts, piestats, and tag analytics cached locally. Quota-safe writes — least-recently-used non-current-user data is evicted on `QuotaExceededError`, never the current user's.
-* **Honest syncs** (v9.9): a sync that could not fetch every page warns and resumes on the next open instead of claiming success over partial data, and posts deleted on Danbooru since the last sync are pruned from the local mirror so milestones and counts don't drift.
+* **Honest syncs** (v9.9): a sync that could not fetch every page warns and resumes on the next open instead of claiming success over partial data, and posts that vanished from Danbooru entirely since the last sync (expunged, or no longer credited to the user) are pruned from the local mirror so milestones and counts don't drift. Since v9.10 rate limits, timeouts and dropped connections are retried, so a full re-sync of a large account finishes in one run.
 * **Persistent storage opt-in** (v9.4+): after first successful sync, requests `navigator.storage.persist()` to survive Safari ITP / Chrome heuristic eviction.
 
 ### Engineering
-* **893 Vitest unit tests** + **7 Playwright e2e tests** (visual baselines for grass, pie widget, settings popover; a mandatory pre-merge gate).
+* **1,028 Vitest unit tests** + **7 Playwright e2e tests** (visual baselines for grass, pie widget, settings popover; a mandatory pre-merge gate).
 * **Architecture fitness tests**: layer-direction enforcement, raw `fetch()` ban, NSFW localStorage key consolidation, `/counts/posts.json` URL consolidation, popover-position formula consolidation, wiki-link tag-name encoding, shared-rate-limiter construction.
 * **Pre-commit hook**: `npm run build` → `npm run lint` → `npm run check:dead` (knip) chained. Blocks regressions before commit.
 
@@ -116,7 +117,7 @@ Visit any user profile, e.g. `https://danbooru.donmai.us/users/701499` or your o
 * The metric selector (top-left of the graph) switches between **Uploads / Approvals / Notes**.
 * The **⚙️ button** opens the settings popover — change theme, grass color, contribution thresholds, NSFW visibility, count-refresh interval, etc.
 * The **📊 button** (next to the username) opens the **Analytics Dashboard** modal. Inside the dashboard:
-  * Tab through the 11 pie chart categories at the top.
+  * Read the **At a glance** summary at the top, then tab through the 11 pie chart categories.
   * Scroll down for **Tag Cloud** (4 category tabs), **Created Tags**, **Scatter Plot** (Score / Tag Count modes), **Milestones**, **Top Posts**, **Recent Popular**, **Random Post**, and other widgets.
   * Click the gear icon in the dashboard header to adjust dashboard-only settings (sync interval, count refresh window, NSFW, etc.).
   * Press the browser **Back** button or click outside the modal to close.
