@@ -666,7 +666,7 @@ export interface DanbooruRelatedTagResponse {
 
 /**
  * Tag implication entry from `/tag_implications.json`.
- * Used by `isTopLevelTag()` — if any implication exists for a tag, it is
+ * Used by `getTopLevelFlags()` (core/top-level-tags) — if any implication exists for a tag, it is
  * NOT considered top-level.
  */
 export interface DanbooruTagImplication {
@@ -733,7 +733,7 @@ export interface MonthlyCountRecord {
 }
 
 /**
- * Cached result of `isTopLevelTag` (tag_implications lookup) stored in the
+ * Cached top-level flag (tag_implications lookup) stored in the
  * `tag_implications_cache` table. Global cache — not tied to the current
  * analytics target tag. `tag_implications` is effectively immutable, so a
  * 180-day TTL is applied at read time.
@@ -741,7 +741,7 @@ export interface MonthlyCountRecord {
 export interface TagImplicationCacheRecord {
   /**
    * Two key shapes coexist in this table:
-   *  - `<tagName>` — antecedent-keyed (`isTopLevelTag` lookup, populated
+   *  - `<tagName>` — antecedent-keyed (`getTopLevelFlags` lookup, populated
    *    by `fetchTopLevelTagsBatch`). The meaningful field is `isTopLevel`.
    *  - `consequent:<parent>` — consequent-keyed (sub-tag breakdown,
    *    populated by `fetchSubTagsForParents`, v9.6.0+). The meaningful

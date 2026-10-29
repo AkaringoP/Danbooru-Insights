@@ -1,5 +1,4 @@
 import type {PostVariant, DanbooruPost} from './types';
-import type {RateLimitedFetch} from './core/rate-limiter';
 
 /* --- Helper: HTML Escaping --- */
 /**
@@ -14,37 +13,6 @@ export function escapeHtml(text: string): string {
 }
 
 /* --- Helper: Tag Utility --- */
-/**
- * Checks whether a tag is top-level (not a sub-tag) by querying its implications.
- * A tag that has antecedent implications (i.e., it implies something else) is a sub-tag.
- *
- * Filters by `status=active` so deleted/declined/retired implications do not
- * count — a tag that *used* to imply something but no longer does is still
- * top-level. Without this filter, e.g. `ninjago` was being treated as a
- * sub-tag because of a deleted `ninjago → the_lego_group` implication.
- *
- * NOTE: The TagAnalyticsApp path uses
- * `TagAnalyticsDataService.getTopLevelFlags` for batched + cached lookups
- * (v10 perf work). This single-tag helper is still used by the
- * UserAnalytics distribution path in `analytics-data-manager.ts`.
- *
- * @param {RateLimitedFetch} rateLimiter
- * @param {string} tagName Exact tag name (underscored).
- * @return {Promise<boolean>} True if top-level, false if sub-tag.
- */
-export async function isTopLevelTag(
-  rateLimiter: RateLimitedFetch,
-  tagName: string,
-): Promise<boolean> {
-  const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}&search[status]=active`;
-  try {
-    const imps = await rateLimiter.fetch(impUrl).then(r => r.json());
-    return !(Array.isArray(imps) && imps.length > 0);
-  } catch {
-    return true; // default to include on error
-  }
-}
-
 /**
  * Returns the CSS class name for a Danbooru user level string.
  * Maps level strings (e.g., "Gold", "Moderator") to Danbooru's user-* CSS classes.

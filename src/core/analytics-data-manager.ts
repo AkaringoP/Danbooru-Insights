@@ -58,7 +58,8 @@ const TOTAL_COUNT_MEMO_MS = 30_000;
 function distributionItemKey(item: DistributionItem): string {
   return item.tagName || item.originalTag || item.name || '';
 }
-import {isTopLevelTag, getBestThumbnailUrl} from '../utils';
+import {getBestThumbnailUrl} from '../utils';
+import {getTopLevelFlags} from './top-level-tags';
 import type {
   TargetUser,
   DistributionItem,
@@ -1479,19 +1480,13 @@ export class AnalyticsDataManager extends DataManager {
       // variant-heavy fandoms still yield `filteredCap` survivors.
       const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
 
-      // isTopLevelTag filter — new in v9.6.2 for character (copy/fav
-      // already filtered). Variants like `abigail_williams_(first_ascension)_(fate)`
+      // Top-level filter (filterTopLevelCandidates), shared with copy/fav.
+      // Variants like `abigail_williams_(first_ascension)_(fate)`
       // collapse into the base tag's sub-tag breakdown instead of
       // competing for a top-10 slot.
-      const filterResults = await this.mapConcurrent(
-        rawCandidates,
-        6,
-        async (item): Promise<DanbooruRelatedTag | null> =>
-          (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
-      );
-      const filteredCandidates = filterResults
-        .filter((item): item is DanbooruRelatedTag => item !== null)
-        .slice(0, filteredCap);
+      const filteredCandidates = (
+        await this.filterTopLevelCandidates(rawCandidates, userInfo)
+      ).slice(0, filteredCap);
 
       // Pre-rerank candidate items. `_item` carries the source row so
       // count-fetch can fall back to its global post_count; stripped
@@ -1623,15 +1618,9 @@ export class AnalyticsDataManager extends DataManager {
 
       const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
 
-      const filterResults = await this.mapConcurrent(
-        rawCandidates,
-        6,
-        async (item): Promise<DanbooruRelatedTag | null> =>
-          (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
-      );
-      const filteredCandidates = filterResults
-        .filter((item): item is DanbooruRelatedTag => item !== null)
-        .slice(0, filteredCap);
+      const filteredCandidates = (
+        await this.filterTopLevelCandidates(rawCandidates, userInfo)
+      ).slice(0, filteredCap);
 
       // _item is a transient prop holding the source DanbooruRelatedTag so
       // we can fall back to its global post_count if the user-scoped count
@@ -1849,32 +1838,11 @@ export class AnalyticsDataManager extends DataManager {
 
       const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
 
-      // Inline /tag_implications.json filter — kept distinct from
-      // `isTopLevelTag` so the fav tab doesn't share the implications
-      // cache with the user-scoped tabs (fav behaviour is fav-set-
-      // dependent and intentionally orthogonal). Concurrency 6 matches
-      // the count-fetch budget.
-      const filterResults = await this.mapConcurrent(
-        rawCandidates,
-        6,
-        async (item): Promise<DanbooruRelatedTag | null> => {
-          const tagName = item.tag.name;
-          const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}&search[status]=active`;
-          try {
-            const imps = await this.rateLimiter
-              .fetch(impUrl)
-              .then(r => r.json());
-            if (Array.isArray(imps) && imps.length > 0) return null;
-            return item;
-          } catch {
-            return item;
-          }
-        },
-      );
-
-      const filteredCandidates = filterResults
-        .filter((item): item is DanbooruRelatedTag => item !== null)
-        .slice(0, filteredCap);
+      // Implication data is a property of the tag name alone, so the fav tab
+      // shares the same cached lookup as the user-scoped tabs.
+      const filteredCandidates = (
+        await this.filterTopLevelCandidates(rawCandidates, userInfo)
+      ).slice(0, filteredCap);
 
       // _item is a transient prop, deleted before the array is returned.
       const preItems: Array<
@@ -3742,6 +3710,30 @@ export class AnalyticsDataManager extends DataManager {
         }),
       );
     }
+  }
+
+  /**
+   * Keep the candidates that are not the antecedent of an active
+   * implication, in their original (frequency) order.
+   *
+   * One batched, cached lookup (core/top-level-tags) replaces the old
+   * per-candidate `/tag_implications.json` fan-out — up to 53 requests for a
+   * 46k-post character pie, 119 across the three related-tag pies, on every
+   * refresh. A failed lookup keeps its candidates and caches nothing, where
+   * the old path's per-tag catch silently kept variants whenever a request
+   * was rate-limited.
+   */
+  private async filterTopLevelCandidates(
+    candidates: DanbooruRelatedTag[],
+    userInfo: TargetUser,
+  ): Promise<DanbooruRelatedTag[]> {
+    const flags = await getTopLevelFlags(
+      this.rateLimiter,
+      this.db,
+      candidates.map(c => c.tag.name),
+      parseInt(userInfo.id || '0'),
+    );
+    return candidates.filter(c => flags.get(c.tag.name) !== false);
   }
 
   /**

@@ -12,6 +12,7 @@ import {
   syncRetryDelayMs,
   SYNC_PAGE_MAX_ATTEMPTS,
 } from '../src/core/analytics-data-manager';
+import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
 
 describe('getBestThumbnailUrl', () => {
   it('빈 post(null)이면 빈 문자열 반환', () => {
@@ -393,6 +394,8 @@ function makeSyncDb(
     tag_implications_cache: {
       get: vi.fn(async () => null),
       put: vi.fn(async () => undefined),
+      bulkGet: vi.fn(async (keys: string[]) => keys.map(() => undefined)),
+      bulkPut: vi.fn(async () => undefined),
     },
     transaction: vi.fn(
       async (_mode: string, _tables: unknown[], cb: () => Promise<void>) => {
@@ -1425,15 +1428,13 @@ function buildDistFetch(
       };
     }
     if (url.startsWith('/tag_implications.json')) {
-      const m = url.match(/antecedent_name_matches\]=([^&]+)/);
-      const name = m ? m[1] : '';
-      const t = tagByName.get(name);
-      // top-level → empty array. variant → 1 row.
-      return {
-        ok: true,
-        status: 200,
-        json: async () => (t && !t.isTopLevel ? [{id: 1}] : []),
-      };
+      // Batched: one row per variant among the comma-joined names.
+      const m = url.match(/antecedent_name_comma\]=([^&]+)/);
+      const names = m ? decodeURIComponent(m[1]).split(',') : [];
+      const rows = names
+        .filter(n => tagByName.get(n)?.isTopLevel === false)
+        .map(n => ({antecedent_name: n, consequent_name: 'base'}));
+      return {ok: true, status: 200, json: async () => rows};
     }
     if (url.startsWith('/counts/posts.json')) {
       // tags=user:NAME alone → getTotalPostCount; tags=user:NAME tagname → per-tag
@@ -1486,6 +1487,7 @@ function makeDistAdm(
 
 describe('getCharacterDistribution — dynamic pool + filter + rerank', () => {
   beforeEach(() => {
+    resetTopLevelSessionCache();
     vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
     vi.stubGlobal('localStorage', {
       getItem: vi.fn(() => null),
@@ -1600,11 +1602,12 @@ describe('getCharacterDistribution — dynamic pool + filter + rerank', () => {
     expect(non[0].tagName).toBe('char_00');
     expect(non[9].tagName).toBe('char_09');
 
-    // For small users charPoolSize returns raw=15 — only 15 implication checks
+    // charPoolSize returns raw=15 for small users — one batched lookup
+    // covers all 15 (was one request per candidate).
     const impCalls = rl.fetch.mock.calls.filter((c: [string]) =>
       c[0].startsWith('/tag_implications.json'),
     );
-    expect(impCalls.length).toBeLessThanOrEqual(15);
+    expect(impCalls.length).toBe(1);
   });
 
   it('Others slice is count-based (N − Σ top10.count)', async () => {
