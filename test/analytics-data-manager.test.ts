@@ -2395,3 +2395,122 @@ describe('AnalyticsDataManager.quickSyncAllPosts', () => {
     expect(AnalyticsDataManager.onProgressCallback).toBeNull();
   });
 });
+
+// A 429 during the post-sync burst used to be saved as data: the rating pie
+// showed Explicit 0 and Recent Popular "No posts found" for the whole cache
+// TTL. Failed runs must not write the cache.
+describe('failed fetches are not cached', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function makeAdm(fetchImpl?: Parameters<typeof makeSyncRateLimiter>[0]) {
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable()) as never,
+      makeSyncRateLimiter(fetchImpl) as never,
+    );
+    const save = vi.spyOn(adm, 'saveStats').mockResolvedValue();
+    const getStats = vi.spyOn(adm, 'getStats');
+    return {adm, save, getStats};
+  }
+  const user = makeSyncUser({id: '42', name: 'tester'});
+
+  it('rating: one failed count keeps the previous cache', async () => {
+    const {adm, save, getStats} = makeAdm();
+    const previous = [{rating: 'e', count: 900, label: 'Explicit'}];
+    getStats.mockResolvedValue(previous);
+    vi.spyOn(adm, 'fetchRemoteCount').mockImplementation(async q => {
+      if (q.includes('rating:e')) throw new Error('HTTP 429');
+      return 10;
+    });
+
+    const result = await adm.getRatingDistribution(user, null, true);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result).toBe(previous);
+  });
+
+  it('rating: a clean run is cached as before', async () => {
+    const {adm, save} = makeAdm();
+    vi.spyOn(adm, 'fetchRemoteCount').mockResolvedValue(10);
+
+    await adm.getRatingDistribution(user, null, true);
+
+    expect(save).toHaveBeenCalledWith(
+      'rating_dist',
+      42,
+      expect.arrayContaining([expect.objectContaining({count: 10})]),
+    );
+  });
+
+  it('status: a failed count with no previous cache returns the partial result unsaved', async () => {
+    const {adm, save, getStats} = makeAdm();
+    getStats.mockResolvedValue(null);
+    vi.spyOn(adm, 'fetchRemoteCount').mockImplementation(async q => {
+      if (q.includes('status:deleted')) throw new Error('HTTP 429');
+      return 5;
+    });
+
+    const result = await adm.getStatusDistribution(user, null, true);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result.find(r => r.name === 'active')?.count).toBe(5);
+  });
+
+  it('recent popular: a 429 is not cached, an empty week is', async () => {
+    const post = {id: 7, score: 50};
+    let nsfwStatus = 429;
+    const {adm, save} = makeAdm(async (url: string) => {
+      if (url.includes('is%3Ansfw')) {
+        return nsfwStatus === 200
+          ? {ok: true, status: 200, json: async () => []}
+          : {
+              ok: false,
+              status: 429,
+              json: async () => {
+                throw new SyntaxError('Unexpected token <');
+              },
+            };
+      }
+      return {ok: true, status: 200, json: async () => [post]};
+    });
+
+    await adm.getRecentPopularPosts(user, true);
+    expect(save).not.toHaveBeenCalled();
+
+    nsfwStatus = 200; // no NSFW upload this week: a real "none"
+    const result = await adm.getRecentPopularPosts(user, true);
+    expect(result).toEqual({sfw: post, nsfw: null});
+    expect(save).toHaveBeenCalledWith('recent_popular_posts', 42, result);
+  });
+
+  it('top posts: an HTML error body marks the run failed', async () => {
+    const {adm, save, getStats} = makeAdm(async (url: string) =>
+      url.includes('rating%3Ag')
+        ? {
+            ok: false,
+            status: 503,
+            json: async () => {
+              throw new SyntaxError('Unexpected token <');
+            },
+          }
+        : {ok: true, status: 200, json: async () => [{id: 1}]},
+    );
+    getStats.mockResolvedValue(null);
+
+    const result = await adm.getTopPostsByType(user, true);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result.g).toBeNull();
+    expect(result.s).toEqual({id: 1});
+  });
+});

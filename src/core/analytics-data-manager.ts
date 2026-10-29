@@ -393,6 +393,32 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
+   * Cache a freshly fetched stat only when every request behind it
+   * succeeded. When some failed (typically a 429 during the post-sync
+   * burst), the result holds zeros / nulls that mean "unknown", not "none";
+   * saving it would serve the failure as fresh data for the whole cache
+   * TTL — a rating pie with Explicit at 0, a Recent Popular widget saying
+   * "No posts found". Instead the previous cached value is returned when
+   * there is one (else the partial result), nothing is written, and the
+   * next open retries.
+   */
+  private async cacheUnlessPartial<T>(
+    cacheKey: string,
+    uploaderId: number,
+    result: T,
+    failed: boolean,
+  ): Promise<T> {
+    if (!uploaderId) return result;
+    if (!failed) {
+      await this.saveStats(cacheKey, uploaderId, result);
+      return result;
+    }
+    log.warn('Partial fetch not cached', {cacheKey});
+    const previous = (await this.getStats(cacheKey, uploaderId)) as T | null;
+    return previous ?? result;
+  }
+
+  /**
    * Centrally selects the most appropriate thumbnail URL for a post.
    * Prioritizes high-quality WebP variants (720x720 or 360x360) for performance.
    * @param {Object} post The post data object from Danbooru API.
@@ -976,6 +1002,7 @@ export class AnalyticsDataManager extends DataManager {
       'pending',
     ];
 
+    let failed = false;
     const tasks = statuses.map(async status => {
       try {
         let tagQuery = `user:${normalizedName} status:${status}`;
@@ -995,6 +1022,7 @@ export class AnalyticsDataManager extends DataManager {
         };
       } catch (e: unknown) {
         log.warn('Failed to fetch count for status', {status, error: e});
+        failed = true;
         return {
           name: status,
           count: 0,
@@ -1004,8 +1032,7 @@ export class AnalyticsDataManager extends DataManager {
     });
 
     const result = await Promise.all(tasks);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
-    return result;
+    return this.cacheUnlessPartial(cacheKey, uploaderId, result, failed);
   }
 
   /**
@@ -1039,6 +1066,7 @@ export class AnalyticsDataManager extends DataManager {
       e: 'Explicit',
     };
 
+    let failed = false;
     const tasks = ratings.map(async rating => {
       try {
         let tagQuery = `user:${normalizedName} rating:${rating}`;
@@ -1054,14 +1082,14 @@ export class AnalyticsDataManager extends DataManager {
         return {rating, count, label: labelMap[rating]};
       } catch (e: unknown) {
         log.warn('Failed to fetch count for rating', {rating, error: e});
+        failed = true;
         return {rating, count: 0, label: labelMap[rating]};
       }
     });
 
     try {
       const results = await Promise.all(tasks);
-      if (uploaderId) await this.saveStats(cacheKey, uploaderId, results);
-      return results;
+      return this.cacheUnlessPartial(cacheKey, uploaderId, results, failed);
     } catch (e: unknown) {
       log.error('Failed to fetch rating distribution', {error: e});
       return [];
@@ -1955,7 +1983,9 @@ export class AnalyticsDataManager extends DataManager {
     }>(cacheKey, uploaderId, forceRefresh);
     if (cached) return cached;
 
-    // Helper for fetching 1 top post
+    // Helper for fetching 1 top post. An empty result is a real "none";
+    // a non-OK reply or a throw marks the run failed (see cacheUnlessPartial).
+    let failed = false;
     const fetchTop = async (
       ratingTag: string,
       extraQuery: string = '',
@@ -1967,12 +1997,15 @@ export class AnalyticsDataManager extends DataManager {
         const normalizedName = userInfo.name.replace(/ /g, '_');
         const query = `user:${normalizedName} order:score rating:${ratingTag} status:active ${extraQuery}`;
         const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
-        const resp = await this.rateLimiter.fetch(url).then(r => r.json());
+        const r = await this.rateLimiter.fetch(url);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const resp = await r.json();
         if (Array.isArray(resp) && resp.length > 0) {
           return resp[0];
         }
       } catch (e: unknown) {
         log.warn('Failed to fetch top post for rating', {ratingTag, error: e});
+        failed = true;
       }
       return null;
     };
@@ -1984,9 +2017,7 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('e'),
     ]);
 
-    const result = {g, s, q, e};
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
-    return result;
+    return this.cacheUnlessPartial(cacheKey, uploaderId, {g, s, q, e}, failed);
   }
 
   /**
@@ -2012,6 +2043,7 @@ export class AnalyticsDataManager extends DataManager {
     }>(cacheKey, uploaderId, forceRefresh);
     if (cached) return cached;
 
+    let failed = false; // see cacheUnlessPartial
     const fetchTop = async (
       ratingTag: string,
     ): Promise<DanbooruPost | null> => {
@@ -2021,12 +2053,15 @@ export class AnalyticsDataManager extends DataManager {
         // blank thumbnail cell.
         const query = `user:${normalizedName} order:score ${ratingTag} age:<1w status:active`;
         const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
-        const resp = await this.rateLimiter.fetch(url).then(r => r.json());
+        const r = await this.rateLimiter.fetch(url);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const resp = await r.json();
         if (Array.isArray(resp) && resp.length > 0) {
           return resp[0];
         }
       } catch (e: unknown) {
         log.warn('Failed to fetch recent top post', {ratingTag, error: e});
+        failed = true;
       }
       return null;
     };
@@ -2036,9 +2071,7 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('is:nsfw'),
     ]);
 
-    const result = {sfw, nsfw};
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
-    return result;
+    return this.cacheUnlessPartial(cacheKey, uploaderId, {sfw, nsfw}, failed);
   }
 
   /**
