@@ -112,6 +112,18 @@ const SLOW_START_MS = 5000;
 const SLOW_START_CONCURRENCY = 2;
 
 /**
+ * A 429 inside the slow-start window — the first request or two after a
+ * pause — means the pause was shorter than the server's own penalty, not
+ * that our rate is too high. In a 46k-post run the edge limiter answered
+ * the first request after a 5 s pause with another 429; treating that as a
+ * rate problem cut the throttle and its ceiling to the 25 % floor for the
+ * rest of the load. Such a 429 now doubles the pause instead (5 s, 10 s,
+ * 20 s, … up to `CONFIG.MAX_BACKOFF_MS`) and leaves throttle and ceiling
+ * alone. A server-provided wait still wins over the doubling.
+ */
+const PAUSE_ESCALATION_FACTOR = 2;
+
+/**
  * Adaptive rate. Each 429 that arrives outside a pause halves the request
  * rate (and concurrency) down to `MIN_THROTTLE` of the configured value;
  * every `THROTTLE_RECOVERY_MS` without a 429 gives back `THROTTLE_STEP`.
@@ -176,6 +188,8 @@ export class RateLimitedFetch {
   private throttleCeiling = 1;
   /** Last ceiling raise (ms epoch). */
   private lastCeilingChangeAt = 0;
+  /** Length of the pause most recently started by this tab's own 429. */
+  private lastPauseMs = 0;
 
   /**
    * @param {number} maxConcurrency Maximum concurrent requests (for general queue).
@@ -432,10 +446,28 @@ export class RateLimitedFetch {
    */
   private triggerBackoff(url: string, response: Response): void {
     const now = Date.now();
+    const {ms: serverMs, source} = backoffFromResponse(response, now);
+    let ms = serverMs;
     // A 429 from a request that was already in flight when an earlier 429
-    // started the pause says nothing new about our rate, so only the first
-    // 429 of an episode cuts the throttle.
-    if (now >= this.backoffUntil) {
+    // started the pause says nothing new, so only the first 429 of an
+    // episode is classified.
+    const inPause = now < this.backoffUntil;
+    const cause = inPause
+      ? 'in-flight'
+      : now < this.slowStartUntil
+        ? 'pause-too-short'
+        : 'rate';
+    if (cause === 'pause-too-short') {
+      // The pause was shorter than the server's penalty: wait longer and
+      // keep the rate (see PAUSE_ESCALATION_FACTOR). Only a guessed
+      // (default) wait is escalated; a server-provided one is used as is.
+      if (source === 'default') {
+        ms = Math.min(
+          CONFIG.MAX_BACKOFF_MS,
+          Math.max(serverMs, this.lastPauseMs * PAUSE_ESCALATION_FACTOR),
+        );
+      }
+    } else if (cause === 'rate') {
       // Remember that this rate was too much: recovery stops one step below.
       this.throttleCeiling = Math.max(
         MIN_THROTTLE,
@@ -445,12 +477,13 @@ export class RateLimitedFetch {
       this.throttle = Math.max(MIN_THROTTLE, this.throttle / 2);
       this.lastThrottleChangeAt = now;
     }
+    if (!inPause) this.lastPauseMs = ms;
     this.lastRateLimitedAt = now;
-    const {ms, source} = backoffFromResponse(response, now);
     const until = now + ms;
     log.warn('429 received, pausing requests', {
       waitMs: Math.round(ms),
       source,
+      cause,
       throttle: this.throttle,
       ceiling: this.throttleCeiling,
       xRateLimit: response.headers?.get?.('x-rate-limit') ?? null,

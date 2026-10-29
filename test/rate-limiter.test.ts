@@ -364,6 +364,54 @@ describe('post-429 recovery', () => {
     expect(rl.getThrottle()).toBe(1);
   });
 
+  // Replays the latest run: a 429 at 46.3 s (rate), then another 0.3 s after
+  // the 5 s pause ended. Treating the second as a rate problem pinned the
+  // throttle and its ceiling at the 25 % floor for the rest of the load.
+  it('a 429 right after a pause doubles the pause and keeps the rate', async () => {
+    const {rl, send} = adaptiveLimiter();
+    await send(429); // steady sending at 1.0
+    expect(rl.getThrottle()).toBe(0.5);
+
+    await vi.advanceTimersByTimeAsync(4100); // pause over, slow start
+    await send(429);
+    expect(rl.getThrottle()).toBe(0.5); // untouched
+    expect(rl.backoffUntil - Date.now()).toBe(10_000 - 1000);
+
+    await vi.advanceTimersByTimeAsync(9100); // second pause over
+    await send(429);
+    expect(rl.backoffUntil - Date.now()).toBe(20_000 - 1000);
+    expect(rl.getThrottle()).toBe(0.5);
+  });
+
+  it('a later 429 while sending normally resets the pause and cuts the rate', async () => {
+    const {rl, send} = adaptiveLimiter();
+    await send(429);
+    await vi.advanceTimersByTimeAsync(4100);
+    await send(429); // resume: 10 s pause
+
+    await vi.advanceTimersByTimeAsync(9000 + 5000 + 100); // pause + slow start
+    await send(429);
+    expect(rl.backoffUntil - Date.now()).toBe(5000 - 1000);
+    expect(rl.getThrottle()).toBe(0.25);
+  });
+
+  it('a server-provided wait is used as is right after a pause', async () => {
+    const {rl, send} = adaptiveLimiter();
+    await send(429);
+    await vi.advanceTimersByTimeAsync(4100);
+
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 429,
+      ok: false,
+      headers: new Headers({'Retry-After': '3'}),
+    });
+    const p = rl.fetch('/x');
+    await vi.advanceTimersByTimeAsync(0);
+    await p;
+    expect(rl.backoffUntil - Date.now()).toBe(3000);
+    expect(rl.getThrottle()).toBe(0.5);
+  });
+
   it('refills more slowly while throttled', async () => {
     global.fetch = vi.fn().mockResolvedValueOnce({status: 429, ok: false});
     const rl = new RateLimitedFetch(6, [0, 0], 5); // 200 ms/token at full rate
