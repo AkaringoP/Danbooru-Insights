@@ -19,7 +19,6 @@ vi.mock('../src/core/rate-limiter', () => ({
   RateLimitedFetch: vi.fn(),
 }));
 vi.mock('../src/utils', () => ({
-  isTopLevelTag: vi.fn(),
   escapeHtml: vi.fn((s: string) => s),
 }));
 

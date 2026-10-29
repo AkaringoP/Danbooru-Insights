@@ -63,7 +63,8 @@ const TOTAL_COUNT_MEMO_MS = 30_000;
 function distributionItemKey(item: DistributionItem): string {
   return item.tagName || item.originalTag || item.name || '';
 }
-import {isTopLevelTag, getBestThumbnailUrl} from '../utils';
+import {getBestThumbnailUrl} from '../utils';
+import {getTopLevelFlags} from './top-level-tags';
 import type {
   TargetUser,
   DistributionItem,
@@ -283,6 +284,71 @@ export function shouldCountHttpAsFailure(status: number): boolean {
   return status !== 429;
 }
 
+/** Total fetch attempts per page in the full-sync worker pool. */
+export const SYNC_PAGE_MAX_ATTEMPTS = 5;
+
+/** How the full-sync worker should react to a failed page fetch. */
+export type SyncFetchErrorKind = 'rate-limit' | 'transient' | 'fatal';
+
+/**
+ * Classify a page-fetch failure in the full-sync worker.
+ *
+ * - `rate-limit`: HTTP 429. The shared rate limiter already paused the whole
+ *   queue (global backoff), so the page is worth retrying after that pause.
+ *   This used to be fatal, so one 429 deep into a 46k-post sync stopped the
+ *   whole run at ~42k and left the user on a "Resume Sync" screen.
+ * - `transient`: 5xx, the 30 s timeout abort, a dropped connection, or a
+ *   truncated/HTML body that fails JSON parsing.
+ * - `fatal`: any other 4xx, or an error we do not recognise. Retrying cannot
+ *   change the answer.
+ */
+export function classifySyncFetchError(err: unknown): SyncFetchErrorKind {
+  const message = err instanceof Error ? err.message : String(err);
+  const status = /^HTTP (\d{3})\b/.exec(message)?.[1];
+  if (status === '429') return 'rate-limit';
+  if (status) return Number(status) >= 500 ? 'transient' : 'fatal';
+
+  // DOMException is not an Error subclass in every runtime, so read the name
+  // off the object instead of relying on instanceof.
+  const name =
+    typeof err === 'object' && err !== null && 'name' in err
+      ? String((err as {name: unknown}).name)
+      : '';
+  // AbortError: our 30 s timeout. TypeError: fetch's network failure
+  // ("Failed to fetch" / "NetworkError when attempting to fetch resource").
+  // SyntaxError: a 200 response whose body was not the JSON we asked for.
+  if (name === 'AbortError' || name === 'TypeError' || name === 'SyntaxError') {
+    return 'transient';
+  }
+  return 'fatal';
+}
+
+/**
+ * Wait before retry number `failures` (1-based count of failures so far).
+ *
+ * Transient errors back off exponentially (1 s, 2 s, 4 s, 8 s). A 429's
+ * wait comes from the server: the rate limiter derives it from Danbooru's
+ * `X-Rate-Limit` header and pauses its queue, and `limiterBackoffMs` is what
+ * is left of that pause. Every retry waits it out here rather than queueing
+ * into the paused limiter, where the request's 30 s timeout would keep
+ * ticking (a server wait can reach ~30 s).
+ */
+export function syncRetryDelayMs(
+  kind: SyncFetchErrorKind,
+  failures: number,
+  limiterBackoffMs: number = 0,
+): number {
+  const own = kind === 'rate-limit' ? 1000 : 1000 * Math.pow(2, failures - 1);
+  return Math.max(own, limiterBackoffMs);
+}
+
+/** Count lookups for one stats run; remembers whether any were lost. */
+interface CountBatch {
+  lookup(query: string): Promise<number>;
+  /** True once a count failed transiently even after its retry. */
+  readonly failed: boolean;
+}
+
 /**
  * AnalyticsDataManager: Handles heavy data fetching for full history.
  */
@@ -337,6 +403,67 @@ export class AnalyticsDataManager extends DataManager {
     if (forceRefresh || !uploaderId) return null;
     const cached = await this.getStats(cacheKey, uploaderId, maxAgeMs);
     return (cached as T | null) ?? null;
+  }
+
+  /**
+   * Cache a freshly fetched stat only when every request behind it
+   * succeeded. When some failed (typically a 429 during the post-sync
+   * burst), the result holds zeros / nulls that mean "unknown", not "none";
+   * saving it would serve the failure as fresh data for the whole cache
+   * TTL — a rating pie with Explicit at 0, a Recent Popular widget saying
+   * "No posts found". Instead the previous cached value is returned when
+   * there is one (else the partial result), nothing is written, and the
+   * next open retries.
+   */
+  private async cacheUnlessPartial<T>(
+    cacheKey: string,
+    uploaderId: number,
+    result: T,
+    failed: boolean,
+  ): Promise<T> {
+    if (!uploaderId) return result;
+    if (!failed) {
+      await this.saveStats(cacheKey, uploaderId, result);
+      return result;
+    }
+    log.warn('Partial fetch not cached', {cacheKey});
+    const previous = (await this.getStats(cacheKey, uploaderId)) as T | null;
+    return previous ?? result;
+  }
+
+  /**
+   * Count fetcher for one stats run. A transient failure (429, 5xx,
+   * timeout, network) is retried once: after a 429 the retry queues behind
+   * the rate limiter's pause and slow start, so it lands after the burst
+   * that caused it. A count still lost after that flips `failed`, and the
+   * caller passes it to `cacheUnlessPartial` — a ranking built on a 0 that
+   * means "unknown" (a top character dropped from the pie) must not be cached.
+   *
+   * Deterministic 4xx failures (e.g. 422 for a search over a Member's tag
+   * limit) are not retried and do not count as lost: refetching cannot
+   * change them, and refusing to cache would re-run them on every open.
+   */
+  private countBatch(): CountBatch {
+    let failed = false;
+    const fetchCount = async (query: string): Promise<number> => {
+      try {
+        return await this.fetchRemoteCount(query);
+      } catch (first: unknown) {
+        if (classifySyncFetchError(first) === 'fatal') throw first;
+        try {
+          return await this.fetchRemoteCount(query);
+        } catch (second: unknown) {
+          if (classifySyncFetchError(second) !== 'fatal') failed = true;
+          throw second;
+        }
+      }
+    };
+    return {
+      lookup: fetchCount,
+      get failed() {
+        return failed;
+      },
+    };
   }
 
   /**
@@ -923,6 +1050,7 @@ export class AnalyticsDataManager extends DataManager {
       'pending',
     ];
 
+    const counts = this.countBatch();
     const tasks = statuses.map(async status => {
       try {
         let tagQuery = `user:${normalizedName} status:${status}`;
@@ -934,7 +1062,7 @@ export class AnalyticsDataManager extends DataManager {
           tagQuery += ` date:>=${dateStr}`;
         }
 
-        const count = await this.fetchRemoteCount(tagQuery);
+        const count = await counts.lookup(tagQuery);
         return {
           name: status,
           count,
@@ -951,8 +1079,7 @@ export class AnalyticsDataManager extends DataManager {
     });
 
     const result = await Promise.all(tasks);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
-    return result;
+    return this.cacheUnlessPartial(cacheKey, uploaderId, result, counts.failed);
   }
 
   /**
@@ -986,6 +1113,7 @@ export class AnalyticsDataManager extends DataManager {
       e: 'Explicit',
     };
 
+    const counts = this.countBatch();
     const tasks = ratings.map(async rating => {
       try {
         let tagQuery = `user:${normalizedName} rating:${rating}`;
@@ -997,7 +1125,7 @@ export class AnalyticsDataManager extends DataManager {
           tagQuery += ` date:>=${dateStr}`;
         }
 
-        const count = await this.fetchRemoteCount(tagQuery);
+        const count = await counts.lookup(tagQuery);
         return {rating, count, label: labelMap[rating]};
       } catch (e: unknown) {
         log.warn('Failed to fetch count for rating', {rating, error: e});
@@ -1007,8 +1135,12 @@ export class AnalyticsDataManager extends DataManager {
 
     try {
       const results = await Promise.all(tasks);
-      if (uploaderId) await this.saveStats(cacheKey, uploaderId, results);
-      return results;
+      return this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        results,
+        counts.failed,
+      );
     } catch (e: unknown) {
       log.error('Failed to fetch rating distribution', {error: e});
       return [];
@@ -1390,6 +1522,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Character Distribution...');
     const uploaderId = parseInt(userInfo.id || '0'); // Need ID for cache key
     const cacheKey = 'character_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -1427,19 +1560,13 @@ export class AnalyticsDataManager extends DataManager {
       // variant-heavy fandoms still yield `filteredCap` survivors.
       const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
 
-      // isTopLevelTag filter — new in v9.6.2 for character (copy/fav
-      // already filtered). Variants like `abigail_williams_(first_ascension)_(fate)`
+      // Top-level filter (filterTopLevelCandidates), shared with copy/fav.
+      // Variants like `abigail_williams_(first_ascension)_(fate)`
       // collapse into the base tag's sub-tag breakdown instead of
       // competing for a top-10 slot.
-      const filterResults = await this.mapConcurrent(
-        rawCandidates,
-        6,
-        async (item): Promise<DanbooruRelatedTag | null> =>
-          (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
-      );
-      const filteredCandidates = filterResults
-        .filter((item): item is DanbooruRelatedTag => item !== null)
-        .slice(0, filteredCap);
+      const filteredCandidates = (
+        await this.filterTopLevelCandidates(rawCandidates, userInfo)
+      ).slice(0, filteredCap);
 
       // Pre-rerank candidate items. `_item` carries the source row so
       // count-fetch can fall back to its global post_count; stripped
@@ -1466,7 +1593,7 @@ export class AnalyticsDataManager extends DataManager {
           this.mapConcurrent(preItems, 6, async obj => {
             if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
             try {
-              const c = await this.fetchRemoteCount(
+              const c = await counts.lookup(
                 `user:${normalizedName} ${obj.tagName}`,
               );
               obj.count = c || obj._item?.tag.post_count || 0;
@@ -1483,7 +1610,12 @@ export class AnalyticsDataManager extends DataManager {
       const top10 = selectTopKByCount(preItems, 10);
       for (const obj of top10) delete obj._item;
 
-      await this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`);
+      await this.attachSubTagBreakdowns(
+        top10,
+        tags,
+        `user:${normalizedName}`,
+        counts,
+      );
 
       // Others = total user uploads − Σ top10.count. Clamped at 0 because
       // a single post can carry multiple characters, so Σtop10.count can
@@ -1508,18 +1640,24 @@ export class AnalyticsDataManager extends DataManager {
 
       // Reuse unchanged thumbs before this write replaces the cache (L-2).
       await this.carryOverThumbs(cacheKey, uploaderId, top10);
-      if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
+      const shown = await this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        top10,
+        counts.failed,
+      );
 
       // Lazy Load Thumbnails
       await this.enrichThumbnails(
         cacheKey,
         uploaderId,
-        top10,
+        shown,
         userInfo,
         reportSubStatus,
+        !counts.failed,
       );
 
-      return top10;
+      return shown;
     } catch (e: unknown) {
       log.warn('Failed to fetch character distribution', {error: e});
       return [];
@@ -1542,6 +1680,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Copyright Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'copyright_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -1571,15 +1710,9 @@ export class AnalyticsDataManager extends DataManager {
 
       const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
 
-      const filterResults = await this.mapConcurrent(
-        rawCandidates,
-        6,
-        async (item): Promise<DanbooruRelatedTag | null> =>
-          (await isTopLevelTag(this.rateLimiter, item.tag.name)) ? item : null,
-      );
-      const filteredCandidates = filterResults
-        .filter((item): item is DanbooruRelatedTag => item !== null)
-        .slice(0, filteredCap);
+      const filteredCandidates = (
+        await this.filterTopLevelCandidates(rawCandidates, userInfo)
+      ).slice(0, filteredCap);
 
       // _item is a transient prop holding the source DanbooruRelatedTag so
       // we can fall back to its global post_count if the user-scoped count
@@ -1602,7 +1735,7 @@ export class AnalyticsDataManager extends DataManager {
           this.mapConcurrent(preItems, 6, async obj => {
             if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
             try {
-              const c = await this.fetchRemoteCount(
+              const c = await counts.lookup(
                 `user:${normalizedName} ${obj.tagName}`,
               );
               obj.count = c || obj._item?.tag.post_count || 0;
@@ -1616,7 +1749,12 @@ export class AnalyticsDataManager extends DataManager {
       const top10 = selectTopKByCount(preItems, 10);
       for (const obj of top10) delete obj._item;
 
-      await this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`);
+      await this.attachSubTagBreakdowns(
+        top10,
+        tags,
+        `user:${normalizedName}`,
+        counts,
+      );
 
       // Others = total user uploads − Σ top10.count; see getCharacterDistribution.
       const sumCount = top10.reduce(
@@ -1638,18 +1776,24 @@ export class AnalyticsDataManager extends DataManager {
 
       // Reuse unchanged thumbs before this write replaces the cache (L-2).
       await this.carryOverThumbs(cacheKey, uploaderId, top10);
-      if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
+      const shown = await this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        top10,
+        counts.failed,
+      );
 
       // Lazy Load
       await this.enrichThumbnails(
         cacheKey,
         uploaderId,
-        top10,
+        shown,
         userInfo,
         reportSubStatus,
+        !counts.failed,
       );
 
-      return top10;
+      return shown;
     } catch (e: unknown) {
       log.warn('Failed to fetch copyright distribution', {error: e});
       return [];
@@ -1706,6 +1850,7 @@ export class AnalyticsDataManager extends DataManager {
     top10: DistributionItem[],
     allUserTags: DanbooruRelatedTag[],
     countQueryPrefix: string,
+    counts: CountBatch,
   ): Promise<void> {
     const topLevelNames = top10
       .map(t => t.tagName)
@@ -1737,7 +1882,7 @@ export class AnalyticsDataManager extends DataManager {
     const userTagCounts = new Map<string, number>();
     await this.mapConcurrent([...subsToFetch], 5, async sub => {
       try {
-        const c = await this.fetchRemoteCount(`${countQueryPrefix} ${sub}`);
+        const c = await counts.lookup(`${countQueryPrefix} ${sub}`);
         if (c > 0) userTagCounts.set(sub, c);
       } catch (e: unknown) {
         log.debug('Failed to fetch sub-tag count', {sub, error: e});
@@ -1768,6 +1913,7 @@ export class AnalyticsDataManager extends DataManager {
     if (!userInfo.name) return [];
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'fav_copyright_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -1797,32 +1943,11 @@ export class AnalyticsDataManager extends DataManager {
 
       const rawCandidates: DanbooruRelatedTag[] = tags.slice(0, rawCap);
 
-      // Inline /tag_implications.json filter — kept distinct from
-      // `isTopLevelTag` so the fav tab doesn't share the implications
-      // cache with the user-scoped tabs (fav behaviour is fav-set-
-      // dependent and intentionally orthogonal). Concurrency 6 matches
-      // the count-fetch budget.
-      const filterResults = await this.mapConcurrent(
-        rawCandidates,
-        6,
-        async (item): Promise<DanbooruRelatedTag | null> => {
-          const tagName = item.tag.name;
-          const impUrl = `/tag_implications.json?search[antecedent_name_matches]=${encodeURIComponent(tagName)}&search[status]=active`;
-          try {
-            const imps = await this.rateLimiter
-              .fetch(impUrl)
-              .then(r => r.json());
-            if (Array.isArray(imps) && imps.length > 0) return null;
-            return item;
-          } catch {
-            return item;
-          }
-        },
-      );
-
-      const filteredCandidates = filterResults
-        .filter((item): item is DanbooruRelatedTag => item !== null)
-        .slice(0, filteredCap);
+      // Implication data is a property of the tag name alone, so the fav tab
+      // shares the same cached lookup as the user-scoped tabs.
+      const filteredCandidates = (
+        await this.filterTopLevelCandidates(rawCandidates, userInfo)
+      ).slice(0, filteredCap);
 
       // _item is a transient prop, deleted before the array is returned.
       const preItems: Array<
@@ -1843,7 +1968,7 @@ export class AnalyticsDataManager extends DataManager {
       await this.mapConcurrent(preItems, 6, async obj => {
         if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
         try {
-          obj.count = await this.fetchRemoteCount(
+          obj.count = await counts.lookup(
             `fav:${normalizedName} ${obj.tagName}`,
           );
         } catch (e: unknown) {
@@ -1857,7 +1982,12 @@ export class AnalyticsDataManager extends DataManager {
       const top10 = selectTopKByCount(preItems, 10);
       for (const obj of top10) delete obj._item;
 
-      await this.attachSubTagBreakdowns(top10, tags, `fav:${normalizedName}`);
+      await this.attachSubTagBreakdowns(
+        top10,
+        tags,
+        `fav:${normalizedName}`,
+        counts,
+      );
 
       // Others base = total favourite count (the fav set's size, not the
       // owner's upload count). One extra /counts/posts.json — negligible
@@ -1865,7 +1995,7 @@ export class AnalyticsDataManager extends DataManager {
       // as character/copyright.
       let totalFavCount = 0;
       try {
-        totalFavCount = await this.fetchRemoteCount(`fav:${normalizedName}`);
+        totalFavCount = await counts.lookup(`fav:${normalizedName}`);
       } catch (e: unknown) {
         log.debug('Failed to fetch total fav count', {error: e});
       }
@@ -1888,17 +2018,23 @@ export class AnalyticsDataManager extends DataManager {
 
       // Reuse unchanged thumbs before this write replaces the cache (L-2).
       await this.carryOverThumbs(cacheKey, uploaderId, top10);
-      if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
+      const shown = await this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        top10,
+        counts.failed,
+      );
 
       await this.enrichThumbnails(
         cacheKey,
         uploaderId,
-        top10,
+        shown,
         userInfo,
         reportSubStatus,
+        !counts.failed,
       );
 
-      return top10;
+      return shown;
     } catch (e: unknown) {
       log.warn('Failed to fetch fav copyright distribution', {error: e});
       return [];
@@ -1935,7 +2071,9 @@ export class AnalyticsDataManager extends DataManager {
     }>(cacheKey, uploaderId, forceRefresh);
     if (cached) return cached;
 
-    // Helper for fetching 1 top post
+    // Helper for fetching 1 top post. An empty result is a real "none";
+    // a non-OK reply or a throw marks the run failed (see cacheUnlessPartial).
+    let failed = false;
     const fetchTop = async (
       ratingTag: string,
       extraQuery: string = '',
@@ -1947,12 +2085,15 @@ export class AnalyticsDataManager extends DataManager {
         const normalizedName = userInfo.name.replace(/ /g, '_');
         const query = `user:${normalizedName} order:score rating:${ratingTag} status:active ${extraQuery}`;
         const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
-        const resp = await this.rateLimiter.fetch(url).then(r => r.json());
+        const r = await this.rateLimiter.fetch(url);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const resp = await r.json();
         if (Array.isArray(resp) && resp.length > 0) {
           return resp[0];
         }
       } catch (e: unknown) {
         log.warn('Failed to fetch top post for rating', {ratingTag, error: e});
+        failed = true;
       }
       return null;
     };
@@ -1964,9 +2105,7 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('e'),
     ]);
 
-    const result = {g, s, q, e};
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
-    return result;
+    return this.cacheUnlessPartial(cacheKey, uploaderId, {g, s, q, e}, failed);
   }
 
   /**
@@ -1992,6 +2131,7 @@ export class AnalyticsDataManager extends DataManager {
     }>(cacheKey, uploaderId, forceRefresh);
     if (cached) return cached;
 
+    let failed = false; // see cacheUnlessPartial
     const fetchTop = async (
       ratingTag: string,
     ): Promise<DanbooruPost | null> => {
@@ -2001,12 +2141,15 @@ export class AnalyticsDataManager extends DataManager {
         // blank thumbnail cell.
         const query = `user:${normalizedName} order:score ${ratingTag} age:<1w status:active`;
         const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
-        const resp = await this.rateLimiter.fetch(url).then(r => r.json());
+        const r = await this.rateLimiter.fetch(url);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const resp = await r.json();
         if (Array.isArray(resp) && resp.length > 0) {
           return resp[0];
         }
       } catch (e: unknown) {
         log.warn('Failed to fetch recent top post', {ratingTag, error: e});
+        failed = true;
       }
       return null;
     };
@@ -2016,9 +2159,7 @@ export class AnalyticsDataManager extends DataManager {
       fetchTop('is:nsfw'),
     ]);
 
-    const result = {sfw, nsfw};
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, result);
-    return result;
+    return this.cacheUnlessPartial(cacheKey, uploaderId, {sfw, nsfw}, failed);
   }
 
   /**
@@ -3062,6 +3203,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Commentary Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'commentary_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3110,7 +3252,7 @@ export class AnalyticsDataManager extends DataManager {
         if (reportSubStatus)
           reportSubStatus(`Fetching Commentary: ${item.name}`);
         try {
-          results[item.idx].count = await this.fetchRemoteCount(item.query);
+          results[item.idx].count = await counts.lookup(item.query);
         } catch (e: unknown) {
           log.debug('Failed to fetch commentary count', {error: e});
         }
@@ -3118,8 +3260,13 @@ export class AnalyticsDataManager extends DataManager {
     );
 
     const filtered = results.filter(r => r.count > 0);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
-    return filtered;
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
+    return shown;
   }
 
   /**
@@ -3135,6 +3282,7 @@ export class AnalyticsDataManager extends DataManager {
       reportSubStatus('Fetching Translation Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'translation_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3183,7 +3331,7 @@ export class AnalyticsDataManager extends DataManager {
     }));
 
     const fetchCount = (query: string): Promise<number> =>
-      this.fetchRemoteCount(query).catch(() => 0);
+      counts.lookup(query).catch(() => 0);
 
     await this.mapConcurrent(
       categories.map((cat, i) => ({...cat, idx: i})),
@@ -3245,8 +3393,13 @@ export class AnalyticsDataManager extends DataManager {
     );
 
     const filtered = results.filter(r => r.count > 0);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
-    return filtered;
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
+    return shown;
   }
 
   /**
@@ -3264,6 +3417,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Gender Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'gender_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3351,14 +3505,14 @@ export class AnalyticsDataManager extends DataManager {
         if (reportSubStatus) reportSubStatus(`Fetching Gender: ${item.name}`);
         try {
           if (item.subQueries) {
-            const counts = await Promise.all(
+            const subCounts = await Promise.all(
               item.subQueries.map((q: string) =>
-                this.fetchRemoteCount(q).catch(() => 0),
+                counts.lookup(q).catch(() => 0),
               ),
             );
-            results[item.idx].count = counts.reduce((sum, n) => sum + n, 0);
+            results[item.idx].count = subCounts.reduce((sum, n) => sum + n, 0);
           } else if (item.query) {
-            results[item.idx].count = await this.fetchRemoteCount(item.query);
+            results[item.idx].count = await counts.lookup(item.query);
           }
         } catch (e: unknown) {
           log.debug('Failed to fetch gender count', {error: e});
@@ -3367,8 +3521,13 @@ export class AnalyticsDataManager extends DataManager {
     );
 
     const filtered = results.filter(r => r.count > 0);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
-    return filtered;
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
+    return shown;
   }
 
   /**
@@ -3386,6 +3545,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Breasts Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'breasts_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3424,9 +3584,7 @@ export class AnalyticsDataManager extends DataManager {
       const tag = obj.tagName;
       if (reportSubStatus) reportSubStatus(`Fetching Breasts: ${obj.name}`);
       try {
-        obj.count = await this.fetchRemoteCount(
-          `user:${normalizedName} ${tag}`,
-        );
+        obj.count = await counts.lookup(`user:${normalizedName} ${tag}`);
       } catch (e: unknown) {
         log.debug('Failed to fetch breasts count', {error: e});
       }
@@ -3439,17 +3597,23 @@ export class AnalyticsDataManager extends DataManager {
 
     // Reuse unchanged thumbs before this write replaces the cache (L-2).
     await this.carryOverThumbs(cacheKey, uploaderId, filtered);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
 
     await this.enrichThumbnails(
       cacheKey,
       uploaderId,
-      filtered,
+      shown,
       userInfo,
       reportSubStatus,
+      !counts.failed,
     );
 
-    return filtered;
+    return shown;
   }
 
   /**
@@ -3468,6 +3632,7 @@ export class AnalyticsDataManager extends DataManager {
       reportSubStatus('Fetching Hair Length Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'hair_length_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3510,7 +3675,7 @@ export class AnalyticsDataManager extends DataManager {
     await this.mapConcurrent(results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Length: ${obj.name}`);
       try {
-        obj.count = await this.fetchRemoteCount(
+        obj.count = await counts.lookup(
           `user:${normalizedName} ${obj.originalTag}`,
         );
       } catch (e: unknown) {
@@ -3523,17 +3688,23 @@ export class AnalyticsDataManager extends DataManager {
       .sort((a, b) => b.count - a.count);
     // Reuse unchanged thumbs before this write replaces the cache (L-2).
     await this.carryOverThumbs(cacheKey, uploaderId, filtered);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
 
     await this.enrichThumbnails(
       cacheKey,
       uploaderId,
-      filtered,
+      shown,
       userInfo,
       reportSubStatus,
+      !counts.failed,
     );
 
-    return filtered;
+    return shown;
   }
 
   /**
@@ -3551,6 +3722,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Hair Color Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'hair_color_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3592,7 +3764,7 @@ export class AnalyticsDataManager extends DataManager {
     await this.mapConcurrent(results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Color: ${obj.name}`);
       try {
-        obj.count = await this.fetchRemoteCount(
+        obj.count = await counts.lookup(
           `user:${normalizedName} ${obj.originalTag}`,
         );
       } catch (e: unknown) {
@@ -3605,17 +3777,23 @@ export class AnalyticsDataManager extends DataManager {
       .sort((a, b) => b.count - a.count);
     // Reuse unchanged thumbs before this write replaces the cache (L-2).
     await this.carryOverThumbs(cacheKey, uploaderId, filtered);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
 
     await this.enrichThumbnails(
       cacheKey,
       uploaderId,
-      filtered,
+      shown,
       userInfo,
       reportSubStatus,
+      !counts.failed,
     );
 
-    return filtered;
+    return shown;
   }
 
   /**
@@ -3672,6 +3850,7 @@ export class AnalyticsDataManager extends DataManager {
     items: DistributionItem[],
     userInfo: TargetUser,
     _statusCallback: ((msg: string) => void) | null = null,
+    persist = true,
   ): Promise<void> {
     let hasUpdates = false;
     const normalizedName = userInfo.name.replace(/ /g, '_');
@@ -3724,8 +3903,10 @@ export class AnalyticsDataManager extends DataManager {
     });
 
     if (hasUpdates && uploaderId) {
-      // Save updated stats
-      await this.saveStats(cacheKey, uploaderId, items);
+      // Save updated stats — unless `items` is a partial result its caller
+      // declined to cache (see cacheUnlessPartial); the thumbs still reach
+      // the open pie through the event below.
+      if (persist) await this.saveStats(cacheKey, uploaderId, items);
 
       // Notify UI
       // How? We need a global event or callback.
@@ -3736,6 +3917,30 @@ export class AnalyticsDataManager extends DataManager {
         }),
       );
     }
+  }
+
+  /**
+   * Keep the candidates that are not the antecedent of an active
+   * implication, in their original (frequency) order.
+   *
+   * One batched, cached lookup (core/top-level-tags) replaces the old
+   * per-candidate `/tag_implications.json` fan-out — up to 53 requests for a
+   * 46k-post character pie, 119 across the three related-tag pies, on every
+   * refresh. A failed lookup keeps its candidates and caches nothing, where
+   * the old path's per-tag catch silently kept variants whenever a request
+   * was rate-limited.
+   */
+  private async filterTopLevelCandidates(
+    candidates: DanbooruRelatedTag[],
+    userInfo: TargetUser,
+  ): Promise<DanbooruRelatedTag[]> {
+    const flags = await getTopLevelFlags(
+      this.rateLimiter,
+      this.db,
+      candidates.map(c => c.tag.name),
+      parseInt(userInfo.id || '0'),
+    );
+    return candidates.filter(c => flags.get(c.tag.name) !== false);
   }
 
   /**
@@ -3976,6 +4181,7 @@ export class AnalyticsDataManager extends DataManager {
         uploaderId,
         startId,
         total,
+        committed: currentNo,
         reportProgress,
         succeeded: !pageFailed,
       });
@@ -4122,7 +4328,8 @@ export class AnalyticsDataManager extends DataManager {
    * Build the worker function used by the syncAllPosts worker pool.
    * Each worker:
    *   1. claims the next page via `claimPage` (shared atomic counter),
-   *   2. fetches with up to 3 retries on 5xx,
+   *   2. fetches with retries on 429 / 5xx / timeout / network errors
+   *      (classifySyncFetchError, up to SYNC_PAGE_MAX_ATTEMPTS),
    *   3. buffers the result by page number,
    *   4. drains the buffer in order — bulkPut'ing each batch with
    *      `no: ++currentNo` sequential numbering.
@@ -4215,42 +4422,41 @@ export class AnalyticsDataManager extends DataManager {
               `Fetching Page ${currentPage} (Pending: ${pending})...`,
             );
 
-            // Retry Logic
+            // Retry Logic — see classifySyncFetchError for what is retried.
             let items: DanbooruPost[] | null = null;
             let attempts = 0;
-            while (attempts < 3) {
+            while (attempts < SYNC_PAGE_MAX_ATTEMPTS) {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
               try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
-
                 const fetchResp = await this.rateLimiter.fetch(url, {
                   signal: controller.signal,
                 });
-                clearTimeout(timeoutId);
                 if (!fetchResp.ok) throw new Error(`HTTP ${fetchResp.status}`);
                 items = await fetchResp.json();
                 break; // Success
               } catch (err: unknown) {
                 attempts++;
-                const errMsg = err instanceof Error ? err.message : String(err);
-                const isServerErr =
-                  errMsg.includes('500') ||
-                  errMsg.includes('502') ||
-                  errMsg.includes('503') ||
-                  errMsg.includes('504');
+                const kind = classifySyncFetchError(err);
                 workerLog.warn('Page fetch attempt failed', {
                   workerId,
                   page: currentPage,
                   attempt: attempts,
-                  error: errMsg,
+                  kind,
+                  error: err instanceof Error ? err.message : String(err),
                 });
 
-                if (attempts >= 3 || !isServerErr) throw err; // Give up or fatal error
-
-                // Backoff: 1s, 2s, 4s...
-                await new Promise(r =>
-                  setTimeout(r, 1000 * Math.pow(2, attempts - 1)),
+                if (kind === 'fatal' || attempts >= SYNC_PAGE_MAX_ATTEMPTS) {
+                  throw err; // Give up or fatal error
+                }
+                const waitMs = syncRetryDelayMs(
+                  kind,
+                  attempts,
+                  this.rateLimiter.backoffRemainingMs(),
                 );
+                await new Promise(r => setTimeout(r, waitMs));
+              } finally {
+                clearTimeout(timeoutId);
               }
             }
             pageAttempts = attempts + 1;
@@ -4363,11 +4569,20 @@ export class AnalyticsDataManager extends DataManager {
     uploaderId: number;
     startId: number;
     total: number;
+    /** This user's post count after the run (resume seed + pages committed). */
+    committed: number;
     reportProgress: (c: number, t: number, msg?: string) => void;
     succeeded: boolean;
   }): Promise<void> {
-    const {userInfo, uploaderId, startId, total, reportProgress, succeeded} =
-      args;
+    const {
+      userInfo,
+      uploaderId,
+      startId,
+      total,
+      committed,
+      reportProgress,
+      succeeded,
+    } = args;
 
     // Completion claims are only written when every page landed. Stamping
     // them after a failed page would tell the next open "this user is fully
@@ -4392,8 +4607,14 @@ export class AnalyticsDataManager extends DataManager {
     // narrow across the method call.
     await this.cleanupStaleData(userInfo.id!);
 
-    // Signal UI: Processing Stats
-    reportProgress(total, total, 'PREPARING');
+    // Signal UI: Processing Stats. A failed run reports what it actually
+    // committed — painting total/total here showed "46,894 / 46,894 (100%)"
+    // over a sync that had stopped thousands of posts short.
+    reportProgress(
+      succeeded ? total : Math.min(committed, total),
+      total,
+      'PREPARING',
+    );
 
     // Refresh the critical (cheap, must-be-fresh) stats after sync. If startId
     // was 0, it was a Full Sync; otherwise it's a Partial Sync. Heavy tag
@@ -4698,5 +4919,10 @@ export class AnalyticsDataManager extends DataManager {
     // Clear metadata (Last Sync Time)
     const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
     localStorage.removeItem(lastSyncKey);
+
+    // The backfill-complete flag describes rows that no longer exist. Leaving
+    // it would vouch for whatever the next (possibly partial) sync writes;
+    // needsPostMetadataBackfill re-derives it from the rows on next check.
+    localStorage.removeItem(`di_post_metadata_v2_${uploaderId}`);
   }
 }

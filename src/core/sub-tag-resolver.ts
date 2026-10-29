@@ -10,7 +10,7 @@
  *     `/tag_implications.json` with the `consequent_name_comma` batched
  *     filter. Cached in `tag_implications_cache` with key prefix
  *     `consequent:` to coexist with the existing `tagName`-keyed
- *     `isTopLevelTag` cache. 180d TTL — `tag_implications` is near-
+ *     top-level-tags cache. 180d TTL — `tag_implications` is near-
  *     immutable.
  *
  *  2. `applySubTagBreakdown` — pure function. Given a parent's sub-tag
@@ -28,6 +28,10 @@
  */
 import type {RateLimitedFetch} from './rate-limiter';
 import {createLogger} from './logger';
+import {
+  IMPLICATIONS_CACHE_SCHEMA_VERSION,
+  IMPLICATIONS_CACHE_TTL_MS,
+} from './top-level-tags';
 import type {
   DanbooruTagImplication,
   SubTagBreakdownEntry,
@@ -40,14 +44,13 @@ export type {SubTagBreakdownEntry};
 const log = createLogger('SubTagResolver');
 
 /** 180-day TTL — same as the antecedent-keyed isTopLevel cache. */
-const CACHE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const CACHE_TTL_MS = IMPLICATIONS_CACHE_TTL_MS;
 
 /**
- * Same schema version as `apps/tag-analytics-data.IMPLICATIONS_CACHE_SCHEMA_VERSION`.
  * Both keying schemes (antecedent + consequent) share the URL contract
  * (`search[status]=active` required) so they share the version number.
  */
-const CACHE_SCHEMA_VERSION = 2;
+const CACHE_SCHEMA_VERSION = IMPLICATIONS_CACHE_SCHEMA_VERSION;
 
 /** Cache-key prefix that distinguishes consequent-keyed records. */
 const KEY_PREFIX = 'consequent:';

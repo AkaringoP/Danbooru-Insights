@@ -1447,6 +1447,14 @@ async function fetchDistributionForTab(
       await dataManager.getGenderDistribution(user),
     );
   }
+  // Hair tabs are count-based like character/copyright: no frequency
+  // preprocessing (same as the initial-load and live-patch paths).
+  if (tabName === 'hair_length') {
+    return dataManager.getHairLengthDistribution(user);
+  }
+  if (tabName === 'hair_color') {
+    return dataManager.getHairColorDistribution(user);
+  }
   if (tabName === 'commentary') {
     return preprocessFrequencyTab(
       await dataManager.getCommentaryDistribution(user),

@@ -16,7 +16,6 @@ vi.mock('../src/core/analytics-data-manager', () => ({
 }));
 vi.mock('../src/core/rate-limiter', () => ({RateLimitedFetch: vi.fn()}));
 vi.mock('../src/utils', () => ({
-  isTopLevelTag: vi.fn(),
   escapeHtml: vi.fn((s: string) => s),
 }));
 
@@ -25,7 +24,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 describe('parseImplicationsResponse', () => {
   it('marks every chunk tag as top-level when response is empty', async () => {
     const {parseImplicationsResponse} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     const result = parseImplicationsResponse(['alpha', 'beta', 'gamma'], []);
     expect(result.get('alpha')).toBe(true);
     expect(result.get('beta')).toBe(true);
@@ -34,7 +33,7 @@ describe('parseImplicationsResponse', () => {
 
   it('marks tags appearing as antecedent_name as NOT top-level', async () => {
     const {parseImplicationsResponse} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     const imps = [
       {antecedent_name: 'beta', consequent_name: 'beta_parent'},
       {antecedent_name: 'gamma', consequent_name: 'gamma_parent'},
@@ -47,7 +46,7 @@ describe('parseImplicationsResponse', () => {
 
   it('ignores implication entries whose antecedent is not in the chunk', async () => {
     const {parseImplicationsResponse} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     // A chunk of ['alpha'] should not be affected by an implication about 'beta'.
     const imps = [{antecedent_name: 'beta', consequent_name: 'beta_parent'}];
     const result = parseImplicationsResponse(['alpha'], imps);
@@ -57,14 +56,14 @@ describe('parseImplicationsResponse', () => {
 
   it('handles non-array response as empty (all top-level)', async () => {
     const {parseImplicationsResponse} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     const result = parseImplicationsResponse(['alpha'], {error: 'not found'});
     expect(result.get('alpha')).toBe(true);
   });
 
   it('handles implication entries missing antecedent_name gracefully', async () => {
     const {parseImplicationsResponse} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     const imps = [
       {consequent_name: 'orphan_consequent'},
       {antecedent_name: 'beta'},
@@ -76,7 +75,7 @@ describe('parseImplicationsResponse', () => {
 
   it('returns empty map for empty chunk', async () => {
     const {parseImplicationsResponse} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     const result = parseImplicationsResponse([], []);
     expect(result.size).toBe(0);
   });
@@ -87,7 +86,7 @@ describe('isImplicationCacheValid', () => {
 
   it('accepts a freshly-written entry stamped with the current schema', async () => {
     const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     expect(
       isImplicationCacheValid(
         NOW - 1000,
@@ -99,7 +98,7 @@ describe('isImplicationCacheValid', () => {
 
   it('accepts an entry within 180 days stamped with the current schema', async () => {
     const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     expect(
       isImplicationCacheValid(
         NOW - 179 * DAY_MS,
@@ -111,7 +110,7 @@ describe('isImplicationCacheValid', () => {
 
   it('rejects an entry older than 180 days', async () => {
     const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     expect(
       isImplicationCacheValid(
         NOW - 181 * DAY_MS,
@@ -123,7 +122,7 @@ describe('isImplicationCacheValid', () => {
 
   it('rejects a future-dated fetchedAt (clock skew defense)', async () => {
     const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     expect(
       isImplicationCacheValid(
         NOW + 1000,
@@ -135,14 +134,14 @@ describe('isImplicationCacheValid', () => {
 
   it('rejects records missing schemaVersion (pre-v9.6 entries)', async () => {
     const {isImplicationCacheValid} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     // Within TTL window but no embedded schemaVersion → treated as stale.
     expect(isImplicationCacheValid(NOW - 1000, NOW, undefined)).toBe(false);
   });
 
   it('rejects records with a mismatched schemaVersion (next contract bump)', async () => {
     const {isImplicationCacheValid, IMPLICATIONS_CACHE_SCHEMA_VERSION} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     expect(
       isImplicationCacheValid(
         NOW - 1000,
@@ -156,13 +155,13 @@ describe('isImplicationCacheValid', () => {
 describe('IMPLICATIONS cache constants', () => {
   it('exposes a 180-day TTL', async () => {
     const {IMPLICATIONS_CACHE_TTL_MS} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     expect(IMPLICATIONS_CACHE_TTL_MS).toBe(180 * DAY_MS);
   });
 
   it('exposes a non-trivial chunk size for URL-length safety', async () => {
     const {IMPLICATIONS_BATCH_CHUNK_SIZE} =
-      await import('../src/apps/tag-analytics-data');
+      await import('../src/core/top-level-tags');
     // Must comfortably cover the 20-candidate case without spilling.
     expect(IMPLICATIONS_BATCH_CHUNK_SIZE).toBeGreaterThanOrEqual(20);
   });

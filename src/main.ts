@@ -10,6 +10,7 @@ import {GrassApp} from './apps/grass-app';
 import {UserAnalyticsApp} from './apps/user-analytics-app';
 import {TagAnalyticsApp} from './apps/tag-analytics-app';
 import {shouldRunDiagnostic, showDiagnostic} from './dev/diagnostic';
+import {installLogCapture} from './dev/log-capture';
 
 // Reserved path segments that are not tag show pages
 const WIKI_RESERVED = new Set(['search', 'show_or_new', 'new']);
@@ -100,6 +101,10 @@ async function main(): Promise<void> {
   // covers pages where GrassApp doesn't run (tag pages, error pages)
   // and unusually slow syncs.
   if (shouldRunDiagnostic()) {
+    // Mirror console output into the panel's Logs section. Installed before
+    // any app starts so a sync failure later in the session is captured —
+    // mobile browsers have no DevTools to read it from otherwise.
+    installLogCapture();
     let fired = false;
     const openDiag = () => {
       if (fired) return;

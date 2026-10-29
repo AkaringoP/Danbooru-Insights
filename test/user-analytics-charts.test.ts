@@ -422,3 +422,57 @@ describe('renderPieWidget — lazy-revalidate event contract', () => {
     expect(badge.classList.contains('is-active')).toBe(false);
   });
 });
+
+describe('renderPieWidget — lazy tab loading', () => {
+  // On a cold cache six tabs arrive without data and load when opened.
+  // Hair_L / Hair_C had no branch in the on-open fetcher and silently
+  // rendered "No data available".
+  const FETCHER_BY_TAB: Record<string, keyof AnalyticsDataManager> = {
+    character: 'getCharacterDistribution',
+    fav_copyright: 'getFavCopyrightDistribution',
+    status: 'getStatusDistribution',
+    rating: 'getRatingDistribution',
+    breasts: 'getBreastsDistribution',
+    hair_length: 'getHairLengthDistribution',
+    hair_color: 'getHairColorDistribution',
+    gender: 'getGenderDistribution',
+    commentary: 'getCommentaryDistribution',
+    translation: 'getTranslationDistribution',
+  };
+
+  it('every tab without preloaded data fetches its own distribution on open', async () => {
+    const dm = Object.fromEntries(
+      Object.values(FETCHER_BY_TAB).map(m => [m, vi.fn(async () => [])]),
+    ) as unknown as AnalyticsDataManager;
+    const container = makeContainer();
+    renderPieWidget(
+      container,
+      {copyright: []},
+      true,
+      dm,
+      {targetUser: TARGET_USER},
+      null,
+    );
+
+    const tabs = Array.from(
+      container.querySelectorAll<HTMLElement>('.di-pie-tab'),
+    )
+      .map(b => b.getAttribute('data-mode') ?? '')
+      .filter(mode => mode !== 'copyright');
+    // Every rendered tab is covered by this table, so a new tab without a
+    // fetch branch fails here too.
+    expect(tabs.sort()).toEqual(Object.keys(FETCHER_BY_TAB).sort());
+
+    for (const mode of tabs) {
+      (
+        container.querySelector(
+          `.di-pie-tab[data-mode="${mode}"]`,
+        ) as HTMLElement
+      ).click();
+      await Promise.resolve();
+      await Promise.resolve();
+      const fetcher = dm[FETCHER_BY_TAB[mode]] as ReturnType<typeof vi.fn>;
+      expect(fetcher, `tab ${mode}`).toHaveBeenCalledTimes(1);
+    }
+  });
+});

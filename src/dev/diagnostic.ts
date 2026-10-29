@@ -15,6 +15,7 @@
  */
 
 import {APP_VERSION} from '../version';
+import {getCapturedLogs, type CapturedLog} from './log-capture';
 
 // ─── Constants ───────────────────────────────────────────────────────
 
@@ -227,6 +228,12 @@ interface DiagPanel {
   show(): void;
   hide(): void;
   getText(): string;
+  /** Run `fn` whenever the panel opens and right before Copy reads it. */
+  onRefresh(fn: () => void): void;
+  /** Drop every section (and its refreshers) before a full rebuild. */
+  reset(): void;
+  /** Wire the header's Refresh button to a full rebuild. */
+  setRebuild(fn: () => Promise<void>): void;
 }
 
 function createPanel(): DiagPanel {
@@ -253,6 +260,7 @@ function createPanel(): DiagPanel {
   copyBtn.textContent = 'Copy';
   copyBtn.style.cssText = btnStyle('#2d8a4e');
   copyBtn.onclick = () => {
+    runRefreshers();
     const text = panel.getText();
     if (navigator.clipboard) {
       navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
@@ -263,12 +271,32 @@ function createPanel(): DiagPanel {
     setTimeout(() => (copyBtn.textContent = 'Copy'), 1500);
   };
 
+  // Sections other than Logs are a snapshot from when they were built (DB
+  // rows, remote counts). Refresh re-reads them, e.g. after a sync finished
+  // or failed with the panel already open. Manual on purpose: rebuilding
+  // fires remote count queries, which should not run on every open.
+  let rebuild: (() => Promise<void>) | null = null;
+  const refreshBtn = document.createElement('button');
+  refreshBtn.textContent = 'Refresh';
+  refreshBtn.style.cssText = btnStyle('#3a6ea5');
+  refreshBtn.onclick = async () => {
+    if (!rebuild || refreshBtn.disabled) return;
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = 'Refreshing…';
+    try {
+      await rebuild();
+    } finally {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = 'Refresh';
+    }
+  };
+
   const closeBtn = document.createElement('button');
   closeBtn.textContent = 'Close';
   closeBtn.style.cssText = btnStyle('#c93c37');
   closeBtn.onclick = () => panel.hide();
 
-  btnGroup.append(copyBtn, closeBtn);
+  btnGroup.append(refreshBtn, copyBtn, closeBtn);
   header.appendChild(btnGroup);
   container.appendChild(header);
 
@@ -290,6 +318,18 @@ function createPanel(): DiagPanel {
 
   document.body.appendChild(container);
   document.body.appendChild(reopenBtn);
+
+  // Live sections (e.g. Logs) re-render from current state on each open.
+  const refreshers: Array<() => void> = [];
+  const runRefreshers = () => {
+    for (const fn of refreshers) {
+      try {
+        fn();
+      } catch {
+        /* one broken section must not block the rest */
+      }
+    }
+  };
 
   const panel: DiagPanel = {
     container,
@@ -356,6 +396,7 @@ function createPanel(): DiagPanel {
     },
 
     show(): void {
+      runRefreshers();
       container.style.display = '';
       reopenBtn.style.display = 'none';
     },
@@ -363,6 +404,20 @@ function createPanel(): DiagPanel {
     hide(): void {
       container.style.display = 'none';
       reopenBtn.style.display = '';
+    },
+
+    onRefresh(fn: () => void): void {
+      refreshers.push(fn);
+      fn();
+    },
+
+    reset(): void {
+      content.textContent = '';
+      refreshers.length = 0;
+    },
+
+    setRebuild(fn: () => Promise<void>): void {
+      rebuild = fn;
     },
 
     getText(): string {
@@ -399,6 +454,43 @@ function createPanel(): DiagPanel {
   };
 
   return panel;
+}
+
+const LOG_COLORS: Record<CapturedLog['level'], string> = {
+  error: '#ff6b6b',
+  warn: '#ffb347',
+  info: '#8fd3ff',
+  log: '#c0c0c0',
+  debug: '#888',
+};
+
+/**
+ * Logs section: WARN/ERROR (and our own INFO/DEBUG/Perf lines) captured
+ * since page load by dev/log-capture. Re-rendered on every panel open and
+ * before Copy, so a sync that fails after the panel was first built still
+ * shows up. Newest last, matching console order.
+ */
+function buildLogsSection(panel: DiagPanel): void {
+  const sec = panel.addSection('Logs', false);
+  panel.onRefresh(() => {
+    sec.textContent = '';
+    const logs = getCapturedLogs();
+    const warnCount = logs.filter(l => l.level === 'warn').length;
+    const errorCount = logs.filter(l => l.level === 'error').length;
+    panel.addLine(
+      sec,
+      'Captured',
+      `${logs.length} lines (${errorCount} error, ${warnCount} warn)`,
+    );
+    for (const entry of logs) {
+      const line = document.createElement('div');
+      line.style.cssText =
+        `color:${LOG_COLORS[entry.level]};white-space:pre-wrap;` +
+        'word-break:break-all;border-bottom:1px solid #2a2a44;padding:1px 0;';
+      line.textContent = `[${(entry.t / 1000).toFixed(1)}s] ${entry.level.toUpperCase()} ${entry.text}`;
+      sec.appendChild(line);
+    }
+  });
 }
 
 function btnStyle(bg: string): string {
@@ -816,10 +908,6 @@ async function buildTagAnalyticsSection(
 
 // ─── Main entry ──────────────────────────────────────────────────────
 
-// T-26 baseline: complexity 28. Top-level entry — branches across panel
-// creation × URL detection × per-section dispatch × DB open failures.
-// Dev-only.
-// eslint-disable-next-line complexity
 export async function showDiagnostic(): Promise<void> {
   // 1. Create panel first (even if everything else fails)
   let panel: DiagPanel;
@@ -836,6 +924,22 @@ export async function showDiagnostic(): Promise<void> {
   // in the corner, so the entry point stays discoverable.
   panel.hide();
 
+  await populatePanel(panel);
+  // Wired only after the first build lands: an earlier click would reset the
+  // panel mid-build and interleave two sets of sections. Until then Refresh
+  // is a no-op.
+  panel.setRebuild(async () => {
+    panel.reset();
+    await populatePanel(panel);
+  });
+}
+
+/** Build every section from scratch. Runs on load and on Refresh. */
+// T-26 baseline: complexity 28. Section builder — branches across
+// URL detection × per-section dispatch × DB open failures.
+// Dev-only.
+// eslint-disable-next-line complexity
+async function populatePanel(panel: DiagPanel): Promise<void> {
   // 2. Open DB
   let db: IDBDatabase | null = null;
   try {
@@ -850,6 +954,13 @@ export async function showDiagnostic(): Promise<void> {
   } catch {
     const sec = panel.addSection('System', true);
     panel.addLine(sec, 'Error', 'Failed to collect system info');
+  }
+
+  // 3b. Captured console logs (no DB needed)
+  try {
+    buildLogsSection(panel);
+  } catch {
+    /* panel still useful without logs */
   }
 
   if (!db) return;

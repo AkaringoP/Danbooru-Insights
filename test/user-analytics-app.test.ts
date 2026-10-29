@@ -296,6 +296,76 @@ describe('UserAnalyticsApp.renderDashboard - quick-sync branch', () => {
   });
 });
 
+describe('UserAnalyticsApp.renderDashboard - resume-sync gate', () => {
+  it('shows the resume view from the pre-check, before any dashboard fetch', async () => {
+    // A large account left short by a failed sync used to sit through the
+    // whole 14-step count load before this view replaced the spinner.
+    const {app, content} = makeApp();
+    stubDataManager(app.dataManager, {
+      syncStats: {count: 41_800, lastDate: '2026-10-28'},
+      totalCount: 46_894,
+    });
+    const fetchData = vi
+      .spyOn(app.dataService, 'fetchDashboardData')
+      .mockRejectedValue(new Error('must not be called'));
+
+    await app.renderDashboard();
+
+    expect(fetchData).not.toHaveBeenCalled();
+    expect(content.textContent).toContain('Data Synchronization Required');
+    expect(content.querySelector('#analytics-start-sync')?.textContent).toBe(
+      'Resume Sync',
+    );
+  });
+
+  it('tints the Resume Sync bar amber while a 429 has requests paused', async () => {
+    const {app, content} = makeApp();
+    stubDataManager(app.dataManager, {
+      syncStats: {count: 41_800, lastDate: '2026-10-28'},
+      totalCount: 46_894,
+    });
+    await app.renderDashboard();
+    // A sync that takes the global lock and stays running for the test.
+    app.dataManager.syncAllPosts = vi.fn(() => {
+      AnalyticsDataManager.isGlobalSyncing = true;
+      return new Promise(() => {});
+    }) as unknown as AnalyticsDataManager['syncAllPosts'];
+    let remaining = 3000;
+    app.rateLimiter.backoffRemainingMs = vi.fn(() => remaining);
+    vi.useFakeTimers();
+    try {
+      (content.querySelector('#analytics-start-sync') as HTMLElement).click();
+      const bar = content.querySelector('#analytics-main-bar') as HTMLElement;
+
+      vi.advanceTimersByTime(500);
+      expect(bar.style.background).toBe('rgb(232, 149, 12)');
+
+      remaining = 0;
+      vi.advanceTimersByTime(500);
+      expect(bar.style.background).toBe('rgb(45, 164, 78)');
+    } finally {
+      AnalyticsDataManager.isGlobalSyncing = false;
+      vi.advanceTimersByTime(500); // loop sees the sync ended and stops
+      vi.useRealTimers();
+    }
+  });
+
+  it('goes on to the dashboard fetch when the local DB is within tolerance', async () => {
+    const {app} = makeApp();
+    stubDataManager(app.dataManager, {
+      syncStats: {count: 46_890, lastDate: '2026-10-28'},
+      totalCount: 46_894,
+    });
+    const fetchData = vi
+      .spyOn(app.dataService, 'fetchDashboardData')
+      .mockRejectedValue(new Error('stop here'));
+
+    await app.renderDashboard().catch(() => {});
+
+    expect(fetchData).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('UserAnalyticsApp.buildMiniReportButton', () => {
   afterEach(() => {
     vi.mocked(isTouchDevice).mockReturnValue(false);
@@ -547,6 +617,35 @@ describe('UserAnalyticsApp.performPartialSync — sync outcome reporting', () =>
     await app.performPartialSync(null, false);
 
     expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('shows the sync status amber while a 429 has requests paused', async () => {
+    const {app} = makeApp();
+    stubForFullSync(app, {complete: true, started: true});
+    app.rateLimiter.backoffRemainingMs = vi.fn(() => 3000);
+    const status = vi.spyOn(app, 'updateHeaderStatus');
+
+    await app.performPartialSync(null, false);
+
+    expect(status).toHaveBeenCalledWith(
+      expect.stringContaining('Synced:'),
+      '#e8950c',
+    );
+  });
+
+  it('keeps the sync status red while fetching normally', async () => {
+    const {app} = makeApp();
+    stubForFullSync(app, {complete: true, started: true});
+    app.rateLimiter.backoffRemainingMs = vi.fn(() => 0);
+    const status = vi.spyOn(app, 'updateHeaderStatus');
+
+    await app.performPartialSync(null, false);
+
+    expect(status).toHaveBeenCalledWith(
+      expect.stringContaining('Synced:'),
+      '#ff4444',
+    );
+    expect(status).not.toHaveBeenCalledWith(expect.anything(), '#e8950c');
   });
 });
 
