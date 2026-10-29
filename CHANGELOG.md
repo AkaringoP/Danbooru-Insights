@@ -4,7 +4,7 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
-## v9.11.0 — "At a glance": the user summed up in two lines
+## v9.11.1 — "At a glance": the user summed up in two lines
 
 ### Added
 - **An "At a glance" card at the top of the dashboard.** Two lines that sum
@@ -40,6 +40,10 @@ All notable changes to Danbooru Insights are documented here.
   `scrollbar-width` property made Chrome ignore the custom always-visible
   scrollbar and fall back to macOS overlay scrollbars that only appear while
   scrolling. It now shows with a faint rail in light and dark themes.
+- **Coloured words in the summary read at the same size.** Each theme's
+  green / blue / amber / red now share one brightness; a dimmer colour next
+  to a brighter one looked thinner and smaller, and the light theme's amber
+  fell below the WCAG AA contrast minimum.
 
 ---
 

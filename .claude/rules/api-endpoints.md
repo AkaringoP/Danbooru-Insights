@@ -20,7 +20,7 @@ All API calls must go through `RateLimitedFetch`.
 
 `AnalyticsDataManager.getAbandonedPostIds(postIds)` runs a background, non-blocking pass (`mapConcurrent`, concurrency 6) over the mintagged ids: `buildPostVersionsUrl(postId)` → `/post_versions.json?search[post_id]=<id>&only=version,updated_at,created_at&limit=100`. A post is **abandoned** (red, escalated from orange) when its `version===2` row lands `≥ 15 min` (`ABANDONED_GAP_MS`) after its `version===1` row (`isAbandonedByGap`); a v2 inside 15 min is treated as a tagging race and stays orange. Unparseable/missing v1 or v2 → not abandoned (fail-soft). The grid renders mintagged labels immediately; abandoned upgrades arrive later, guarded against stale popover generations.
 
-## Profile summary — "At a glance" (v9.11.0)
+## Profile summary — "At a glance" (v9.11.1)
 
 Pure builder: `buildProfileSummary(input, now, scope)` in `src/core/profile-summary.ts`; rendering in `src/ui/profile-summary-view.ts` (DOM nodes only).
 
