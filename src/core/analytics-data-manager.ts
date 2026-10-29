@@ -4272,11 +4272,15 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Drop this user's rows above `startId` that the just-completed sync did
-   * not return — posts deleted on Danbooru since the last run.
+   * not return — posts that vanished from Danbooru's search since the last
+   * run: expunged (permanently destroyed), or no longer credited to this
+   * uploader.
    *
-   * Sync searches carry no `status:any`, so Danbooru's default excludes
-   * deleted posts and the re-fetched overlap window simply never mentions
-   * them. Without this pass the old row survives with `is_deleted:false`
+   * Plain *deleted* posts are not ghosts: Danbooru's default search includes
+   * them (no `status:` metatag needed — verified 2026-10-29 against this
+   * sync's own query), so the re-fetch overwrites their row with
+   * `is_deleted: true`. Only a post the search no longer returns at all
+   * leaves a ghost. Without this pass the old row survives
    * while the posts that outlived it are renumbered, so its stale `no`
    * collides with a live post's: `[uploader_id+no]` milestone lookups pick
    * whichever row Dexie hands back first, local counts drift above the
