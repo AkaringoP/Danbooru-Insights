@@ -20,6 +20,15 @@ All API calls must go through `RateLimitedFetch`.
 
 `AnalyticsDataManager.getAbandonedPostIds(postIds)` runs a background, non-blocking pass (`mapConcurrent`, concurrency 6) over the mintagged ids: `buildPostVersionsUrl(postId)` → `/post_versions.json?search[post_id]=<id>&only=version,updated_at,created_at&limit=100`. A post is **abandoned** (red, escalated from orange) when its `version===2` row lands `≥ 15 min` (`ABANDONED_GAP_MS`) after its `version===1` row (`isAbandonedByGap`); a v2 inside 15 min is treated as a tagging race and stays orange. Unparseable/missing v1 or v2 → not abandoned (fail-soft). The grid renders mintagged labels immediately; abandoned upgrades arrive later, guarded against stale popover generations.
 
+## Profile summary — "At a glance" (v9.11.0)
+
+Pure builder: `buildProfileSummary(input, now, scope)` in `src/core/profile-summary.ts`; rendering in `src/ui/profile-summary-view.ts` (DOM nodes only).
+
+- **Dashboard card (`scope: 'lifetime'`) makes no extra requests.** Input = local `posts` (the scatter data, or one `getScatterData` cursor pass under the scatter gate) + the already-loaded `status_dist` / `copyright_dist` / `character_dist` (assembled by `assembleProfileSummaryInput`). A `status_dist` revalidate (`DanbooruInsights:DataUpdated`) re-renders the card in place.
+- **Popover section (`scope: 'recent'`)**: `AnalyticsDataManager.getRecentUploadWindow` → `/posts.json?tags=user:<name>&limit=200&only=id,created_at,score,tag_count_general,rating,is_pending,is_flagged,is_deleted,is_banned,tag_string_copyright,tag_string_character`, cached in piestats `recent_window` with the count-cache TTL (failures/empties not cached). Baselines come from local posts and the *cached* pies only (`buildRecentSummaryInput`) — no other network. Never-synced users get the window's own health without comparisons.
+- **No `status:` metatag needed**: Danbooru's default post search *includes* deleted posts (verified 2026-10-18 — `user:X` count equals `user:X status:any`, and a status-less listing returns `is_deleted: true` rows). `status:any` only matters for the HTML thumbnail display.
+- Thresholds (constants at the top of `profile-summary.ts`): deletion 10% / 23% (UploadLimit break-even at ~25 slots / ≤15 slots), early deletion = within 3 days (`moderation_period`, 5 upload slots each), untagged ≤3 / under-tagged <10 general tags after a 15-minute grace (`ABANDONED_GAP_MS`), downvoted = score ≤ −3 (`SUSPICIOUS_SCORE_MAX`), score comparisons skip uploads younger than 7 days.
+
 ## Activity distribution feed (v9.7.0 — preview popover section B)
 
 `AnalyticsDataManager.getActivityDistribution` fans out one `&limit=200&only=id,updated_at,created_at` request per type via `mapConcurrent` and merges the most-recent 200. Timestamp = `updated_at ?? created_at` (version tables merge consecutive same-user edits onto `updated_at`).
