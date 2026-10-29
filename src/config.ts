@@ -13,6 +13,7 @@ export const CONFIG: {
   CACHE_EXPIRY_MS: number;
   FULL_REFRESH_HINT_DAYS: number;
   BACKOFF_DURATION_MS: number;
+  MAX_BACKOFF_MS: number;
   RATE_LIMITER: {concurrency: number; jitter: [number, number]; rps: number};
   TAB_COORDINATOR: {
     channelName: string;
@@ -42,8 +43,15 @@ export const CONFIG: {
    * drifted — deliberately a low-urgency, roughly-monthly cadence (was 7d).
    */
   FULL_REFRESH_HINT_DAYS: 30,
-  /** Duration (ms) to pause all requests after receiving a 429 response. */
+  /**
+   * Fallback pause (ms) after a 429 that carries no usable wait hint. When
+   * Danbooru's `X-Rate-Limit` header (or a `Retry-After`) is present, the
+   * rate limiter follows the server's wait instead — see
+   * `backoffFromResponse` in rate-limiter.ts.
+   */
   BACKOFF_DURATION_MS: 5000,
+  /** Upper bound (ms) on a server-derived 429 pause, against bogus headers. */
+  MAX_BACKOFF_MS: 120_000,
   // Danbooru enforces a server-side global cap of 10 read req/sec across
   // all endpoints and accounts sharing an IP. We use 9 to leave a 1 req/sec
   // safety margin; TabCoordinator divides this further when multiple tabs

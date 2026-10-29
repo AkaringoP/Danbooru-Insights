@@ -53,7 +53,7 @@ export function selectTopKByCount<T extends FreqCandidate>(
 /**
  * Candidate pool sizing for the Character pie tab. `N` is the user's
  * total upload count. Returns `filtered` — how many candidates to keep
- * *after* the isTopLevelTag filter so that `selectTopKByCount` has
+ * *after* the top-level (implication) filter so that `selectTopKByCount` has
  * enough headroom to absorb sample noise — and `raw` — how many to
  * fetch from `/related_tag.json` *before* filtering (1.5× margin for
  * variant-heavy fandoms where the filter drops a large fraction).

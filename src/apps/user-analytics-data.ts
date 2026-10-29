@@ -110,9 +110,28 @@ type HeavyDistKey =
   | 'translation';
 
 /**
+ * Heavy distributions fetched up front even on a cold cache: the pie opens on
+ * copyright, and these three related-tag tabs are the ones users read most
+ * and the ones that cost the most to fetch on a tab click. The other six
+ * (gender, breasts, hair ×2, commentary, translation) are left out of the
+ * blocking cold-cache load; the pie widget fetches a missing tab when it is
+ * first opened (its "Loading..." path), and a tab never opened costs nothing.
+ */
+const EAGER_HEAVY_DISTS: ReadonlySet<HeavyDistKey> = new Set([
+  'copyright',
+  'character',
+  'fav_copyright',
+]);
+
+/**
  * SWR-fetches the nine heavy tag distributions in parallel. Each returns its
  * cached value immediately (stale allowed); when the cache is older than the
  * count-cache TTL, `revalidators` carries a starter the caller runs post-paint.
+ *
+ * Cold cache (first open, or after a full reset): only `EAGER_HEAVY_DISTS`
+ * block. A 46k-post account's first dashboard load used to fire ~250
+ * requests here, all at once, on top of a 235-page sync — most of the
+ * post-sync 429s came from this burst.
  *
  * These used to be force-refreshed on the blocking sync path (the old
  * `refreshAllStats`); moving them behind the same SWR machinery status/rating
@@ -120,17 +139,20 @@ type HeavyDistKey =
  * barely shifts when a few posts are added, so the previous sync's cache is
  * shown at once and freshened in the background — thumbnails live-patch via the
  * `DanbooruInsights:DataUpdated` event; slice proportions land on the next
- * open. Audit R2. On a genuine cache miss (first-ever open) each fetch blocks,
- * which is the one-time unavoidable cost.
+ * open. Audit R2. On a genuine cache miss only the eager three block; the
+ * rest wait for their tab.
+ *
+ * Exported for the eager/lazy split's regression tests.
  */
-async function fetchHeavyDistributionsSwr(
+export async function fetchHeavyDistributionsSwr(
   dataManager: AnalyticsDataManager,
   user: TargetUser,
   uploaderId: number,
   sub: (msg: string) => void,
   forceRevalidate: boolean,
 ): Promise<{
-  distributions: Record<HeavyDistKey, DistributionItem[]>;
+  /** A lazy tab with no cache is absent: the pie loads it when opened. */
+  distributions: Partial<Record<HeavyDistKey, DistributionItem[]>>;
   revalidators: Array<
     [string, (() => Promise<DistributionItem[] | null>) | undefined]
   >;
@@ -233,26 +255,31 @@ async function fetchHeavyDistributionsSwr(
   ];
 
   const results = await Promise.all(
-    defs.map(d =>
-      swrStats<DistributionItem[]>(
+    defs.map(async d => {
+      if (!EAGER_HEAVY_DISTS.has(d.key) && uploaderId) {
+        const cached = await dataManager.getStats(d.cacheKey, uploaderId);
+        if (cached === null)
+          return {data: undefined, startRevalidate: undefined};
+      }
+      return swrStats<DistributionItem[]>(
         dataManager,
         d.cacheKey,
         uploaderId,
         d.fetch,
         d.label,
         ttl,
-      ),
-    ),
+      );
+    }),
   );
 
-  const distributions = {} as Record<HeavyDistKey, DistributionItem[]>;
+  const distributions: Partial<Record<HeavyDistKey, DistributionItem[]>> = {};
   // Keyed by piestats cacheKey (contentType) so renderDashboard can dispatch
   // DanbooruInsights:DataUpdated with a key the pie widget's map understands.
   const revalidators: Array<
     [string, (() => Promise<DistributionItem[] | null>) | undefined]
   > = [];
   results.forEach((r, i) => {
-    distributions[defs[i].key] = r.data;
+    if (r.data !== undefined) distributions[defs[i].key] = r.data;
     revalidators.push([defs[i].cacheKey, r.startRevalidate]);
   });
   return {distributions, revalidators};

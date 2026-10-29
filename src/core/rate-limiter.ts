@@ -3,6 +3,146 @@ import {createLogger} from './logger';
 
 const log = createLogger('RateLimiter');
 
+/* --- 429 wait derivation --- */
+
+/** Where a 429 pause length came from; logged so diagnostics show it. */
+type BackoffSource = 'x-rate-limit' | 'retry-after' | 'default';
+
+/** Lower bound on any 429 pause: never hammer straight back. */
+const MIN_BACKOFF_MS = 1000;
+/**
+ * Slack added to a wait computed from `X-Rate-Limit`. Landing even slightly
+ * early is expensive: Danbooru charges every request made while limited
+ * another second of debt.
+ */
+const RATE_LIMIT_MARGIN_MS = 500;
+
+/**
+ * Wait (ms) until Danbooru's token bucket admits another request, from the
+ * `X-Rate-Limit` header it attaches to every rate-limited action.
+ *
+ * The header is the server-side RateLimiter as JSON:
+ * `{"action","rate","burst","cost","minimum_points","enabled",
+ *   "limits": {"<key>": <points>, ...}}` — one key per user / IP subnet /
+ * session. Points regenerate at `rate` per second and a request is allowed
+ * once points ≥ `cost`, so the binding key (lowest points) needs
+ * `(cost - points) / rate` seconds. While limited, each further request
+ * costs another `rate` points (down to `minimum_points`, -30 by default),
+ * which is why a fixed short pause kept the account limited.
+ *
+ * @return null when the header is absent or unusable.
+ */
+export function parseXRateLimitWaitMs(raw: string | null): number | null {
+  if (!raw) return null;
+  let data: {rate?: unknown; cost?: unknown; limits?: unknown};
+  try {
+    data = JSON.parse(raw) as typeof data;
+  } catch {
+    return null;
+  }
+  const rate = Number(data.rate);
+  const cost = data.cost === undefined ? 1 : Number(data.cost);
+  if (!(rate > 0) || !Number.isFinite(cost)) return null;
+  if (typeof data.limits !== 'object' || data.limits === null) return null;
+  const points = Object.values(data.limits).map(Number).filter(Number.isFinite);
+  if (points.length === 0) return null;
+  const lowest = Math.min(...points);
+  return Math.max(0, ((cost - lowest) / rate) * 1000);
+}
+
+/**
+ * Standard `Retry-After`: delay-seconds or an HTTP-date. Danbooru's app does
+ * not send it, but an edge proxy's 429 may.
+ *
+ * @return null when the header is absent or unparseable.
+ */
+export function parseRetryAfterMs(
+  raw: string | null,
+  now: number,
+): number | null {
+  if (!raw) return null;
+  const value = raw.trim();
+  if (/^\d+(\.\d+)?$/.test(value)) return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : Math.max(0, at - now);
+}
+
+/**
+ * How long to pause all requests after a 429, following the server's own
+ * wait when it tells us one. Falls back to `CONFIG.BACKOFF_DURATION_MS`.
+ * Server-derived waits are clamped to [1 s, `CONFIG.MAX_BACKOFF_MS`].
+ */
+export function backoffFromResponse(
+  response: Pick<Response, 'headers'>,
+  now: number,
+): {ms: number; source: BackoffSource} {
+  // Test doubles and some polyfills hand back a Response without headers.
+  const header = (name: string): string | null =>
+    response.headers?.get?.(name) ?? null;
+  const clamp = (ms: number) =>
+    Math.min(CONFIG.MAX_BACKOFF_MS, Math.max(MIN_BACKOFF_MS, ms));
+
+  const fromLimiter = parseXRateLimitWaitMs(header('x-rate-limit'));
+  if (fromLimiter !== null) {
+    return {
+      ms: clamp(fromLimiter + RATE_LIMIT_MARGIN_MS),
+      source: 'x-rate-limit',
+    };
+  }
+  const fromRetryAfter = parseRetryAfterMs(header('retry-after'), now);
+  if (fromRetryAfter !== null) {
+    return {ms: clamp(fromRetryAfter), source: 'retry-after'};
+  }
+  return {ms: CONFIG.BACKOFF_DURATION_MS, source: 'default'};
+}
+
+/* --- Post-429 recovery tuning --- */
+
+/**
+ * How long after a pause ends the limiter stays in slow start: a one-token
+ * bucket and at most `SLOW_START_CONCURRENCY` requests in flight.
+ *
+ * Without it the pause itself caused the next 429. The bucket refilled to
+ * its full burst while paused and every queued request's dispatch timer
+ * fired together, so ~8 requests left in the same instant the pause ended.
+ * Danbooru's edge limiter answered with another 429 within a second or two,
+ * and a 46k-post dashboard load spent three quarters of its time paused.
+ */
+const SLOW_START_MS = 5000;
+const SLOW_START_CONCURRENCY = 2;
+
+/**
+ * A 429 inside the slow-start window — the first request or two after a
+ * pause — means the pause was shorter than the server's own penalty, not
+ * that our rate is too high. In a 46k-post run the edge limiter answered
+ * the first request after a 5 s pause with another 429; treating that as a
+ * rate problem cut the throttle and its ceiling to the 25 % floor for the
+ * rest of the load. Such a 429 now doubles the pause instead (5 s, 10 s,
+ * 20 s, … up to `CONFIG.MAX_BACKOFF_MS`) and leaves throttle and ceiling
+ * alone. A server-provided wait still wins over the doubling.
+ */
+const PAUSE_ESCALATION_FACTOR = 2;
+
+/**
+ * Adaptive rate. Each 429 that arrives outside a pause halves the request
+ * rate (and concurrency) down to `MIN_THROTTLE` of the configured value;
+ * every `THROTTLE_RECOVERY_MS` without a 429 gives back `THROTTLE_STEP`.
+ * The edge limiter's real budget is unknown and evidently below the 9 req/s
+ * we configure, so the limiter finds a sustainable rate instead of
+ * re-hitting the same wall every few seconds.
+ *
+ * Recovery is capped by a ceiling one step below the rate that drew the
+ * last 429. Without it the throttle sawtoothed: a 46k-post run held 0.5
+ * with no 429 for 20 s, but every recovery to 0.56–0.75 drew another 429
+ * within 1–8 s, each costing a pause plus slow start. The ceiling itself
+ * rises one step per `CEILING_RELAX_MS` without any 429, so a budget that
+ * frees up (another tab closed, a quieter hour) is found again.
+ */
+const MIN_THROTTLE = 0.25;
+const THROTTLE_RECOVERY_MS = 20_000;
+const THROTTLE_STEP = 0.25;
+const CEILING_RELAX_MS = 120_000;
+
 /* --- Helper: Rate Limited Fetch --- */
 
 /** Internal task queued for rate-limited dispatch. */
@@ -35,6 +175,21 @@ export class RateLimitedFetch {
   backoffUntil: number;
   /** Called when a 429 response triggers global backoff. */
   onBackoff: ((until: number) => void) | null;
+
+  /** Slow-start window end (ms epoch); see SLOW_START_MS. */
+  private slowStartUntil = 0;
+  /** Fraction of the configured rate/concurrency in use; see MIN_THROTTLE. */
+  private throttle = 1;
+  /** Last 429 seen by this tab (ms epoch). */
+  private lastRateLimitedAt = 0;
+  /** Last throttle cut or step-up (ms epoch). */
+  private lastThrottleChangeAt = 0;
+  /** Highest throttle recovery may reach; see CEILING_RELAX_MS. */
+  private throttleCeiling = 1;
+  /** Last ceiling raise (ms epoch). */
+  private lastCeilingChangeAt = 0;
+  /** Length of the pause most recently started by this tab's own 429. */
+  private lastPauseMs = 0;
 
   /**
    * @param {number} maxConcurrency Maximum concurrent requests (for general queue).
@@ -89,7 +244,24 @@ export class RateLimitedFetch {
    * Only updates if the new timestamp is later than the current backoff.
    */
   setBackoff(until: number): void {
-    this.backoffUntil = Math.max(this.backoffUntil, until);
+    if (until <= this.backoffUntil) return;
+    this.backoffUntil = until;
+    // Resume gently: an empty bucket plus a narrow slow-start window, so the
+    // backlog that queued up during the pause does not leave as one burst the
+    // moment it ends. Applies to pauses broadcast by other tabs too — they
+    // share this tab's IP/user budget.
+    this.tokens = 0;
+    this.slowStartUntil = until + SLOW_START_MS;
+  }
+
+  /** Current fraction of the configured rate in use (1 = full speed). */
+  getThrottle(): number {
+    return this.throttle;
+  }
+
+  /** Milliseconds left in the current global backoff (0 when none). */
+  backoffRemainingMs(): number {
+    return Math.max(0, this.backoffUntil - Date.now());
   }
 
   async fetch(url: string, options?: RequestInit): Promise<Response> {
@@ -130,7 +302,7 @@ export class RateLimitedFetch {
 
     try {
       const response = await fetch(task.url, task.options);
-      if (response.status === 429) this.triggerBackoff();
+      if (response.status === 429) this.triggerBackoff(task.url, response);
       task.resolve(response);
     } catch (e: unknown) {
       log.error('Report fetch failed', {url: task.url, error: e});
@@ -145,23 +317,27 @@ export class RateLimitedFetch {
   }
 
   async processQueue(): Promise<void> {
-    if (this.activeWorkers >= this.maxConcurrency || this.queue.length === 0) {
+    const now = Date.now();
+    if (
+      this.activeWorkers >= this.effectiveConcurrency(now) ||
+      this.queue.length === 0
+    ) {
       return;
     }
 
     // Global backoff check
-    const now = Date.now();
     if (now < this.backoffUntil) {
       setTimeout(() => this.processQueue(), this.backoffUntil - now);
       return;
     }
 
+    this.maybeRecoverThrottle(now);
+
     // Token Bucket Check
     this.refillTokens();
     if (this.tokens < 1) {
       // Not enough tokens, schedule a retry after refill interval
-      const waitTime = this.refillRate;
-      setTimeout(() => this.processQueue(), waitTime);
+      setTimeout(() => this.processQueue(), this.refillInterval());
       return;
     }
 
@@ -176,6 +352,11 @@ export class RateLimitedFetch {
       return;
     }
 
+    // Fill any remaining capacity now. Otherwise each completion admits only
+    // one successor, and the in-flight count never climbs back up after a
+    // slow-start window narrowed it.
+    if (this.queue.length > 0) void this.processQueue();
+
     // Staggered Start Delay (minimal now, rely on token bucket for rate)
     const startDelay =
       Math.floor(
@@ -185,7 +366,7 @@ export class RateLimitedFetch {
 
     try {
       const response = await fetch(task.url, task.options);
-      if (response.status === 429) this.triggerBackoff();
+      if (response.status === 429) this.triggerBackoff(task.url, response);
       task.resolve(response);
     } catch (e: unknown) {
       task.reject(e);
@@ -199,18 +380,115 @@ export class RateLimitedFetch {
 
   refillTokens(): void {
     const now = Date.now();
+    const interval = this.refillInterval();
     const elapsed = now - this.lastRefill;
-    if (elapsed > this.refillRate) {
-      const newTokens = Math.floor(elapsed / this.refillRate);
-      this.tokens = Math.min(this.rateLimit, this.tokens + newTokens);
+    if (elapsed > interval) {
+      const newTokens = Math.floor(elapsed / interval);
+      this.tokens = Math.min(this.burstCap(now), this.tokens + newTokens);
       // precision:
-      this.lastRefill = now - (elapsed % this.refillRate);
+      this.lastRefill = now - (elapsed % interval);
     }
   }
 
-  /** Activate global backoff and notify listeners (e.g., TabCoordinator). */
-  private triggerBackoff(): void {
-    const until = Date.now() + CONFIG.BACKOFF_DURATION_MS;
+  /** ms per token at the current throttle. */
+  private refillInterval(): number {
+    return this.refillRate / this.throttle;
+  }
+
+  /** Bucket capacity: 1 during slow start, else the throttled burst. */
+  private burstCap(now: number): number {
+    if (now < this.slowStartUntil) return 1;
+    return Math.max(1, Math.floor(this.rateLimit * this.throttle));
+  }
+
+  /** In-flight ceiling: narrowed during slow start, scaled by throttle. */
+  private effectiveConcurrency(now: number): number {
+    const scaled = Math.max(1, Math.ceil(this.maxConcurrency * this.throttle));
+    return now < this.slowStartUntil
+      ? Math.min(scaled, SLOW_START_CONCURRENCY)
+      : scaled;
+  }
+
+  /**
+   * Step the ceiling, then the throttle, back up after quiet periods.
+   * Lazy: runs on dispatch.
+   */
+  private maybeRecoverThrottle(now: number): void {
+    const quietFor = now - this.lastRateLimitedAt;
+    if (
+      this.throttleCeiling < 1 &&
+      quietFor >= CEILING_RELAX_MS &&
+      now - this.lastCeilingChangeAt >= CEILING_RELAX_MS
+    ) {
+      this.throttleCeiling = Math.min(1, this.throttleCeiling + THROTTLE_STEP);
+      this.lastCeilingChangeAt = now;
+      log.info('Request rate ceiling raised', {ceiling: this.throttleCeiling});
+    }
+
+    if (this.throttle >= this.throttleCeiling) return;
+    if (quietFor < THROTTLE_RECOVERY_MS) return;
+    if (now - this.lastThrottleChangeAt < THROTTLE_RECOVERY_MS) return;
+    this.throttle = Math.min(
+      this.throttleCeiling,
+      this.throttle + THROTTLE_STEP,
+    );
+    this.lastThrottleChangeAt = now;
+    log.info('Request rate recovering', {
+      throttle: this.throttle,
+      ceiling: this.throttleCeiling,
+    });
+  }
+
+  /**
+   * Activate global backoff for as long as the server asked, and notify
+   * listeners (e.g., TabCoordinator — other tabs share the same IP/user
+   * bucket, so they pause for the same span).
+   */
+  private triggerBackoff(url: string, response: Response): void {
+    const now = Date.now();
+    const {ms: serverMs, source} = backoffFromResponse(response, now);
+    let ms = serverMs;
+    // A 429 from a request that was already in flight when an earlier 429
+    // started the pause says nothing new, so only the first 429 of an
+    // episode is classified.
+    const inPause = now < this.backoffUntil;
+    const cause = inPause
+      ? 'in-flight'
+      : now < this.slowStartUntil
+        ? 'pause-too-short'
+        : 'rate';
+    if (cause === 'pause-too-short') {
+      // The pause was shorter than the server's penalty: wait longer and
+      // keep the rate (see PAUSE_ESCALATION_FACTOR). Only a guessed
+      // (default) wait is escalated; a server-provided one is used as is.
+      if (source === 'default') {
+        ms = Math.min(
+          CONFIG.MAX_BACKOFF_MS,
+          Math.max(serverMs, this.lastPauseMs * PAUSE_ESCALATION_FACTOR),
+        );
+      }
+    } else if (cause === 'rate') {
+      // Remember that this rate was too much: recovery stops one step below.
+      this.throttleCeiling = Math.max(
+        MIN_THROTTLE,
+        this.throttle - THROTTLE_STEP,
+      );
+      this.lastCeilingChangeAt = now;
+      this.throttle = Math.max(MIN_THROTTLE, this.throttle / 2);
+      this.lastThrottleChangeAt = now;
+    }
+    if (!inPause) this.lastPauseMs = ms;
+    this.lastRateLimitedAt = now;
+    const until = now + ms;
+    log.warn('429 received, pausing requests', {
+      waitMs: Math.round(ms),
+      source,
+      cause,
+      throttle: this.throttle,
+      ceiling: this.throttleCeiling,
+      xRateLimit: response.headers?.get?.('x-rate-limit') ?? null,
+      url: url.slice(0, 160),
+    });
     this.setBackoff(until);
     this.onBackoff?.(until);
   }

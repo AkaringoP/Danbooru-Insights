@@ -76,7 +76,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run compile` — `tsc` 단독 (타입 체크만, 번들 없음)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 893 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 954 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 7 개)
 - `npm run test:e2e:update` — e2e 스냅샷 baseline 갱신 (의도한 시각 변경일 때만)
@@ -110,10 +110,10 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 | 레이어 | 역할 | 예시 |
 |---|---|---|
-| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts` |
+| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts` |
 | `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts`, `dashboard-preview-popover.ts`, `grass-month-popover.ts` |
 | `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
-| `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts` |
+| `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts`, `log-capture.ts` |
 | `src/` (루트) | Entry, 공유 types/utils/config | `main.ts`, `types.ts`, `utils.ts`, `config.ts`, `styles.ts`, `version.ts` |
 
 ## 주요 제약사항
@@ -141,6 +141,8 @@ Token bucket 알고리즘 기반 3-queue 시스템. 정확한 수치는 [src/con
 - **General Queue**: 8 concurrent requests, 9 req/sec, 0-50ms jitter (v9.6 에서 6/6 → 8/9 으로 상향)
 - **Report Queue**: 격리됨, `/reports/` URL 에 3 초 cooldown (`CONFIG.REPORT_COOLDOWN_MS`)
 - **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 분할해 Danbooru 의 10 req/s 서버 상한 안에 유지
+- **429 global backoff**: 서버 대기시간을 따름. Danbooru 는 `Retry-After` 대신 `X-Rate-Limit` 헤더 (token bucket JSON: `rate`/`cost`/`limits{key: points}`) 를 보냄 → `(cost − 최저 points) / rate` 초 + 0.5s 동안 전체 큐 정지 (`backoffFromResponse`). 헤더 없으면 `Retry-After`, 그것도 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s). `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp. 제한 중 요청은 1 초씩 debt 를 늘리므로 (최대 ~30s) 고정 5s 로는 429 가 반복됐음
+- **Slow start + 적응형 rate**: 정지가 끝나면 5 초간 토큰 1 개 / 동시 2 개로만 재개 (정지 중 꽉 찬 버킷과 대기 타이머가 한꺼번에 터지며 다음 429 를 부르던 문제). 정지 밖에서 받은 429 마다 rate·동시성을 절반으로 (하한 25%), 429 없는 20 초마다 25%p 씩 복구. 복구 상한은 429 가 난 rate 보다 한 단계 (25%p) 아래 — 상한 없이는 0.5 에서 버티다 0.56~0.75 로 회복할 때마다 수 초 안에 429 가 나는 톱니가 생겼음. 상한은 429 없는 2 분마다 한 단계씩 올라감. 단, slow start 구간 (정지 직후) 에 난 429 는 "정지가 서버 페널티보다 짧았다" 로 보고 rate·상한은 그대로 두고 정지만 2 배로 늘림 (5→10→20s…, 최대 `MAX_BACKOFF_MS`, 서버가 대기시간을 주면 그 값) 실측상 Danbooru 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 와서 서버 대기시간 추종이 작동 안 함 — 이 두 장치가 실질적인 방어선
 
 ## Evaluator Rubric (작업 완료 선언 전 self-evaluation 용)
 7 개 gate 모두 통과해야 태스크 완료 보고 가능. 직접 실행해 — 가정 금지
@@ -189,9 +191,11 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
 ## 현재 릴리즈 상태
-현재 버전 **v9.9.1** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
+현재 버전 **v9.10.0** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
 
 최근 출시분 요약 (상세는 [CHANGELOG.md](CHANGELOG.md)):
+- **v9.10.0** — 큰 계정 full sync 가 429 한 번에 멈추던 문제 (429·타임아웃·네트워크 재시도, 대기 끝난 뒤 재시도), rate limiter 재설계 (slow start, 적응형 rate + 회복 상한, 정지 직후 429 는 정지 2 배, `X-Rate-Limit`/`Retry-After` 추종 — 46k 계정 재 sync + 첫 대시보드 기준 페이지 재시도만 있을 때 429 약 45 → 이 장치들로 4), 실패한 카운트를 0 으로 캐시하던 문제 (`countBatch` 1 회 재시도 + `cacheUnlessPartial`), related-tag pie 3 개의 implication 조회를 일괄 + 캐시로 공유 (`core/top-level-tags.ts`, 119 → ≤4 건), cold open 시 부가 pie 탭 6 개는 열 때 로딩, rate-limit 대기 중 진행 표시 주황, 진단 패널 Logs 섹션 + Refresh. 테스트 896 → 954
+- **v9.9.2** — grass 에서 metric/year 를 빠르게 바꿀 때 늦게 끝난 fetch 가 새 라벨 아래 옛 데이터를 그리던 race (issue #4), threshold 안내 중복
 - **v9.9.1** (핫픽스) — 모달의 `backdrop-filter` 2 개 제거 (Windows 잔상/버벅임), architecture.test.ts 경로 정규화 (Windows 에서 규칙 1 개가 0 건 검사로 통과하던 문제)
 - **v9.9.0** — 대시보드 오픈 속도 개선 (무거운 태그 분포 9 개를 blocking path 에서 제거, 캐시 즉시 페인트 + 화면에 보이는 pie 탭만 lazy revalidate → ~46k 계정 기준 30s → 5s), 월 popover 차트 (일별 스파크라인 + 연간 추세선), `<`/`>` 포함 태그 이스케이프, 실패한 sync 가 성공으로 보고되던 문제, 삭제된 포스트의 로컬 ghost row 정리 (`pruneGhostPosts`), 모든 대시보드 트래픽을 공유 rate limiter 로 통일 (+ gate 4 규칙 11 신설). 테스트 782 → 893
 - **v9.8.0** — grass 월 라벨 hover popover (월 합계/MoM/활동일 비율/최다일, 연내 in-memory 데이터로 계산 — 추가 API 없음)
@@ -206,3 +210,4 @@ preview popover 의 동작 카탈로그 (mintag/abandoned 판정 기준, 활동 
 - `mapConcurrent()` 유틸은 병렬 API 호출 제어용 (count fetch, tag filtering 에서 사용)
 - `MAX_OPTIMIZED_POSTS = 1200` — Quick Sync / Small Tag 경로의 분기 임계값 ([src/config.ts](src/config.ts))
 - Count cache TTL (v9.6): `getCountCacheTtlMs()` 기본 10 분, 사용자가 settings popover 에서 조절 가능. `tryGetCachedStats<T>` 가 일관 사용
+- Count 기반 통계 (status/rating/분포 9 개) 는 `countBatch()` 로 카운트를 받고 `cacheUnlessPartial()` 로 저장. 429·5xx·네트워크 실패는 1 회 재시도 (rate limiter 정지 뒤로 줄 섬), 그래도 잃은 카운트가 있으면 캐시 저장 안 함 → 이전 캐시를 보여주고 다음 열기에서 재시도. 결정적 4xx (예: Member 태그 한도 422) 는 재시도도 차단도 안 함. 새 분포 추가 시 `fetchRemoteCount` 직접 호출 대신 이 경로 사용

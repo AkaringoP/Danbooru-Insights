@@ -974,6 +974,71 @@ function buildDashboardHeader(
 }
 
 /**
+ * Sync progress colour while the shared rate limiter is paused by a 429:
+ * the sync is waiting, not stuck or failing. Same amber as the preview
+ * popover's mintag label — a milder warning than red, readable on light
+ * and dark themes.
+ */
+const RATE_LIMIT_WAIT_COLOR = '#e8950c';
+/** Normal colour of the Resume Sync progress bar. */
+const SYNC_BAR_COLOR = '#2da44e';
+
+/**
+ * Tint the Resume Sync progress bar amber while requests are paused by a
+ * 429, back to green when they resume. Polls every 500 ms (pauses do not
+ * emit progress events) and stops on its own once the sync ends or the bar
+ * leaves the DOM.
+ */
+function tintBarWhileRateLimited(
+  bar: HTMLElement,
+  app: UserAnalyticsApp,
+): void {
+  const timer = setInterval(() => {
+    if (!bar.isConnected || !AnalyticsDataManager.isGlobalSyncing) {
+      clearInterval(timer);
+      bar.style.background = SYNC_BAR_COLOR;
+      return;
+    }
+    bar.style.background =
+      app.rateLimiter.backoffRemainingMs() > 0
+        ? RATE_LIMIT_WAIT_COLOR
+        : SYNC_BAR_COLOR;
+  }, 500);
+}
+
+/** Local-vs-remote slack before the dashboard insists on a resume sync. */
+const RESUME_SYNC_TOLERANCE = 10;
+
+/**
+ * Whether the local DB is too far behind the remote total to paint the
+ * dashboard. `total === 0 && count === 0` (nothing known at all) also lands
+ * here; the zero-uploads view normally catches a real zero-upload user first.
+ */
+function needsResumeSync(count: number, total: number): boolean {
+  return (
+    (total > 0 && count < total - RESUME_SYNC_TOLERANCE) ||
+    (total === 0 && count === 0)
+  );
+}
+
+/**
+ * Paint the dashboard header followed by the resume-sync view, replacing
+ * whatever spinner `content` currently holds.
+ */
+function showResumeSyncGate(
+  content: HTMLElement,
+  stats: {count: number},
+  total: number,
+  app: UserAnalyticsApp,
+): void {
+  const nsfw: NsfwBus = {enabled: getNsfwEnabled(), apply: null};
+  const header = buildDashboardHeader(app.context.targetUser, app, nsfw);
+  content.innerHTML = '';
+  content.appendChild(header);
+  renderResumeSyncView(content, stats, total, app);
+}
+
+/**
  * Renders the "Data Synchronization Required" view. Hit when the local DB
  * is materially behind the remote total — drives a full `syncAllPosts`
  * worker-pool run on button click, with progress mirrored from the
@@ -1020,7 +1085,7 @@ function renderResumeSyncView(
               <span id="analytics-main-percent">0%</span>
            </div>
            <div style="width:100%; height:8px; background:var(--di-border-light, #eee); border-radius:4px; overflow:hidden;">
-              <div id="analytics-main-bar" style="width:0%; height:100%; background:#2da44e; transition: width 0.2s;"></div>
+              <div id="analytics-main-bar" style="width:0%; height:100%; background:${SYNC_BAR_COLOR}; transition: width 0.2s, background 0.3s;"></div>
            </div>
            <div id="analytics-main-count" style="font-size:0.8em; color:var(--di-text-secondary, #666); margin-top:5px; text-align:right;"></div>
         </div>
@@ -1069,6 +1134,7 @@ function renderResumeSyncView(
       percent.textContent = max > 0 ? `${p}%` : 'Scanning...';
       countText.textContent = `${c} / ${max > 0 ? max : '?'}`;
     };
+    tintBarWhileRateLimited(bar, app);
   }
 
   btn.onclick = async () => {
@@ -1087,10 +1153,14 @@ function renderResumeSyncView(
     };
 
     // No-op progress callback — internal broadcast above handles UI updates.
-    const outcome = await app.dataManager.syncAllPosts(
+    // syncAllPosts takes the global lock synchronously, so the tint loop
+    // started right after it sees the sync as running.
+    const pending = app.dataManager.syncAllPosts(
       app.context.targetUser,
       () => {},
     );
+    tintBarWhileRateLimited(bar, app);
+    const outcome = await pending;
     warnIfSyncIncomplete(outcome);
 
     // A sync ran → force the deferred distributions to revalidate on
@@ -1459,13 +1529,22 @@ export class UserAnalyticsApp {
       let headerHtml = '';
       let subHtml = '';
       let containerColor = '#ff4444';
+      // Amber while a 429 has the shared limiter paused: waiting, not failing.
+      const waiting = this.rateLimiter.backoffRemainingMs() > 0;
 
       if (state.phase === 'PREPARING') {
         containerColor = 'inherit';
-        headerHtml = `<div style="color:#00ba7c; font-weight:bold;">Synced: ${state.current.toLocaleString()} / ${state.total.toLocaleString()} (${percent}%)</div>`;
+        // Green only when every post landed; a sync that stopped short still
+        // reaches PREPARING (stats refresh runs over the partial data).
+        const countColor = waiting
+          ? RATE_LIMIT_WAIT_COLOR
+          : state.current >= state.total
+            ? '#00ba7c'
+            : '#d73a49';
+        headerHtml = `<div style="color:${countColor}; font-weight:bold;">Synced: ${state.current.toLocaleString()} / ${state.total.toLocaleString()} (${percent}%)</div>`;
         subHtml = `<div style="font-size:0.8em; color:#ffeb3b; margin-top:2px;">${state.message || 'Preparing Report'}${dotStr}</div>`;
       } else {
-        containerColor = '#ff4444';
+        containerColor = waiting ? RATE_LIMIT_WAIT_COLOR : '#ff4444';
         headerHtml = `<div style="font-weight:bold;">Synced: ${state.current.toLocaleString()} / ${state.total.toLocaleString()} (${percent}%)</div>`;
         subHtml = `<div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-top:2px;">${state.message || `Fetching data${dotStr}`}</div>`;
       }
@@ -2030,7 +2109,7 @@ export class UserAnalyticsApp {
     this.isRendering = true;
 
     const perfMeta = {
-      path: 'unknown' as 'quickSync' | 'syncSkipped' | 'unknown',
+      path: 'unknown' as 'quickSync' | 'syncSkipped' | 'resumeSync' | 'unknown',
       preTotal: 0,
     };
     perfLogger.start('dbi:render:total');
@@ -2083,6 +2162,17 @@ export class UserAnalyticsApp {
         reportProgress = paintLoadingSpinner(content);
       } else {
         perfMeta.path = 'syncSkipped';
+      }
+
+      // Resume gate, decided from the pre-check alone. It used to run after
+      // fetchDashboardData, so a user left short by a failed sync sat through
+      // the whole 14-step count load before the "Data Synchronization
+      // Required" view replaced it. Quick Sync just rewrote the DB, so its
+      // pre-check numbers are stale — that path keeps the post-fetch check.
+      if (!didQuickSync && needsResumeSync(preStats.count, preTotal)) {
+        perfMeta.path = 'resumeSync';
+        showResumeSyncGate(content, preStats, preTotal, this);
+        return;
       }
 
       // Pre-fetch all data! If we did a Quick Sync the syncStats/totalCount
@@ -2140,13 +2230,10 @@ export class UserAnalyticsApp {
       content.innerHTML = '';
       content.appendChild(header);
 
-      // Condition: Show Dashboard if Synced OR if we have data and total is unknown
-      const tolerance = 10;
-      const needsSync =
-        (total > 0 && stats.count < total - tolerance) ||
-        (total === 0 && stats.count === 0);
-
-      if (needsSync) {
+      // Condition: Show Dashboard if Synced OR if we have data and total is
+      // unknown. Only reachable as a resume case after Quick Sync (the
+      // no-sync path was gated before fetchDashboardData).
+      if (needsResumeSync(stats.count, total)) {
         renderResumeSyncView(content, stats, total, this);
         return; // Stop here, don't render dashboard
       }

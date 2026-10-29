@@ -202,7 +202,7 @@ export class Database extends Dexie {
     //   existing Delta sync rescan window). Compound PK `[tag+yearMonth]`,
     //   `tag` index for bulk per-tag reads, `fetchedAt` for distance-based
     //   TTL eviction. See `MonthlyCountRecord` in types.ts.
-    // - tag_implications_cache: global cache for `isTopLevelTag` checks.
+    // - tag_implications_cache: global cache for top-level flags (core/top-level-tags).
     //   `tag_implications` is effectively immutable; caching here lets
     //   `fetchRelatedTagDistribution` skip up to 20 API calls per session.
     //   PK is `tagName` (global, not per-analytics-target).

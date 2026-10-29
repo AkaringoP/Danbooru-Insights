@@ -8,7 +8,11 @@ import {
   BACKFILL_FAILURE_THRESHOLD,
   BACKFILL_COOLDOWN_MS,
   type BackfillFailureState,
+  classifySyncFetchError,
+  syncRetryDelayMs,
+  SYNC_PAGE_MAX_ATTEMPTS,
 } from '../src/core/analytics-data-manager';
+import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
 
 describe('getBestThumbnailUrl', () => {
   it('빈 post(null)이면 빈 문자열 반환', () => {
@@ -390,6 +394,8 @@ function makeSyncDb(
     tag_implications_cache: {
       get: vi.fn(async () => null),
       put: vi.fn(async () => undefined),
+      bulkGet: vi.fn(async (keys: string[]) => keys.map(() => undefined)),
+      bulkPut: vi.fn(async () => undefined),
     },
     transaction: vi.fn(
       async (_mode: string, _tables: unknown[], cb: () => Promise<void>) => {
@@ -429,8 +435,61 @@ function makeSyncRateLimiter(
   return {
     fetch: vi.fn(fetchImpl ?? defaultFetch),
     getRequestCount: vi.fn(() => 0),
+    backoffRemainingMs: vi.fn(() => 0),
   };
 }
+
+describe('classifySyncFetchError', () => {
+  it('treats 429 as a rate-limit retry', () => {
+    expect(classifySyncFetchError(new Error('HTTP 429'))).toBe('rate-limit');
+  });
+
+  it('treats 5xx, timeouts, network drops and bad JSON as transient', () => {
+    expect(classifySyncFetchError(new Error('HTTP 500'))).toBe('transient');
+    expect(classifySyncFetchError(new Error('HTTP 503'))).toBe('transient');
+    const abort = Object.assign(new Error('aborted'), {name: 'AbortError'});
+    expect(classifySyncFetchError(abort)).toBe('transient');
+    // DOMException-shaped object that is not an Error instance.
+    expect(classifySyncFetchError({name: 'AbortError', message: 'x'})).toBe(
+      'transient',
+    );
+    expect(classifySyncFetchError(new TypeError('Failed to fetch'))).toBe(
+      'transient',
+    );
+    expect(classifySyncFetchError(new SyntaxError('Unexpected token <'))).toBe(
+      'transient',
+    );
+  });
+
+  it('treats other 4xx and unknown errors as fatal', () => {
+    expect(classifySyncFetchError(new Error('HTTP 400'))).toBe('fatal');
+    expect(classifySyncFetchError(new Error('HTTP 403'))).toBe('fatal');
+    expect(classifySyncFetchError(new Error('something else'))).toBe('fatal');
+    expect(classifySyncFetchError('HTTP 5000 widgets')).toBe('fatal');
+  });
+});
+
+describe('syncRetryDelayMs', () => {
+  it('backs off exponentially for transient errors', () => {
+    expect([1, 2, 3, 4].map(n => syncRetryDelayMs('transient', n))).toEqual([
+      1000, 2000, 4000, 8000,
+    ]);
+  });
+
+  it('waits out the server-derived limiter pause on a 429', () => {
+    // 31.5 s is what X-Rate-Limit yields at points=-30, rate=1, cost=1.
+    expect(syncRetryDelayMs('rate-limit', 1, 31_500)).toBe(31_500);
+    expect(syncRetryDelayMs('rate-limit', 4, 2_000)).toBe(2_000);
+  });
+
+  it('still waits at least 1 s on a 429 with no pause left', () => {
+    expect(syncRetryDelayMs('rate-limit', 1, 0)).toBe(1000);
+  });
+
+  it('never lets a transient retry land inside a limiter pause', () => {
+    expect(syncRetryDelayMs('transient', 1, 12_000)).toBe(12_000);
+  });
+});
 
 describe('AnalyticsDataManager.syncAllPosts', () => {
   beforeEach(() => {
@@ -949,6 +1008,174 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
   });
 
+  // A 46k-post sync used to die at ~42k on a single HTTP 429: only 5xx
+  // were retried, so the worker gave up on the first attempt and the user
+  // landed on "Resume Sync". These pin the retry classes end to end.
+  const onePost = [
+    {
+      id: 101,
+      uploader_id: 42,
+      created_at: '2024-01-01T00:00:00Z',
+      up_score: 1,
+      down_score: 0,
+      rating: 'g',
+    },
+  ];
+
+  function failFirstPageFetch(
+    failure: () =>
+      | never
+      | Promise<never>
+      | {
+          ok: boolean;
+          status: number;
+          json: () => Promise<unknown>;
+        },
+  ) {
+    let page1Calls = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 1}}),
+        };
+      }
+      if (url.includes('page=1&')) {
+        page1Calls++;
+        if (page1Calls === 1) return failure();
+        return {ok: true, status: 200, json: async () => onePost};
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+    return {rl, page1Calls: () => page1Calls};
+  }
+
+  it.each([
+    ['HTTP 429', () => ({ok: false, status: 429, json: async () => ({})})],
+    [
+      'a network drop',
+      () => {
+        throw new TypeError('NetworkError when attempting to fetch resource.');
+      },
+    ],
+    [
+      'the 30s timeout abort',
+      () => {
+        throw Object.assign(new Error('The operation was aborted.'), {
+          name: 'AbortError',
+        });
+      },
+    ],
+  ])('retries a page after %s and completes', async (_label, failure) => {
+    const db = makeSyncDb(makePostsTable([]));
+    const {rl, page1Calls} = failFirstPageFetch(failure);
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(page1Calls()).toBe(2);
+    expect(outcome).toEqual({complete: true, started: true});
+    expect(quotaManager.bulkPutSafe).toHaveBeenCalled();
+  });
+
+  it('a 429 retry waits for the rate limiter pause', async () => {
+    const db = makeSyncDb(makePostsTable([]));
+    const {rl} = failFirstPageFetch(() => ({
+      ok: false,
+      status: 429,
+      json: async () => ({}),
+    }));
+    rl.backoffRemainingMs.mockReturnValue(31_500);
+    const waits: number[] = [];
+    vi.stubGlobal('setTimeout', (fn: () => void, ms: number) => {
+      waits.push(ms);
+      fn();
+    });
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(outcome.complete).toBe(true);
+    expect(rl.backoffRemainingMs).toHaveBeenCalled();
+    expect(waits).toContain(31_500);
+  });
+
+  it('stops after SYNC_PAGE_MAX_ATTEMPTS when 429 persists', async () => {
+    const db = makeSyncDb(makePostsTable([]));
+    let page1Calls = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 1}}),
+        };
+      }
+      if (url.includes('page=1&')) page1Calls++;
+      return {ok: false, status: 429, json: async () => ({})};
+    });
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(page1Calls).toBe(SYNC_PAGE_MAX_ATTEMPTS);
+    expect(outcome.complete).toBe(false);
+  });
+
+  it('a failed run reports the committed count, not total/total, when preparing', async () => {
+    // The header used to read "46,894 / 46,894 (100%)" over a run that had
+    // stopped thousands of posts short.
+    const db = makeSyncDb(makePostsTable([]));
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 3}}),
+        };
+      }
+      if (url.includes('page=1&')) {
+        return {ok: true, status: 200, json: async () => onePost};
+      }
+      return {ok: false, status: 400, json: async () => ({})};
+    });
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const progress = vi.fn();
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), progress);
+
+    expect(outcome.complete).toBe(false);
+    expect(progress).toHaveBeenCalledWith(1, 3, 'PREPARING');
+    expect(progress).not.toHaveBeenCalledWith(3, 3, 'PREPARING');
+  });
+
+  it('clearUserData also drops the backfill-complete flag', async () => {
+    const postsTable = makePostsTable([]);
+    const db = makeSyncDb(postsTable);
+    const adm = new AnalyticsDataManager(
+      db as never,
+      makeSyncRateLimiter() as never,
+    );
+
+    await adm.clearUserData(makeSyncUser({id: '42'}));
+
+    expect(postsTable._chain.delete).toHaveBeenCalled();
+    const removed = vi
+      .mocked(localStorage.removeItem)
+      .mock.calls.map((c: string[]) => c[0]);
+    expect(removed).toContain('danbooru_grass_last_sync_42');
+    expect(removed).toContain('di_post_metadata_v2_42');
+  });
+
   it('a clean run reports complete:true', async () => {
     const postsTable = makePostsTable([]);
     const db = makeSyncDb(postsTable);
@@ -1201,15 +1428,13 @@ function buildDistFetch(
       };
     }
     if (url.startsWith('/tag_implications.json')) {
-      const m = url.match(/antecedent_name_matches\]=([^&]+)/);
-      const name = m ? m[1] : '';
-      const t = tagByName.get(name);
-      // top-level → empty array. variant → 1 row.
-      return {
-        ok: true,
-        status: 200,
-        json: async () => (t && !t.isTopLevel ? [{id: 1}] : []),
-      };
+      // Batched: one row per variant among the comma-joined names.
+      const m = url.match(/antecedent_name_comma\]=([^&]+)/);
+      const names = m ? decodeURIComponent(m[1]).split(',') : [];
+      const rows = names
+        .filter(n => tagByName.get(n)?.isTopLevel === false)
+        .map(n => ({antecedent_name: n, consequent_name: 'base'}));
+      return {ok: true, status: 200, json: async () => rows};
     }
     if (url.startsWith('/counts/posts.json')) {
       // tags=user:NAME alone → getTotalPostCount; tags=user:NAME tagname → per-tag
@@ -1262,6 +1487,7 @@ function makeDistAdm(
 
 describe('getCharacterDistribution — dynamic pool + filter + rerank', () => {
   beforeEach(() => {
+    resetTopLevelSessionCache();
     vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
     vi.stubGlobal('localStorage', {
       getItem: vi.fn(() => null),
@@ -1376,11 +1602,12 @@ describe('getCharacterDistribution — dynamic pool + filter + rerank', () => {
     expect(non[0].tagName).toBe('char_00');
     expect(non[9].tagName).toBe('char_09');
 
-    // For small users charPoolSize returns raw=15 — only 15 implication checks
+    // charPoolSize returns raw=15 for small users — one batched lookup
+    // covers all 15 (was one request per candidate).
     const impCalls = rl.fetch.mock.calls.filter((c: [string]) =>
       c[0].startsWith('/tag_implications.json'),
     );
-    expect(impCalls.length).toBeLessThanOrEqual(15);
+    expect(impCalls.length).toBe(1);
   });
 
   it('Others slice is count-based (N − Σ top10.count)', async () => {
@@ -1470,6 +1697,147 @@ describe('getCopyrightDistribution — dynamic pool + rerank (method A margin)',
     );
     // Highest-count top-level (franchise_0, count 2000) ranks first
     expect(non[0].tagName).toBe('franchise_0');
+  });
+});
+
+// A 429 on one candidate's count used to leave it at 0: it fell out of the
+// top 10 (Noa missing from a Blue Archive uploader's character pie) and that
+// ranking was cached. Counts now retry once; a count still lost blocks the
+// cache write.
+describe('getCharacterDistribution — lost counts', () => {
+  beforeEach(() => {
+    resetTopLevelSessionCache();
+    vi.stubGlobal('window', {
+      location: {origin: 'https://danbooru.donmai.us'},
+      dispatchEvent: vi.fn(),
+    });
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const script: FetchScript = {
+    totalPostCount: 50_000,
+    related: [
+      {
+        name: 'noa_(blue_archive)',
+        frequency: 0.03,
+        isTopLevel: true,
+        count: 900,
+      },
+      {
+        name: 'yuuka_(blue_archive)',
+        frequency: 0.04,
+        isTopLevel: true,
+        count: 700,
+      },
+      {
+        name: 'aru_(blue_archive)',
+        frequency: 0.02,
+        isTopLevel: true,
+        count: 500,
+      },
+    ],
+  };
+  const user = makeSyncUser({id: '42', name: 'tester'});
+
+  /** Fails Noa's count with `status` the first `times` attempts. */
+  function failingNoa(status: number, times: number) {
+    const base = buildDistFetch(script, 'user');
+    let failures = 0;
+    return async (url: string) => {
+      if (
+        url.startsWith('/counts/posts.json') &&
+        decodeURIComponent(url).includes('noa_(blue_archive)') &&
+        failures < times
+      ) {
+        failures++;
+        return {ok: false, status, json: async () => ({})};
+      }
+      return base(url);
+    };
+  }
+
+  it('a count that 429s once is retried, ranked and cached', async () => {
+    const {adm} = makeDistAdm(failingNoa(429, 1), 50_000);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    const result = await adm.getCharacterDistribution(user);
+
+    expect(result[0].tagName).toBe('noa_(blue_archive)');
+    expect(result[0].count).toBe(900);
+    expect(save).toHaveBeenCalledWith('character_dist', 42, result);
+  });
+
+  it('a count lost after its retry is shown but not cached', async () => {
+    const {adm} = makeDistAdm(failingNoa(429, 2), 50_000);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    const result = await adm.getCharacterDistribution(user);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result.map(r => r.tagName)).toContain('yuuka_(blue_archive)');
+  });
+
+  it('a lost count falls back to the previous cached ranking', async () => {
+    const {adm, rl} = makeDistAdm(failingNoa(503, 2), 50_000);
+    const previous = [
+      {name: 'noa (blue archive)', tagName: 'noa_(blue_archive)', count: 880},
+    ];
+    vi.spyOn(adm, 'getStats').mockResolvedValue(previous);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    const result = await adm.getCharacterDistribution(user, true);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result).toBe(previous);
+    // It really fetched (forceRefresh), rather than returning the cache early.
+    expect(rl.fetch).toHaveBeenCalled();
+  });
+
+  it('thumbnails for an uncached partial result reach the pie but not the cache', async () => {
+    const {adm} = makeDistAdm(buildDistFetch(script, 'user'), 50_000);
+    vi.mocked(adm.enrichThumbnails).mockRestore();
+    vi.spyOn(adm, 'fetchThumbnailWithRetry').mockResolvedValue('t.webp');
+    const save = vi.spyOn(adm, 'saveStats');
+    const items = [{name: 'noa', tagName: 'noa_(blue_archive)', count: 1}];
+
+    await adm.enrichThumbnails(
+      'character_dist',
+      42,
+      items as never,
+      user,
+      null,
+      false,
+    );
+
+    expect(items[0]).toHaveProperty('thumb', 't.webp');
+    expect(save).not.toHaveBeenCalled();
+    expect(window.dispatchEvent).toHaveBeenCalled();
+  });
+
+  it('a deterministic 4xx is not retried and does not block caching', async () => {
+    // e.g. 422 for a search over a Member account's tag limit: refetching
+    // cannot change it, so refusing to cache would re-run it every open.
+    const fetchImpl = failingNoa(422, 99);
+    const {adm, rl} = makeDistAdm(fetchImpl, 50_000);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    await adm.getCharacterDistribution(user);
+
+    const noaCalls = rl.fetch.mock.calls.filter(
+      (c: [string]) =>
+        c[0].startsWith('/counts/posts.json') &&
+        decodeURIComponent(c[0]).includes('noa_(blue_archive)'),
+    );
+    expect(noaCalls).toHaveLength(1);
+    expect(save).toHaveBeenCalled();
   });
 });
 
@@ -2166,5 +2534,124 @@ describe('AnalyticsDataManager.quickSyncAllPosts', () => {
     // Otherwise every later sync in this tab is refused by a lock nobody holds.
     expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
     expect(AnalyticsDataManager.onProgressCallback).toBeNull();
+  });
+});
+
+// A 429 during the post-sync burst used to be saved as data: the rating pie
+// showed Explicit 0 and Recent Popular "No posts found" for the whole cache
+// TTL. Failed runs must not write the cache.
+describe('failed fetches are not cached', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function makeAdm(fetchImpl?: Parameters<typeof makeSyncRateLimiter>[0]) {
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable()) as never,
+      makeSyncRateLimiter(fetchImpl) as never,
+    );
+    const save = vi.spyOn(adm, 'saveStats').mockResolvedValue();
+    const getStats = vi.spyOn(adm, 'getStats');
+    return {adm, save, getStats};
+  }
+  const user = makeSyncUser({id: '42', name: 'tester'});
+
+  it('rating: one failed count keeps the previous cache', async () => {
+    const {adm, save, getStats} = makeAdm();
+    const previous = [{rating: 'e', count: 900, label: 'Explicit'}];
+    getStats.mockResolvedValue(previous);
+    vi.spyOn(adm, 'fetchRemoteCount').mockImplementation(async q => {
+      if (q.includes('rating:e')) throw new Error('HTTP 429');
+      return 10;
+    });
+
+    const result = await adm.getRatingDistribution(user, null, true);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result).toBe(previous);
+  });
+
+  it('rating: a clean run is cached as before', async () => {
+    const {adm, save} = makeAdm();
+    vi.spyOn(adm, 'fetchRemoteCount').mockResolvedValue(10);
+
+    await adm.getRatingDistribution(user, null, true);
+
+    expect(save).toHaveBeenCalledWith(
+      'rating_dist',
+      42,
+      expect.arrayContaining([expect.objectContaining({count: 10})]),
+    );
+  });
+
+  it('status: a failed count with no previous cache returns the partial result unsaved', async () => {
+    const {adm, save, getStats} = makeAdm();
+    getStats.mockResolvedValue(null);
+    vi.spyOn(adm, 'fetchRemoteCount').mockImplementation(async q => {
+      if (q.includes('status:deleted')) throw new Error('HTTP 429');
+      return 5;
+    });
+
+    const result = await adm.getStatusDistribution(user, null, true);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result.find(r => r.name === 'active')?.count).toBe(5);
+  });
+
+  it('recent popular: a 429 is not cached, an empty week is', async () => {
+    const post = {id: 7, score: 50};
+    let nsfwStatus = 429;
+    const {adm, save} = makeAdm(async (url: string) => {
+      if (url.includes('is%3Ansfw')) {
+        return nsfwStatus === 200
+          ? {ok: true, status: 200, json: async () => []}
+          : {
+              ok: false,
+              status: 429,
+              json: async () => {
+                throw new SyntaxError('Unexpected token <');
+              },
+            };
+      }
+      return {ok: true, status: 200, json: async () => [post]};
+    });
+
+    await adm.getRecentPopularPosts(user, true);
+    expect(save).not.toHaveBeenCalled();
+
+    nsfwStatus = 200; // no NSFW upload this week: a real "none"
+    const result = await adm.getRecentPopularPosts(user, true);
+    expect(result).toEqual({sfw: post, nsfw: null});
+    expect(save).toHaveBeenCalledWith('recent_popular_posts', 42, result);
+  });
+
+  it('top posts: an HTML error body marks the run failed', async () => {
+    const {adm, save, getStats} = makeAdm(async (url: string) =>
+      url.includes('rating%3Ag')
+        ? {
+            ok: false,
+            status: 503,
+            json: async () => {
+              throw new SyntaxError('Unexpected token <');
+            },
+          }
+        : {ok: true, status: 200, json: async () => [{id: 1}]},
+    );
+    getStats.mockResolvedValue(null);
+
+    const result = await adm.getTopPostsByType(user, true);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result.g).toBeNull();
+    expect(result.s).toEqual({id: 1});
   });
 });
