@@ -15,6 +15,7 @@
  */
 
 import {APP_VERSION} from '../version';
+import {getCapturedLogs, type CapturedLog} from './log-capture';
 
 // ─── Constants ───────────────────────────────────────────────────────
 
@@ -227,6 +228,8 @@ interface DiagPanel {
   show(): void;
   hide(): void;
   getText(): string;
+  /** Run `fn` whenever the panel opens and right before Copy reads it. */
+  onRefresh(fn: () => void): void;
 }
 
 function createPanel(): DiagPanel {
@@ -253,6 +256,7 @@ function createPanel(): DiagPanel {
   copyBtn.textContent = 'Copy';
   copyBtn.style.cssText = btnStyle('#2d8a4e');
   copyBtn.onclick = () => {
+    runRefreshers();
     const text = panel.getText();
     if (navigator.clipboard) {
       navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
@@ -290,6 +294,18 @@ function createPanel(): DiagPanel {
 
   document.body.appendChild(container);
   document.body.appendChild(reopenBtn);
+
+  // Live sections (e.g. Logs) re-render from current state on each open.
+  const refreshers: Array<() => void> = [];
+  const runRefreshers = () => {
+    for (const fn of refreshers) {
+      try {
+        fn();
+      } catch {
+        /* one broken section must not block the rest */
+      }
+    }
+  };
 
   const panel: DiagPanel = {
     container,
@@ -356,6 +372,7 @@ function createPanel(): DiagPanel {
     },
 
     show(): void {
+      runRefreshers();
       container.style.display = '';
       reopenBtn.style.display = 'none';
     },
@@ -363,6 +380,11 @@ function createPanel(): DiagPanel {
     hide(): void {
       container.style.display = 'none';
       reopenBtn.style.display = '';
+    },
+
+    onRefresh(fn: () => void): void {
+      refreshers.push(fn);
+      fn();
     },
 
     getText(): string {
@@ -399,6 +421,43 @@ function createPanel(): DiagPanel {
   };
 
   return panel;
+}
+
+const LOG_COLORS: Record<CapturedLog['level'], string> = {
+  error: '#ff6b6b',
+  warn: '#ffb347',
+  info: '#8fd3ff',
+  log: '#c0c0c0',
+  debug: '#888',
+};
+
+/**
+ * Logs section: WARN/ERROR (and our own INFO/DEBUG/Perf lines) captured
+ * since page load by dev/log-capture. Re-rendered on every panel open and
+ * before Copy, so a sync that fails after the panel was first built still
+ * shows up. Newest last, matching console order.
+ */
+function buildLogsSection(panel: DiagPanel): void {
+  const sec = panel.addSection('Logs', false);
+  panel.onRefresh(() => {
+    sec.textContent = '';
+    const logs = getCapturedLogs();
+    const warnCount = logs.filter(l => l.level === 'warn').length;
+    const errorCount = logs.filter(l => l.level === 'error').length;
+    panel.addLine(
+      sec,
+      'Captured',
+      `${logs.length} lines (${errorCount} error, ${warnCount} warn)`,
+    );
+    for (const entry of logs) {
+      const line = document.createElement('div');
+      line.style.cssText =
+        `color:${LOG_COLORS[entry.level]};white-space:pre-wrap;` +
+        'word-break:break-all;border-bottom:1px solid #2a2a44;padding:1px 0;';
+      line.textContent = `[${(entry.t / 1000).toFixed(1)}s] ${entry.level.toUpperCase()} ${entry.text}`;
+      sec.appendChild(line);
+    }
+  });
 }
 
 function btnStyle(bg: string): string {
@@ -850,6 +909,13 @@ export async function showDiagnostic(): Promise<void> {
   } catch {
     const sec = panel.addSection('System', true);
     panel.addLine(sec, 'Error', 'Failed to collect system info');
+  }
+
+  // 3b. Captured console logs (no DB needed)
+  try {
+    buildLogsSection(panel);
+  } catch {
+    /* panel still useful without logs */
   }
 
   if (!db) return;
