@@ -183,15 +183,25 @@ const GLOBAL_CSS = `
        The fade is only shown when the has-overflow class is set via JS after
        measuring scrollHeight, so it doesn't clutter the UI when there's
        nothing to scroll. */
-    .di-user-history-timeline {
-      scrollbar-width: thin;
-      scrollbar-color: var(--di-scrollbar-thumb, #cccccc) transparent;
+    /* Standard scrollbar-width/-color only where ::-webkit-scrollbar is not
+       supported (Firefox). Chrome 121+ honours the standard properties when
+       present and then *ignores* ::-webkit-scrollbar, falling back to macOS
+       overlay scrollbars that stay hidden until you scroll — which is why the
+       scrollbar never showed. Safari/Chrome keep the always-visible custom
+       bar below. */
+    @supports not selector(::-webkit-scrollbar) {
+      .di-user-history-timeline {
+        scrollbar-width: thin;
+        scrollbar-color: var(--di-scrollbar-thumb, #cccccc) transparent;
+      }
     }
     .di-user-history-timeline::-webkit-scrollbar {
       width: 8px;
     }
+    /* A faint rail so the scroll affordance reads even before hovering. */
     .di-user-history-timeline::-webkit-scrollbar-track {
-      background: transparent;
+      background: var(--di-border-light, #eeeeee);
+      border-radius: 4px;
     }
     .di-user-history-timeline::-webkit-scrollbar-thumb {
       background: var(--di-scrollbar-thumb, #cccccc);
@@ -241,6 +251,72 @@ const GLOBAL_CSS = `
     #danbooru-insights-upload-card.paused .di-upload-card-pane {
         animation-play-state: paused;
     }
+    /* -- "At a glance" (profile-summary-view.ts): dashboard card + popover -- */
+    .di-ps-card {
+        background: var(--di-bg, #fff);
+        border: 1px solid var(--di-border-light, #eee);
+        border-radius: 8px;
+        padding: 15px;
+        display: flex;
+        align-items: flex-start;
+        margin-bottom: 15px;
+    }
+    .di-ps-icon {
+        font-size: 2em;
+        margin-right: 15px;
+        margin-top: 5px;
+        flex-shrink: 0;
+    }
+    .di-ps-body {
+        flex: 1;
+        min-width: 0;
+    }
+    .di-preview-summary {
+        margin-bottom: 12px;
+    }
+    /* The popover's base is 11px; the sentences need to read as body
+       text, not a caption. */
+    .di-preview-summary .di-ps-text {
+        font-size: 11.5px;
+        line-height: 1.45;
+    }
+    .di-ps-label {
+        font-size: 0.85em;
+        color: var(--di-text-secondary, #666);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    /* Never clamped: the full text must be readable without hovering
+       (a tooltip is undiscoverable and absent on touch). The card grows to
+       the tallest pane instead. */
+    .di-ps-text {
+        font-size: 0.85em;
+        line-height: 1.4;
+        color: var(--di-text, #333);
+    }
+    .di-ps-link,
+    .di-ps-flag {
+        text-decoration: none;
+        font-weight: 600;
+    }
+    .di-ps-link { color: var(--di-link, #007bff); }
+    /* Tag links in Danbooru's category colours (same values as the
+       dashboard's pie/legend: copyright purple, character green). */
+    .di-ps-tag--copyright { color: #a800aa; }
+    .di-ps-tag--character { color: #00ab2c; }
+    [data-di-theme="dark"] .di-ps-tag--copyright { color: #c797ff; }
+    [data-di-theme="dark"] .di-ps-tag--character { color: #35c64a; }
+    /* Tone colours for both plain parts and flag links. */
+    .di-ps-tone--good { color: #1a7f37; font-weight: 600; }
+    .di-ps-tone--info { color: #0969da; }
+    .di-ps-tone--warn { color: #bf7a00; font-weight: 600; }
+    .di-ps-tone--bad { color: #cf222e; font-weight: 600; }
+    [data-di-theme="dark"] .di-ps-tone--good { color: #3fb950; }
+    [data-di-theme="dark"] .di-ps-tone--info { color: #58a6ff; }
+    [data-di-theme="dark"] .di-ps-tone--warn { color: #f0b429; }
+    [data-di-theme="dark"] .di-ps-tone--bad { color: #ff7b72; }
+    .di-ps-link:hover,
+    .di-ps-flag:hover { text-decoration: underline; }
     .di-play-pause-btn {
         position: absolute;
         top: 10px;
@@ -248,7 +324,10 @@ const GLOBAL_CSS = `
         background: none;
         border: none;
         cursor: pointer;
-        opacity: 0.5;
+        /* Explicit colour: the SVG strokes currentColor, and a bare <button>
+           inherits the UA's black buttontext — invisible on dark themes. */
+        color: var(--di-text-secondary, #666666);
+        opacity: 0.7;
         transition: opacity 0.2s;
         display: flex;
         align-items: center;

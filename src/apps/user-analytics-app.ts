@@ -13,7 +13,17 @@ import {
   setCountCacheTtlMin,
 } from '../core/settings';
 import {perfLogger} from '../core/perf-logger';
-import {UserAnalyticsDataService} from './user-analytics-data';
+import {
+  UserAnalyticsDataService,
+  buildRecentSummaryInput,
+  deletedCount,
+  statusTriple,
+} from './user-analytics-data';
+import {buildProfileSummary} from '../core/profile-summary';
+import {
+  mountProfileSummaryCard,
+  updateProfileSummaryCard,
+} from '../ui/profile-summary-view';
 import type {ProgressState, ReportProgress} from './progress-tracker';
 import {escapeHtml, getLevelClass} from '../utils';
 import {
@@ -49,7 +59,7 @@ import {isTouchDevice} from '../ui/two-step-tap';
 import {showToast} from '../ui/toast';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
-import type {SyncOutcome} from '../types';
+import type {ProfileSummaryInput, SyncOutcome} from '../types';
 
 const log = createLogger('UserAnalytics');
 
@@ -190,6 +200,53 @@ function scheduleRevalidateAll(
       });
     }, 0);
   }
+}
+
+/** Same single-slot pattern as {@link lazyPieRevalidateListener}. */
+let summaryCardListener: ((e: Event) => void) | null = null;
+
+/**
+ * Mounts the dashboard's "At a glance" card (every synced upload) above the
+ * summary grid and keeps it live: a status-pie revalidate (lifetime deleted /
+ * pending / flagged / banned counts) re-renders it in place. Any builder
+ * failure only drops the card — the dashboard keeps rendering.
+ */
+export function wireSummaryCard(
+  parent: HTMLElement,
+  input: ProfileSummaryInput,
+): void {
+  let current = input;
+  const build = () => buildProfileSummary(current, Date.now(), 'lifetime');
+  try {
+    if (!mountProfileSummaryCard(parent, build())) return;
+  } catch (e: unknown) {
+    log.warn('At a glance card failed to build', {error: e});
+    return;
+  }
+  if (summaryCardListener) {
+    window.removeEventListener(
+      'DanbooruInsights:DataUpdated',
+      summaryCardListener,
+    );
+  }
+  summaryCardListener = (e: Event) => {
+    const {contentType, data} = ((e as CustomEvent).detail ?? {}) as {
+      contentType?: string;
+      data?: unknown;
+    };
+    if (contentType !== 'status_dist' || !Array.isArray(data)) return;
+    current = {
+      ...current,
+      lifetimeDeleted: deletedCount(data),
+      lifetimeStatus: statusTriple(data),
+    };
+    try {
+      updateProfileSummaryCard(parent, build());
+    } catch (err: unknown) {
+      log.warn('At a glance card failed to update', {error: err});
+    }
+  };
+  window.addEventListener('DanbooruInsights:DataUpdated', summaryCardListener);
 }
 
 /**
@@ -1318,6 +1375,9 @@ export class UserAnalyticsApp {
         // uploads whose v2 landed well after v1 (left under-tagged).
         fetchAbandoned: postIds =>
           this.dataManager.getAbandonedPostIds(postIds),
+        // Newest-200 "At a glance" (1 piestats-cached request; the dashboard
+        // card shows the lifetime view instead).
+        fetchSummary: () => this.buildRecentSummary(),
       });
       // Hoist so updateHeaderStatus() can attach the touch 📋 next to the gear.
       this.previewPopover = previewPopover;
@@ -1690,6 +1750,15 @@ export class UserAnalyticsApp {
    * opens the pinned preview directly. Returns null on desktop or before the
    * preview popover has been created.
    */
+  /** The popover's newest-200 summary (see {@link buildRecentSummaryInput}). */
+  private async buildRecentSummary() {
+    const user = this.context.targetUser;
+    const total =
+      this.totalPostCount ?? (await this.dataManager.getTotalPostCount(user));
+    const input = await buildRecentSummaryInput(this.dataManager, user, total);
+    return buildProfileSummary(input, Date.now(), 'recent');
+  }
+
   private buildMiniReportButton(): HTMLSpanElement | null {
     if (!isTouchDevice() || !this.previewPopover) return null;
     const reportBtn = document.createElement('span');
@@ -2160,6 +2229,7 @@ export class UserAnalyticsApp {
 
       const dashboardDiv = document.createElement('div');
       renderSummaryCards(dashboardDiv, dashboardData, this.context.targetUser);
+      wireSummaryCard(dashboardDiv, dashboardData.profileSummaryInput);
 
       await renderDashboardWidgets(
         dashboardDiv,

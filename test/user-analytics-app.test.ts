@@ -38,6 +38,7 @@ vi.mock('../src/ui/two-step-tap', async importOriginal => {
 import {
   UserAnalyticsApp,
   schedulePieRevalidate,
+  wireSummaryCard,
 } from '../src/apps/user-analytics-app';
 import {isTouchDevice} from '../src/ui/two-step-tap';
 import {showToast} from '../src/ui/toast';
@@ -45,7 +46,7 @@ import {AnalyticsDataManager} from '../src/core/analytics-data-manager';
 import {SettingsManager} from '../src/core/settings';
 import {RateLimitedFetch} from '../src/core/rate-limiter';
 import type {ProfileContext} from '../src/core/profile-context';
-import type {TargetUser} from '../src/types';
+import type {ProfileSummaryInput, TargetUser, WindowPoint} from '../src/types';
 import type {Database} from '../src/core/database';
 
 const TARGET_USER: TargetUser = {
@@ -546,5 +547,98 @@ describe('UserAnalyticsApp.performPartialSync — sync outcome reporting', () =>
     await app.performPartialSync(null, false);
 
     expect(showToast).not.toHaveBeenCalled();
+  });
+});
+
+describe('wireSummaryCard — dashboard At a glance (lifetime)', () => {
+  const NOW = Date.now();
+  const point = (i: number, over: Partial<WindowPoint> = {}): WindowPoint => ({
+    id: 1000 - i,
+    ts: NOW - (i + 1) * 6 * 3_600_000,
+    del: false,
+    ban: false,
+    score: 5,
+    gentags: 20,
+    rating: 's',
+    ...over,
+  });
+  const points = (n: number) => Array.from({length: n}, (_, i) => point(i));
+  const input = (
+    over: Partial<ProfileSummaryInput> = {},
+  ): ProfileSummaryInput => {
+    const all = points(300);
+    return {
+      userName: 'fixture_user',
+      firstUploadDate: new Date(Date.UTC(2021, 2, 1)),
+      total: 1000,
+      lifetimeDeleted: 2,
+      lifetimeStatus: {pending: 0, flagged: 0, banned: 0},
+      copyrightTop: [],
+      characterTop: [],
+      lifetimePoints: all,
+      window: all.slice(0, 200),
+      ...over,
+    };
+  };
+  function dashboard(): HTMLElement {
+    const root = document.createElement('div');
+    root.innerHTML = '<div class="di-summary-grid"></div>';
+    document.body.appendChild(root);
+    return root;
+  }
+  const cardText = (root: HTMLElement) =>
+    root.querySelector('.di-ps-card .di-ps-text')?.textContent ?? '';
+  const dataUpdated = (contentType: string, data: unknown) =>
+    window.dispatchEvent(
+      new CustomEvent('DanbooruInsights:DataUpdated', {
+        detail: {contentType, data},
+      }),
+    );
+
+  it('mounts the lifetime card above the summary grid', () => {
+    const root = dashboard();
+    wireSummaryCard(root, input());
+    expect(root.firstElementChild?.className).toBe('di-ps-card');
+    expect(cardText(root)).toContain(
+      'Uploading since 2021-03. All 1,000 uploads are clean — 2 deleted (0.2%)',
+    );
+  });
+
+  it('drops only the card when the builder throws', () => {
+    const root = dashboard();
+    const broken = input({lifetimePoints: null as unknown as WindowPoint[]});
+    expect(() => wireSummaryCard(root, broken)).not.toThrow();
+    expect(root.querySelector('.di-ps-card')).toBeNull();
+  });
+
+  it('re-renders when the status pie revalidates', () => {
+    const root = dashboard();
+    wireSummaryCard(root, input());
+    dataUpdated('status_dist', [
+      {name: 'deleted', count: 150},
+      {name: 'pending', count: 2},
+    ]);
+    expect(cardText(root)).toContain(
+      'Across all 1,000 uploads: 150 deleted (15%)',
+    );
+    expect(cardText(root)).toContain('2 pending (0.2%)');
+  });
+
+  it('ignores other distributions', () => {
+    const root = dashboard();
+    wireSummaryCard(root, input());
+    const before = cardText(root);
+    dataUpdated('copyright_dist', []);
+    expect(cardText(root)).toBe(before);
+  });
+
+  it('does not stack listeners across dashboard re-opens', () => {
+    const first = dashboard();
+    wireSummaryCard(first, input());
+    const second = dashboard();
+    wireSummaryCard(second, input());
+    dataUpdated('status_dist', [{name: 'deleted', count: 150}]);
+    expect(cardText(first)).toContain('2 deleted (0.2%)');
+    expect(cardText(second)).toContain('150 deleted (15%)');
   });
 });

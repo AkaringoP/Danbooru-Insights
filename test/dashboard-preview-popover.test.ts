@@ -1170,3 +1170,61 @@ describe('createDashboardPreviewPopover — section B (activity)', () => {
     pop.destroy();
   });
 });
+
+describe('preview popover — At a glance (last 200) section', () => {
+  const summary = {
+    lines: [[{text: 'Last 200 uploads are clean', severity: 'good' as const}]],
+    overflow: [],
+  };
+
+  it('is omitted without fetchSummary', () => {
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: NEVER,
+    });
+    pop.show();
+    expect(document.querySelector('.di-preview-summary')).toBeNull();
+    pop.destroy();
+  });
+
+  it('renders the summary above the recent uploads once resolved', async () => {
+    const fetchSummary = vi.fn(async () => summary);
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: NEVER,
+      fetchSummary,
+    });
+    pop.show();
+    const section = document.querySelector('.di-preview-summary');
+    expect(section?.nextElementSibling?.className).toBe(
+      'di-preview-section-head',
+    );
+    expect(section?.textContent).toContain('last 200 uploads');
+    expect(section?.querySelector('.di-ps-text')?.textContent).toBe(
+      'Summarising recent uploads…',
+    );
+    await flush();
+    expect(section?.querySelector('.di-ps-tone--good')?.textContent).toBe(
+      'Last 200 uploads are clean',
+    );
+    // A quick re-open serves the cache without refetching.
+    pop.hide();
+    pop.show();
+    expect(fetchSummary).toHaveBeenCalledTimes(1);
+    pop.destroy();
+  });
+
+  it('shows a fallback message when the summary fails', async () => {
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: NEVER,
+      fetchSummary: () => Promise.reject(new Error('x')),
+    });
+    pop.show();
+    await flush();
+    expect(
+      document.querySelector('.di-preview-summary .di-ps-text')?.textContent,
+    ).toBe('Summary unavailable.');
+    pop.destroy();
+  });
+});
