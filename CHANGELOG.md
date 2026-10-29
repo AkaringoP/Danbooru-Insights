@@ -4,6 +4,93 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.10.0 — Full syncs that finish, a rate limiter that adapts, fewer requests
+
+### Fixed
+- **A full re-sync of a large account now finishes in one run.** Deleting
+  local data and re-syncing a ~47k-post account stopped at around 42-44k
+  every time: the dashboard opened behind a "Sync incomplete" toast, loaded
+  its charts, and only then showed "Data Synchronization Required". A single
+  HTTP 429 (rate limit) was enough, because the sync retried server errors
+  only and gave up on the first 429. Rate limits, timeouts and dropped
+  connections are now retried, up to five attempts per page, and each retry
+  waits out the current rate-limit pause first.
+- **A sync that stops short no longer shows 100 %.** While stats refreshed
+  after an interrupted run, the header read "46,894 / 46,894 (100%)" in
+  green. It now shows the posts actually saved, in red.
+- **"Data Synchronization Required" appears straight away.** The check used
+  to run only after all 14 dashboard loading steps; it now runs before them.
+- **Failed lookups are no longer saved as real data.** A rate-limited
+  request right after a sync could leave the rating pie with Explicit at 0,
+  Recent Popular reading "No posts found", or a top character missing from
+  the character pie, and that result was cached for the count-refresh
+  period. Each count is now retried once. If one is still lost, the result
+  is shown but not saved, the previous cached value is kept when there is
+  one, and the next open tries again. The popular-post lookups also check
+  the response status, so an error page is no longer read as "no posts".
+- **Full reset clears the post-metadata flag too**, so it no longer vouches
+  for data that was just deleted.
+- **Tag pages could cache a wrong "top-level tag" answer for 180 days.** A
+  rate-limited implication lookup whose error body was JSON parsed as "no
+  implications", marking every candidate top-level. A failed lookup is now
+  never cached.
+
+### Performance
+- **Requests adapt to Danbooru's rate limit instead of hitting it
+  repeatedly.** Measured on mobile, Danbooru's 429s arrive as HTML with no
+  wait hint, and after a fixed 5 s pause the whole queued backlog fired at
+  once and drew the next 429 within seconds. Now:
+  - after a pause, requests resume gently for 5 s (one at a time, two in
+    flight at most);
+  - a 429 while sending normally halves the request rate (down to 25 %); it
+    climbs back after 20 s without a 429, but never above one step below the
+    rate that drew the last 429, and that cap itself rises after 2 quiet
+    minutes;
+  - a 429 right after resuming means the pause was too short, so the next
+    pause doubles (5 s, 10 s, 20 s, up to 2 min) and the rate is kept;
+  - Danbooru's `X-Rate-Limit` header, or a `Retry-After`, is followed
+    whenever a response carries one.
+
+  Testing on a 46k-post account, a full re-sync plus the first dashboard
+  load drew about 45 rate-limit hits with page retries alone, and 4 with
+  this pacing; none of them lose data any more.
+- **The related-tag pies make one lookup instead of 119.** Character,
+  copyright and fav-copyright checked every candidate tag's implications
+  with its own request on every refresh. They now share one batched, cached
+  lookup with the tag pages: at most 4 requests on a cold cache, none once
+  cached (180 days).
+- **The first open after a reset loads less up front.** Copyright, Char and
+  Fav_Copy still load with the dashboard. Gender, Boobs, Hair_L, Hair_C,
+  Cmnt and Tran load when first opened (a brief "Loading...") if they have no
+  cached data yet, so a tab nobody opens costs nothing.
+
+### Changed
+- **Sync progress turns amber while waiting on a rate limit.** The header
+  status and the Resume Sync progress bar switch from red / green to amber
+  during a rate-limit pause and back when requests resume, so a wait no
+  longer looks like an error.
+
+### Added
+- **The diagnostic panel keeps a log.** With `#di_diag` in the URL, warnings
+  and errors since page load (newest 500, plus the script's own info lines)
+  appear in a new **Logs** section, refreshed whenever the panel opens and
+  included in **Copy**. Sync problems can now be diagnosed on mobile, where
+  there is no browser console. A **Refresh** button re-reads the database
+  sections, which used to be a snapshot from page load.
+
+### Internal
+- The unit suite grew from 896 to 954 tests. Every new test for a fix was
+  checked to fail against the pre-fix code.
+- Top-level tag detection moved from the tag-page service into
+  `core/top-level-tags.ts`, now shared by both apps; `utils.isTopLevelTag`
+  is gone with its last caller.
+- Count-based stats go through `countBatch()` + `cacheUnlessPartial()` in
+  `AnalyticsDataManager`; new distributions should use the same path rather
+  than calling `fetchRemoteCount` directly.
+- New `CONFIG.MAX_BACKOFF_MS` (2 min) bounds any rate-limit pause.
+
+---
+
 ## v9.9.2 — Grass race on rapid metric/year switching (issue #4)
 
 ### Fixed

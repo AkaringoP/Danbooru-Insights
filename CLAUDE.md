@@ -76,7 +76,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run compile` — `tsc` 단독 (타입 체크만, 번들 없음)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 893 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 954 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 7 개)
 - `npm run test:e2e:update` — e2e 스냅샷 baseline 갱신 (의도한 시각 변경일 때만)
@@ -113,7 +113,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 | `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts` |
 | `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts`, `dashboard-preview-popover.ts`, `grass-month-popover.ts` |
 | `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
-| `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts` |
+| `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts`, `log-capture.ts` |
 | `src/` (루트) | Entry, 공유 types/utils/config | `main.ts`, `types.ts`, `utils.ts`, `config.ts`, `styles.ts`, `version.ts` |
 
 ## 주요 제약사항
@@ -191,9 +191,11 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
 ## 현재 릴리즈 상태
-현재 버전 **v9.9.1** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
+현재 버전 **v9.10.0** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
 
 최근 출시분 요약 (상세는 [CHANGELOG.md](CHANGELOG.md)):
+- **v9.10.0** — 큰 계정 full sync 가 429 한 번에 멈추던 문제 (429·타임아웃·네트워크 재시도, 대기 끝난 뒤 재시도), rate limiter 재설계 (slow start, 적응형 rate + 회복 상한, 정지 직후 429 는 정지 2 배, `X-Rate-Limit`/`Retry-After` 추종 — 46k 계정 재 sync + 첫 대시보드 기준 페이지 재시도만 있을 때 429 약 45 → 이 장치들로 4), 실패한 카운트를 0 으로 캐시하던 문제 (`countBatch` 1 회 재시도 + `cacheUnlessPartial`), related-tag pie 3 개의 implication 조회를 일괄 + 캐시로 공유 (`core/top-level-tags.ts`, 119 → ≤4 건), cold open 시 부가 pie 탭 6 개는 열 때 로딩, rate-limit 대기 중 진행 표시 주황, 진단 패널 Logs 섹션 + Refresh. 테스트 896 → 954
+- **v9.9.2** — grass 에서 metric/year 를 빠르게 바꿀 때 늦게 끝난 fetch 가 새 라벨 아래 옛 데이터를 그리던 race (issue #4), threshold 안내 중복
 - **v9.9.1** (핫픽스) — 모달의 `backdrop-filter` 2 개 제거 (Windows 잔상/버벅임), architecture.test.ts 경로 정규화 (Windows 에서 규칙 1 개가 0 건 검사로 통과하던 문제)
 - **v9.9.0** — 대시보드 오픈 속도 개선 (무거운 태그 분포 9 개를 blocking path 에서 제거, 캐시 즉시 페인트 + 화면에 보이는 pie 탭만 lazy revalidate → ~46k 계정 기준 30s → 5s), 월 popover 차트 (일별 스파크라인 + 연간 추세선), `<`/`>` 포함 태그 이스케이프, 실패한 sync 가 성공으로 보고되던 문제, 삭제된 포스트의 로컬 ghost row 정리 (`pruneGhostPosts`), 모든 대시보드 트래픽을 공유 rate limiter 로 통일 (+ gate 4 규칙 11 신설). 테스트 782 → 893
 - **v9.8.0** — grass 월 라벨 hover popover (월 합계/MoM/활동일 비율/최다일, 연내 in-memory 데이터로 계산 — 추가 API 없음)

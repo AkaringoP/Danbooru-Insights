@@ -22,14 +22,22 @@ An in-page overlay that shows the internal state of all three apps (GrassApp, Us
 - The panel appears at the bottom of the page.
 - **Sections** are collapsible — tap the header to expand/collapse.
 - The section most relevant to the current page is expanded by default (GrassApp + UserAnalytics on profile pages, TagAnalytics on wiki/artist pages).
-- **Copy** button copies all diagnostic data as plain text to the clipboard.
+- **Copy** button copies all diagnostic data as plain text to the clipboard, including the latest **Logs**.
+- **Refresh** (v9.10) re-reads every section. The database sections are otherwise a snapshot taken when the panel was first built (shortly after page load), so refresh after a sync finishes or fails. It fires a few remote count queries, which is why it is manual.
 - **Close** hides the panel and leaves a small floating **DI** button in the bottom-right corner. Tap it to reopen.
+
+While the gate is on, console output is captured from page load (before any app starts), so the **Logs** section shows what happened even if the panel was closed at the time. Keep `#di_diag` in the URL while reproducing a problem.
 
 ### What Each Section Shows
 
 #### System
 - Script version, page URL, User-Agent, DB version, IndexedDB store list
 - All `di*` / `danbooru*` localStorage keys and their values
+
+#### Logs (v9.10)
+- Every `console.warn` / `console.error` since page load, plus the script's own `[DI:…]` / `[Perf …]` info and debug lines (`src/dev/log-capture.ts`). Newest 500 lines, oldest first, each stamped with seconds since page load.
+- Re-rendered every time the panel opens and right before **Copy**, unlike the database sections.
+- Collapsed by default; its first line counts the captured error / warn lines.
 
 #### GrassApp
 - Cached user IDs in the database
@@ -131,8 +139,8 @@ Use the Console filter box to narrow down logs:
 ### On Mobile Without DevTools
 
 If you don't have DevTools access (e.g., mobile browser):
-1. Use the **Diagnostic Panel** (Section 1 above) instead — it shows the most important state without needing the console.
-2. Alternatively, inject a mobile console tool like [Eruda](https://github.com/nickstenning/eruda) or [vConsole](https://github.com/nickstenning/vconsole) via a bookmarklet.
+1. Use the **Diagnostic Panel** (Section 1 above). Its **Logs** section captures every `WARN` / `ERROR` line since page load (they are never gated, so release builds produce them too); **Copy** exports them with the rest of the report.
+2. Alternatively, inject a mobile console tool like [Eruda](https://github.com/nickstenning/eruda) or [vConsole](https://github.com/nickstenning/vconsole) via a bookmarklet. Bookmarklets are unreliable on some mobile browsers, which is why option 1 exists.
 
 ---
 
@@ -186,6 +194,20 @@ localStorage.removeItem('di.perf.enabled');
    - `Posts in DB` — is there data? If 0, sync hasn't completed.
    - `piestats entries` — are there cache entries? Check their age.
    - If piestats age is > 24h, the cache has expired and will refresh on next load.
+
+### "Sync stops before 100%" / "Sync incomplete" toast
+
+1. Open the page with `#di_diag`, reproduce the sync, then open the panel, tap **Refresh** and **Copy**.
+2. In **Logs**:
+   - `Page fetch attempt failed {page, attempt, kind, error}` — a page fetch that will be retried. `kind` is `rate-limit` (429), `transient` (5xx, timeout, network) or `fatal`.
+   - `Page failed, stopping sync {page, error}` — retries ran out (or the error was fatal). This is what ends a sync early.
+   - `429 received, pausing requests {waitMs, source, cause, throttle, ceiling, xRateLimit}` — the shared rate limiter paused. `cause` is `rate` (sending too fast: rate halved), `pause-too-short` (429 right after resuming: next pause doubled) or `in-flight` (a request sent before the pause). `source: default` with `xRateLimit: null` means the 429 carried no wait hint.
+   - `Partial fetch not cached {cacheKey}` — some counts behind a stat were lost even after a retry; that stat was shown but not saved, and the next open refetches it.
+3. In **UserAnalyticsApp**, `Posts in DB` should match the user's upload count after a successful sync.
+
+### "A pie tab only says Loading..."
+
+After a full reset (or on a first visit), only Copy / Char / Fav_Copy load with the dashboard. The other six tabs load the first time they are opened, so a short "Loading..." there is expected. A tab stuck on "No data available" when the user has matching uploads is a bug — check **Logs** for errors.
 
 ### "Tag data seems outdated"
 
