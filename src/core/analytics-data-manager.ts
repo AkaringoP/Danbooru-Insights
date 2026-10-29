@@ -37,6 +37,11 @@ import {
   toPostPreview,
 } from './dashboard-preview';
 import type {CommentarySegment, UploadMeta} from './dashboard-preview';
+import {
+  WINDOW_SIZE,
+  buildRecentWindowUrl,
+  danbooruPostToWindowPoint,
+} from './profile-summary';
 import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
@@ -77,6 +82,7 @@ import type {
   ActivitySegment,
   ActivityDistribution,
   SyncOutcome,
+  WindowPoint,
 } from '../types';
 
 /**
@@ -2217,6 +2223,52 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
+   * The user's most recent uploads as {@link WindowPoint}s for the "At a
+   * glance" pane — one `/posts.json` request, cached in piestats under
+   * `recent_window` with the count-cache TTL. A failed or empty fetch returns
+   * `[]` and is not cached; the caller falls back to the local window.
+   * @param {!TargetUser} userInfo The user to fetch for.
+   * @param {number} limit How many recent uploads (default 200).
+   * @param {boolean} forceRefresh Bypass the cache (SWR revalidate).
+   * @return {!Promise<!Array<!WindowPoint>>} Newest-first points.
+   */
+  async getRecentUploadWindow(
+    userInfo: TargetUser,
+    limit = WINDOW_SIZE,
+    forceRefresh = false,
+  ): Promise<WindowPoint[]> {
+    if (!userInfo.name) return [];
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'recent_window';
+    const cached = await this.tryGetCachedStats<WindowPoint[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+      getCountCacheTtlMs(),
+    );
+    if (cached) return cached;
+
+    const normalizedName = userInfo.name.replace(/ /g, '_');
+    try {
+      const posts = await this.rateLimiter
+        .fetch(buildRecentWindowUrl(normalizedName, limit))
+        .then(r => r.json());
+      if (!Array.isArray(posts) || !posts.length) return [];
+      const points = posts.map((p: DanbooruPost) =>
+        danbooruPostToWindowPoint(p),
+      );
+      if (uploaderId) await this.saveStats(cacheKey, uploaderId, points);
+      return points;
+    } catch (e: unknown) {
+      log.warn('Failed to fetch recent upload window', {
+        user: userInfo.name,
+        error: e,
+      });
+      return [];
+    }
+  }
+
+  /**
    * Of the given (mintagged) post ids, returns those that look "abandoned":
    * their v2 landed at least {@link ABANDONED_GAP_MS} after v1, i.e. the
    * upload sat under-tagged before someone else stepped in (vs. the
@@ -4220,11 +4272,15 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Drop this user's rows above `startId` that the just-completed sync did
-   * not return — posts deleted on Danbooru since the last run.
+   * not return — posts that vanished from Danbooru's search since the last
+   * run: expunged (permanently destroyed), or no longer credited to this
+   * uploader.
    *
-   * Sync searches carry no `status:any`, so Danbooru's default excludes
-   * deleted posts and the re-fetched overlap window simply never mentions
-   * them. Without this pass the old row survives with `is_deleted:false`
+   * Plain *deleted* posts are not ghosts: Danbooru's default search includes
+   * them (no `status:` metatag needed — verified 2026-10-29 against this
+   * sync's own query), so the re-fetch overwrites their row with
+   * `is_deleted: true`. Only a post the search no longer returns at all
+   * leaves a ghost. Without this pass the old row survives
    * while the posts that outlived it are renumbered, so its stale `no`
    * collides with a live post's: `[uploader_id+no]` milestone lookups pick
    * whichever row Dexie hands back first, local counts drift above the

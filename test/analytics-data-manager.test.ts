@@ -2000,6 +2000,103 @@ describe('getRecentPostsPreview — uploader tag-count (mintag) join', () => {
   });
 });
 
+describe('getRecentUploadWindow — live window for the At a glance pane', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const row = {
+    id: 9,
+    created_at: '2026-10-17T06:30:00.000-04:00',
+    score: 4,
+    tag_count_general: 2,
+    rating: 'q',
+    is_pending: true,
+    is_flagged: false,
+    is_deleted: false,
+    is_banned: false,
+    tag_string_copyright: 'blue_archive original',
+    tag_string_character: '',
+  };
+
+  function setup(body: unknown, ok = true) {
+    const rl = makeSyncRateLimiter(async () => ({
+      ok,
+      status: ok ? 200 : 500,
+      json: async () => body,
+    }));
+    const db = makeSyncDb(makePostsTable());
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    return {rl, db, adm};
+  }
+
+  it('requests the newest 200 uploads without a status metatag', async () => {
+    const {rl, adm} = setup([row]);
+    await adm.getRecentUploadWindow(makeSyncUser({id: '42', name: 'a b'}));
+    const url = rl.fetch.mock.calls[0][0] as string;
+    expect(url).toContain(`tags=${encodeURIComponent('user:a_b')}&`);
+    expect(url).toContain('limit=200');
+    expect(url).toContain('tag_string_copyright,tag_string_character');
+    expect(url).not.toContain('status');
+  });
+
+  it('maps rows to window points and caches them', async () => {
+    const {db, adm} = setup([row]);
+    const points = await adm.getRecentUploadWindow(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    expect(points).toEqual([
+      {
+        id: 9,
+        ts: Date.parse('2026-10-17T10:30:00Z'),
+        del: false,
+        ban: false,
+        pending: true,
+        flagged: false,
+        score: 4,
+        gentags: 2,
+        rating: 'q',
+        copyrights: ['blue_archive', 'original'],
+        characters: [],
+      },
+    ]);
+    expect(db.piestats.put).toHaveBeenCalledWith(
+      expect.objectContaining({key: 'recent_window', data: points}),
+    );
+  });
+
+  it('serves a fresh cache without a request', async () => {
+    const {rl, db, adm} = setup([row]);
+    db.piestats.get.mockResolvedValue({
+      data: [{id: 1}],
+      updated_at: new Date().toISOString(),
+    } as never);
+    const points = await adm.getRecentUploadWindow(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    expect(points).toEqual([{id: 1}]);
+    expect(rl.fetch).not.toHaveBeenCalled();
+  });
+
+  it('returns [] and caches nothing on failure', async () => {
+    const {db, adm} = setup({error: 'x'}, false);
+    const points = await adm.getRecentUploadWindow(
+      makeSyncUser({id: '42', name: 'tester'}),
+    );
+    expect(points).toEqual([]);
+    expect(db.piestats.put).not.toHaveBeenCalled();
+  });
+});
+
 describe('getAbandonedPostIds — v1→v2 gap', () => {
   beforeEach(() => {
     vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});

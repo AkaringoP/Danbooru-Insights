@@ -126,7 +126,7 @@ export function toPostPreview(
 }
 
 /** Score at/below which a recent upload is flagged (heavily downvoted) → red. */
-const SUSPICIOUS_SCORE_MAX = -3;
+export const SUSPICIOUS_SCORE_MAX = -3;
 /**
  * Uploader-added tag count at/below which an upload is "mintagged" → orange.
  * This counts the tags the *uploader* added on the post's first version
@@ -135,7 +135,7 @@ const SUSPICIOUS_SCORE_MAX = -3;
  * even when others tagged the post up afterwards. The threshold is generous
  * because `added_tags` includes non-general tags (artist, copyright, meta).
  */
-const MINTAG_MAX = 10;
+export const MINTAG_MAX = 10;
 
 /**
  * Whether a recent upload is heavily downvoted (its label turns red): score

@@ -612,6 +612,90 @@ export interface ActivityDistribution {
 }
 
 /**
+ * One upload in the profile-summary ("At a glance") pane's analysis. Built
+ * from either the live recent-uploads fetch or a local scatter point, so the
+ * fields only the live fetch carries are optional — `undefined` means
+ * "unknown", and the summary skips whatever depends on it.
+ */
+export interface WindowPoint {
+  id: number;
+  /** Upload time (ms since epoch). */
+  ts: number;
+  del?: boolean;
+  ban?: boolean;
+  pending?: boolean;
+  flagged?: boolean;
+  score?: number;
+  /** General tag count (current value, not the uploader's first version). */
+  gentags: number;
+  rating: string;
+  copyrights?: string[];
+  characters?: string[];
+}
+
+/** A tag and how many of the user's uploads carry it. */
+export interface TagShare {
+  tag: string;
+  count: number;
+}
+
+/** Everything the profile summary needs, already loaded by the dashboard. */
+export interface ProfileSummaryInput {
+  /** Underscored user name, for `user:<name>` search links. */
+  userName: string;
+  firstUploadDate: Date | null;
+  /** Total uploads (deleted included — Danbooru's default search). */
+  total: number;
+  /** Lifetime deleted uploads (status_dist), or null when unknown. */
+  lifetimeDeleted: number | null;
+  /** Other lifetime status counts (status_dist) for the lifetime view. */
+  lifetimeStatus?: {pending: number; flagged: number; banned: number} | null;
+  /** Raw tag names of the lifetime top copyrights / characters (pie). */
+  copyrightTop: string[];
+  characterTop: string[];
+  /** Lifetime top tags with their upload counts (dashboard focus clause). */
+  lifetimeFocus?: {copyright: TagShare[]; character: TagShare[]};
+  /** Every locally synced upload — the "usual" baseline. */
+  lifetimePoints: WindowPoint[];
+  /** The most recent uploads (live fetch, or local newest-200 fallback). */
+  window: WindowPoint[];
+}
+
+/** Tone of a pane part: `good` praise, `info` neutral note, `warn`/`bad` concerns. */
+/** `recent`: newest-window view (popover). `lifetime`: all synced uploads (dashboard). */
+export type SummaryScope = 'recent' | 'lifetime';
+
+export type SummarySeverity = 'good' | 'info' | 'warn' | 'bad';
+
+/** Danbooru tag category of a tag-name link (drives its colour). */
+export type SummaryTagCategory = 'copyright' | 'character';
+
+/** A run of pane text; with `href` it renders as a link. */
+export interface SummaryPart {
+  text: string;
+  href?: string;
+  severity?: SummarySeverity;
+  title?: string;
+  category?: SummaryTagCategory;
+}
+
+/** One upload-health finding about the recent window. */
+export interface SummaryFlag {
+  id: string;
+  severity: SummarySeverity;
+  /** Sort key within a severity: the share of the window it affects. */
+  weight: number;
+  part: SummaryPart;
+}
+
+/** Built pane content: up to two lines of parts. */
+export interface ProfileSummary {
+  lines: SummaryPart[][];
+  /** Flags that did not fit inline (shown as "+N more"). */
+  overflow: SummaryFlag[];
+}
+
+/**
  * User object from `/users.json`.
  * The project always requests `only=id,name,level_string` so other fields
  * are normally absent. `created_at` is included only on a few endpoints
