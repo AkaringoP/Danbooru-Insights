@@ -142,7 +142,7 @@ Token bucket 알고리즘 기반 3-queue 시스템. 정확한 수치는 [src/con
 - **Report Queue**: 격리됨, `/reports/` URL 에 3 초 cooldown (`CONFIG.REPORT_COOLDOWN_MS`)
 - **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 분할해 Danbooru 의 10 req/s 서버 상한 안에 유지
 - **429 global backoff**: 서버 대기시간을 따름. Danbooru 는 `Retry-After` 대신 `X-Rate-Limit` 헤더 (token bucket JSON: `rate`/`cost`/`limits{key: points}`) 를 보냄 → `(cost − 최저 points) / rate` 초 + 0.5s 동안 전체 큐 정지 (`backoffFromResponse`). 헤더 없으면 `Retry-After`, 그것도 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s). `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp. 제한 중 요청은 1 초씩 debt 를 늘리므로 (최대 ~30s) 고정 5s 로는 429 가 반복됐음
-- **Slow start + 적응형 rate**: 정지가 끝나면 5 초간 토큰 1 개 / 동시 2 개로만 재개 (정지 중 꽉 찬 버킷과 대기 타이머가 한꺼번에 터지며 다음 429 를 부르던 문제). 정지 밖에서 받은 429 마다 rate·동시성을 절반으로 (하한 25%), 429 없는 20 초마다 25%p 씩 복구. 실측상 Danbooru 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 와서 서버 대기시간 추종이 작동 안 함 — 이 두 장치가 실질적인 방어선
+- **Slow start + 적응형 rate**: 정지가 끝나면 5 초간 토큰 1 개 / 동시 2 개로만 재개 (정지 중 꽉 찬 버킷과 대기 타이머가 한꺼번에 터지며 다음 429 를 부르던 문제). 정지 밖에서 받은 429 마다 rate·동시성을 절반으로 (하한 25%), 429 없는 20 초마다 25%p 씩 복구. 복구 상한은 429 가 난 rate 보다 한 단계 (25%p) 아래 — 상한 없이는 0.5 에서 버티다 0.56~0.75 로 회복할 때마다 수 초 안에 429 가 나는 톱니가 생겼음. 상한은 429 없는 2 분마다 한 단계씩 올라감. 실측상 Danbooru 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 와서 서버 대기시간 추종이 작동 안 함 — 이 두 장치가 실질적인 방어선
 
 ## Evaluator Rubric (작업 완료 선언 전 self-evaluation 용)
 7 개 gate 모두 통과해야 태스크 완료 보고 가능. 직접 실행해 — 가정 금지

@@ -312,27 +312,55 @@ describe('post-429 recovery', () => {
     expect(rl.getThrottle()).toBe(0.25);
   });
 
-  it('steps the rate back up after each quiet period', async () => {
-    global.fetch = vi.fn().mockResolvedValueOnce({status: 429, ok: false});
+  /** Rate limiter plus helpers to send one request and to draw one 429. */
+  function adaptiveLimiter() {
     const rl = new RateLimitedFetch(8, [0, 0], 9);
-    await rl.fetch('/a');
-    expect(rl.getThrottle()).toBe(0.5);
-
-    global.fetch = vi.fn().mockResolvedValue({status: 200, ok: true});
-    const send = async () => {
-      const p = rl.fetch('/b');
+    const send = async (status: number) => {
+      global.fetch = vi.fn().mockResolvedValue({status, ok: status < 400});
+      const p = rl.fetch('/x');
       await vi.advanceTimersByTimeAsync(1000);
       await p;
     };
+    const quiet = async (ms: number) => {
+      await vi.advanceTimersByTimeAsync(ms);
+      await send(200); // recovery is lazy: it runs on a dispatch
+    };
+    return {rl, send, quiet};
+  }
 
-    await vi.advanceTimersByTimeAsync(20_000);
-    await send();
+  // Replays the 46k-post diagnostic run: 0.5 held without a 429, but each
+  // recovery to 0.56–0.75 drew another 429 within seconds.
+  it('recovers only to one step below the rate that drew the 429', async () => {
+    const {rl, send, quiet} = adaptiveLimiter();
+    await send(429); // at 1.0
+    expect(rl.getThrottle()).toBe(0.5);
+
+    await quiet(20_000);
     expect(rl.getThrottle()).toBe(0.75);
-    await send(); // too soon for another step
+    await quiet(20_000);
+    expect(rl.getThrottle()).toBe(0.75); // ceiling, not 1.0
+  });
+
+  it('a 429 at the ceiling lowers it to where the rate settles', async () => {
+    const {rl, send, quiet} = adaptiveLimiter();
+    await send(429); // at 1.0 → ceiling 0.75
+    await quiet(20_000); // 0.75
+    await vi.advanceTimersByTimeAsync(10_000); // past pause + slow start
+    await send(429); // at 0.75 → 0.375, ceiling 0.5
+    expect(rl.getThrottle()).toBe(0.375);
+
+    for (let i = 0; i < 4; i++) await quiet(20_000);
+    expect(rl.getThrottle()).toBe(0.5);
+  });
+
+  it('the ceiling rises a step per two quiet minutes', async () => {
+    const {rl, send, quiet} = adaptiveLimiter();
+    await send(429); // throttle 0.5, ceiling 0.75
+    await quiet(20_000);
     expect(rl.getThrottle()).toBe(0.75);
 
-    await vi.advanceTimersByTimeAsync(20_000);
-    await send();
+    await quiet(100_000); // 2 min since the 429: ceiling → 1.0
+    await quiet(20_000);
     expect(rl.getThrottle()).toBe(1);
   });
 

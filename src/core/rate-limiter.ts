@@ -118,10 +118,18 @@ const SLOW_START_CONCURRENCY = 2;
  * The edge limiter's real budget is unknown and evidently below the 9 req/s
  * we configure, so the limiter finds a sustainable rate instead of
  * re-hitting the same wall every few seconds.
+ *
+ * Recovery is capped by a ceiling one step below the rate that drew the
+ * last 429. Without it the throttle sawtoothed: a 46k-post run held 0.5
+ * with no 429 for 20 s, but every recovery to 0.56–0.75 drew another 429
+ * within 1–8 s, each costing a pause plus slow start. The ceiling itself
+ * rises one step per `CEILING_RELAX_MS` without any 429, so a budget that
+ * frees up (another tab closed, a quieter hour) is found again.
  */
 const MIN_THROTTLE = 0.25;
 const THROTTLE_RECOVERY_MS = 20_000;
 const THROTTLE_STEP = 0.25;
+const CEILING_RELAX_MS = 120_000;
 
 /* --- Helper: Rate Limited Fetch --- */
 
@@ -164,6 +172,10 @@ export class RateLimitedFetch {
   private lastRateLimitedAt = 0;
   /** Last throttle cut or step-up (ms epoch). */
   private lastThrottleChangeAt = 0;
+  /** Highest throttle recovery may reach; see CEILING_RELAX_MS. */
+  private throttleCeiling = 1;
+  /** Last ceiling raise (ms epoch). */
+  private lastCeilingChangeAt = 0;
 
   /**
    * @param {number} maxConcurrency Maximum concurrent requests (for general queue).
@@ -383,14 +395,34 @@ export class RateLimitedFetch {
       : scaled;
   }
 
-  /** Step the throttle back up after a quiet period. Lazy: runs on dispatch. */
+  /**
+   * Step the ceiling, then the throttle, back up after quiet periods.
+   * Lazy: runs on dispatch.
+   */
   private maybeRecoverThrottle(now: number): void {
-    if (this.throttle >= 1) return;
-    if (now - this.lastRateLimitedAt < THROTTLE_RECOVERY_MS) return;
+    const quietFor = now - this.lastRateLimitedAt;
+    if (
+      this.throttleCeiling < 1 &&
+      quietFor >= CEILING_RELAX_MS &&
+      now - this.lastCeilingChangeAt >= CEILING_RELAX_MS
+    ) {
+      this.throttleCeiling = Math.min(1, this.throttleCeiling + THROTTLE_STEP);
+      this.lastCeilingChangeAt = now;
+      log.info('Request rate ceiling raised', {ceiling: this.throttleCeiling});
+    }
+
+    if (this.throttle >= this.throttleCeiling) return;
+    if (quietFor < THROTTLE_RECOVERY_MS) return;
     if (now - this.lastThrottleChangeAt < THROTTLE_RECOVERY_MS) return;
-    this.throttle = Math.min(1, this.throttle + THROTTLE_STEP);
+    this.throttle = Math.min(
+      this.throttleCeiling,
+      this.throttle + THROTTLE_STEP,
+    );
     this.lastThrottleChangeAt = now;
-    log.info('Request rate recovering', {throttle: this.throttle});
+    log.info('Request rate recovering', {
+      throttle: this.throttle,
+      ceiling: this.throttleCeiling,
+    });
   }
 
   /**
@@ -404,6 +436,12 @@ export class RateLimitedFetch {
     // started the pause says nothing new about our rate, so only the first
     // 429 of an episode cuts the throttle.
     if (now >= this.backoffUntil) {
+      // Remember that this rate was too much: recovery stops one step below.
+      this.throttleCeiling = Math.max(
+        MIN_THROTTLE,
+        this.throttle - THROTTLE_STEP,
+      );
+      this.lastCeilingChangeAt = now;
       this.throttle = Math.max(MIN_THROTTLE, this.throttle / 2);
       this.lastThrottleChangeAt = now;
     }
@@ -414,6 +452,7 @@ export class RateLimitedFetch {
       waitMs: Math.round(ms),
       source,
       throttle: this.throttle,
+      ceiling: this.throttleCeiling,
       xRateLimit: response.headers?.get?.('x-rate-limit') ?? null,
       url: url.slice(0, 160),
     });
