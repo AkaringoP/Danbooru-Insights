@@ -973,6 +973,39 @@ function buildDashboardHeader(
   return header;
 }
 
+/**
+ * Sync progress colour while the shared rate limiter is paused by a 429:
+ * the sync is waiting, not stuck or failing. Same amber as the preview
+ * popover's mintag label — a milder warning than red, readable on light
+ * and dark themes.
+ */
+const RATE_LIMIT_WAIT_COLOR = '#e8950c';
+/** Normal colour of the Resume Sync progress bar. */
+const SYNC_BAR_COLOR = '#2da44e';
+
+/**
+ * Tint the Resume Sync progress bar amber while requests are paused by a
+ * 429, back to green when they resume. Polls every 500 ms (pauses do not
+ * emit progress events) and stops on its own once the sync ends or the bar
+ * leaves the DOM.
+ */
+function tintBarWhileRateLimited(
+  bar: HTMLElement,
+  app: UserAnalyticsApp,
+): void {
+  const timer = setInterval(() => {
+    if (!bar.isConnected || !AnalyticsDataManager.isGlobalSyncing) {
+      clearInterval(timer);
+      bar.style.background = SYNC_BAR_COLOR;
+      return;
+    }
+    bar.style.background =
+      app.rateLimiter.backoffRemainingMs() > 0
+        ? RATE_LIMIT_WAIT_COLOR
+        : SYNC_BAR_COLOR;
+  }, 500);
+}
+
 /** Local-vs-remote slack before the dashboard insists on a resume sync. */
 const RESUME_SYNC_TOLERANCE = 10;
 
@@ -1052,7 +1085,7 @@ function renderResumeSyncView(
               <span id="analytics-main-percent">0%</span>
            </div>
            <div style="width:100%; height:8px; background:var(--di-border-light, #eee); border-radius:4px; overflow:hidden;">
-              <div id="analytics-main-bar" style="width:0%; height:100%; background:#2da44e; transition: width 0.2s;"></div>
+              <div id="analytics-main-bar" style="width:0%; height:100%; background:${SYNC_BAR_COLOR}; transition: width 0.2s, background 0.3s;"></div>
            </div>
            <div id="analytics-main-count" style="font-size:0.8em; color:var(--di-text-secondary, #666); margin-top:5px; text-align:right;"></div>
         </div>
@@ -1101,6 +1134,7 @@ function renderResumeSyncView(
       percent.textContent = max > 0 ? `${p}%` : 'Scanning...';
       countText.textContent = `${c} / ${max > 0 ? max : '?'}`;
     };
+    tintBarWhileRateLimited(bar, app);
   }
 
   btn.onclick = async () => {
@@ -1119,10 +1153,14 @@ function renderResumeSyncView(
     };
 
     // No-op progress callback — internal broadcast above handles UI updates.
-    const outcome = await app.dataManager.syncAllPosts(
+    // syncAllPosts takes the global lock synchronously, so the tint loop
+    // started right after it sees the sync as running.
+    const pending = app.dataManager.syncAllPosts(
       app.context.targetUser,
       () => {},
     );
+    tintBarWhileRateLimited(bar, app);
+    const outcome = await pending;
     warnIfSyncIncomplete(outcome);
 
     // A sync ran → force the deferred distributions to revalidate on
@@ -1491,16 +1529,22 @@ export class UserAnalyticsApp {
       let headerHtml = '';
       let subHtml = '';
       let containerColor = '#ff4444';
+      // Amber while a 429 has the shared limiter paused: waiting, not failing.
+      const waiting = this.rateLimiter.backoffRemainingMs() > 0;
 
       if (state.phase === 'PREPARING') {
         containerColor = 'inherit';
         // Green only when every post landed; a sync that stopped short still
         // reaches PREPARING (stats refresh runs over the partial data).
-        const countColor = state.current >= state.total ? '#00ba7c' : '#d73a49';
+        const countColor = waiting
+          ? RATE_LIMIT_WAIT_COLOR
+          : state.current >= state.total
+            ? '#00ba7c'
+            : '#d73a49';
         headerHtml = `<div style="color:${countColor}; font-weight:bold;">Synced: ${state.current.toLocaleString()} / ${state.total.toLocaleString()} (${percent}%)</div>`;
         subHtml = `<div style="font-size:0.8em; color:#ffeb3b; margin-top:2px;">${state.message || 'Preparing Report'}${dotStr}</div>`;
       } else {
-        containerColor = '#ff4444';
+        containerColor = waiting ? RATE_LIMIT_WAIT_COLOR : '#ff4444';
         headerHtml = `<div style="font-weight:bold;">Synced: ${state.current.toLocaleString()} / ${state.total.toLocaleString()} (${percent}%)</div>`;
         subHtml = `<div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-top:2px;">${state.message || `Fetching data${dotStr}`}</div>`;
       }
