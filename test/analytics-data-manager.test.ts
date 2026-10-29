@@ -12,7 +12,6 @@ import {
   syncRetryDelayMs,
   SYNC_PAGE_MAX_ATTEMPTS,
 } from '../src/core/analytics-data-manager';
-import {CONFIG} from '../src/config';
 
 describe('getBestThumbnailUrl', () => {
   it('빈 post(null)이면 빈 문자열 반환', () => {
@@ -433,6 +432,7 @@ function makeSyncRateLimiter(
   return {
     fetch: vi.fn(fetchImpl ?? defaultFetch),
     getRequestCount: vi.fn(() => 0),
+    backoffRemainingMs: vi.fn(() => 0),
   };
 }
 
@@ -473,13 +473,18 @@ describe('syncRetryDelayMs', () => {
     ]);
   });
 
-  it('never retries a 429 inside the rate limiter global backoff', () => {
-    for (const n of [1, 2, 3, 4]) {
-      expect(syncRetryDelayMs('rate-limit', n)).toBeGreaterThanOrEqual(
-        CONFIG.BACKOFF_DURATION_MS,
-      );
-    }
-    expect(syncRetryDelayMs('rate-limit', 4)).toBe(8000);
+  it('waits out the server-derived limiter pause on a 429', () => {
+    // 31.5 s is what X-Rate-Limit yields at points=-30, rate=1, cost=1.
+    expect(syncRetryDelayMs('rate-limit', 1, 31_500)).toBe(31_500);
+    expect(syncRetryDelayMs('rate-limit', 4, 2_000)).toBe(2_000);
+  });
+
+  it('still waits at least 1 s on a 429 with no pause left', () => {
+    expect(syncRetryDelayMs('rate-limit', 1, 0)).toBe(1000);
+  });
+
+  it('never lets a transient retry land inside a limiter pause', () => {
+    expect(syncRetryDelayMs('transient', 1, 12_000)).toBe(12_000);
   });
 });
 
@@ -1071,6 +1076,30 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     expect(page1Calls()).toBe(2);
     expect(outcome).toEqual({complete: true, started: true});
     expect(quotaManager.bulkPutSafe).toHaveBeenCalled();
+  });
+
+  it('a 429 retry waits for the rate limiter pause', async () => {
+    const db = makeSyncDb(makePostsTable([]));
+    const {rl} = failFirstPageFetch(() => ({
+      ok: false,
+      status: 429,
+      json: async () => ({}),
+    }));
+    rl.backoffRemainingMs.mockReturnValue(31_500);
+    const waits: number[] = [];
+    vi.stubGlobal('setTimeout', (fn: () => void, ms: number) => {
+      waits.push(ms);
+      fn();
+    });
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(outcome.complete).toBe(true);
+    expect(rl.backoffRemainingMs).toHaveBeenCalled();
+    expect(waits).toContain(31_500);
   });
 
   it('stops after SYNC_PAGE_MAX_ATTEMPTS when 429 persists', async () => {

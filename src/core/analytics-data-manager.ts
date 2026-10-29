@@ -318,17 +318,21 @@ export function classifySyncFetchError(err: unknown): SyncFetchErrorKind {
 
 /**
  * Wait before retry number `failures` (1-based count of failures so far).
- * Exponential 1 s, 2 s, 4 s, 8 s; a 429 waits at least the rate limiter's
- * global backoff so the retry does not land inside the same pause.
+ *
+ * Transient errors back off exponentially (1 s, 2 s, 4 s, 8 s). A 429's
+ * wait comes from the server: the rate limiter derives it from Danbooru's
+ * `X-Rate-Limit` header and pauses its queue, and `limiterBackoffMs` is what
+ * is left of that pause. Every retry waits it out here rather than queueing
+ * into the paused limiter, where the request's 30 s timeout would keep
+ * ticking (a server wait can reach ~30 s).
  */
 export function syncRetryDelayMs(
   kind: SyncFetchErrorKind,
   failures: number,
+  limiterBackoffMs: number = 0,
 ): number {
-  const exponential = 1000 * Math.pow(2, failures - 1);
-  return kind === 'rate-limit'
-    ? Math.max(CONFIG.BACKOFF_DURATION_MS, exponential)
-    : exponential;
+  const own = kind === 'rate-limit' ? 1000 : 1000 * Math.pow(2, failures - 1);
+  return Math.max(own, limiterBackoffMs);
 }
 
 /**
@@ -4246,9 +4250,12 @@ export class AnalyticsDataManager extends DataManager {
                 if (kind === 'fatal' || attempts >= SYNC_PAGE_MAX_ATTEMPTS) {
                   throw err; // Give up or fatal error
                 }
-                await new Promise(r =>
-                  setTimeout(r, syncRetryDelayMs(kind, attempts)),
+                const waitMs = syncRetryDelayMs(
+                  kind,
+                  attempts,
+                  this.rateLimiter.backoffRemainingMs(),
                 );
+                await new Promise(r => setTimeout(r, waitMs));
               } finally {
                 clearTimeout(timeoutId);
               }
