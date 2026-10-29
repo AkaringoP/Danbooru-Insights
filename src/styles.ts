@@ -306,15 +306,19 @@ const GLOBAL_CSS = `
     .di-ps-tag--character { color: #00ab2c; }
     [data-di-theme="dark"] .di-ps-tag--copyright { color: #c797ff; }
     [data-di-theme="dark"] .di-ps-tag--character { color: #35c64a; }
-    /* Tone colours for both plain parts and flag links. */
+    /* Tone colours for both plain parts and flag links. Within each theme
+       the four share one relative luminance (light ≈0.15 / 5.2:1 on white,
+       dark ≈0.47 / 8.5:1 on the dark bg): text sitting side by side reads
+       as the same weight and size only when its brightness matches — a
+       dimmer colour looks thinner and smaller next to a brighter one. */
     .di-ps-tone--good { color: #1a7f37; font-weight: 600; }
     .di-ps-tone--info { color: #0969da; }
-    .di-ps-tone--warn { color: #bf7a00; font-weight: 600; }
+    .di-ps-tone--warn { color: #976100; font-weight: 600; }
     .di-ps-tone--bad { color: #cf222e; font-weight: 600; }
-    [data-di-theme="dark"] .di-ps-tone--good { color: #3fb950; }
-    [data-di-theme="dark"] .di-ps-tone--info { color: #58a6ff; }
-    [data-di-theme="dark"] .di-ps-tone--warn { color: #f0b429; }
-    [data-di-theme="dark"] .di-ps-tone--bad { color: #ff7b72; }
+    [data-di-theme="dark"] .di-ps-tone--good { color: #68cc76; }
+    [data-di-theme="dark"] .di-ps-tone--info { color: #7ebbff; }
+    [data-di-theme="dark"] .di-ps-tone--warn { color: #edaa11; }
+    [data-di-theme="dark"] .di-ps-tone--bad { color: #ff9c95; }
     .di-ps-link:hover,
     .di-ps-flag:hover { text-decoration: underline; }
     .di-play-pause-btn {
