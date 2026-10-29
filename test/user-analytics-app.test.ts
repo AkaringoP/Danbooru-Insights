@@ -295,6 +295,44 @@ describe('UserAnalyticsApp.renderDashboard - quick-sync branch', () => {
   });
 });
 
+describe('UserAnalyticsApp.renderDashboard - resume-sync gate', () => {
+  it('shows the resume view from the pre-check, before any dashboard fetch', async () => {
+    // A large account left short by a failed sync used to sit through the
+    // whole 14-step count load before this view replaced the spinner.
+    const {app, content} = makeApp();
+    stubDataManager(app.dataManager, {
+      syncStats: {count: 41_800, lastDate: '2026-10-28'},
+      totalCount: 46_894,
+    });
+    const fetchData = vi
+      .spyOn(app.dataService, 'fetchDashboardData')
+      .mockRejectedValue(new Error('must not be called'));
+
+    await app.renderDashboard();
+
+    expect(fetchData).not.toHaveBeenCalled();
+    expect(content.textContent).toContain('Data Synchronization Required');
+    expect(content.querySelector('#analytics-start-sync')?.textContent).toBe(
+      'Resume Sync',
+    );
+  });
+
+  it('goes on to the dashboard fetch when the local DB is within tolerance', async () => {
+    const {app} = makeApp();
+    stubDataManager(app.dataManager, {
+      syncStats: {count: 46_890, lastDate: '2026-10-28'},
+      totalCount: 46_894,
+    });
+    const fetchData = vi
+      .spyOn(app.dataService, 'fetchDashboardData')
+      .mockRejectedValue(new Error('stop here'));
+
+    await app.renderDashboard().catch(() => {});
+
+    expect(fetchData).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('UserAnalyticsApp.buildMiniReportButton', () => {
   afterEach(() => {
     vi.mocked(isTouchDevice).mockReturnValue(false);

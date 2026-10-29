@@ -277,6 +277,60 @@ export function shouldCountHttpAsFailure(status: number): boolean {
   return status !== 429;
 }
 
+/** Total fetch attempts per page in the full-sync worker pool. */
+export const SYNC_PAGE_MAX_ATTEMPTS = 5;
+
+/** How the full-sync worker should react to a failed page fetch. */
+export type SyncFetchErrorKind = 'rate-limit' | 'transient' | 'fatal';
+
+/**
+ * Classify a page-fetch failure in the full-sync worker.
+ *
+ * - `rate-limit`: HTTP 429. The shared rate limiter already paused the whole
+ *   queue (global backoff), so the page is worth retrying after that pause.
+ *   This used to be fatal, so one 429 deep into a 46k-post sync stopped the
+ *   whole run at ~42k and left the user on a "Resume Sync" screen.
+ * - `transient`: 5xx, the 30 s timeout abort, a dropped connection, or a
+ *   truncated/HTML body that fails JSON parsing.
+ * - `fatal`: any other 4xx, or an error we do not recognise. Retrying cannot
+ *   change the answer.
+ */
+export function classifySyncFetchError(err: unknown): SyncFetchErrorKind {
+  const message = err instanceof Error ? err.message : String(err);
+  const status = /^HTTP (\d{3})\b/.exec(message)?.[1];
+  if (status === '429') return 'rate-limit';
+  if (status) return Number(status) >= 500 ? 'transient' : 'fatal';
+
+  // DOMException is not an Error subclass in every runtime, so read the name
+  // off the object instead of relying on instanceof.
+  const name =
+    typeof err === 'object' && err !== null && 'name' in err
+      ? String((err as {name: unknown}).name)
+      : '';
+  // AbortError: our 30 s timeout. TypeError: fetch's network failure
+  // ("Failed to fetch" / "NetworkError when attempting to fetch resource").
+  // SyntaxError: a 200 response whose body was not the JSON we asked for.
+  if (name === 'AbortError' || name === 'TypeError' || name === 'SyntaxError') {
+    return 'transient';
+  }
+  return 'fatal';
+}
+
+/**
+ * Wait before retry number `failures` (1-based count of failures so far).
+ * Exponential 1 s, 2 s, 4 s, 8 s; a 429 waits at least the rate limiter's
+ * global backoff so the retry does not land inside the same pause.
+ */
+export function syncRetryDelayMs(
+  kind: SyncFetchErrorKind,
+  failures: number,
+): number {
+  const exponential = 1000 * Math.pow(2, failures - 1);
+  return kind === 'rate-limit'
+    ? Math.max(CONFIG.BACKOFF_DURATION_MS, exponential)
+    : exponential;
+}
+
 /**
  * AnalyticsDataManager: Handles heavy data fetching for full history.
  */
@@ -3924,6 +3978,7 @@ export class AnalyticsDataManager extends DataManager {
         uploaderId,
         startId,
         total,
+        committed: currentNo,
         reportProgress,
         succeeded: !pageFailed,
       });
@@ -4070,7 +4125,8 @@ export class AnalyticsDataManager extends DataManager {
    * Build the worker function used by the syncAllPosts worker pool.
    * Each worker:
    *   1. claims the next page via `claimPage` (shared atomic counter),
-   *   2. fetches with up to 3 retries on 5xx,
+   *   2. fetches with retries on 429 / 5xx / timeout / network errors
+   *      (classifySyncFetchError, up to SYNC_PAGE_MAX_ATTEMPTS),
    *   3. buffers the result by page number,
    *   4. drains the buffer in order — bulkPut'ing each batch with
    *      `no: ++currentNo` sequential numbering.
@@ -4163,42 +4219,38 @@ export class AnalyticsDataManager extends DataManager {
               `Fetching Page ${currentPage} (Pending: ${pending})...`,
             );
 
-            // Retry Logic
+            // Retry Logic — see classifySyncFetchError for what is retried.
             let items: DanbooruPost[] | null = null;
             let attempts = 0;
-            while (attempts < 3) {
+            while (attempts < SYNC_PAGE_MAX_ATTEMPTS) {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
               try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
-
                 const fetchResp = await this.rateLimiter.fetch(url, {
                   signal: controller.signal,
                 });
-                clearTimeout(timeoutId);
                 if (!fetchResp.ok) throw new Error(`HTTP ${fetchResp.status}`);
                 items = await fetchResp.json();
                 break; // Success
               } catch (err: unknown) {
                 attempts++;
-                const errMsg = err instanceof Error ? err.message : String(err);
-                const isServerErr =
-                  errMsg.includes('500') ||
-                  errMsg.includes('502') ||
-                  errMsg.includes('503') ||
-                  errMsg.includes('504');
+                const kind = classifySyncFetchError(err);
                 workerLog.warn('Page fetch attempt failed', {
                   workerId,
                   page: currentPage,
                   attempt: attempts,
-                  error: errMsg,
+                  kind,
+                  error: err instanceof Error ? err.message : String(err),
                 });
 
-                if (attempts >= 3 || !isServerErr) throw err; // Give up or fatal error
-
-                // Backoff: 1s, 2s, 4s...
+                if (kind === 'fatal' || attempts >= SYNC_PAGE_MAX_ATTEMPTS) {
+                  throw err; // Give up or fatal error
+                }
                 await new Promise(r =>
-                  setTimeout(r, 1000 * Math.pow(2, attempts - 1)),
+                  setTimeout(r, syncRetryDelayMs(kind, attempts)),
                 );
+              } finally {
+                clearTimeout(timeoutId);
               }
             }
             pageAttempts = attempts + 1;
@@ -4311,11 +4363,20 @@ export class AnalyticsDataManager extends DataManager {
     uploaderId: number;
     startId: number;
     total: number;
+    /** This user's post count after the run (resume seed + pages committed). */
+    committed: number;
     reportProgress: (c: number, t: number, msg?: string) => void;
     succeeded: boolean;
   }): Promise<void> {
-    const {userInfo, uploaderId, startId, total, reportProgress, succeeded} =
-      args;
+    const {
+      userInfo,
+      uploaderId,
+      startId,
+      total,
+      committed,
+      reportProgress,
+      succeeded,
+    } = args;
 
     // Completion claims are only written when every page landed. Stamping
     // them after a failed page would tell the next open "this user is fully
@@ -4340,8 +4401,14 @@ export class AnalyticsDataManager extends DataManager {
     // narrow across the method call.
     await this.cleanupStaleData(userInfo.id!);
 
-    // Signal UI: Processing Stats
-    reportProgress(total, total, 'PREPARING');
+    // Signal UI: Processing Stats. A failed run reports what it actually
+    // committed — painting total/total here showed "46,894 / 46,894 (100%)"
+    // over a sync that had stopped thousands of posts short.
+    reportProgress(
+      succeeded ? total : Math.min(committed, total),
+      total,
+      'PREPARING',
+    );
 
     // Refresh the critical (cheap, must-be-fresh) stats after sync. If startId
     // was 0, it was a Full Sync; otherwise it's a Partial Sync. Heavy tag
@@ -4646,5 +4713,10 @@ export class AnalyticsDataManager extends DataManager {
     // Clear metadata (Last Sync Time)
     const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
     localStorage.removeItem(lastSyncKey);
+
+    // The backfill-complete flag describes rows that no longer exist. Leaving
+    // it would vouch for whatever the next (possibly partial) sync writes;
+    // needsPostMetadataBackfill re-derives it from the rows on next check.
+    localStorage.removeItem(`di_post_metadata_v2_${uploaderId}`);
   }
 }

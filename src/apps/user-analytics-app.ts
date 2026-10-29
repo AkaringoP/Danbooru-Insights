@@ -973,6 +973,38 @@ function buildDashboardHeader(
   return header;
 }
 
+/** Local-vs-remote slack before the dashboard insists on a resume sync. */
+const RESUME_SYNC_TOLERANCE = 10;
+
+/**
+ * Whether the local DB is too far behind the remote total to paint the
+ * dashboard. `total === 0 && count === 0` (nothing known at all) also lands
+ * here; the zero-uploads view normally catches a real zero-upload user first.
+ */
+function needsResumeSync(count: number, total: number): boolean {
+  return (
+    (total > 0 && count < total - RESUME_SYNC_TOLERANCE) ||
+    (total === 0 && count === 0)
+  );
+}
+
+/**
+ * Paint the dashboard header followed by the resume-sync view, replacing
+ * whatever spinner `content` currently holds.
+ */
+function showResumeSyncGate(
+  content: HTMLElement,
+  stats: {count: number},
+  total: number,
+  app: UserAnalyticsApp,
+): void {
+  const nsfw: NsfwBus = {enabled: getNsfwEnabled(), apply: null};
+  const header = buildDashboardHeader(app.context.targetUser, app, nsfw);
+  content.innerHTML = '';
+  content.appendChild(header);
+  renderResumeSyncView(content, stats, total, app);
+}
+
 /**
  * Renders the "Data Synchronization Required" view. Hit when the local DB
  * is materially behind the remote total — drives a full `syncAllPosts`
@@ -1462,7 +1494,10 @@ export class UserAnalyticsApp {
 
       if (state.phase === 'PREPARING') {
         containerColor = 'inherit';
-        headerHtml = `<div style="color:#00ba7c; font-weight:bold;">Synced: ${state.current.toLocaleString()} / ${state.total.toLocaleString()} (${percent}%)</div>`;
+        // Green only when every post landed; a sync that stopped short still
+        // reaches PREPARING (stats refresh runs over the partial data).
+        const countColor = state.current >= state.total ? '#00ba7c' : '#d73a49';
+        headerHtml = `<div style="color:${countColor}; font-weight:bold;">Synced: ${state.current.toLocaleString()} / ${state.total.toLocaleString()} (${percent}%)</div>`;
         subHtml = `<div style="font-size:0.8em; color:#ffeb3b; margin-top:2px;">${state.message || 'Preparing Report'}${dotStr}</div>`;
       } else {
         containerColor = '#ff4444';
@@ -2030,7 +2065,7 @@ export class UserAnalyticsApp {
     this.isRendering = true;
 
     const perfMeta = {
-      path: 'unknown' as 'quickSync' | 'syncSkipped' | 'unknown',
+      path: 'unknown' as 'quickSync' | 'syncSkipped' | 'resumeSync' | 'unknown',
       preTotal: 0,
     };
     perfLogger.start('dbi:render:total');
@@ -2083,6 +2118,17 @@ export class UserAnalyticsApp {
         reportProgress = paintLoadingSpinner(content);
       } else {
         perfMeta.path = 'syncSkipped';
+      }
+
+      // Resume gate, decided from the pre-check alone. It used to run after
+      // fetchDashboardData, so a user left short by a failed sync sat through
+      // the whole 14-step count load before the "Data Synchronization
+      // Required" view replaced it. Quick Sync just rewrote the DB, so its
+      // pre-check numbers are stale — that path keeps the post-fetch check.
+      if (!didQuickSync && needsResumeSync(preStats.count, preTotal)) {
+        perfMeta.path = 'resumeSync';
+        showResumeSyncGate(content, preStats, preTotal, this);
+        return;
       }
 
       // Pre-fetch all data! If we did a Quick Sync the syncStats/totalCount
@@ -2140,13 +2186,10 @@ export class UserAnalyticsApp {
       content.innerHTML = '';
       content.appendChild(header);
 
-      // Condition: Show Dashboard if Synced OR if we have data and total is unknown
-      const tolerance = 10;
-      const needsSync =
-        (total > 0 && stats.count < total - tolerance) ||
-        (total === 0 && stats.count === 0);
-
-      if (needsSync) {
+      // Condition: Show Dashboard if Synced OR if we have data and total is
+      // unknown. Only reachable as a resume case after Quick Sync (the
+      // no-sync path was gated before fetchDashboardData).
+      if (needsResumeSync(stats.count, total)) {
         renderResumeSyncView(content, stats, total, this);
         return; // Stop here, don't render dashboard
       }

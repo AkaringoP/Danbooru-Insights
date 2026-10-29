@@ -8,7 +8,11 @@ import {
   BACKFILL_FAILURE_THRESHOLD,
   BACKFILL_COOLDOWN_MS,
   type BackfillFailureState,
+  classifySyncFetchError,
+  syncRetryDelayMs,
+  SYNC_PAGE_MAX_ATTEMPTS,
 } from '../src/core/analytics-data-manager';
+import {CONFIG} from '../src/config';
 
 describe('getBestThumbnailUrl', () => {
   it('빈 post(null)이면 빈 문자열 반환', () => {
@@ -431,6 +435,53 @@ function makeSyncRateLimiter(
     getRequestCount: vi.fn(() => 0),
   };
 }
+
+describe('classifySyncFetchError', () => {
+  it('treats 429 as a rate-limit retry', () => {
+    expect(classifySyncFetchError(new Error('HTTP 429'))).toBe('rate-limit');
+  });
+
+  it('treats 5xx, timeouts, network drops and bad JSON as transient', () => {
+    expect(classifySyncFetchError(new Error('HTTP 500'))).toBe('transient');
+    expect(classifySyncFetchError(new Error('HTTP 503'))).toBe('transient');
+    const abort = Object.assign(new Error('aborted'), {name: 'AbortError'});
+    expect(classifySyncFetchError(abort)).toBe('transient');
+    // DOMException-shaped object that is not an Error instance.
+    expect(classifySyncFetchError({name: 'AbortError', message: 'x'})).toBe(
+      'transient',
+    );
+    expect(classifySyncFetchError(new TypeError('Failed to fetch'))).toBe(
+      'transient',
+    );
+    expect(classifySyncFetchError(new SyntaxError('Unexpected token <'))).toBe(
+      'transient',
+    );
+  });
+
+  it('treats other 4xx and unknown errors as fatal', () => {
+    expect(classifySyncFetchError(new Error('HTTP 400'))).toBe('fatal');
+    expect(classifySyncFetchError(new Error('HTTP 403'))).toBe('fatal');
+    expect(classifySyncFetchError(new Error('something else'))).toBe('fatal');
+    expect(classifySyncFetchError('HTTP 5000 widgets')).toBe('fatal');
+  });
+});
+
+describe('syncRetryDelayMs', () => {
+  it('backs off exponentially for transient errors', () => {
+    expect([1, 2, 3, 4].map(n => syncRetryDelayMs('transient', n))).toEqual([
+      1000, 2000, 4000, 8000,
+    ]);
+  });
+
+  it('never retries a 429 inside the rate limiter global backoff', () => {
+    for (const n of [1, 2, 3, 4]) {
+      expect(syncRetryDelayMs('rate-limit', n)).toBeGreaterThanOrEqual(
+        CONFIG.BACKOFF_DURATION_MS,
+      );
+    }
+    expect(syncRetryDelayMs('rate-limit', 4)).toBe(8000);
+  });
+});
 
 describe('AnalyticsDataManager.syncAllPosts', () => {
   beforeEach(() => {
@@ -947,6 +998,150 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     // reflected, so only the completion *claims* are withheld.
     expect(adm.refreshCriticalStats).toHaveBeenCalled();
     expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
+  });
+
+  // A 46k-post sync used to die at ~42k on a single HTTP 429: only 5xx
+  // were retried, so the worker gave up on the first attempt and the user
+  // landed on "Resume Sync". These pin the retry classes end to end.
+  const onePost = [
+    {
+      id: 101,
+      uploader_id: 42,
+      created_at: '2024-01-01T00:00:00Z',
+      up_score: 1,
+      down_score: 0,
+      rating: 'g',
+    },
+  ];
+
+  function failFirstPageFetch(
+    failure: () =>
+      | never
+      | Promise<never>
+      | {
+          ok: boolean;
+          status: number;
+          json: () => Promise<unknown>;
+        },
+  ) {
+    let page1Calls = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 1}}),
+        };
+      }
+      if (url.includes('page=1&')) {
+        page1Calls++;
+        if (page1Calls === 1) return failure();
+        return {ok: true, status: 200, json: async () => onePost};
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+    return {rl, page1Calls: () => page1Calls};
+  }
+
+  it.each([
+    ['HTTP 429', () => ({ok: false, status: 429, json: async () => ({})})],
+    [
+      'a network drop',
+      () => {
+        throw new TypeError('NetworkError when attempting to fetch resource.');
+      },
+    ],
+    [
+      'the 30s timeout abort',
+      () => {
+        throw Object.assign(new Error('The operation was aborted.'), {
+          name: 'AbortError',
+        });
+      },
+    ],
+  ])('retries a page after %s and completes', async (_label, failure) => {
+    const db = makeSyncDb(makePostsTable([]));
+    const {rl, page1Calls} = failFirstPageFetch(failure);
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(page1Calls()).toBe(2);
+    expect(outcome).toEqual({complete: true, started: true});
+    expect(quotaManager.bulkPutSafe).toHaveBeenCalled();
+  });
+
+  it('stops after SYNC_PAGE_MAX_ATTEMPTS when 429 persists', async () => {
+    const db = makeSyncDb(makePostsTable([]));
+    let page1Calls = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 1}}),
+        };
+      }
+      if (url.includes('page=1&')) page1Calls++;
+      return {ok: false, status: 429, json: async () => ({})};
+    });
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(page1Calls).toBe(SYNC_PAGE_MAX_ATTEMPTS);
+    expect(outcome.complete).toBe(false);
+  });
+
+  it('a failed run reports the committed count, not total/total, when preparing', async () => {
+    // The header used to read "46,894 / 46,894 (100%)" over a run that had
+    // stopped thousands of posts short.
+    const db = makeSyncDb(makePostsTable([]));
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 3}}),
+        };
+      }
+      if (url.includes('page=1&')) {
+        return {ok: true, status: 200, json: async () => onePost};
+      }
+      return {ok: false, status: 400, json: async () => ({})};
+    });
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+
+    const progress = vi.fn();
+    const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), progress);
+
+    expect(outcome.complete).toBe(false);
+    expect(progress).toHaveBeenCalledWith(1, 3, 'PREPARING');
+    expect(progress).not.toHaveBeenCalledWith(3, 3, 'PREPARING');
+  });
+
+  it('clearUserData also drops the backfill-complete flag', async () => {
+    const postsTable = makePostsTable([]);
+    const db = makeSyncDb(postsTable);
+    const adm = new AnalyticsDataManager(
+      db as never,
+      makeSyncRateLimiter() as never,
+    );
+
+    await adm.clearUserData(makeSyncUser({id: '42'}));
+
+    expect(postsTable._chain.delete).toHaveBeenCalled();
+    const removed = vi
+      .mocked(localStorage.removeItem)
+      .mock.calls.map((c: string[]) => c[0]);
+    expect(removed).toContain('danbooru_grass_last_sync_42');
+    expect(removed).toContain('di_post_metadata_v2_42');
   });
 
   it('a clean run reports complete:true', async () => {
