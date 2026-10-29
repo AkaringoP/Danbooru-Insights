@@ -336,6 +336,13 @@ export function syncRetryDelayMs(
   return Math.max(own, limiterBackoffMs);
 }
 
+/** Count lookups for one stats run; remembers whether any were lost. */
+interface CountBatch {
+  lookup(query: string): Promise<number>;
+  /** True once a count failed transiently even after its retry. */
+  readonly failed: boolean;
+}
+
 /**
  * AnalyticsDataManager: Handles heavy data fetching for full history.
  */
@@ -416,6 +423,41 @@ export class AnalyticsDataManager extends DataManager {
     log.warn('Partial fetch not cached', {cacheKey});
     const previous = (await this.getStats(cacheKey, uploaderId)) as T | null;
     return previous ?? result;
+  }
+
+  /**
+   * Count fetcher for one stats run. A transient failure (429, 5xx,
+   * timeout, network) is retried once: after a 429 the retry queues behind
+   * the rate limiter's pause and slow start, so it lands after the burst
+   * that caused it. A count still lost after that flips `failed`, and the
+   * caller passes it to `cacheUnlessPartial` — a ranking built on a 0 that
+   * means "unknown" (a top character dropped from the pie) must not be cached.
+   *
+   * Deterministic 4xx failures (e.g. 422 for a search over a Member's tag
+   * limit) are not retried and do not count as lost: refetching cannot
+   * change them, and refusing to cache would re-run them on every open.
+   */
+  private countBatch(): CountBatch {
+    let failed = false;
+    const fetchCount = async (query: string): Promise<number> => {
+      try {
+        return await this.fetchRemoteCount(query);
+      } catch (first: unknown) {
+        if (classifySyncFetchError(first) === 'fatal') throw first;
+        try {
+          return await this.fetchRemoteCount(query);
+        } catch (second: unknown) {
+          if (classifySyncFetchError(second) !== 'fatal') failed = true;
+          throw second;
+        }
+      }
+    };
+    return {
+      lookup: fetchCount,
+      get failed() {
+        return failed;
+      },
+    };
   }
 
   /**
@@ -1002,7 +1044,7 @@ export class AnalyticsDataManager extends DataManager {
       'pending',
     ];
 
-    let failed = false;
+    const counts = this.countBatch();
     const tasks = statuses.map(async status => {
       try {
         let tagQuery = `user:${normalizedName} status:${status}`;
@@ -1014,7 +1056,7 @@ export class AnalyticsDataManager extends DataManager {
           tagQuery += ` date:>=${dateStr}`;
         }
 
-        const count = await this.fetchRemoteCount(tagQuery);
+        const count = await counts.lookup(tagQuery);
         return {
           name: status,
           count,
@@ -1022,7 +1064,6 @@ export class AnalyticsDataManager extends DataManager {
         };
       } catch (e: unknown) {
         log.warn('Failed to fetch count for status', {status, error: e});
-        failed = true;
         return {
           name: status,
           count: 0,
@@ -1032,7 +1073,7 @@ export class AnalyticsDataManager extends DataManager {
     });
 
     const result = await Promise.all(tasks);
-    return this.cacheUnlessPartial(cacheKey, uploaderId, result, failed);
+    return this.cacheUnlessPartial(cacheKey, uploaderId, result, counts.failed);
   }
 
   /**
@@ -1066,7 +1107,7 @@ export class AnalyticsDataManager extends DataManager {
       e: 'Explicit',
     };
 
-    let failed = false;
+    const counts = this.countBatch();
     const tasks = ratings.map(async rating => {
       try {
         let tagQuery = `user:${normalizedName} rating:${rating}`;
@@ -1078,18 +1119,22 @@ export class AnalyticsDataManager extends DataManager {
           tagQuery += ` date:>=${dateStr}`;
         }
 
-        const count = await this.fetchRemoteCount(tagQuery);
+        const count = await counts.lookup(tagQuery);
         return {rating, count, label: labelMap[rating]};
       } catch (e: unknown) {
         log.warn('Failed to fetch count for rating', {rating, error: e});
-        failed = true;
         return {rating, count: 0, label: labelMap[rating]};
       }
     });
 
     try {
       const results = await Promise.all(tasks);
-      return this.cacheUnlessPartial(cacheKey, uploaderId, results, failed);
+      return this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        results,
+        counts.failed,
+      );
     } catch (e: unknown) {
       log.error('Failed to fetch rating distribution', {error: e});
       return [];
@@ -1471,6 +1516,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Character Distribution...');
     const uploaderId = parseInt(userInfo.id || '0'); // Need ID for cache key
     const cacheKey = 'character_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -1541,7 +1587,7 @@ export class AnalyticsDataManager extends DataManager {
           this.mapConcurrent(preItems, 6, async obj => {
             if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
             try {
-              const c = await this.fetchRemoteCount(
+              const c = await counts.lookup(
                 `user:${normalizedName} ${obj.tagName}`,
               );
               obj.count = c || obj._item?.tag.post_count || 0;
@@ -1558,7 +1604,12 @@ export class AnalyticsDataManager extends DataManager {
       const top10 = selectTopKByCount(preItems, 10);
       for (const obj of top10) delete obj._item;
 
-      await this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`);
+      await this.attachSubTagBreakdowns(
+        top10,
+        tags,
+        `user:${normalizedName}`,
+        counts,
+      );
 
       // Others = total user uploads − Σ top10.count. Clamped at 0 because
       // a single post can carry multiple characters, so Σtop10.count can
@@ -1583,18 +1634,24 @@ export class AnalyticsDataManager extends DataManager {
 
       // Reuse unchanged thumbs before this write replaces the cache (L-2).
       await this.carryOverThumbs(cacheKey, uploaderId, top10);
-      if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
+      const shown = await this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        top10,
+        counts.failed,
+      );
 
       // Lazy Load Thumbnails
       await this.enrichThumbnails(
         cacheKey,
         uploaderId,
-        top10,
+        shown,
         userInfo,
         reportSubStatus,
+        !counts.failed,
       );
 
-      return top10;
+      return shown;
     } catch (e: unknown) {
       log.warn('Failed to fetch character distribution', {error: e});
       return [];
@@ -1617,6 +1674,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Copyright Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'copyright_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -1671,7 +1729,7 @@ export class AnalyticsDataManager extends DataManager {
           this.mapConcurrent(preItems, 6, async obj => {
             if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
             try {
-              const c = await this.fetchRemoteCount(
+              const c = await counts.lookup(
                 `user:${normalizedName} ${obj.tagName}`,
               );
               obj.count = c || obj._item?.tag.post_count || 0;
@@ -1685,7 +1743,12 @@ export class AnalyticsDataManager extends DataManager {
       const top10 = selectTopKByCount(preItems, 10);
       for (const obj of top10) delete obj._item;
 
-      await this.attachSubTagBreakdowns(top10, tags, `user:${normalizedName}`);
+      await this.attachSubTagBreakdowns(
+        top10,
+        tags,
+        `user:${normalizedName}`,
+        counts,
+      );
 
       // Others = total user uploads − Σ top10.count; see getCharacterDistribution.
       const sumCount = top10.reduce(
@@ -1707,18 +1770,24 @@ export class AnalyticsDataManager extends DataManager {
 
       // Reuse unchanged thumbs before this write replaces the cache (L-2).
       await this.carryOverThumbs(cacheKey, uploaderId, top10);
-      if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
+      const shown = await this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        top10,
+        counts.failed,
+      );
 
       // Lazy Load
       await this.enrichThumbnails(
         cacheKey,
         uploaderId,
-        top10,
+        shown,
         userInfo,
         reportSubStatus,
+        !counts.failed,
       );
 
-      return top10;
+      return shown;
     } catch (e: unknown) {
       log.warn('Failed to fetch copyright distribution', {error: e});
       return [];
@@ -1775,6 +1844,7 @@ export class AnalyticsDataManager extends DataManager {
     top10: DistributionItem[],
     allUserTags: DanbooruRelatedTag[],
     countQueryPrefix: string,
+    counts: CountBatch,
   ): Promise<void> {
     const topLevelNames = top10
       .map(t => t.tagName)
@@ -1806,7 +1876,7 @@ export class AnalyticsDataManager extends DataManager {
     const userTagCounts = new Map<string, number>();
     await this.mapConcurrent([...subsToFetch], 5, async sub => {
       try {
-        const c = await this.fetchRemoteCount(`${countQueryPrefix} ${sub}`);
+        const c = await counts.lookup(`${countQueryPrefix} ${sub}`);
         if (c > 0) userTagCounts.set(sub, c);
       } catch (e: unknown) {
         log.debug('Failed to fetch sub-tag count', {sub, error: e});
@@ -1837,6 +1907,7 @@ export class AnalyticsDataManager extends DataManager {
     if (!userInfo.name) return [];
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'fav_copyright_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -1891,7 +1962,7 @@ export class AnalyticsDataManager extends DataManager {
       await this.mapConcurrent(preItems, 6, async obj => {
         if (reportSubStatus) reportSubStatus(`Fetching Count: ${obj.name}`);
         try {
-          obj.count = await this.fetchRemoteCount(
+          obj.count = await counts.lookup(
             `fav:${normalizedName} ${obj.tagName}`,
           );
         } catch (e: unknown) {
@@ -1905,7 +1976,12 @@ export class AnalyticsDataManager extends DataManager {
       const top10 = selectTopKByCount(preItems, 10);
       for (const obj of top10) delete obj._item;
 
-      await this.attachSubTagBreakdowns(top10, tags, `fav:${normalizedName}`);
+      await this.attachSubTagBreakdowns(
+        top10,
+        tags,
+        `fav:${normalizedName}`,
+        counts,
+      );
 
       // Others base = total favourite count (the fav set's size, not the
       // owner's upload count). One extra /counts/posts.json — negligible
@@ -1913,7 +1989,7 @@ export class AnalyticsDataManager extends DataManager {
       // as character/copyright.
       let totalFavCount = 0;
       try {
-        totalFavCount = await this.fetchRemoteCount(`fav:${normalizedName}`);
+        totalFavCount = await counts.lookup(`fav:${normalizedName}`);
       } catch (e: unknown) {
         log.debug('Failed to fetch total fav count', {error: e});
       }
@@ -1936,17 +2012,23 @@ export class AnalyticsDataManager extends DataManager {
 
       // Reuse unchanged thumbs before this write replaces the cache (L-2).
       await this.carryOverThumbs(cacheKey, uploaderId, top10);
-      if (uploaderId) await this.saveStats(cacheKey, uploaderId, top10);
+      const shown = await this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        top10,
+        counts.failed,
+      );
 
       await this.enrichThumbnails(
         cacheKey,
         uploaderId,
-        top10,
+        shown,
         userInfo,
         reportSubStatus,
+        !counts.failed,
       );
 
-      return top10;
+      return shown;
     } catch (e: unknown) {
       log.warn('Failed to fetch fav copyright distribution', {error: e});
       return [];
@@ -3069,6 +3151,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Commentary Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'commentary_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3117,7 +3200,7 @@ export class AnalyticsDataManager extends DataManager {
         if (reportSubStatus)
           reportSubStatus(`Fetching Commentary: ${item.name}`);
         try {
-          results[item.idx].count = await this.fetchRemoteCount(item.query);
+          results[item.idx].count = await counts.lookup(item.query);
         } catch (e: unknown) {
           log.debug('Failed to fetch commentary count', {error: e});
         }
@@ -3125,8 +3208,13 @@ export class AnalyticsDataManager extends DataManager {
     );
 
     const filtered = results.filter(r => r.count > 0);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
-    return filtered;
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
+    return shown;
   }
 
   /**
@@ -3142,6 +3230,7 @@ export class AnalyticsDataManager extends DataManager {
       reportSubStatus('Fetching Translation Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'translation_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3190,7 +3279,7 @@ export class AnalyticsDataManager extends DataManager {
     }));
 
     const fetchCount = (query: string): Promise<number> =>
-      this.fetchRemoteCount(query).catch(() => 0);
+      counts.lookup(query).catch(() => 0);
 
     await this.mapConcurrent(
       categories.map((cat, i) => ({...cat, idx: i})),
@@ -3252,8 +3341,13 @@ export class AnalyticsDataManager extends DataManager {
     );
 
     const filtered = results.filter(r => r.count > 0);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
-    return filtered;
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
+    return shown;
   }
 
   /**
@@ -3271,6 +3365,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Gender Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'gender_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3358,14 +3453,14 @@ export class AnalyticsDataManager extends DataManager {
         if (reportSubStatus) reportSubStatus(`Fetching Gender: ${item.name}`);
         try {
           if (item.subQueries) {
-            const counts = await Promise.all(
+            const subCounts = await Promise.all(
               item.subQueries.map((q: string) =>
-                this.fetchRemoteCount(q).catch(() => 0),
+                counts.lookup(q).catch(() => 0),
               ),
             );
-            results[item.idx].count = counts.reduce((sum, n) => sum + n, 0);
+            results[item.idx].count = subCounts.reduce((sum, n) => sum + n, 0);
           } else if (item.query) {
-            results[item.idx].count = await this.fetchRemoteCount(item.query);
+            results[item.idx].count = await counts.lookup(item.query);
           }
         } catch (e: unknown) {
           log.debug('Failed to fetch gender count', {error: e});
@@ -3374,8 +3469,13 @@ export class AnalyticsDataManager extends DataManager {
     );
 
     const filtered = results.filter(r => r.count > 0);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
-    return filtered;
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
+    return shown;
   }
 
   /**
@@ -3393,6 +3493,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Breasts Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'breasts_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3431,9 +3532,7 @@ export class AnalyticsDataManager extends DataManager {
       const tag = obj.tagName;
       if (reportSubStatus) reportSubStatus(`Fetching Breasts: ${obj.name}`);
       try {
-        obj.count = await this.fetchRemoteCount(
-          `user:${normalizedName} ${tag}`,
-        );
+        obj.count = await counts.lookup(`user:${normalizedName} ${tag}`);
       } catch (e: unknown) {
         log.debug('Failed to fetch breasts count', {error: e});
       }
@@ -3446,17 +3545,23 @@ export class AnalyticsDataManager extends DataManager {
 
     // Reuse unchanged thumbs before this write replaces the cache (L-2).
     await this.carryOverThumbs(cacheKey, uploaderId, filtered);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
 
     await this.enrichThumbnails(
       cacheKey,
       uploaderId,
-      filtered,
+      shown,
       userInfo,
       reportSubStatus,
+      !counts.failed,
     );
 
-    return filtered;
+    return shown;
   }
 
   /**
@@ -3475,6 +3580,7 @@ export class AnalyticsDataManager extends DataManager {
       reportSubStatus('Fetching Hair Length Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'hair_length_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3517,7 +3623,7 @@ export class AnalyticsDataManager extends DataManager {
     await this.mapConcurrent(results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Length: ${obj.name}`);
       try {
-        obj.count = await this.fetchRemoteCount(
+        obj.count = await counts.lookup(
           `user:${normalizedName} ${obj.originalTag}`,
         );
       } catch (e: unknown) {
@@ -3530,17 +3636,23 @@ export class AnalyticsDataManager extends DataManager {
       .sort((a, b) => b.count - a.count);
     // Reuse unchanged thumbs before this write replaces the cache (L-2).
     await this.carryOverThumbs(cacheKey, uploaderId, filtered);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
 
     await this.enrichThumbnails(
       cacheKey,
       uploaderId,
-      filtered,
+      shown,
       userInfo,
       reportSubStatus,
+      !counts.failed,
     );
 
-    return filtered;
+    return shown;
   }
 
   /**
@@ -3558,6 +3670,7 @@ export class AnalyticsDataManager extends DataManager {
     if (reportSubStatus) reportSubStatus('Fetching Hair Color Distribution...');
     const uploaderId = parseInt(userInfo.id || '0');
     const cacheKey = 'hair_color_dist';
+    const counts = this.countBatch();
 
     const cached = await this.tryGetCachedStats<DistributionItem[]>(
       cacheKey,
@@ -3599,7 +3712,7 @@ export class AnalyticsDataManager extends DataManager {
     await this.mapConcurrent(results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Color: ${obj.name}`);
       try {
-        obj.count = await this.fetchRemoteCount(
+        obj.count = await counts.lookup(
           `user:${normalizedName} ${obj.originalTag}`,
         );
       } catch (e: unknown) {
@@ -3612,17 +3725,23 @@ export class AnalyticsDataManager extends DataManager {
       .sort((a, b) => b.count - a.count);
     // Reuse unchanged thumbs before this write replaces the cache (L-2).
     await this.carryOverThumbs(cacheKey, uploaderId, filtered);
-    if (uploaderId) await this.saveStats(cacheKey, uploaderId, filtered);
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      filtered,
+      counts.failed,
+    );
 
     await this.enrichThumbnails(
       cacheKey,
       uploaderId,
-      filtered,
+      shown,
       userInfo,
       reportSubStatus,
+      !counts.failed,
     );
 
-    return filtered;
+    return shown;
   }
 
   /**
@@ -3679,6 +3798,7 @@ export class AnalyticsDataManager extends DataManager {
     items: DistributionItem[],
     userInfo: TargetUser,
     _statusCallback: ((msg: string) => void) | null = null,
+    persist = true,
   ): Promise<void> {
     let hasUpdates = false;
     const normalizedName = userInfo.name.replace(/ /g, '_');
@@ -3731,8 +3851,10 @@ export class AnalyticsDataManager extends DataManager {
     });
 
     if (hasUpdates && uploaderId) {
-      // Save updated stats
-      await this.saveStats(cacheKey, uploaderId, items);
+      // Save updated stats — unless `items` is a partial result its caller
+      // declined to cache (see cacheUnlessPartial); the thumbs still reach
+      // the open pie through the event below.
+      if (persist) await this.saveStats(cacheKey, uploaderId, items);
 
       // Notify UI
       // How? We need a global event or callback.

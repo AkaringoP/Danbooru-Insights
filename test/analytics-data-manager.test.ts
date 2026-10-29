@@ -1700,6 +1700,147 @@ describe('getCopyrightDistribution — dynamic pool + rerank (method A margin)',
   });
 });
 
+// A 429 on one candidate's count used to leave it at 0: it fell out of the
+// top 10 (Noa missing from a Blue Archive uploader's character pie) and that
+// ranking was cached. Counts now retry once; a count still lost blocks the
+// cache write.
+describe('getCharacterDistribution — lost counts', () => {
+  beforeEach(() => {
+    resetTopLevelSessionCache();
+    vi.stubGlobal('window', {
+      location: {origin: 'https://danbooru.donmai.us'},
+      dispatchEvent: vi.fn(),
+    });
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const script: FetchScript = {
+    totalPostCount: 50_000,
+    related: [
+      {
+        name: 'noa_(blue_archive)',
+        frequency: 0.03,
+        isTopLevel: true,
+        count: 900,
+      },
+      {
+        name: 'yuuka_(blue_archive)',
+        frequency: 0.04,
+        isTopLevel: true,
+        count: 700,
+      },
+      {
+        name: 'aru_(blue_archive)',
+        frequency: 0.02,
+        isTopLevel: true,
+        count: 500,
+      },
+    ],
+  };
+  const user = makeSyncUser({id: '42', name: 'tester'});
+
+  /** Fails Noa's count with `status` the first `times` attempts. */
+  function failingNoa(status: number, times: number) {
+    const base = buildDistFetch(script, 'user');
+    let failures = 0;
+    return async (url: string) => {
+      if (
+        url.startsWith('/counts/posts.json') &&
+        decodeURIComponent(url).includes('noa_(blue_archive)') &&
+        failures < times
+      ) {
+        failures++;
+        return {ok: false, status, json: async () => ({})};
+      }
+      return base(url);
+    };
+  }
+
+  it('a count that 429s once is retried, ranked and cached', async () => {
+    const {adm} = makeDistAdm(failingNoa(429, 1), 50_000);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    const result = await adm.getCharacterDistribution(user);
+
+    expect(result[0].tagName).toBe('noa_(blue_archive)');
+    expect(result[0].count).toBe(900);
+    expect(save).toHaveBeenCalledWith('character_dist', 42, result);
+  });
+
+  it('a count lost after its retry is shown but not cached', async () => {
+    const {adm} = makeDistAdm(failingNoa(429, 2), 50_000);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    const result = await adm.getCharacterDistribution(user);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result.map(r => r.tagName)).toContain('yuuka_(blue_archive)');
+  });
+
+  it('a lost count falls back to the previous cached ranking', async () => {
+    const {adm, rl} = makeDistAdm(failingNoa(503, 2), 50_000);
+    const previous = [
+      {name: 'noa (blue archive)', tagName: 'noa_(blue_archive)', count: 880},
+    ];
+    vi.spyOn(adm, 'getStats').mockResolvedValue(previous);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    const result = await adm.getCharacterDistribution(user, true);
+
+    expect(save).not.toHaveBeenCalled();
+    expect(result).toBe(previous);
+    // It really fetched (forceRefresh), rather than returning the cache early.
+    expect(rl.fetch).toHaveBeenCalled();
+  });
+
+  it('thumbnails for an uncached partial result reach the pie but not the cache', async () => {
+    const {adm} = makeDistAdm(buildDistFetch(script, 'user'), 50_000);
+    vi.mocked(adm.enrichThumbnails).mockRestore();
+    vi.spyOn(adm, 'fetchThumbnailWithRetry').mockResolvedValue('t.webp');
+    const save = vi.spyOn(adm, 'saveStats');
+    const items = [{name: 'noa', tagName: 'noa_(blue_archive)', count: 1}];
+
+    await adm.enrichThumbnails(
+      'character_dist',
+      42,
+      items as never,
+      user,
+      null,
+      false,
+    );
+
+    expect(items[0]).toHaveProperty('thumb', 't.webp');
+    expect(save).not.toHaveBeenCalled();
+    expect(window.dispatchEvent).toHaveBeenCalled();
+  });
+
+  it('a deterministic 4xx is not retried and does not block caching', async () => {
+    // e.g. 422 for a search over a Member account's tag limit: refetching
+    // cannot change it, so refusing to cache would re-run it every open.
+    const fetchImpl = failingNoa(422, 99);
+    const {adm, rl} = makeDistAdm(fetchImpl, 50_000);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    await adm.getCharacterDistribution(user);
+
+    const noaCalls = rl.fetch.mock.calls.filter(
+      (c: [string]) =>
+        c[0].startsWith('/counts/posts.json') &&
+        decodeURIComponent(c[0]).includes('noa_(blue_archive)'),
+    );
+    expect(noaCalls).toHaveLength(1);
+    expect(save).toHaveBeenCalled();
+  });
+});
+
 describe('getFavCopyrightDistribution — uses fav: count query', () => {
   beforeEach(() => {
     vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
