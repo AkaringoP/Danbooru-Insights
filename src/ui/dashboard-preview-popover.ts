@@ -30,7 +30,9 @@ import type {
   ActivityType,
   PostPreview,
   PostPreviewStatus,
+  ProfileSummary,
 } from '../types';
+import {renderSummaryText} from './profile-summary-view';
 import {
   ACTIVITY_COLORS,
   ACTIVITY_TYPES,
@@ -112,6 +114,8 @@ interface PopoverRefs {
   legend: HTMLElement | null;
   /** Touch legend two-step controller (document listeners) — for disposal. */
   legendTap: TwoStepTapController<string> | null;
+  /** "At a glance" text — null when no `fetchSummary` was provided. */
+  summary: HTMLElement | null;
 }
 
 /** Relative "Xm/h/d ago" label for an activity segment's tooltip. */
@@ -669,6 +673,7 @@ function syncPopoverTheme(el: HTMLElement): void {
 /** Builds the popover DOM (appended to `document.body`) and returns its refs. */
 function buildPopoverDom(opts: {
   hasActivity: boolean;
+  hasSummary: boolean;
   onEnter: () => void;
   onLeave: () => void;
 }): PopoverRefs {
@@ -684,6 +689,17 @@ function buildPopoverDom(opts: {
 
   const body = document.createElement('div');
   body.className = 'di-preview-body';
+  // Top: the newest-200 "At a glance" sentences (dashboard shows lifetime).
+  let summary: HTMLElement | null = null;
+  if (opts.hasSummary) {
+    const section = document.createElement('div');
+    section.className = 'di-preview-summary';
+    section.appendChild(makeSectionLabel('At a glance · last 200 uploads'));
+    summary = document.createElement('div');
+    summary.className = 'di-ps-text';
+    section.appendChild(summary);
+    body.appendChild(section);
+  }
   const grid = document.createElement('div');
   grid.className = 'di-preview-grid';
   // Section A header: "Recent uploads" + the NSFW blur toggle (top-right).
@@ -727,7 +743,16 @@ function buildPopoverDom(opts: {
   el.addEventListener('mouseleave', opts.onLeave);
 
   document.body.appendChild(el);
-  return {el, caret, grid, nsfwToggle: nsfw.checkbox, strip, legend, legendTap};
+  return {
+    el,
+    caret,
+    grid,
+    nsfwToggle: nsfw.checkbox,
+    strip,
+    legend,
+    legendTap,
+    summary,
+  };
 }
 
 export interface DashboardPreviewPopoverOptions {
@@ -758,6 +783,11 @@ export interface DashboardPreviewPopoverOptions {
    * skip the escalation (the grid still shows the orange mintag labels).
    */
   fetchAbandoned?: (postIds: number[]) => Promise<Set<number>>;
+  /**
+   * Optional: builds the newest-200 "At a glance" summary shown at the top.
+   * Omit to skip the section.
+   */
+  fetchSummary?: () => Promise<ProfileSummary>;
 }
 
 export interface DashboardPreviewPopover {
@@ -799,6 +829,60 @@ interface CachedFetcher<T> {
  * equivalent) means an empty result is never cached: the next open re-fetches
  * and recovers. A genuinely-empty user just re-fetches each open — cheap.
  */
+/**
+ * Top "At a glance" section — independent of the A/B load strategy (it is
+ * just text). A fresh cache renders synchronously; otherwise a placeholder
+ * until the summary resolves, dropped if this open is no longer current.
+ */
+function loadSummary(
+  fetcher: CachedFetcher<ProfileSummary>,
+  box: HTMLElement,
+  isCurrent: () => boolean,
+): void {
+  const fresh = fetcher.peekFresh();
+  if (fresh) {
+    renderSummaryText(box, fresh);
+    return;
+  }
+  box.textContent = 'Summarising recent uploads…';
+  void fetcher.get().then(
+    s => {
+      if (!isCurrent()) return;
+      if (s.lines.length) renderSummaryText(box, s);
+      else box.textContent = 'No recent uploads to summarise.';
+    },
+    () => {
+      if (isCurrent()) box.textContent = 'Summary unavailable.';
+    },
+  );
+}
+
+/**
+ * The popover's per-section cached fetchers. An empty result is never cached
+ * (an error degrades to one — see createCachedFetcher); a real empty just
+ * re-fetches cheaply on the next open.
+ */
+function createPopoverFetchers(options: DashboardPreviewPopoverOptions) {
+  const {fetchPosts, fetchActivity, fetchSummary} = options;
+  return {
+    postsFetcher: createCachedFetcher(
+      fetchPosts,
+      CACHE_TTL_MS,
+      posts => posts.length > 0,
+    ),
+    activityFetcher: fetchActivity
+      ? createCachedFetcher(
+          fetchActivity,
+          CACHE_TTL_MS,
+          dist => dist.recent.length > 0,
+        )
+      : null,
+    summaryFetcher: fetchSummary
+      ? createCachedFetcher(fetchSummary, CACHE_TTL_MS, s => s.lines.length > 0)
+      : null,
+  };
+}
+
 function createCachedFetcher<T>(
   fetchFn: () => Promise<T>,
   ttlMs: number,
@@ -836,7 +920,7 @@ function createCachedFetcher<T>(
 export function createDashboardPreviewPopover(
   options: DashboardPreviewPopoverOptions,
 ): DashboardPreviewPopover {
-  const {anchor, fetchPosts, fetchActivity, activityHref, fetchAbandoned} =
+  const {anchor, fetchActivity, activityHref, fetchAbandoned, fetchSummary} =
     options;
 
   let refs: PopoverRefs | null = null;
@@ -844,20 +928,8 @@ export function createDashboardPreviewPopover(
   let visible = false;
   let generation = 0;
   let hideTimer: ReturnType<typeof setTimeout> | null = null;
-  // Don't cache an empty result (an error degrades to one) — see
-  // createCachedFetcher. A real empty just re-fetches cheaply on the next open.
-  const postsFetcher = createCachedFetcher(
-    fetchPosts,
-    CACHE_TTL_MS,
-    posts => posts.length > 0,
-  );
-  const activityFetcher = fetchActivity
-    ? createCachedFetcher(
-        fetchActivity,
-        CACHE_TTL_MS,
-        dist => dist.recent.length > 0,
-      )
-    : null;
+  const {postsFetcher, activityFetcher, summaryFetcher} =
+    createPopoverFetchers(options);
   let clickOutside: ((e: MouseEvent) => void) | null = null;
   let onKeydown: ((e: KeyboardEvent) => void) | null = null;
 
@@ -1026,6 +1098,7 @@ export function createDashboardPreviewPopover(
     if (!refs) {
       refs = buildPopoverDom({
         hasActivity: !!fetchActivity,
+        hasSummary: !!fetchSummary,
         onEnter: keepOpen,
         onLeave: scheduleHide,
       });
@@ -1043,6 +1116,13 @@ export function createDashboardPreviewPopover(
     const gen = ++generation;
     reposition();
     setupDismiss();
+    if (summaryFetcher && refs.summary) {
+      loadSummary(
+        summaryFetcher,
+        refs.summary,
+        () => gen === generation && visible,
+      );
+    }
     // Touch + pinned (the mobile mini-report): one spinner → render both
     // sections at once. Desktop keeps the progressive A-first / B-background.
     if (isTouchDevice() && pinned) {

@@ -4,6 +4,45 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.11.0 — "At a glance": the user summed up in two lines
+
+### Added
+- **An "At a glance" card at the top of the dashboard.** Two lines that sum
+  up every synced upload, built only from data the dashboard already loads
+  (no extra requests):
+  - when they started and what they mainly upload, e.g. "Uploading since
+    2021-03, mainly idolmaster (58%) and blue archive (25%), above all …"
+    (shares of all uploads; each tag links to `user:<name> <tag>`, in
+    Danbooru's copyright / character colours);
+  - deleted, banned and pending uploads, each as a count with its share of
+    all uploads and a link to that search, plus tagging health ("all tagged
+    (avg 18 general tags)" or the uploads still essentially untagged);
+  - the long-term arc: 30-day pace against the 12-month pace, the current
+    upload streak, the busiest year and how the last 12 months compare, and
+    whether recent uploads score below or above their usual median.
+
+  Wording is coloured by tone: green for a clean record or a busier pace,
+  amber and red for concerns. Deletion rates are graded against Danbooru's
+  upload-limit break-even (10% / 23%), and "untagged" means ≤3 general tags
+  more than 15 minutes after upload.
+- **The same summary for the newest 200 uploads in the preview popover**
+  (desktop hover and the mobile 📋 mini report). It compares the recent
+  window with the user's record: recent vs lifetime deletion rate,
+  deletions within the 3-day moderation period, uploads still left
+  untagged, a drop in tags per upload, heavily downvoted uploads, and focus
+  shifts ("lately shifted from A to B", "branching into C"). This view
+  costs one `/posts.json` request, cached for the count-refresh period.
+
+### Fixed
+- **The upload card's play/pause button was invisible on dark themes.** It
+  drew in the browser's default black.
+- **The User History scrollbar never showed in Chrome.** The standard
+  `scrollbar-width` property made Chrome ignore the custom always-visible
+  scrollbar and fall back to macOS overlay scrollbars that only appear while
+  scrolling. It now shows with a faint rail in light and dark themes.
+
+---
+
 ## v9.10.0 — Full syncs that finish, a rate limiter that adapts, fewer requests
 
 ### Fixed

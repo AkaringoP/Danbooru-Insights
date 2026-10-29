@@ -37,6 +37,11 @@ import {
   toPostPreview,
 } from './dashboard-preview';
 import type {CommentarySegment, UploadMeta} from './dashboard-preview';
+import {
+  WINDOW_SIZE,
+  buildRecentWindowUrl,
+  danbooruPostToWindowPoint,
+} from './profile-summary';
 import {CONFIG} from '../config';
 
 const log = createLogger('Analytics');
@@ -77,6 +82,7 @@ import type {
   ActivitySegment,
   ActivityDistribution,
   SyncOutcome,
+  WindowPoint,
 } from '../types';
 
 /**
@@ -2209,6 +2215,52 @@ export class AnalyticsDataManager extends DataManager {
       }));
     } catch (e: unknown) {
       log.warn('Failed to fetch recent posts preview', {
+        user: userInfo.name,
+        error: e,
+      });
+      return [];
+    }
+  }
+
+  /**
+   * The user's most recent uploads as {@link WindowPoint}s for the "At a
+   * glance" pane — one `/posts.json` request, cached in piestats under
+   * `recent_window` with the count-cache TTL. A failed or empty fetch returns
+   * `[]` and is not cached; the caller falls back to the local window.
+   * @param {!TargetUser} userInfo The user to fetch for.
+   * @param {number} limit How many recent uploads (default 200).
+   * @param {boolean} forceRefresh Bypass the cache (SWR revalidate).
+   * @return {!Promise<!Array<!WindowPoint>>} Newest-first points.
+   */
+  async getRecentUploadWindow(
+    userInfo: TargetUser,
+    limit = WINDOW_SIZE,
+    forceRefresh = false,
+  ): Promise<WindowPoint[]> {
+    if (!userInfo.name) return [];
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = 'recent_window';
+    const cached = await this.tryGetCachedStats<WindowPoint[]>(
+      cacheKey,
+      uploaderId,
+      forceRefresh,
+      getCountCacheTtlMs(),
+    );
+    if (cached) return cached;
+
+    const normalizedName = userInfo.name.replace(/ /g, '_');
+    try {
+      const posts = await this.rateLimiter
+        .fetch(buildRecentWindowUrl(normalizedName, limit))
+        .then(r => r.json());
+      if (!Array.isArray(posts) || !posts.length) return [];
+      const points = posts.map((p: DanbooruPost) =>
+        danbooruPostToWindowPoint(p),
+      );
+      if (uploaderId) await this.saveStats(cacheKey, uploaderId, points);
+      return points;
+    } catch (e: unknown) {
+      log.warn('Failed to fetch recent upload window', {
         user: userInfo.name,
         error: e,
       });

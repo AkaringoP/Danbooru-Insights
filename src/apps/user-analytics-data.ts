@@ -4,7 +4,20 @@ import {getCountCacheTtlMs, getNsfwEnabled} from '../core/settings';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
 import type {RateLimitedFetch} from '../core/rate-limiter';
-import type {DistributionItem, TagCloudItem, TargetUser} from '../types';
+import {
+  WINDOW_SIZE,
+  newestPoints,
+  scatterPointToWindowPoint,
+} from '../core/profile-summary';
+import type {
+  DistributionItem,
+  ProfileSummaryInput,
+  ScatterDataPoint,
+  TagCloudItem,
+  TagShare,
+  TargetUser,
+  WindowPoint,
+} from '../types';
 import {createPhaseTracker, type ReportProgress} from './progress-tracker';
 import {SCATTER_MIN_UPLOADS, TAG_CLOUD_MIN_UPLOADS} from './widget-gates';
 
@@ -94,6 +107,43 @@ export async function swrStats<T>(
   // the blocking cost is still visible in perf logs.
   const data = await perfLogger.wrap(label, freshFetch);
   return {data};
+}
+
+/** Shared plumbing for one `fetchDashboardData` phase. */
+interface PhaseContext {
+  dataManager: AnalyticsDataManager;
+  uploaderId: number;
+  sub: (msg: string) => void;
+  step: () => void;
+}
+
+/**
+ * One SWR phase of the dashboard load: cached piestats value now, background
+ * revalidate later (see {@link swrStats}), with the spinner sub-status set on
+ * a real fetch and the phase tracker stepped when it settles. `maxAgeMs`
+ * defaults to the count-cache TTL; pass `undefined` explicitly to force a
+ * post-paint revalidate.
+ */
+function swrPhase<T>(
+  ctx: PhaseContext,
+  cacheKey: string,
+  status: string,
+  label: string,
+  load: () => Promise<T>,
+  ...ttl: [maxAgeMs?: number]
+): Promise<SwrResult<T>> {
+  const maxAgeMs = ttl.length ? ttl[0] : getCountCacheTtlMs();
+  return swrStats(
+    ctx.dataManager,
+    cacheKey,
+    ctx.uploaderId,
+    () => {
+      ctx.sub(status);
+      return load();
+    },
+    `dbi:net:fetchData:${label}`,
+    maxAgeMs,
+  ).finally(ctx.step);
 }
 
 /** The nine heavy tag-distribution keys as they appear on the dashboard
@@ -417,6 +467,12 @@ export class UserAnalyticsDataService {
     );
 
     const uploaderId = parseInt(user.id ?? '0');
+    const phase: PhaseContext = {
+      dataManager,
+      uploaderId,
+      sub,
+      step: () => tracker.step(),
+    };
 
     const [
       stats,
@@ -465,28 +521,12 @@ export class UserAnalyticsDataService {
       // cache TTL so a sub-TTL cache hit skips the background revalidate
       // entirely — matches the 9 other count-driven distributions and
       // honours the "Count Refresh (min)" setting consistently.
-      swrStats(
-        dataManager,
-        'status_dist',
-        uploaderId,
-        () => {
-          sub('Loading status counts…');
-          return dataManager.getStatusDistribution(user, firstUploadDate, true);
-        },
-        'dbi:net:fetchData:status',
-        getCountCacheTtlMs(),
-      ).finally(() => tracker.step()),
-      swrStats(
-        dataManager,
-        'rating_dist',
-        uploaderId,
-        () => {
-          sub('Loading rating counts…');
-          return dataManager.getRatingDistribution(user, firstUploadDate, true);
-        },
-        'dbi:net:fetchData:rating',
-        getCountCacheTtlMs(),
-      ).finally(() => tracker.step()),
+      swrPhase(phase, 'status_dist', 'Loading status counts…', 'status', () =>
+        dataManager.getStatusDistribution(user, firstUploadDate, true),
+      ),
+      swrPhase(phase, 'rating_dist', 'Loading rating counts…', 'rating', () =>
+        dataManager.getRatingDistribution(user, firstUploadDate, true),
+      ),
       // SWR: return cached value now, revalidate in background. fresh fetch
       // uses forceRefresh=true so it bypasses the in-method cache and
       // overwrites piestats via saveStats. The count-cache TTL is now passed
@@ -494,39 +534,27 @@ export class UserAnalyticsDataService {
       // without it, `refreshCriticalStats` freshens these on sync and then the
       // post-paint revalidate re-fetches the very same data seconds later
       // (audit M-5). Matches the status/rating SWR calls above.
-      swrStats(
-        dataManager,
+      swrPhase(
+        phase,
         'top_posts_by_type',
-        uploaderId,
-        () => {
-          sub('Loading top posts by rating…');
-          return dataManager.getTopPostsByType(user, true);
-        },
-        'dbi:net:fetchData:topPosts',
-        getCountCacheTtlMs(),
-      ).finally(() => tracker.step()),
-      swrStats(
-        dataManager,
+        'Loading top posts by rating…',
+        'topPosts',
+        () => dataManager.getTopPostsByType(user, true),
+      ),
+      swrPhase(
+        phase,
         'recent_popular_posts',
-        uploaderId,
-        () => {
-          sub('Loading recent popular posts…');
-          return dataManager.getRecentPopularPosts(user, true);
-        },
-        'dbi:net:fetchData:recentPopular',
-        getCountCacheTtlMs(),
-      ).finally(() => tracker.step()),
-      swrStats(
-        dataManager,
+        'Loading recent popular posts…',
+        'recentPopular',
+        () => dataManager.getRecentPopularPosts(user, true),
+      ),
+      swrPhase(
+        phase,
         `milestones_1000_${isNsfwEnabled ? '1' : '0'}`,
-        uploaderId,
-        () => {
-          sub('Loading milestones…');
-          return dataManager.getMilestones(user, isNsfwEnabled, 1000, true);
-        },
-        'dbi:net:fetchData:milestones1k',
-        getCountCacheTtlMs(),
-      ).finally(() => tracker.step()),
+        'Loading milestones…',
+        'milestones1k',
+        () => dataManager.getMilestones(user, isNsfwEnabled, 1000, true),
+      ),
       // Skip the scatter fetch entirely when the upload-count gate
       // (v9.6.0) will hide the widget anyway — the placeholder doesn't
       // need scatter data.
@@ -537,17 +565,13 @@ export class UserAnalyticsDataService {
             return dataManager.getScatterData(user);
           })
       ).finally(() => tracker.step()),
-      swrStats(
-        dataManager,
+      swrPhase(
+        phase,
         'level_change_history',
-        uploaderId,
-        () => {
-          sub('Loading level change history…');
-          return dataManager.getLevelChangeHistory(user, true);
-        },
-        'dbi:net:fetchData:levelChanges',
-        getCountCacheTtlMs(),
-      ).finally(() => tracker.step()),
+        'Loading level change history…',
+        'levelChanges',
+        () => dataManager.getLevelChangeHistory(user, true),
+      ),
       perfLogger
         .wrap('dbi:net:fetchData:timelineMilestones', () => {
           sub('Loading timeline milestones…');
@@ -600,6 +624,22 @@ export class UserAnalyticsDataService {
       ...distributionsSwr.distributions,
     };
 
+    // The dashboard's "At a glance" card judges every synced upload — no
+    // live window request on the dashboard path (that lives in the popover).
+    const profileSummaryInput = await assembleProfileSummaryInput({
+      dataManager,
+      user,
+      firstUploadDate,
+      total,
+      status: statusSwr.data,
+      // Both are in EAGER_HEAVY_DISTS, so always present; `?? []` only
+      // satisfies the Partial type.
+      copyright: distributions.copyright ?? [],
+      character: distributions.character ?? [],
+      scatterData,
+      recentWindow: [],
+    });
+
     return {
       stats,
       total,
@@ -628,7 +668,128 @@ export class UserAnalyticsDataService {
       tagCloudGeneral: tagCloudGeneralSwr.data,
       userStats,
       needsBackfill,
+      profileSummaryInput,
       dataManager,
     };
   }
+}
+
+/**
+ * Builds the "At a glance" input. The lifetime baseline is every locally
+ * synced upload: the scatter data when it was fetched (≥
+ * SCATTER_MIN_UPLOADS), otherwise one local cursor pass — the scatter gate
+ * exists because the widget is meaningless that small, not because the read
+ * is expensive. Without a live window (dashboard, or a failed popover fetch)
+ * the newest local uploads stand in for "recent".
+ */
+export async function assembleProfileSummaryInput(args: {
+  dataManager: AnalyticsDataManager;
+  user: TargetUser;
+  firstUploadDate: Date | null;
+  total: number;
+  status: Array<{name: string; count: number}>;
+  copyright: DistributionItem[];
+  character: DistributionItem[];
+  scatterData: ScatterDataPoint[];
+  recentWindow: WindowPoint[];
+}): Promise<ProfileSummaryInput> {
+  const scatter = args.scatterData.length
+    ? args.scatterData
+    : await args.dataManager.getScatterData(args.user);
+  const lifetimePoints = scatter.map(scatterPointToWindowPoint);
+  const window = args.recentWindow.length
+    ? args.recentWindow
+    : newestPoints(lifetimePoints, WINDOW_SIZE);
+  return {
+    userName: args.user.name.replace(/ /g, '_'),
+    firstUploadDate: args.firstUploadDate,
+    total: args.total,
+    lifetimeDeleted: deletedCount(args.status),
+    lifetimeStatus: statusTriple(args.status),
+    copyrightTop: topTagNames(args.copyright),
+    characterTop: topTagNames(args.character),
+    lifetimeFocus: {
+      copyright: topTagShares(args.copyright),
+      character: topTagShares(args.character),
+    },
+    lifetimePoints,
+    window,
+  };
+}
+
+/** Lifetime deleted uploads from the status distribution, if present. */
+export function deletedCount(
+  status: Array<{name: string; count: number}>,
+): number | null {
+  return status.find(s => s.name === 'deleted')?.count ?? null;
+}
+
+/** Lifetime pending / flagged / banned counts, when the status row exists. */
+export function statusTriple(
+  status: Array<{name: string; count: number}>,
+): ProfileSummaryInput['lifetimeStatus'] {
+  if (!status.length) return null;
+  const get = (n: string) => status.find(s => s.name === n)?.count ?? 0;
+  return {
+    pending: get('pending'),
+    flagged: get('flagged'),
+    banned: get('banned'),
+  };
+}
+
+/**
+ * Popover ("mini report") input: the live newest-200 window (1 request,
+ * piestats-cached with the count TTL) judged against whatever is already
+ * local — synced posts and the cached status / copyright / character
+ * distributions. No other network: a user who was never synced simply gets
+ * the window's own health without lifetime comparisons.
+ */
+export async function buildRecentSummaryInput(
+  dataManager: AnalyticsDataManager,
+  user: TargetUser,
+  total: number,
+): Promise<ProfileSummaryInput> {
+  const uploaderId = parseInt(user.id ?? '0');
+  const cached = async <T>(key: string, fallback: T): Promise<T> =>
+    uploaderId
+      ? (((await dataManager.getStats(key, uploaderId)) as T | null) ??
+        fallback)
+      : fallback;
+  const [recentWindow, scatterData, status, copyright, character] =
+    await Promise.all([
+      dataManager.getRecentUploadWindow(user, WINDOW_SIZE),
+      dataManager.getScatterData(user),
+      cached<Array<{name: string; count: number}>>('status_dist', []),
+      cached<DistributionItem[]>('copyright_dist', []),
+      cached<DistributionItem[]>('character_dist', []),
+    ]);
+  const firstTs = scatterData.length
+    ? Math.min(...scatterData.map(p => p.d))
+    : null;
+  return assembleProfileSummaryInput({
+    dataManager,
+    user,
+    firstUploadDate: firstTs === null ? null : new Date(firstTs),
+    total,
+    status,
+    copyright,
+    character,
+    scatterData,
+    recentWindow,
+  });
+}
+
+/** Tag + count of a pie distribution's real slices, largest first. */
+function topTagShares(items: DistributionItem[]): TagShare[] {
+  return items
+    .filter(i => !i.isOther && i.tagName)
+    .map(i => ({tag: i.tagName as string, count: i.count}))
+    .sort((a, b) => b.count - a.count);
+}
+
+/** Raw tag names of a pie distribution's real (non-"Others") slices. */
+function topTagNames(items: DistributionItem[]): string[] {
+  return items
+    .filter(i => !i.isOther && i.tagName)
+    .map(i => i.tagName as string);
 }
