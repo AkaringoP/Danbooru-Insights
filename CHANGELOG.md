@@ -4,7 +4,7 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
-## Unreleased
+## v9.11.2 — Preview popover fits phones; Suspicious explained and reworked
 
 ### Added
 - **A "?" next to "Suspicious N" in the preview popover's activity legend.**
