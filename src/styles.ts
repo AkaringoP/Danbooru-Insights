@@ -1921,8 +1921,15 @@ const GLOBAL_CSS = `
       color: var(--di-text, #333);
       white-space: nowrap;
     }
-    .di-preview-legend-wrap:hover .di-preview-legend-pop,
-    .di-preview-legend-wrap:focus-within .di-preview-legend-pop,
+    /* Hover/focus reveal only where a real hover exists: on a phone a tap
+       leaves a sticky :hover and focus on the "?", which would keep the
+       popup up after the tap toggle closed it. Touch uses the --open class. */
+    @media (hover: hover) {
+      .di-preview-legend-wrap:hover .di-preview-legend-pop,
+      .di-preview-legend-wrap:focus-within .di-preview-legend-pop {
+        display: block;
+      }
+    }
     .di-preview-legend-wrap--open .di-preview-legend-pop {
       display: block;
     }
@@ -2060,8 +2067,13 @@ const GLOBAL_CSS = `
       color: var(--di-text, #333);
       white-space: normal;
     }
-    .di-activity-help:hover .di-activity-help-pop,
-    .di-activity-help:focus-within .di-activity-help-pop,
+    /* Same (hover: hover) gating as the section-A "?" legend above. */
+    @media (hover: hover) {
+      .di-activity-help:hover .di-activity-help-pop,
+      .di-activity-help:focus-within .di-activity-help-pop {
+        display: block;
+      }
+    }
     .di-activity-help--open .di-activity-help-pop {
       display: block;
     }
