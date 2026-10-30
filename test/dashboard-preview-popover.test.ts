@@ -6,6 +6,7 @@ import {
   RECENT_POSTS_LIMIT,
 } from '../src/ui/dashboard-preview-popover';
 import {calcPopoverPositionBelow} from '../src/ui/popover-utils';
+import {SUSPICIOUS_SCORE_MAX} from '../src/core/dashboard-preview';
 import {getNsfwEnabled, setNsfwEnabled} from '../src/core/settings';
 import * as twoStepTap from '../src/ui/two-step-tap';
 import type {ActivityDistribution, PostPreview} from '../src/types';
@@ -841,6 +842,91 @@ describe('createDashboardPreviewPopover — section B (activity)', () => {
       document.querySelectorAll('.di-activity-legend-item'),
     ).map(e => e.textContent);
     expect(legend).toContain('Suspicious 1');
+    pop.destroy();
+  });
+
+  const suspiciousDist = () =>
+    activityWith(
+      [
+        {type: 'upload', ts: Date.now() - 1000},
+        {type: 'suspicious', ts: Date.now() - 2000},
+      ],
+      {upload: 1, suspicious: 1},
+    );
+
+  it('pairs only the Suspicious legend entry with a "?" note', async () => {
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => samplePosts,
+      fetchActivity: async () => suspiciousDist(),
+    });
+    pop.show();
+    await flush();
+    const helps = document.querySelectorAll('.di-activity-help');
+    expect(helps).toHaveLength(1);
+    const group = helps[0].closest('.di-activity-legend-group');
+    expect(
+      group?.querySelector<HTMLElement>('.di-activity-legend-item')?.dataset
+        .type,
+    ).toBe('suspicious');
+    // Beside the item, not inside it: the item's delegated handlers use
+    // closest('.di-activity-legend-item').
+    expect(helps[0].closest('.di-activity-legend-item')).toBeNull();
+    const note = helps[0].querySelector('.di-activity-help-pop')!.textContent;
+    expect(note).toContain('deleted or banned');
+    expect(note).toContain(`${SUSPICIOUS_SCORE_MAX} or lower`);
+    expect(note).toContain('Click the label');
+    pop.destroy();
+  });
+
+  it('desktop: clicking the "?" does not open the suspicious list', async () => {
+    const opened: string[] = [];
+    const origOpen = window.open;
+    window.open = ((url?: string | URL) => {
+      opened.push(String(url));
+      return null;
+    }) as typeof window.open;
+    try {
+      const pop = createDashboardPreviewPopover({
+        anchor: anchorWithRect({}),
+        fetchPosts: async () => samplePosts,
+        fetchActivity: async () => suspiciousDist(),
+        activityHref: () => '/posts?tags=id:1',
+      });
+      pop.show();
+      await flush();
+      document
+        .querySelector<HTMLElement>(
+          '.di-activity-help .di-preview-legend-icon',
+        )!
+        .click();
+      expect(opened).toEqual([]);
+      pop.destroy();
+    } finally {
+      window.open = origOpen;
+    }
+  });
+
+  it('touch: a tap on the "?" toggles the note, a tap on the note closes it', async () => {
+    vi.mocked(twoStepTap.isTouchDevice).mockReturnValue(true);
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => samplePosts,
+      fetchActivity: async () => suspiciousDist(),
+    });
+    pop.show();
+    await flush();
+    const help = document.querySelector<HTMLElement>('.di-activity-help')!;
+    const icon = help.querySelector<HTMLElement>('.di-preview-legend-icon')!;
+    const note = help.querySelector<HTMLElement>('.di-activity-help-pop')!;
+    expect(note.textContent).toContain('Tap the label twice');
+    icon.click();
+    expect(help.classList.contains('di-activity-help--open')).toBe(true);
+    note.click();
+    expect(help.classList.contains('di-activity-help--open')).toBe(false);
+    icon.click();
+    icon.click();
+    expect(help.classList.contains('di-activity-help--open')).toBe(false);
     pop.destroy();
   });
 

@@ -37,6 +37,7 @@ import {
   ACTIVITY_COLORS,
   ACTIVITY_TYPES,
   STATUS_BORDER_COLORS,
+  SUSPICIOUS_SCORE_MAX,
   balancedChunks,
   isMintagged,
   isSuspiciousUpload,
@@ -416,6 +417,77 @@ function makeColorLegend(): HTMLElement {
   return wrap;
 }
 
+/**
+ * Section B: the "?" next to the Suspicious legend entry — a short note on
+ * what gets re-typed as suspicious (users kept asking). Desktop reveals it on
+ * hover/focus (CSS); touch has no hover, so a tap on the "?" toggles it and a
+ * tap on the note closes it.
+ *
+ * It sits *beside* the legend item, not inside it, so the item's delegated
+ * handlers (`closest('.di-activity-legend-item')`: click-to-open, the touch
+ * two-step, peer-highlight) never see taps on the "?". The note anchors to the
+ * legend (`position: relative` there) and spans its full width just above it,
+ * so it can't spill off the right edge on a phone or below the popover.
+ */
+function makeSuspiciousHelp(): HTMLElement {
+  const touch = isTouchDevice();
+  const wrap = document.createElement('span');
+  wrap.className = 'di-activity-help';
+  const icon = document.createElement('span');
+  icon.className = 'di-preview-legend-icon';
+  icon.textContent = '?';
+  icon.setAttribute('role', 'button');
+  icon.setAttribute('aria-label', 'What Suspicious means');
+  icon.tabIndex = 0;
+  const note = document.createElement('div');
+  note.className = 'di-activity-help-pop';
+  note.setAttribute('role', 'tooltip');
+  const title = document.createElement('strong');
+  title.textContent = 'Suspicious';
+  note.appendChild(title);
+  note.appendChild(
+    document.createTextNode(
+      ' — uploads that were later deleted or banned or scored ' +
+        `${SUSPICIOUS_SCORE_MAX} or lower, and comments scored ` +
+        `${SUSPICIOUS_SCORE_MAX} or lower. Counted here instead of under ` +
+        `Uploads / Comments. ${touch ? 'Tap the label twice' : 'Click the label'} ` +
+        'to open those posts.',
+    ),
+  );
+  wrap.appendChild(icon);
+  wrap.appendChild(note);
+  if (touch) {
+    const toggle = (e: Event) => {
+      e.stopPropagation();
+      e.preventDefault();
+      wrap.classList.toggle('di-activity-help--open');
+    };
+    icon.addEventListener('click', toggle);
+    note.addEventListener('click', toggle);
+  }
+  return wrap;
+}
+
+/**
+ * Section B: appends one legend entry. The Suspicious entry is paired with its
+ * "?" note in a no-wrap group so the two never land on different rows.
+ */
+function appendLegendItem(
+  legend: HTMLElement,
+  item: HTMLElement,
+  type: ActivityType,
+): void {
+  if (type !== 'suspicious') {
+    legend.appendChild(item);
+    return;
+  }
+  const group = document.createElement('span');
+  group.className = 'di-activity-legend-group';
+  group.appendChild(item);
+  group.appendChild(makeSuspiciousHelp());
+  legend.appendChild(group);
+}
+
 /** Section B: a single muted/pulsing message row (empty or error state). */
 function renderActivityMessage(
   strip: HTMLElement,
@@ -501,7 +573,7 @@ function renderActivity(
         );
       }
     }
-    legend.appendChild(item);
+    appendLegendItem(legend, item, type);
   }
 }
 
