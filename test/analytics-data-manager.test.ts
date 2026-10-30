@@ -2769,17 +2769,41 @@ describe('getActivityDistribution — suspicious uploads', () => {
 
   it('flags deleted / flagged / suspicious-tag / downvoted uploads, not banned', async () => {
     const posts = [
-      {id: 1, is_deleted: true, is_flagged: false, score: 5, tag_string: 'a'},
-      {id: 2, is_deleted: false, is_flagged: true, score: 5, tag_string: 'a'},
-      {id: 3, is_deleted: false, is_flagged: false, score: 5, tag_string: 'a'},
+      {
+        id: 1,
+        is_deleted: true,
+        is_flagged: false,
+        score: 5,
+        tag_string_meta: 'highres',
+      },
+      {
+        id: 2,
+        is_deleted: false,
+        is_flagged: true,
+        score: 5,
+        tag_string_meta: 'highres',
+      },
+      {
+        id: 3,
+        is_deleted: false,
+        is_flagged: false,
+        score: 5,
+        tag_string_meta: 'highres',
+      },
       {
         id: 4,
         is_deleted: false,
         is_flagged: false,
         score: 5,
-        tag_string: '1girl ai-generated',
+        tag_string_meta: 'ai-generated highres',
       },
-      {id: 5, is_deleted: false, is_flagged: false, score: -3, tag_string: 'a'},
+      {
+        id: 5,
+        is_deleted: false,
+        is_flagged: false,
+        score: -3,
+        tag_string_meta: 'highres',
+      },
       // Banned (artist takedown) but otherwise healthy → stays an upload.
       {
         id: 6,
@@ -2787,7 +2811,7 @@ describe('getActivityDistribution — suspicious uploads', () => {
         is_banned: true,
         is_flagged: false,
         score: 5,
-        tag_string: 'a',
+        tag_string_meta: 'highres',
       },
     ];
     const urls: string[] = [];
@@ -2826,11 +2850,11 @@ describe('getActivityDistribution — suspicious uploads', () => {
     ]);
     expect(dist.suspiciousPostIds.sort()).toEqual([1, 2, 4, 5]);
 
-    // One batch lookup carries every signal — no second (tag-limited) search.
+    // One batch lookup carries every signal — no second (OR-tag) request.
     const lookups = urls.filter(u => u.startsWith('/posts.json'));
     expect(lookups).toHaveLength(1);
     expect(lookups[0]).toContain(
-      'only=id,is_deleted,is_flagged,score,tag_string',
+      'only=id,is_deleted,is_flagged,score,tag_string_meta',
     );
     expect(decodeURIComponent(lookups[0])).not.toContain('~');
   });

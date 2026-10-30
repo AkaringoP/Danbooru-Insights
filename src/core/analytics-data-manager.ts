@@ -2449,9 +2449,9 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Maps post ids → {@link UploadMeta} (deleted/flagged/score/tags) in one
-   * `status:any` batch query so deleted uploads still resolve. `tag_string`
-   * rides along so the suspicious-tag check needs no second (tag-limited)
-   * search. Capped at the
+   * `status:any` batch query so deleted uploads still resolve.
+   * `tag_string_meta` rides along so the suspicious-tag check needs no second
+   * request (all `SUSPICIOUS_UPLOAD_TAGS` are Meta-category). Capped at the
    * `/posts.json` limit (200); misses leave a segment unflagged (fail-open).
    */
   private async fetchPostBadnessMeta(
@@ -2465,7 +2465,7 @@ export class AnalyticsDataManager extends DataManager {
       const url =
         `/posts.json?tags=${encodeURIComponent(query)}` +
         `&limit=${unique.length}` +
-        '&only=id,is_deleted,is_flagged,score,tag_string';
+        '&only=id,is_deleted,is_flagged,score,tag_string_meta';
       const rows = await this.rateLimiter.fetch(url).then(r => r.json());
       if (Array.isArray(rows)) {
         for (const p of rows as Array<{
@@ -2473,14 +2473,14 @@ export class AnalyticsDataManager extends DataManager {
           is_deleted?: boolean;
           is_flagged?: boolean;
           score?: number;
-          tag_string?: string;
+          tag_string_meta?: string;
         }>) {
           if (p.id !== undefined) {
             map.set(p.id, {
               isDeleted: !!p.is_deleted,
               isFlagged: !!p.is_flagged,
               score: p.score,
-              tagString: p.tag_string,
+              metaTags: p.tag_string_meta,
             });
           }
         }

@@ -629,7 +629,7 @@ describe('classifyUploadType', () => {
   it('flags uploads carrying any suspicious tag', () => {
     for (const tag of SUSPICIOUS_UPLOAD_TAGS) {
       expect(
-        classifyUploadType({score: 50, tagString: `1girl ${tag} solo`}),
+        classifyUploadType({score: 50, metaTags: `1girl ${tag} solo`}),
       ).toBe('suspicious');
     }
     expect(SUSPICIOUS_UPLOAD_TAGS).toEqual([
@@ -642,7 +642,7 @@ describe('classifyUploadType', () => {
 
   it('matches suspicious tags exactly, not as substrings', () => {
     expect(
-      classifyUploadType({score: 5, tagString: 'ai-generated_background'}),
+      classifyUploadType({score: 5, metaTags: 'ai-generated_background'}),
     ).toBe('upload');
     expect(hasSuspiciousUploadTag('not_off-topic solo')).toBe(false);
     expect(hasSuspiciousUploadTag(undefined)).toBe(false);

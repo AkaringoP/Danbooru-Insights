@@ -314,11 +314,12 @@ export function activityTypeIndexUrl(
  * off-topic content, someone else's edit of the art, AI output, or an exact
  * re-upload. Any one of them re-types the upload to `suspicious`.
  *
- * Matched client-side against the post's `tag_string` (fetched in the same
- * batch lookup as the status flags) rather than with a server-side
- * `~a ~b ~c ~d` OR search: each `~` term counts toward the *viewer's* tag
- * search limit, so a Member (2 tags) would get a 422 and — the lookup being
- * fail-open — silently lose the whole check.
+ * All four are Meta-category tags, so they are matched client-side against
+ * the post's `tag_string_meta`, which rides along in the batch lookup that
+ * already resolves the status flags. A server-side `~a ~b ~c ~d` OR search
+ * would also work (Meta-category tags don't count toward the search tag
+ * limit) but costs a second request. A tag added here must be Meta-category
+ * too, or switch the lookup to the full `tag_string`.
  */
 export const SUSPICIOUS_UPLOAD_TAGS: readonly string[] = [
   'off-topic',
@@ -332,14 +333,14 @@ export interface UploadMeta {
   isDeleted?: boolean;
   isFlagged?: boolean;
   score?: number;
-  /** Space-separated tag names (Danbooru `tag_string`). */
-  tagString?: string;
+  /** Space-separated Meta-category tag names (Danbooru `tag_string_meta`). */
+  metaTags?: string;
 }
 
-/** Whether `tagString` carries any of {@link SUSPICIOUS_UPLOAD_TAGS}. */
-export function hasSuspiciousUploadTag(tagString: string | undefined): boolean {
-  if (!tagString) return false;
-  return tagString.split(' ').some(t => SUSPICIOUS_UPLOAD_TAGS.includes(t));
+/** Whether `metaTags` carries any of {@link SUSPICIOUS_UPLOAD_TAGS}. */
+export function hasSuspiciousUploadTag(metaTags: string | undefined): boolean {
+  if (!metaTags) return false;
+  return metaTags.split(' ').some(t => SUSPICIOUS_UPLOAD_TAGS.includes(t));
 }
 
 /**
@@ -355,7 +356,7 @@ export function hasSuspiciousUploadTag(tagString: string | undefined): boolean {
 export function classifyUploadType(meta: UploadMeta | undefined): ActivityType {
   if (!meta) return 'upload';
   if (meta.isDeleted || meta.isFlagged) return 'suspicious';
-  if (hasSuspiciousUploadTag(meta.tagString)) return 'suspicious';
+  if (hasSuspiciousUploadTag(meta.metaTags)) return 'suspicious';
   return (meta.score ?? 0) <= SUSPICIOUS_SCORE_MAX ? 'suspicious' : 'upload';
 }
 
