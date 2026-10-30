@@ -318,12 +318,11 @@ export function activityTypeIndexUrl(
  * the post's `tag_string_meta`, which rides along in the batch lookup that
  * already resolves the status flags: no extra request, and no exposure to
  * the viewer's search tag limit. A server-side `~a ~b ~c ~d` OR search would
- * cost a second request and, per the project's v8.0.3 rule (only search
- * metatags like `user:`/`id:` are free; tag names count, Meta-category
- * included), would exceed a Member's 2-tag limit. Whether Meta-category tags
- * are really counted is unverified — see "Search tag limit" in
- * .claude/rules/api-endpoints.md. A tag added here must be Meta-category
- * too, or switch the lookup to the full `tag_string`.
+ * cost a second request and would fail for Member viewers: only search
+ * metatags like `user:`/`id:` are free, tag names count (Meta-category
+ * included, verified 2026-10-30 — 4 terms hit the 2-tag Search Error). See
+ * "Search tag limit" in .claude/rules/api-endpoints.md. A tag added here must
+ * be Meta-category too, or switch the lookup to the full `tag_string`.
  */
 export const SUSPICIOUS_UPLOAD_TAGS: readonly string[] = [
   'off-topic',

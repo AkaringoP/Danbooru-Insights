@@ -26,14 +26,22 @@ has:   is:      fav:     ordfav: limit: source:
 gentags:  copytags:  chartags:  arttags:
 ```
 
-— and every **tag name** counts, Meta-category tags included (the original note names `1girl`, `commentary`, `translated`). `~` OR terms and `-` negations count one each.
+— and every **tag name** counts, **Meta-category tags included** (the original note names `1girl`, `commentary`, `translated`). `~` OR terms and `-` negations count one each.
+
+**Verified 2026-10-30** on a Member account: `~off-topic ~third-party_edit ~ai-generated ~pixel-perfect_duplicate` (4 Meta-category tags, no metatags) → "Search Error — You cannot search for more than 2 tags at a time. Upgrade your account to search for more tags at once." So Meta-category tags are *not* free; only the search metatags above are.
 
 How the code stays within it:
-- **Gender pies**: `~1girl ~2girls … ~6+girls` (6 tags) is split into one single-tag count per term and summed; `DistributionItem.originalTag` keeps the OR query for the click-through link, which 422s on Member accounts (v8.0.3).
+- **Gender pies**: `~1girl ~2girls … ~6+girls` (6 tags) is split into one single-tag count per term and summed (v8.0.3).
 - **Translation "Untagged"**: computed by inclusion-exclusion over 6 queries of ≤ 2 tags each (`computeUntaggedTranslation`, `buildUntaggedTranslationQueries`), instead of one 4-tag negation query (v8.0.3, reused tag-side in v9.6.3).
 - **Suspicious upload tags** (`SUSPICIOUS_UPLOAD_TAGS`): matched client-side on `tag_string_meta` inside the existing `id:<csv> status:any` lookup (both metatags, so 0 tags), never as a 4-term `~` search.
 
-**Open question (2026-10-30):** the maintainer recalled that Meta-category tags (e.g. `ai-generated`, `translated`) do *not* count toward the limit, which contradicts the v8.0.3 rule above. Unverified — the dev container cannot reach Danbooru. To settle it, run `~off-topic ~third-party_edit ~ai-generated ~pixel-perfect_duplicate` (4 Meta-category tags) from a Member account: a 422 confirms the v8.0.3 rule; results mean Meta-category tags are free, and this section, the `SUSPICIOUS_UPLOAD_TAGS` comment in `core/dashboard-preview.ts` and possibly the Translation decomposition can be simplified. Until then, write new queries to the stricter v8.0.3 rule.
+**Known over-limit click-through links (intentional since v8.0.3).** The *counts* fit the limit, but some pie-slice links keep the full conceptual query (`buildSearchQuery` in `apps/user-analytics-pie-helpers.ts`), so a Member who clicks them lands on the Search Error page; Gold+ get the real search:
+- Gender slices: `user:X ~1girl ~2girls ~3girls ~4girls ~5girls ~6+girls` (6 tags; same for boys / others), via `DistributionItem.originalTag`.
+- Translation "Untagged" slice: `user:X *_text -english_text -translation_request -translated` (4 tags).
+
+Everything else stays within 2 tags (e.g. Commentary "Untagged" is `has:commentary -commentary -commentary_request`, 2 tags; Hair "Bald" is `~bald ~bald_female`, 2 tags).
+
+**History:** on 2026-10-30 the maintainer recalled Meta-category tags being free; the Member-account test above disproved it the same day. Commit `480cab4` briefly stated the wrong rule in comments; `e0bbb0c` and the next docs commit corrected it.
 
 ## Mintag / abandoned detection (v9.7.1 — preview popover section A)
 

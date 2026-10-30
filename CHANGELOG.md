@@ -44,9 +44,10 @@ All notable changes to Danbooru Insights are documented here.
 - `.claude/rules/api-endpoints.md` gains a **Search tag limit** section. It
   restores the Member 2-tag rule from the v8.0.3 design note (removed in
   `ec31b2c`): search metatags such as `user:` and `id:` are free, tag names
-  count, Meta-category included. It also lists how each query fits the
-  limit, plus an open question: the maintainer recalls Meta-category tags
-  being free, which a Member-account search would settle.
+  count, Meta-category included. A Member-account search with four
+  Meta-category tags confirmed it on 2026-10-30 (Search Error). The section
+  also lists how each query fits the limit and the two pie-slice links
+  (Gender, Translation "Untagged") that knowingly exceed it for Members.
 
 ---
 
