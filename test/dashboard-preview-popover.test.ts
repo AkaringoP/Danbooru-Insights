@@ -157,6 +157,26 @@ describe('calcPopoverPositionBelow', () => {
   });
 });
 
+describe('calcPopoverPositionBelow — viewport width source', () => {
+  afterEach(() => {
+    // Drop the own-property override so the prototype getter (0) is back.
+    delete (document.documentElement as {clientWidth?: number}).clientWidth;
+  });
+
+  it('sizes against clientWidth over an inflated innerWidth (mobile Chrome)', () => {
+    // Measured on mobile Chrome: an overflowing popover inflates innerWidth to
+    // 436 on a 412px screen; clientWidth stays at the real layout width.
+    Object.defineProperty(document.documentElement, 'clientWidth', {
+      value: 412,
+      configurable: true,
+    });
+    const el = anchorWithRect({left: 160, bottom: 10, width: 24});
+    const {left, width} = calcPopoverPositionBelow(el, 440);
+    expect(width).toBe(412 - 16); // jsdom innerWidth is 1024 — ignored
+    expect(left).toBe(8);
+  });
+});
+
 describe('createDashboardPreviewPopover', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
