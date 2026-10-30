@@ -373,6 +373,56 @@ function labelSwatch(cls: string): HTMLElement {
   return s;
 }
 
+/** Closers of the tap-toggled "?" tooltips, keyed by their wrap element. */
+const tapTooltipClosers = new WeakMap<Element, () => void>();
+
+/**
+ * Touch behaviour for a "?" tooltip (desktop reveals it on hover/focus in
+ * CSS, gated to `(hover: hover)` so a phone's sticky hover / tap focus can't
+ * pin it open). A tap on `icon` toggles `openClass` on `wrap`; while open, a
+ * tap anywhere else — the note itself, the rest of the popover, the page —
+ * closes it. The outside-tap listener is attached only while open, in the
+ * capture phase so taps whose handlers stop propagation still close it, and
+ * it drops itself once `wrap` has been re-rendered away.
+ * {@link closeTapTooltips} closes it from the popover's `hide()`.
+ */
+function attachTapTooltip(
+  wrap: HTMLElement,
+  icon: HTMLElement,
+  openClass: string,
+): void {
+  let onDocClick: ((e: MouseEvent) => void) | null = null;
+  const close = () => {
+    wrap.classList.remove(openClass);
+    if (onDocClick) {
+      document.removeEventListener('click', onDocClick, true);
+      onDocClick = null;
+    }
+  };
+  icon.addEventListener('click', e => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (onDocClick) {
+      close();
+      return;
+    }
+    wrap.classList.add(openClass);
+    // Added during this click's target phase, so it only sees later taps.
+    onDocClick = ev => {
+      if (!wrap.isConnected || !icon.contains(ev.target as Node)) close();
+    };
+    document.addEventListener('click', onDocClick, true);
+  });
+  tapTooltipClosers.set(wrap, close);
+}
+
+/** Closes every open "?" tooltip inside `root` (popover hide → no stale open). */
+function closeTapTooltips(root: Element): void {
+  root
+    .querySelectorAll('.di-preview-legend-wrap, .di-activity-help')
+    .forEach(w => tapTooltipClosers.get(w)?.());
+}
+
 /**
  * The "?" colour-legend affordance for section A's header: hovering it (or, on
  * touch, tapping it) reveals what the thumbnail border colours and label
@@ -409,11 +459,7 @@ function makeColorLegend(): HTMLElement {
   wrap.appendChild(pop);
   // Desktop reveals on hover/focus (CSS). Touch has no hover, so a tap toggles.
   if (isTouchDevice()) {
-    icon.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      wrap.classList.toggle('di-preview-legend-wrap--open');
-    });
+    attachTapTooltip(wrap, icon, 'di-preview-legend-wrap--open');
   }
   return wrap;
 }
@@ -422,7 +468,7 @@ function makeColorLegend(): HTMLElement {
  * Section B: the "?" next to the Suspicious legend entry — a short note on
  * what gets re-typed as suspicious (users kept asking). Desktop reveals it on
  * hover/focus (CSS); touch has no hover, so a tap on the "?" toggles it and a
- * tap on the note closes it.
+ * tap anywhere else closes it ({@link attachTapTooltip}).
  *
  * It sits *beside* the legend item, not inside it, so the item's delegated
  * handlers (`closest('.di-activity-legend-item')`: click-to-open, the touch
@@ -458,15 +504,7 @@ function makeSuspiciousHelp(): HTMLElement {
   );
   wrap.appendChild(icon);
   wrap.appendChild(note);
-  if (touch) {
-    const toggle = (e: Event) => {
-      e.stopPropagation();
-      e.preventDefault();
-      wrap.classList.toggle('di-activity-help--open');
-    };
-    icon.addEventListener('click', toggle);
-    note.addEventListener('click', toggle);
-  }
+  if (touch) attachTapTooltip(wrap, icon, 'di-activity-help--open');
   return wrap;
 }
 
@@ -1065,6 +1103,7 @@ export function createDashboardPreviewPopover(
     if (refs) {
       refs.el.style.display = 'none';
       refs.el.classList.remove('di-preview-popover--fading'); // reset for re-show
+      closeTapTooltips(refs.el); // the DOM is reused: don't reopen with one up
     }
   }
 

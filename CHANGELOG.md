@@ -4,6 +4,20 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.11.3 — "?" tooltips close on a tap elsewhere (mobile)
+
+### Fixed
+- **A "?" tooltip opened by a tap stayed open until the "?" was tapped
+  again.** On mobile, tapping elsewhere in the preview popover left the
+  Suspicious note (v9.11.2) and the Recent uploads colour legend up, and
+  closing the popover kept them open for the next time it opened. A tap
+  anywhere other than the "?" now closes them, and closing the popover
+  resets them. Tapping the "?" also no longer leaves the tooltip pinned by
+  the phone's sticky hover or the tap's focus: the hover / focus reveal now
+  applies only on devices with a real hover (a mouse).
+
+---
+
 ## v9.11.2 — Preview popover fits phones; Suspicious explained and reworked
 
 ### Added

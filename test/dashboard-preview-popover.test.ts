@@ -737,6 +737,36 @@ describe('createDashboardPreviewPopover', () => {
     expect(wrap.classList.contains('di-preview-legend-wrap--open')).toBe(false);
     pop.destroy();
   });
+
+  it('touch: the colour legend closes on a tap elsewhere and on popover hide', async () => {
+    vi.spyOn(twoStepTap, 'isTouchDevice').mockReturnValue(true);
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => samplePosts,
+    });
+    pop.show({pinned: true});
+    await flush();
+    const wrap = document.querySelector<HTMLElement>(
+      '.di-preview-legend-wrap',
+    )!;
+    const icon = wrap.querySelector<HTMLElement>('.di-preview-legend-icon')!;
+    const isOpen = () =>
+      wrap.classList.contains('di-preview-legend-wrap--open');
+
+    icon.click();
+    expect(isOpen()).toBe(true);
+    // A tap elsewhere in the popover (here: the grid) closes it.
+    document.querySelector<HTMLElement>('.di-preview-grid')!.click();
+    expect(isOpen()).toBe(false);
+
+    // Left open when the popover hides → closed when it shows again.
+    icon.click();
+    expect(isOpen()).toBe(true);
+    pop.hide();
+    pop.show({pinned: true});
+    expect(isOpen()).toBe(false);
+    pop.destroy();
+  });
 });
 
 describe('createDashboardPreviewPopover — section B (activity)', () => {
@@ -928,6 +958,40 @@ describe('createDashboardPreviewPopover — section B (activity)', () => {
     icon.click();
     icon.click();
     expect(help.classList.contains('di-activity-help--open')).toBe(false);
+    pop.destroy();
+  });
+
+  it('touch: the Suspicious note closes on a tap elsewhere and on popover hide', async () => {
+    vi.mocked(twoStepTap.isTouchDevice).mockReturnValue(true);
+    const pop = createDashboardPreviewPopover({
+      anchor: anchorWithRect({}),
+      fetchPosts: async () => samplePosts,
+      fetchActivity: async () => suspiciousDist(),
+    });
+    pop.show({pinned: true});
+    await flush();
+    const help = document.querySelector<HTMLElement>('.di-activity-help')!;
+    const icon = help.querySelector<HTMLElement>('.di-preview-legend-icon')!;
+    const isOpen = () => help.classList.contains('di-activity-help--open');
+
+    // Reported bug: a tap anywhere but the "?" / note left it open.
+    icon.click();
+    document.querySelector<HTMLElement>('.di-preview-section-label')!.click();
+    expect(isOpen()).toBe(false);
+
+    // Even a tap whose own handler stops propagation closes it (capture).
+    icon.click();
+    const stopper = document.querySelector<HTMLElement>('.di-activity-strip')!;
+    stopper.addEventListener('click', e => e.stopPropagation());
+    stopper.click();
+    expect(isOpen()).toBe(false);
+
+    // Left open when the popover hides → closed when it shows again.
+    icon.click();
+    expect(isOpen()).toBe(true);
+    pop.hide();
+    pop.show({pinned: true});
+    expect(isOpen()).toBe(false);
     pop.destroy();
   });
 
