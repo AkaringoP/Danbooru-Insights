@@ -2369,7 +2369,8 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Upload activity (post_versions, is_new=true) → segments retyped to
-   * `suspicious` when the post is deleted/banned or heavily downvoted (one
+   * `suspicious` when the post is deleted, flagged, carries a suspicious tag
+   * (`SUSPICIOUS_UPLOAD_TAGS`) or is heavily downvoted (one
    * batch {@link fetchPostBadnessMeta} lookup over the segments' post ids).
    * See {@link classifyUploadType}. Suspicious segments keep their `postId`
    * so the legend can link straight to the flagged posts.
@@ -2447,8 +2448,10 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Maps post ids → {@link UploadMeta} (deleted/banned/score) in one
-   * `status:any` batch query so deleted uploads still resolve. Capped at the
+   * Maps post ids → {@link UploadMeta} (deleted/flagged/score/tags) in one
+   * `status:any` batch query so deleted uploads still resolve. `tag_string`
+   * rides along so the suspicious-tag check needs no second (tag-limited)
+   * search. Capped at the
    * `/posts.json` limit (200); misses leave a segment unflagged (fail-open).
    */
   private async fetchPostBadnessMeta(
@@ -2461,20 +2464,23 @@ export class AnalyticsDataManager extends DataManager {
       const query = `id:${unique.join(',')} status:any`;
       const url =
         `/posts.json?tags=${encodeURIComponent(query)}` +
-        `&limit=${unique.length}&only=id,is_deleted,is_banned,score`;
+        `&limit=${unique.length}` +
+        '&only=id,is_deleted,is_flagged,score,tag_string';
       const rows = await this.rateLimiter.fetch(url).then(r => r.json());
       if (Array.isArray(rows)) {
         for (const p of rows as Array<{
           id?: number;
           is_deleted?: boolean;
-          is_banned?: boolean;
+          is_flagged?: boolean;
           score?: number;
+          tag_string?: string;
         }>) {
           if (p.id !== undefined) {
             map.set(p.id, {
               isDeleted: !!p.is_deleted,
-              isBanned: !!p.is_banned,
+              isFlagged: !!p.is_flagged,
               score: p.score,
+              tagString: p.tag_string,
             });
           }
         }

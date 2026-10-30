@@ -873,7 +873,8 @@ describe('createDashboardPreviewPopover — section B (activity)', () => {
     // closest('.di-activity-legend-item').
     expect(helps[0].closest('.di-activity-legend-item')).toBeNull();
     const note = helps[0].querySelector('.di-activity-help-pop')!.textContent;
-    expect(note).toContain('deleted or banned');
+    expect(note).toContain('deleted, flagged, tagged off-topic');
+    expect(note).not.toContain('banned');
     expect(note).toContain(`${SUSPICIOUS_SCORE_MAX} or lower`);
     expect(note).toContain('Click the label');
     pop.destroy();

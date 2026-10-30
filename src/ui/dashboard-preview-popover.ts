@@ -38,6 +38,7 @@ import {
   ACTIVITY_TYPES,
   STATUS_BORDER_COLORS,
   SUSPICIOUS_SCORE_MAX,
+  SUSPICIOUS_UPLOAD_TAGS,
   balancedChunks,
   isMintagged,
   isSuspiciousUpload,
@@ -445,9 +446,10 @@ function makeSuspiciousHelp(): HTMLElement {
   const title = document.createElement('strong');
   title.textContent = 'Suspicious';
   note.appendChild(title);
+  const tags = SUSPICIOUS_UPLOAD_TAGS.join(', ');
   note.appendChild(
     document.createTextNode(
-      ' — uploads that were later deleted or banned or scored ' +
+      ` — uploads that are deleted, flagged, tagged ${tags}, or scored ` +
         `${SUSPICIOUS_SCORE_MAX} or lower, and comments scored ` +
         `${SUSPICIOUS_SCORE_MAX} or lower. Counted here instead of under ` +
         `Uploads / Comments. ${touch ? 'Tap the label twice' : 'Click the label'} ` +

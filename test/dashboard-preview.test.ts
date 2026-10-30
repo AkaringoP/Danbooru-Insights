@@ -18,6 +18,8 @@ import {
   classifyUploadType,
   derivePostStatus,
   filterUploadCoupledCommentary,
+  hasSuspiciousUploadTag,
+  SUSPICIOUS_UPLOAD_TAGS,
   isMintagged,
   isSuspiciousUpload,
   mergeRecentActivity,
@@ -615,11 +617,36 @@ describe('activityTypeIndexUrl', () => {
 });
 
 describe('classifyUploadType', () => {
-  it('flags deleted or banned uploads as suspicious', () => {
+  it('flags deleted or flagged uploads as suspicious', () => {
     expect(classifyUploadType({isDeleted: true, score: 100})).toBe(
       'suspicious',
     );
-    expect(classifyUploadType({isBanned: true, score: 100})).toBe('suspicious');
+    expect(classifyUploadType({isFlagged: true, score: 100})).toBe(
+      'suspicious',
+    );
+  });
+
+  it('flags uploads carrying any suspicious tag', () => {
+    for (const tag of SUSPICIOUS_UPLOAD_TAGS) {
+      expect(
+        classifyUploadType({score: 50, tagString: `1girl ${tag} solo`}),
+      ).toBe('suspicious');
+    }
+    expect(SUSPICIOUS_UPLOAD_TAGS).toEqual([
+      'off-topic',
+      'third-party_edit',
+      'ai-generated',
+      'pixel-perfect_duplicate',
+    ]);
+  });
+
+  it('matches suspicious tags exactly, not as substrings', () => {
+    expect(
+      classifyUploadType({score: 5, tagString: 'ai-generated_background'}),
+    ).toBe('upload');
+    expect(hasSuspiciousUploadTag('not_off-topic solo')).toBe(false);
+    expect(hasSuspiciousUploadTag(undefined)).toBe(false);
+    expect(hasSuspiciousUploadTag('')).toBe(false);
   });
 
   it('flags heavily-downvoted uploads as suspicious', () => {
