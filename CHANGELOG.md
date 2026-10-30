@@ -4,6 +4,52 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## Unreleased
+
+### Added
+- **A "?" next to "Suspicious N" in the preview popover's activity legend.**
+  Hover it on desktop or tap it on mobile for a short note on what counts as
+  suspicious and how to open those posts. The note opens above the legend
+  at its full width, so it stays on screen on narrow phones, and the "?"
+  never triggers the label's own link or two-tap open.
+
+### Changed
+- **What makes an upload "Suspicious" in the activity strip.** An upload now
+  counts when its post is deleted, flagged, tagged `off-topic`,
+  `third-party_edit`, `ai-generated` or `pixel-perfect_duplicate`, or scored
+  −3 or lower. Comments scored −3 or lower still count too.
+  - **Banned no longer counts.** Danbooru bans a post at the artist's request,
+    which says nothing about the uploader.
+  - **Flagged and the four tags are new.** They come from the same post
+    lookup the strip already made, now also asking for `is_flagged` and the
+    post's Meta-category tags, so there are no extra requests.
+
+### Fixed
+- **The preview popover was cut off on the right on phones.** It is 440px
+  wide, and on a screen narrower than 456px no position could fit it, so
+  the fifth thumbnail column and the end of the activity strip ran off the
+  edge. Its width now shrinks to the screen minus 8px margins and the
+  content reflows.
+- **The width was measured against an inflated screen width on mobile
+  Chrome.** While the popover was momentarily wider than the screen, Chrome
+  widened the layout to show it, and `innerWidth` then reported that wider
+  value (436 on a 412px phone), so the popover stayed too wide. It now uses
+  the layout viewport width (`documentElement.clientWidth`).
+- **The popover ignored device rotation.** Rotating with it open kept the old
+  size and position (portrait → cut off again, landscape → needlessly
+  narrow) and left its caret pointing at the icon's old spot. It now
+  re-fits on every resize while open.
+
+### Internal
+- `.claude/rules/api-endpoints.md` gains a **Search tag limit** section. It
+  restores the Member 2-tag rule from the v8.0.3 design note (removed in
+  `ec31b2c`): search metatags such as `user:` and `id:` are free, tag names
+  count, Meta-category included. It also lists how each query fits the
+  limit, plus an open question: the maintainer recalls Meta-category tags
+  being free, which a Member-account search would settle.
+
+---
+
 ## v9.11.1 — "At a glance": the user summed up in two lines
 
 ### Added

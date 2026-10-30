@@ -14,6 +14,27 @@ All API calls must go through `RateLimitedFetch`.
 | `/posts/random.json` | Random post fetch |
 | `/posts/{id}.json` | Single post details (milestone thumbnails) |
 
+## Search tag limit (Member 2-tag)
+
+A post search by a **Member** (blue) account may use at most **2 tags**; Gold+ has a higher limit. The limit follows the *viewer* running the script, not the user being analysed, so every query must fit 2 tags. Over the limit Danbooru answers **422** (an error page for click-through links). Count fetches treat a 422 as deterministic: no retry, nothing cached as lost (`countBatch`).
+
+**What counts (v8.0.3 rule, from [forum #33823](https://danbooru.donmai.us/forum_topics/33823)):** search **metatags** are free —
+
+```
+user:  rating:  status:  order:  date:  age:  id:
+has:   is:      fav:     ordfav: limit: source:
+gentags:  copytags:  chartags:  arttags:
+```
+
+— and every **tag name** counts, Meta-category tags included (the original note names `1girl`, `commentary`, `translated`). `~` OR terms and `-` negations count one each.
+
+How the code stays within it:
+- **Gender pies**: `~1girl ~2girls … ~6+girls` (6 tags) is split into one single-tag count per term and summed; `DistributionItem.originalTag` keeps the OR query for the click-through link, which 422s on Member accounts (v8.0.3).
+- **Translation "Untagged"**: computed by inclusion-exclusion over 6 queries of ≤ 2 tags each (`computeUntaggedTranslation`, `buildUntaggedTranslationQueries`), instead of one 4-tag negation query (v8.0.3, reused tag-side in v9.6.3).
+- **Suspicious upload tags** (`SUSPICIOUS_UPLOAD_TAGS`): matched client-side on `tag_string_meta` inside the existing `id:<csv> status:any` lookup (both metatags, so 0 tags), never as a 4-term `~` search.
+
+**Open question (2026-10-30):** the maintainer recalled that Meta-category tags (e.g. `ai-generated`, `translated`) do *not* count toward the limit, which contradicts the v8.0.3 rule above. Unverified — the dev container cannot reach Danbooru. To settle it, run `~off-topic ~third-party_edit ~ai-generated ~pixel-perfect_duplicate` (4 Meta-category tags) from a Member account: a 422 confirms the v8.0.3 rule; results mean Meta-category tags are free, and this section, the `SUSPICIOUS_UPLOAD_TAGS` comment in `core/dashboard-preview.ts` and possibly the Translation decomposition can be simplified. Until then, write new queries to the stricter v8.0.3 rule.
+
 ## Mintag / abandoned detection (v9.7.1 — preview popover section A)
 
 `AnalyticsDataManager.getRecentPostsPreview` fires a third parallel request alongside the recent-uploads + appeal fetches: `buildMintagVersionsUrl(userId, limit)` → `/post_versions.json?search[is_new]=true&search[updater_id]=<id>&only=post_id,added_tags`. `buildUploaderTagCounts` reduces it to `Map<post_id, added_tags.length>` — the number of tags *that uploader* added in the post's first version (not the post's current `tag_count_general`, which others inflate). A preview is **mintagged** (orange) when `uploaderTagCount ≤ 10` (`isMintagged`).
@@ -50,7 +71,7 @@ Pure builder: `buildProfileSummary(input, now, scope)` in `src/core/profile-summ
 `approval`/`note` params match the existing grass `DataManager` usage. The `*_versions` tables follow Danbooru's `updater_id` convention; `forum`/`comment`/`appeal` use `creator_id`. Per-type failures degrade to `[]` so one dead endpoint never sinks the strip.
 
 **Suspicious-activity re-typing (section B):** segments that look malicious are recolored to a separate `suspicious` category (near-black). Two sources:
-- `upload`: fetched with `only=id,post_id,...`; their posts are batch-resolved via `/posts.json?tags=id:<csv> status:any&only=id,is_deleted,is_flagged,score,tag_string_meta` and re-typed to `suspicious` when deleted, flagged, tagged with any of `SUSPICIOUS_UPLOAD_TAGS` (`off-topic`, `third-party_edit`, `ai-generated`, `pixel-perfect_duplicate`), or `score ≤ -3` (`classifyUploadType`). **Banned is not a signal**: Danbooru bans a post at the artist's request (takedown), which says nothing about the uploader. All four are Meta-category tags, so they are matched client-side on `tag_string_meta` in that same lookup. A `~a ~b ~c ~d` OR search would also work (Meta-category tags don't count toward the search tag limit) but costs a second request. A tag added to the list must be Meta-category too, or the lookup must switch to the full `tag_string`.
+- `upload`: fetched with `only=id,post_id,...`; their posts are batch-resolved via `/posts.json?tags=id:<csv> status:any&only=id,is_deleted,is_flagged,score,tag_string_meta` and re-typed to `suspicious` when deleted, flagged, tagged with any of `SUSPICIOUS_UPLOAD_TAGS` (`off-topic`, `third-party_edit`, `ai-generated`, `pixel-perfect_duplicate`), or `score ≤ -3` (`classifyUploadType`). **Banned is not a signal**: Danbooru bans a post at the artist's request (takedown), which says nothing about the uploader. All four are Meta-category tags, so they are matched client-side on `tag_string_meta` in that same lookup: no extra request, and the check works whatever the viewer's tag limit (see **Search tag limit** below). A `~a ~b ~c ~d` OR search would cost a second request and may exceed a Member's limit. A tag added to the list must be Meta-category too, or the lookup must switch to the full `tag_string`.
 - `comment`: fetched with `only=id,post_id,score,created_at` and re-typed to `suspicious` when `score ≤ -3` (`classifyCommentType`).
 
 Both fail open (a lookup miss / missing field leaves the segment in its normal category). `suspicious` is deliberately **not** named `flagged` to avoid clashing with Danbooru's `status:flagged`.

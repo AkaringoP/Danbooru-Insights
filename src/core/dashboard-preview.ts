@@ -316,9 +316,13 @@ export function activityTypeIndexUrl(
  *
  * All four are Meta-category tags, so they are matched client-side against
  * the post's `tag_string_meta`, which rides along in the batch lookup that
- * already resolves the status flags. A server-side `~a ~b ~c ~d` OR search
- * would also work (Meta-category tags don't count toward the search tag
- * limit) but costs a second request. A tag added here must be Meta-category
+ * already resolves the status flags: no extra request, and no exposure to
+ * the viewer's search tag limit. A server-side `~a ~b ~c ~d` OR search would
+ * cost a second request and, per the project's v8.0.3 rule (only search
+ * metatags like `user:`/`id:` are free; tag names count, Meta-category
+ * included), would exceed a Member's 2-tag limit. Whether Meta-category tags
+ * are really counted is unverified — see "Search tag limit" in
+ * .claude/rules/api-endpoints.md. A tag added here must be Meta-category
  * too, or switch the lookup to the full `tag_string`.
  */
 export const SUSPICIOUS_UPLOAD_TAGS: readonly string[] = [

@@ -76,7 +76,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run compile` — `tsc` 단독 (타입 체크만, 번들 없음)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 1028 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 1038 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 7 개)
 - `npm run test:e2e:update` — e2e 스냅샷 baseline 갱신 (의도한 시각 변경일 때만)
@@ -213,4 +213,5 @@ preview popover 의 동작 카탈로그 (mintag/abandoned 판정 기준, 활동 
 - `mapConcurrent()` 유틸은 병렬 API 호출 제어용 (count fetch, tag filtering 에서 사용)
 - `MAX_OPTIMIZED_POSTS = 1200` — Quick Sync / Small Tag 경로의 분기 임계값 ([src/config.ts](src/config.ts))
 - Count cache TTL (v9.6): `getCountCacheTtlMs()` 기본 10 분, 사용자가 settings popover 에서 조절 가능. `tryGetCachedStats<T>` 가 일관 사용
+- **검색 태그 한도**: Member 조회자는 검색당 태그 2 개까지. `user:`/`id:`/`status:` 같은 검색 메타태그는 무료, 태그 이름은 Meta 카테고리 포함 1 개씩 (v8.0.3 규칙 — Meta 카테고리 무료 여부는 미검증 open question). 새 쿼리는 이 규칙에 맞춰 작성. 상세·현재 우회 방식은 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Search tag limit"
 - Count 기반 통계 (status/rating/분포 9 개) 는 `countBatch()` 로 카운트를 받고 `cacheUnlessPartial()` 로 저장. 429·5xx·네트워크 실패는 1 회 재시도 (rate limiter 정지 뒤로 줄 섬), 그래도 잃은 카운트가 있으면 캐시 저장 안 함 → 이전 캐시를 보여주고 다음 열기에서 재시도. 결정적 4xx (예: Member 태그 한도 422) 는 재시도도 차단도 안 함. 새 분포 추가 시 `fetchRemoteCount` 직접 호출 대신 이 경로 사용
