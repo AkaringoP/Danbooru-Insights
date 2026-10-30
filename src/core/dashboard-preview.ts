@@ -309,22 +309,57 @@ export function activityTypeIndexUrl(
   return base ? withAnchor(withIndexLimit(base), type, anchorId) : undefined;
 }
 
+/**
+ * Tags that mark an upload as a typical bad-faith / rule-breaking upload:
+ * off-topic content, someone else's edit of the art, AI output, or an exact
+ * re-upload. Any one of them re-types the upload to `suspicious`.
+ *
+ * All four are Meta-category tags, so they are matched client-side against
+ * the post's `tag_string_meta`, which rides along in the batch lookup that
+ * already resolves the status flags: no extra request, and no exposure to
+ * the viewer's search tag limit. A server-side `~a ~b ~c ~d` OR search would
+ * cost a second request and would fail for Member viewers: only search
+ * metatags like `user:`/`id:` are free, tag names count (Meta-category
+ * included, verified 2026-10-30 — 4 terms hit the 2-tag Search Error). See
+ * "Search tag limit" in .claude/rules/api-endpoints.md. A tag added here must
+ * be Meta-category too, or switch the lookup to the full `tag_string`.
+ */
+export const SUSPICIOUS_UPLOAD_TAGS: readonly string[] = [
+  'off-topic',
+  'third-party_edit',
+  'ai-generated',
+  'pixel-perfect_duplicate',
+];
+
 /** Per-post quality signals used to flag malicious uploads in section B. */
 export interface UploadMeta {
   isDeleted?: boolean;
-  isBanned?: boolean;
+  isFlagged?: boolean;
   score?: number;
+  /** Space-separated Meta-category tag names (Danbooru `tag_string_meta`). */
+  metaTags?: string;
+}
+
+/** Whether `metaTags` carries any of {@link SUSPICIOUS_UPLOAD_TAGS}. */
+export function hasSuspiciousUploadTag(metaTags: string | undefined): boolean {
+  if (!metaTags) return false;
+  return metaTags.split(' ').some(t => SUSPICIOUS_UPLOAD_TAGS.includes(t));
 }
 
 /**
  * Classifies an upload activity segment for section B's strip: `'suspicious'`
- * when the post is deleted/banned or heavily downvoted
- * ({@link SUSPICIOUS_SCORE_MAX}), else `'upload'`. Unknown meta (lookup miss)
+ * when the post is deleted or flagged, carries one of
+ * {@link SUSPICIOUS_UPLOAD_TAGS}, or is heavily downvoted
+ * ({@link SUSPICIOUS_SCORE_MAX}); else `'upload'`. Unknown meta (lookup miss)
  * stays `'upload'` — fail-open, so a failed lookup never mass-flags.
+ *
+ * Banned is deliberately *not* a signal: Danbooru bans a post at the
+ * artist's request (takedown), which says nothing about the uploader.
  */
 export function classifyUploadType(meta: UploadMeta | undefined): ActivityType {
   if (!meta) return 'upload';
-  if (meta.isDeleted || meta.isBanned) return 'suspicious';
+  if (meta.isDeleted || meta.isFlagged) return 'suspicious';
+  if (hasSuspiciousUploadTag(meta.metaTags)) return 'suspicious';
   return (meta.score ?? 0) <= SUSPICIOUS_SCORE_MAX ? 'suspicious' : 'upload';
 }
 
@@ -478,8 +513,8 @@ const SUSPICIOUS_URL_ID_CAP = 200;
 
 /**
  * Relative `/posts` index URL listing exactly the given suspicious post ids
- * (`id:a,b,c status:any` — `status:any` so deleted/banned uploads, the whole
- * point of the flag, still appear). Returns undefined for an empty list so the
+ * (`id:a,b,c status:any` — `status:any` so deleted uploads, the strongest
+ * signal, still appear). Returns undefined for an empty list so the
  * caller can fall back to a name-scoped search. Ids are deduped and capped at
  * {@link SUSPICIOUS_URL_ID_CAP}.
  */

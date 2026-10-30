@@ -14,6 +14,35 @@ All API calls must go through `RateLimitedFetch`.
 | `/posts/random.json` | Random post fetch |
 | `/posts/{id}.json` | Single post details (milestone thumbnails) |
 
+## Search tag limit (Member 2-tag)
+
+A post search by a **Member** (blue) account may use at most **2 tags**; Gold+ has a higher limit. The limit follows the *viewer* running the script, not the user being analysed, so every query must fit 2 tags. Over the limit Danbooru answers **422** (an error page for click-through links). Count fetches treat a 422 as deterministic: no retry, nothing cached as lost (`countBatch`).
+
+**What counts (v8.0.3 rule, from [forum #33823](https://danbooru.donmai.us/forum_topics/33823)):** search **metatags** are free —
+
+```
+user:  rating:  status:  order:  date:  age:  id:
+has:   is:      fav:     ordfav: limit: source:
+gentags:  copytags:  chartags:  arttags:
+```
+
+— and every **tag name** counts, **Meta-category tags included** (the original note names `1girl`, `commentary`, `translated`). `~` OR terms and `-` negations count one each.
+
+**Verified 2026-10-30** on a Member account: `~off-topic ~third-party_edit ~ai-generated ~pixel-perfect_duplicate` (4 Meta-category tags, no metatags) → "Search Error — You cannot search for more than 2 tags at a time. Upgrade your account to search for more tags at once." So Meta-category tags are *not* free; only the search metatags above are.
+
+How the code stays within it:
+- **Gender pies**: `~1girl ~2girls … ~6+girls` (6 tags) is split into one single-tag count per term and summed (v8.0.3).
+- **Translation "Untagged"**: computed by inclusion-exclusion over 6 queries of ≤ 2 tags each (`computeUntaggedTranslation`, `buildUntaggedTranslationQueries`), instead of one 4-tag negation query (v8.0.3, reused tag-side in v9.6.3).
+- **Suspicious upload tags** (`SUSPICIOUS_UPLOAD_TAGS`): matched client-side on `tag_string_meta` inside the existing `id:<csv> status:any` lookup (both metatags, so 0 tags), never as a 4-term `~` search.
+
+**Known over-limit click-through links (intentional since v8.0.3).** The *counts* fit the limit, but some pie-slice links keep the full conceptual query (`buildSearchQuery` in `apps/user-analytics-pie-helpers.ts`), so a Member who clicks them lands on the Search Error page; Gold+ get the real search:
+- Gender slices: `user:X ~1girl ~2girls ~3girls ~4girls ~5girls ~6+girls` (6 tags; same for boys / others), via `DistributionItem.originalTag`.
+- Translation "Untagged" slice: `user:X *_text -english_text -translation_request -translated` (4 tags).
+
+Everything else stays within 2 tags (e.g. Commentary "Untagged" is `has:commentary -commentary -commentary_request`, 2 tags; Hair "Bald" is `~bald ~bald_female`, 2 tags).
+
+**History:** on 2026-10-30 the maintainer recalled Meta-category tags being free; the Member-account test above disproved it the same day. Commit `480cab4` briefly stated the wrong rule in comments; `e0bbb0c` and the next docs commit corrected it.
+
 ## Mintag / abandoned detection (v9.7.1 — preview popover section A)
 
 `AnalyticsDataManager.getRecentPostsPreview` fires a third parallel request alongside the recent-uploads + appeal fetches: `buildMintagVersionsUrl(userId, limit)` → `/post_versions.json?search[is_new]=true&search[updater_id]=<id>&only=post_id,added_tags`. `buildUploaderTagCounts` reduces it to `Map<post_id, added_tags.length>` — the number of tags *that uploader* added in the post's first version (not the post's current `tag_count_general`, which others inflate). A preview is **mintagged** (orange) when `uploaderTagCount ≤ 10` (`isMintagged`).
@@ -50,12 +79,12 @@ Pure builder: `buildProfileSummary(input, now, scope)` in `src/core/profile-summ
 `approval`/`note` params match the existing grass `DataManager` usage. The `*_versions` tables follow Danbooru's `updater_id` convention; `forum`/`comment`/`appeal` use `creator_id`. Per-type failures degrade to `[]` so one dead endpoint never sinks the strip.
 
 **Suspicious-activity re-typing (section B):** segments that look malicious are recolored to a separate `suspicious` category (near-black). Two sources:
-- `upload`: fetched with `only=id,post_id,...`; their posts are batch-resolved via `/posts.json?tags=id:<csv> status:any&only=id,is_deleted,is_banned,score` and re-typed to `suspicious` when deleted/banned or `score ≤ -3` (`classifyUploadType`).
+- `upload`: fetched with `only=id,post_id,...`; their posts are batch-resolved via `/posts.json?tags=id:<csv> status:any&only=id,is_deleted,is_flagged,score,tag_string_meta` and re-typed to `suspicious` when deleted, flagged, tagged with any of `SUSPICIOUS_UPLOAD_TAGS` (`off-topic`, `third-party_edit`, `ai-generated`, `pixel-perfect_duplicate`), or `score ≤ -3` (`classifyUploadType`). **Banned is not a signal**: Danbooru bans a post at the artist's request (takedown), which says nothing about the uploader. All four are Meta-category tags, so they are matched client-side on `tag_string_meta` in that same lookup: no extra request, and the check works whatever the viewer's tag limit (see **Search tag limit** below). A `~a ~b ~c ~d` OR search would cost a second request and may exceed a Member's limit. A tag added to the list must be Meta-category too, or the lookup must switch to the full `tag_string`.
 - `comment`: fetched with `only=id,post_id,score,created_at` and re-typed to `suspicious` when `score ≤ -3` (`classifyCommentType`).
 
 Both fail open (a lookup miss / missing field leaves the segment in its normal category). `suspicious` is deliberately **not** named `flagged` to avoid clashing with Danbooru's `status:flagged`.
 
-**Suspicious id: link-out:** a suspicious segment keeps the post behind it — the upload's own `post_id`, or (for a suspicious comment) the `post_id` the comment sits on. `mergeRecentActivity` dedupes these across the capped window into `ActivityDistribution.suspiciousPostIds`, and clicking the **Suspicious** legend item opens `/posts?tags=id:<csv> status:any&limit=200` (`suspiciousPostsUrl`, ids capped at 200) — the *exact* flagged posts, so the page matches the "Suspicious N" count (modulo comments that share a post). Falls back to the name-scoped `user:<name> status:deleted` search when no ids resolve. `status:any` is required so deleted/banned uploads — the whole point of the flag — still appear.
+**Suspicious id: link-out:** a suspicious segment keeps the post behind it — the upload's own `post_id`, or (for a suspicious comment) the `post_id` the comment sits on. `mergeRecentActivity` dedupes these across the capped window into `ActivityDistribution.suspiciousPostIds`, and clicking the **Suspicious** legend item opens `/posts?tags=id:<csv> status:any&limit=200` (`suspiciousPostsUrl`, ids capped at 200) — the *exact* flagged posts, so the page matches the "Suspicious N" count (modulo comments that share a post). Falls back to the name-scoped `user:<name> status:deleted` search when no ids resolve. `status:any` is required so deleted uploads — the strongest signal — still appear.
 
 **Legend index links — `&limit=200` + oldest-row `#anchor`:** every `activityTypeIndexUrl` / `suspiciousPostsUrl` target appends `&limit=200` (= the activity window, `ACTIVITY_SEGMENT_LIMIT`) so the entire analysed window lands on one page, then appends a `#<prefix>_<id>` fragment that scrolls to the **oldest in-window** row (the boundary of what the strip analysed).
 

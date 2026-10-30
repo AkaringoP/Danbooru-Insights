@@ -2021,12 +2021,49 @@ const GLOBAL_CSS = `
       animation: di-preview-pulse 1.2s ease-in-out infinite;
     }
     .di-activity-legend {
+      position: relative; /* anchors .di-activity-help-pop */
       display: flex;
       flex-wrap: wrap;
       gap: 4px 10px;
       margin-top: 8px;
       font-size: 10px;
       color: var(--di-text-secondary, #aaa);
+    }
+    /* Suspicious legend item + its "?" kept on one row. */
+    .di-activity-legend-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+    /* No position here on purpose: the note anchors to the legend, spanning
+       its full width just above it, so it never overflows the popover's right
+       edge (phones) or its bottom (the legend is the popover's last row). */
+    .di-activity-help {
+      display: inline-flex;
+    }
+    .di-activity-help-pop {
+      display: none;
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 100%;
+      z-index: 1;
+      margin-bottom: 6px;
+      padding: 6px 8px;
+      background: var(--di-bg, #fff);
+      border: 1px solid var(--di-border, #ddd);
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--di-text, #333);
+      white-space: normal;
+    }
+    .di-activity-help:hover .di-activity-help-pop,
+    .di-activity-help:focus-within .di-activity-help-pop,
+    .di-activity-help--open .di-activity-help-pop {
+      display: block;
     }
     .di-activity-legend-item {
       display: inline-flex;

@@ -37,6 +37,8 @@ import {
   ACTIVITY_COLORS,
   ACTIVITY_TYPES,
   STATUS_BORDER_COLORS,
+  SUSPICIOUS_SCORE_MAX,
+  SUSPICIOUS_UPLOAD_TAGS,
   balancedChunks,
   isMintagged,
   isSuspiciousUpload,
@@ -416,6 +418,78 @@ function makeColorLegend(): HTMLElement {
   return wrap;
 }
 
+/**
+ * Section B: the "?" next to the Suspicious legend entry — a short note on
+ * what gets re-typed as suspicious (users kept asking). Desktop reveals it on
+ * hover/focus (CSS); touch has no hover, so a tap on the "?" toggles it and a
+ * tap on the note closes it.
+ *
+ * It sits *beside* the legend item, not inside it, so the item's delegated
+ * handlers (`closest('.di-activity-legend-item')`: click-to-open, the touch
+ * two-step, peer-highlight) never see taps on the "?". The note anchors to the
+ * legend (`position: relative` there) and spans its full width just above it,
+ * so it can't spill off the right edge on a phone or below the popover.
+ */
+function makeSuspiciousHelp(): HTMLElement {
+  const touch = isTouchDevice();
+  const wrap = document.createElement('span');
+  wrap.className = 'di-activity-help';
+  const icon = document.createElement('span');
+  icon.className = 'di-preview-legend-icon';
+  icon.textContent = '?';
+  icon.setAttribute('role', 'button');
+  icon.setAttribute('aria-label', 'What Suspicious means');
+  icon.tabIndex = 0;
+  const note = document.createElement('div');
+  note.className = 'di-activity-help-pop';
+  note.setAttribute('role', 'tooltip');
+  const title = document.createElement('strong');
+  title.textContent = 'Suspicious';
+  note.appendChild(title);
+  const tags = SUSPICIOUS_UPLOAD_TAGS.join(', ');
+  note.appendChild(
+    document.createTextNode(
+      ` — uploads that are deleted, flagged, tagged ${tags}, or scored ` +
+        `${SUSPICIOUS_SCORE_MAX} or lower, and comments scored ` +
+        `${SUSPICIOUS_SCORE_MAX} or lower. Counted here instead of under ` +
+        `Uploads / Comments. ${touch ? 'Tap the label twice' : 'Click the label'} ` +
+        'to open those posts.',
+    ),
+  );
+  wrap.appendChild(icon);
+  wrap.appendChild(note);
+  if (touch) {
+    const toggle = (e: Event) => {
+      e.stopPropagation();
+      e.preventDefault();
+      wrap.classList.toggle('di-activity-help--open');
+    };
+    icon.addEventListener('click', toggle);
+    note.addEventListener('click', toggle);
+  }
+  return wrap;
+}
+
+/**
+ * Section B: appends one legend entry. The Suspicious entry is paired with its
+ * "?" note in a no-wrap group so the two never land on different rows.
+ */
+function appendLegendItem(
+  legend: HTMLElement,
+  item: HTMLElement,
+  type: ActivityType,
+): void {
+  if (type !== 'suspicious') {
+    legend.appendChild(item);
+    return;
+  }
+  const group = document.createElement('span');
+  group.className = 'di-activity-legend-group';
+  group.appendChild(item);
+  group.appendChild(makeSuspiciousHelp());
+  legend.appendChild(group);
+}
+
 /** Section B: a single muted/pulsing message row (empty or error state). */
 function renderActivityMessage(
   strip: HTMLElement,
@@ -501,7 +575,7 @@ function renderActivity(
         );
       }
     }
-    legend.appendChild(item);
+    appendLegendItem(legend, item, type);
   }
 }
 
@@ -917,6 +991,34 @@ function createCachedFetcher<T>(
   };
 }
 
+/**
+ * Idempotent start/stop wrapper around a `window` resize listener. The preview
+ * popover re-runs its placement through this while open: rotating a phone
+ * fires `resize`, and without it a popover opened in landscape kept its 440px
+ * width after turning to portrait (spilling past the right edge again) while
+ * the page reflow left the caret pointing at the icon's old spot. Browsers
+ * dispatch `resize` at most once per frame and placement is a rect read +
+ * three style writes, so there is no extra throttling.
+ */
+function createResizeWatcher(onResize: () => void): {
+  start(): void;
+  stop(): void;
+} {
+  let attached = false;
+  return {
+    start() {
+      if (attached) return;
+      attached = true;
+      window.addEventListener('resize', onResize);
+    },
+    stop() {
+      if (!attached) return;
+      attached = false;
+      window.removeEventListener('resize', onResize);
+    },
+  };
+}
+
 export function createDashboardPreviewPopover(
   options: DashboardPreviewPopoverOptions,
 ): DashboardPreviewPopover {
@@ -932,6 +1034,8 @@ export function createDashboardPreviewPopover(
     createPopoverFetchers(options);
   let clickOutside: ((e: MouseEvent) => void) | null = null;
   let onKeydown: ((e: KeyboardEvent) => void) | null = null;
+  // Started in show(), stopped in hide(): only listens while visible.
+  const viewport = createResizeWatcher(() => reposition());
 
   function cancelHideTimer(): void {
     if (hideTimer !== null) {
@@ -954,6 +1058,7 @@ export function createDashboardPreviewPopover(
   function hide(): void {
     cancelHideTimer();
     teardownDismiss();
+    viewport.stop();
     visible = false;
     pinned = false;
     generation++; // void any pending render
@@ -1001,6 +1106,9 @@ export function createDashboardPreviewPopover(
   function reposition(): void {
     if (!refs) return;
     const pos = calcPopoverPositionBelow(anchor, POPOVER_WIDTH);
+    // Narrow viewports (phone portrait) get a width shrunk to fit; the grid
+    // and strip are fluid, so the content reflows instead of being clipped.
+    refs.el.style.width = `${pos.width}px`;
     refs.el.style.top = `${pos.top}px`;
     refs.el.style.left = `${pos.left}px`;
     refs.caret.style.left = `${pos.caretLeft}px`;
@@ -1115,6 +1223,7 @@ export function createDashboardPreviewPopover(
     // One generation per open guards stale renders for both sections.
     const gen = ++generation;
     reposition();
+    viewport.start();
     setupDismiss();
     if (summaryFetcher && refs.summary) {
       loadSummary(

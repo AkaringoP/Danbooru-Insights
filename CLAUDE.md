@@ -76,7 +76,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run compile` — `tsc` 단독 (타입 체크만, 번들 없음)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 1028 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 1038 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 7 개)
 - `npm run test:e2e:update` — e2e 스냅샷 baseline 갱신 (의도한 시각 변경일 때만)
@@ -193,9 +193,10 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
 ## 현재 릴리즈 상태
-현재 버전 **v9.11.1** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
+현재 버전 **v9.11.2** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
 
 최근 출시분 요약 (상세는 [CHANGELOG.md](CHANGELOG.md)):
+- **v9.11.2** (핫픽스) — preview popover 가 폰에서 오른쪽이 잘리던 문제 (폭을 화면 −16px 로 clamp, `innerWidth` 대신 `documentElement.clientWidth` — 넘친 팝오버 때문에 모바일 Chrome 의 `innerWidth` 가 부풀던 문제), 열린 채 회전 시 재배치 (`resize` 리스너, 열려 있을 때만). Activity 범례 Suspicious 옆 "?" 설명 (PC hover / 모바일 탭, 범례 위 전체 폭). Suspicious 업로드 조건 재정비: banned 제외 (작가 요청 takedown), flagged 와 Meta 태그 4 개 (`SUSPICIOUS_UPLOAD_TAGS`) 추가 — 기존 조회에 `is_flagged,tag_string_meta` 만 추가, 클라이언트 매칭 (Meta 카테고리 태그도 Member 2 태그 한도에 포함 — 2026-10-30 재확인, api-endpoints.md "Search tag limit")
 - **v9.11.1** — "At a glance" 요약: 대시보드 상단 카드 (동기화된 전체 업로드 기준 — 주력 작품·캐릭터 비율, deleted/banned/pending 개수 + 전체 대비 %, 태깅 건전성, 30일 속도·연속일·연도 정점·반응 변화, **추가 요청 0**) + preview popover 상단 섹션 (최근 200 기준, 평소와 비교, `/posts.json` 1 요청 piestats `recent_window` 캐시). 순수 빌더 `core/profile-summary.ts` (`scope: 'lifetime' | 'recent'`), 렌더 `ui/profile-summary-view.ts` (DOM 노드 — HTML 문자열 금지). 업로드 카드 일시정지 버튼 다크모드 색, User History 스크롤바 (Chrome 이 표준 `scrollbar-width` 있으면 커스텀 스크롤바 무시) 수정
 - **v9.10.0** — 큰 계정 full sync 가 429 한 번에 멈추던 문제 (429·타임아웃·네트워크 재시도, 대기 끝난 뒤 재시도), rate limiter 재설계 (slow start, 적응형 rate + 회복 상한, 정지 직후 429 는 정지 2 배, `X-Rate-Limit`/`Retry-After` 추종 — 46k 계정 재 sync + 첫 대시보드 기준 페이지 재시도만 있을 때 429 약 45 → 이 장치들로 4), 실패한 카운트를 0 으로 캐시하던 문제 (`countBatch` 1 회 재시도 + `cacheUnlessPartial`), related-tag pie 3 개의 implication 조회를 일괄 + 캐시로 공유 (`core/top-level-tags.ts`, 119 → ≤4 건), cold open 시 부가 pie 탭 6 개는 열 때 로딩, rate-limit 대기 중 진행 표시 주황, 진단 패널 Logs 섹션 + Refresh. 테스트 896 → 954
 - **v9.9.2** — grass 에서 metric/year 를 빠르게 바꿀 때 늦게 끝난 fetch 가 새 라벨 아래 옛 데이터를 그리던 race (issue #4), threshold 안내 중복
@@ -213,4 +214,5 @@ preview popover 의 동작 카탈로그 (mintag/abandoned 판정 기준, 활동 
 - `mapConcurrent()` 유틸은 병렬 API 호출 제어용 (count fetch, tag filtering 에서 사용)
 - `MAX_OPTIMIZED_POSTS = 1200` — Quick Sync / Small Tag 경로의 분기 임계값 ([src/config.ts](src/config.ts))
 - Count cache TTL (v9.6): `getCountCacheTtlMs()` 기본 10 분, 사용자가 settings popover 에서 조절 가능. `tryGetCachedStats<T>` 가 일관 사용
+- **검색 태그 한도**: Member 조회자는 검색당 태그 2 개까지. `user:`/`id:`/`status:` 같은 검색 메타태그는 무료, 태그 이름은 Meta 카테고리 포함 1 개씩 (v8.0.3 규칙, 2026-10-30 Member 계정으로 재확인 — Meta 카테고리 태그 4 개 검색 시 Search Error). 새 쿼리는 이 규칙에 맞춰 작성. 상세·현재 우회 방식은 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Search tag limit"
 - Count 기반 통계 (status/rating/분포 9 개) 는 `countBatch()` 로 카운트를 받고 `cacheUnlessPartial()` 로 저장. 429·5xx·네트워크 실패는 1 회 재시도 (rate limiter 정지 뒤로 줄 섬), 그래도 잃은 카운트가 있으면 캐시 저장 안 함 → 이전 캐시를 보여주고 다음 열기에서 재시도. 결정적 4xx (예: Member 태그 한도 422) 는 재시도도 차단도 안 함. 새 분포 추가 시 `fetchRemoteCount` 직접 호출 대신 이 경로 사용

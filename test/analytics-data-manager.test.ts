@@ -2752,3 +2752,110 @@ describe('failed fetches are not cached', () => {
     expect(result.s).toEqual({id: 1});
   });
 });
+
+describe('getActivityDistribution — suspicious uploads', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('flags deleted / flagged / suspicious-tag / downvoted uploads, not banned', async () => {
+    const posts = [
+      {
+        id: 1,
+        is_deleted: true,
+        is_flagged: false,
+        score: 5,
+        tag_string_meta: 'highres',
+      },
+      {
+        id: 2,
+        is_deleted: false,
+        is_flagged: true,
+        score: 5,
+        tag_string_meta: 'highres',
+      },
+      {
+        id: 3,
+        is_deleted: false,
+        is_flagged: false,
+        score: 5,
+        tag_string_meta: 'highres',
+      },
+      {
+        id: 4,
+        is_deleted: false,
+        is_flagged: false,
+        score: 5,
+        tag_string_meta: 'ai-generated highres',
+      },
+      {
+        id: 5,
+        is_deleted: false,
+        is_flagged: false,
+        score: -3,
+        tag_string_meta: 'highres',
+      },
+      // Banned (artist takedown) but otherwise healthy → stays an upload.
+      {
+        id: 6,
+        is_deleted: false,
+        is_banned: true,
+        is_flagged: false,
+        score: 5,
+        tag_string_meta: 'highres',
+      },
+    ];
+    const urls: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      urls.push(url);
+      let rows: unknown = [];
+      if (
+        url.startsWith('/post_versions.json') &&
+        url.includes('is_new]=true')
+      ) {
+        rows = posts.map((p, i) => ({
+          id: 100 + p.id,
+          post_id: p.id,
+          created_at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+        }));
+      } else if (url.startsWith('/posts.json')) {
+        rows = posts;
+      }
+      return {ok: true, status: 200, json: async () => rows};
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable()) as never,
+      rl as never,
+    );
+
+    const dist = await adm.getActivityDistribution(makeSyncUser(), 200);
+    const typeOf = (postId: number) =>
+      dist.recent.find(s => s.postId === postId || s.anchorId === postId)?.type;
+    expect([1, 2, 3, 4, 5, 6].map(typeOf)).toEqual([
+      'suspicious',
+      'suspicious',
+      'upload',
+      'suspicious',
+      'suspicious',
+      'upload',
+    ]);
+    expect(dist.suspiciousPostIds.sort()).toEqual([1, 2, 4, 5]);
+
+    // One batch lookup carries every signal — no second (OR-tag) request.
+    const lookups = urls.filter(u => u.startsWith('/posts.json'));
+    expect(lookups).toHaveLength(1);
+    expect(lookups[0]).toContain(
+      'only=id,is_deleted,is_flagged,score,tag_string_meta',
+    );
+    expect(decodeURIComponent(lookups[0])).not.toContain('~');
+  });
+});
