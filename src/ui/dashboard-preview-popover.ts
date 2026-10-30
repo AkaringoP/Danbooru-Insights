@@ -917,6 +917,34 @@ function createCachedFetcher<T>(
   };
 }
 
+/**
+ * Idempotent start/stop wrapper around a `window` resize listener. The preview
+ * popover re-runs its placement through this while open: rotating a phone
+ * fires `resize`, and without it a popover opened in landscape kept its 440px
+ * width after turning to portrait (spilling past the right edge again) while
+ * the page reflow left the caret pointing at the icon's old spot. Browsers
+ * dispatch `resize` at most once per frame and placement is a rect read +
+ * three style writes, so there is no extra throttling.
+ */
+function createResizeWatcher(onResize: () => void): {
+  start(): void;
+  stop(): void;
+} {
+  let attached = false;
+  return {
+    start() {
+      if (attached) return;
+      attached = true;
+      window.addEventListener('resize', onResize);
+    },
+    stop() {
+      if (!attached) return;
+      attached = false;
+      window.removeEventListener('resize', onResize);
+    },
+  };
+}
+
 export function createDashboardPreviewPopover(
   options: DashboardPreviewPopoverOptions,
 ): DashboardPreviewPopover {
@@ -932,6 +960,8 @@ export function createDashboardPreviewPopover(
     createPopoverFetchers(options);
   let clickOutside: ((e: MouseEvent) => void) | null = null;
   let onKeydown: ((e: KeyboardEvent) => void) | null = null;
+  // Started in show(), stopped in hide(): only listens while visible.
+  const viewport = createResizeWatcher(() => reposition());
 
   function cancelHideTimer(): void {
     if (hideTimer !== null) {
@@ -954,6 +984,7 @@ export function createDashboardPreviewPopover(
   function hide(): void {
     cancelHideTimer();
     teardownDismiss();
+    viewport.stop();
     visible = false;
     pinned = false;
     generation++; // void any pending render
@@ -1118,6 +1149,7 @@ export function createDashboardPreviewPopover(
     // One generation per open guards stale renders for both sections.
     const gen = ++generation;
     reposition();
+    viewport.start();
     setupDismiss();
     if (summaryFetcher && refs.summary) {
       loadSummary(

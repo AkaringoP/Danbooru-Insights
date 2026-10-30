@@ -501,6 +501,53 @@ describe('createDashboardPreviewPopover', () => {
     pop.destroy();
   });
 
+  it('re-fits width and position when the viewport resizes (rotation)', () => {
+    const original = window.innerWidth;
+    const setViewport = (w: number) => {
+      Object.defineProperty(window, 'innerWidth', {
+        value: w,
+        configurable: true,
+      });
+      window.dispatchEvent(new Event('resize'));
+    };
+    try {
+      // Opened in landscape: full width, pushed left to fit the right edge.
+      Object.defineProperty(window, 'innerWidth', {
+        value: 915,
+        configurable: true,
+      });
+      const anchor = anchorWithRect({left: 600, bottom: 10, width: 24});
+      const pop = createDashboardPreviewPopover({
+        anchor,
+        fetchPosts: () => new Promise<PostPreview[]>(() => {}),
+      });
+      pop.show({pinned: true});
+      const el = document.querySelector<HTMLElement>('.di-preview-popover')!;
+      expect(el.style.width).toBe('440px');
+      expect(el.style.left).toBe(`${915 - 440 - 8}px`);
+
+      // Rotate to portrait: shrinks to the viewport instead of spilling.
+      setViewport(412);
+      expect(el.style.width).toBe(`${412 - 16}px`);
+      expect(el.style.left).toBe('8px');
+
+      // Back to landscape: regains the full width.
+      setViewport(915);
+      expect(el.style.width).toBe('440px');
+
+      // Closed: the listener is gone, a later resize leaves styles alone.
+      pop.hide();
+      setViewport(412);
+      expect(el.style.width).toBe('440px');
+      pop.destroy();
+    } finally {
+      Object.defineProperty(window, 'innerWidth', {
+        value: original,
+        configurable: true,
+      });
+    }
+  });
+
   it('hides on Escape when pinned', () => {
     const anchor = anchorWithRect({});
     const pop = createDashboardPreviewPopover({
