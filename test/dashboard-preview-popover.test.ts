@@ -127,6 +127,34 @@ describe('calcPopoverPositionBelow', () => {
     const el = anchorWithRect({left: 0, bottom: 0, width: 0});
     expect(calcPopoverPositionBelow(el, 480).caretLeft).toBe(7);
   });
+
+  it('keeps the requested width when the viewport has room', () => {
+    const el = anchorWithRect({left: 100, bottom: 10, width: 24});
+    expect(calcPopoverPositionBelow(el, 480).width).toBe(480);
+  });
+
+  it('shrinks the width on a viewport narrower than the popover', () => {
+    // Phone portrait: a 440px popover on a 412px screen used to spill past
+    // the right edge even at left=8 (the page blocks horizontal scroll).
+    const original = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', {
+      value: 412,
+      configurable: true,
+    });
+    try {
+      const el = anchorWithRect({left: 160, bottom: 10, width: 24});
+      const {left, width, caretLeft} = calcPopoverPositionBelow(el, 440);
+      expect(width).toBe(412 - 16);
+      expect(left).toBe(8);
+      expect(left + width).toBe(412 - 8);
+      expect(caretLeft).toBe(172 - 8); // still points at the anchor centre
+    } finally {
+      Object.defineProperty(window, 'innerWidth', {
+        value: original,
+        configurable: true,
+      });
+    }
+  });
 });
 
 describe('createDashboardPreviewPopover', () => {

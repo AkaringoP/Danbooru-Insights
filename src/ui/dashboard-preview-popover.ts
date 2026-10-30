@@ -1001,6 +1001,9 @@ export function createDashboardPreviewPopover(
   function reposition(): void {
     if (!refs) return;
     const pos = calcPopoverPositionBelow(anchor, POPOVER_WIDTH);
+    // Narrow viewports (phone portrait) get a width shrunk to fit; the grid
+    // and strip are fluid, so the content reflows instead of being clipped.
+    refs.el.style.width = `${pos.width}px`;
     refs.el.style.top = `${pos.top}px`;
     refs.el.style.left = `${pos.left}px`;
     refs.caret.style.left = `${pos.caretLeft}px`;

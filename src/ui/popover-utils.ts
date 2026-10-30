@@ -65,6 +65,12 @@ export function calcPopoverPositionBelowCentered(
  * dashboard preview popover, which mimics Danbooru's native user card
  * (below the anchor with an upward caret).
  *
+ * On a viewport narrower than `popoverWidth` + margins (phones in portrait:
+ * a 440px popover on a ~412px screen) no `left` keeps the popover inside, so
+ * the width itself is shrunk to the viewport minus the margins. The clamped
+ * value comes back as `width`; callers assign it to `style.width` so the
+ * element matches the geometry the caret was computed against.
+ *
  * Also returns `caretLeft`: the x-offset **within the popover** for an
  * upward caret pointing at the target's horizontal centre, clamped so the
  * caret stays inside the popover body.
@@ -72,25 +78,29 @@ export function calcPopoverPositionBelowCentered(
 export function calcPopoverPositionBelow(
   target: Element,
   popoverWidth: number,
-): {top: number; left: number; caretLeft: number} {
+): {top: number; left: number; caretLeft: number; width: number} {
   const rect = target.getBoundingClientRect();
   const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
   const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
 
   const margin = 8;
-  const maxLeft = Math.max(margin, window.innerWidth - popoverWidth - margin);
+  const caretHalf = 7; // half the caret's visual width
+  const width = Math.max(
+    2 * caretHalf,
+    Math.min(popoverWidth, window.innerWidth - 2 * margin),
+  );
+  const maxLeft = Math.max(margin, window.innerWidth - width - margin);
   const viewportLeft = Math.min(Math.max(margin, rect.left), maxLeft);
   const top = rect.bottom + scrollTop + margin;
   const left = viewportLeft + scrollLeft;
 
-  const caretHalf = 7; // half the caret's visual width
   const anchorCenter = rect.left + rect.width / 2;
   const caretLeft = Math.min(
     Math.max(caretHalf, anchorCenter - viewportLeft),
-    popoverWidth - caretHalf,
+    width - caretHalf,
   );
 
-  return {top, left, caretLeft};
+  return {top, left, caretLeft, width};
 }
 
 export interface ClickOutsideOptions {
