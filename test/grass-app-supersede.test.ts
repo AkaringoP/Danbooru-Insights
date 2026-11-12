@@ -23,6 +23,7 @@ import type {Database} from '../src/core/database';
 import type {SettingsManager} from '../src/core/settings';
 import type {ProfileContext} from '../src/core/profile-context';
 import type {MetricData} from '../src/types';
+import type {RateLimitedFetch} from '../src/core/rate-limiter';
 
 interface Deferred {
   promise: Promise<MetricData>;
@@ -105,7 +106,12 @@ describe('GrassApp updateView supersede (issue #4)', () => {
     const context = {
       targetUser: {id: 1, name: 'tester', joinDate: new Date('2020-01-15')},
     } as unknown as ProfileContext;
-    return new GrassApp({} as unknown as Database, settings, context);
+    return new GrassApp(
+      {} as unknown as Database,
+      settings,
+      context,
+      {} as unknown as RateLimitedFetch,
+    );
   }
 
   it('discards a stale run instead of rendering old data under new labels', async () => {

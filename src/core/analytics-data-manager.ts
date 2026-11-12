@@ -381,10 +381,10 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * @param {Database} db The Dexie database instance.
-   * @param {RateLimitedFetch=} rateLimiter Optional shared rate limiter.
+   * @param {RateLimitedFetch} rateLimiter The tab's shared rate limiter.
    */
-  constructor(db: Database, rateLimiter?: RateLimitedFetch | null) {
-    super(db, rateLimiter ?? null);
+  constructor(db: Database, rateLimiter: RateLimitedFetch) {
+    super(db, rateLimiter);
   }
 
   /**

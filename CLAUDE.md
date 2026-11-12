@@ -152,7 +152,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 한도에 걸린 상태에서 보낸 요청은 1 초 분씩 점수를 더 깎음 (최저 −30). Rails 한도는 성공 응답과 429 양쪽에 `X-Rate-Limit` 헤더를 붙임. 흔히 말하는 "전체 10 req/s" 는 저장소에 없는 앞단(edge, Cloudflare) 설정으로 보이며 실제 규칙은 확인하지 못함. 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 옴.
 
 **클라이언트** — 토큰 버킷 하나 + 서버 액션별 차선 (v9.12). 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
-- **General Queue**: 8 concurrent requests, **6 req/sec, 버스트 1**, 0-50ms jitter → 한 탭에서 임의의 1 초에 최대 7 건, 10 초에 최대 61 건 (결정 G-1, v9.12). v9.6 의 9 req/sec · 버스트 9 (버스트가 속도와 같았음) 는 Grass 와 sync 가 겹치면 1 초 16 건 · 10 초 98 건까지 나갔음. Grass · UserAnalytics · TagAnalytics 가 `main.ts` 가 만든 limiter 하나를 공유. `RateLimitedFetch` 의 4 번째 인자가 버스트 (생략하면 속도와 같음 — 테스트용)
+- **General Queue**: 8 concurrent requests, **6 req/sec, 버스트 1**, 0-50ms jitter → 한 탭에서 임의의 1 초에 최대 7 건, 10 초에 최대 61 건 (결정 G-1, v9.12). v9.6 의 9 req/sec · 버스트 9 (버스트가 속도와 같았음) 는 Grass 와 sync 가 겹치면 1 초 16 건 · 10 초 98 건까지 나갔음. Grass · UserAnalytics · TagAnalytics 가 `main.ts` 가 만든 limiter 하나를 공유 (생성자 필수 인자, gate 4 규칙 11). `RateLimitedFetch` 의 4 번째 인자가 버스트 (생략하면 속도와 같음 — 테스트용)
 - **차선** ([src/core/rate-lane.ts](src/core/rate-lane.ts)): counts · reports · related_tag 요청은 각자의 차선에서 기다림. 차선은 서버 버킷의 로컬 추정치 (처음엔 위 표의 수치, 이후 응답마다 오는 `X-Rate-Limit` 로 보정 — 다른 탭이 같은 버킷을 쓴 것도 반영) 가 2 점 이상 (1 점 여유) 이고 진행 중 요청이 2 건 미만일 때만 보냄. 차선 요청도 일반 버킷 토큰을 하나 씀 → count · report 를 합쳐도 위의 7 / 61 상한 안. 발송은 "차선이 준비된 요청 중 가장 먼저 온 것" 이라 기다리는 차선이 sync 를 막지 않음. 모르는 경로가 `X-Rate-Limit` 를 보내면 그 경로용 차선을 만듦. v9.11 까지의 report 전용 큐 (3 초 고정 대기) 는 없어짐
 - **429 의 범위**: `X-Rate-Limit` 이 붙은 429 (Rails 의 액션별 한도) 는 **그 차선만** 기다림 — 전체 정지 · 속도 절반 · 다른 탭 알림 없음. 헤더 없는 429 (앞단) 만 아래의 전체 정지로 감. `backoffRemainingMs()` 는 전체 정지만 뜻함
 - **깨움**: 큐 전체에 예약된 깨움 하나 (`scheduleWake`). 거절될 때마다 타이머를 걸던 방식은 250 건 대기에 타이머 수만 개를 만들었음 (감사 DA-13)
@@ -184,7 +184,7 @@ pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), `prepare` 스�
 8. legacy NSFW localStorage 키는 `core/settings.ts` 마이그레이션 코드에만
 9. `/counts/posts.json` URL 은 `fetchRemoteCount()` 로만 — 인라인 재롤 금지
 10. `/wiki_pages/` href 는 태그명을 반드시 encode (태그에 `/` 포함 가능 — `fate/grand_order`)
-11. `apps/` 에서 DataManager 계열 생성 시 **공유 rate limiter 를 인자로 전달 필수** (v9.9.0 — private token bucket 이 멀티탭 분배와 429 백오프를 무시하던 문제)
+11. `new RateLimitedFetch(` 는 **`main.ts` 에서만** — 탭당 버킷 하나 (v9.12, G-1). `DataManager` · `AnalyticsDataManager` · 세 App · `UserAnalyticsDataService` 의 생성자는 limiter 가 필수 인자 (빠뜨리면 tsc 가 잡음). 예전의 `rateLimiter ?? new RateLimitedFetch(…)` fallback 처럼 다른 곳에서 버킷을 새로 만들면 멀티탭 분배와 429 정지를 무시하고 속도가 두 배가 됨 (v9.9.0 H-1). 검사 대상 파일 수와 `main.ts` 의 1 건을 같이 단언 (빈 통과 방지)
 12. popover 위치 공식 (`getBoundingClientRect` + `pageXOffset/pageYOffset`) 은 `ui/popover-utils.ts` 에만
 13. `dev/` 는 `core/`, `ui/`, `apps/` 를 import 하지 않음 (진단 모듈 격리)
 14. 마크업에 인라인 스크립트 금지 — HTML 문자열의 `on*="…"` 속성, `setAttribute`/d3 `.attr` 로 넣는 `on*` 속성, `javascript:` URL (v9.11.4 — Danbooru 가 2026-11-11 부터 `unsafe-inline` 없는 CSP 를 강제해서 조용히 동작하지 않음). 리스너로 붙이고, innerHTML 로 다시 그리는 곳은 바깥 컨테이너에 위임 리스너 (`ui/thumb-fallback.ts` 참고). 검출기 자체 검사 테스트가 같이 있음

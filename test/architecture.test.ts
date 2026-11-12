@@ -343,23 +343,23 @@ describe('Architecture constraints', () => {
     ).toEqual([]);
   });
 
-  it('apps/ must construct DataManager subclasses with the shared rate limiter', () => {
-    // H-1 recurrence guard. DataManager's constructor falls back to a brand
-    // new RateLimitedFetch when none is passed (core/data-manager.ts:86), so
-    // a limiter-less `new AnalyticsDataManager(db)` gets a private token
-    // bucket: it ignores TabCoordinator's multi-tab rps/concurrency split and
-    // keeps firing while the shared limiter is in 429 backoff. Every
-    // construction under apps/ must therefore pass a second argument.
-    //
-    // ui/settings-popover.ts is exempt: its manager only calls getCacheStats()
-    // (IndexedDB-only, no network), so its unused limiter never issues traffic.
+  it('only main.ts constructs a RateLimitedFetch — one bucket per tab', () => {
+    // H-1 / G-1 recurrence guard. Every request of a tab must go through the
+    // one limiter main.ts builds: a second bucket ignores TabCoordinator's
+    // multi-tab split and the shared 429 pause, and adds its own 6 req/s on
+    // top. The constructors of DataManager, AnalyticsDataManager, the three
+    // apps and UserAnalyticsDataService take the limiter as a required
+    // argument (the type checker enforces passing one); this rule stops a
+    // new bucket being built anywhere else to satisfy them — which is what
+    // the old `rateLimiter ?? new RateLimitedFetch(…)` fallbacks did.
+    const ctorRe = /new\s+RateLimitedFetch\s*\(/;
     const violations: string[] = [];
-    const ctorRe = /new\s+(?:\w*DataManager)\s*\(([^)]*)\)/g;
+    let mainHits = 0;
+    let scanned = 0;
 
     for (const file of allFiles) {
       const rel = relFromSrc(file.path);
-      if (!rel.startsWith('apps/')) continue;
-
+      scanned++;
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {
         const trimmed = lines[i].trim();
@@ -370,22 +370,20 @@ describe('Architecture constraints', () => {
         ) {
           continue;
         }
-        ctorRe.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = ctorRe.exec(lines[i])) !== null) {
-          // A second constructor argument is the rate limiter.
-          if (!m[1].includes(',')) {
-            violations.push(`${rel}:${i + 1}: ${trimmed}`);
-          }
-        }
+        if (!ctorRe.test(lines[i])) continue;
+        if (rel === 'main.ts') mainHits++;
+        else violations.push(`${rel}:${i + 1}: ${trimmed}`);
       }
     }
 
+    // Not a vacuous pass: the scan saw the source tree and the one real
+    // construction in main.ts.
+    expect(scanned).toBeGreaterThan(20);
+    expect(mainHits).toBe(1);
     expect(
       violations,
-      'Pass the shared RateLimitedFetch as the second constructor argument ' +
-        '(e.g. `new AnalyticsDataManager(db, this.rateLimiter)`), or reuse an ' +
-        'existing manager such as `app.dataManager`.',
+      'Take the shared limiter as a constructor argument and pass it down ' +
+        'from main.ts (e.g. `new AnalyticsDataManager(db, this.rateLimiter)`).',
     ).toEqual([]);
   });
 

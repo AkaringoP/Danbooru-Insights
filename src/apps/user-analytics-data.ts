@@ -395,7 +395,7 @@ export interface PieSlice {
  */
 export class UserAnalyticsDataService {
   private readonly db: Database;
-  private readonly rateLimiter: RateLimitedFetch | null;
+  private readonly rateLimiter: RateLimitedFetch;
 
   /**
    * @param db The Dexie database instance.
@@ -403,9 +403,8 @@ export class UserAnalyticsDataService {
    *   dashboard fetch (and the now-heavier post-paint SWR revalidate flood)
    *   on the TabCoordinator-managed, 429-backoff-aware limiter instead of a
    *   private bucket that would blow past Danbooru's server cap (audit H-1).
-   *   Optional so existing callers/tests that only need cache reads still work.
    */
-  constructor(db: Database, rateLimiter: RateLimitedFetch | null = null) {
+  constructor(db: Database, rateLimiter: RateLimitedFetch) {
     this.db = db;
     this.rateLimiter = rateLimiter;
   }

@@ -4,7 +4,7 @@ import {
   resolveEffectiveDashboardTheme,
 } from '../ui/theme-palette';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
-import {RateLimitedFetch} from '../core/rate-limiter';
+import type {RateLimitedFetch} from '../core/rate-limiter';
 import {
   SettingsManager,
   getNsfwEnabled,
@@ -1310,15 +1310,12 @@ export class UserAnalyticsApp {
     db: Database,
     settings: SettingsManager,
     context: ProfileContext,
-    rateLimiter?: RateLimitedFetch,
+    rateLimiter: RateLimitedFetch,
   ) {
     this.db = db;
     this.settings = settings;
     this.context = context as ValidatedProfileContext;
-    const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter =
-      rateLimiter ??
-      new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps, rl.burst);
+    this.rateLimiter = rateLimiter;
 
     this.dataManager = new AnalyticsDataManager(db, this.rateLimiter);
     // Share the rate limiter so the dashboard fetch + post-paint SWR

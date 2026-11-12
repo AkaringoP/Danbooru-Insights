@@ -28,25 +28,25 @@ export class GrassApp {
   db: Database;
   settings: SettingsManager;
   context: ProfileContext;
-  rateLimiter: RateLimitedFetch | null;
+  rateLimiter: RateLimitedFetch;
 
   /**
    * Initializes the GrassApp default instance.
    * @param {Database} db - The shared Dexie database instance.
    * @param {SettingsManager} settings - The settings manager instance.
    * @param {ProfileContext} context - The current profile context containing target user info.
-   * @param {RateLimitedFetch=} rateLimiter - Optional shared rate limiter instance.
+   * @param {RateLimitedFetch} rateLimiter - The tab's shared rate limiter.
    */
   constructor(
     db: Database,
     settings: SettingsManager,
     context: ProfileContext,
-    rateLimiter?: RateLimitedFetch,
+    rateLimiter: RateLimitedFetch,
   ) {
     this.db = db;
     this.settings = settings;
     this.context = context;
-    this.rateLimiter = rateLimiter ?? null;
+    this.rateLimiter = rateLimiter;
   }
 
   /**

@@ -5,7 +5,7 @@ import {
   resolveEffectiveDashboardTheme,
 } from '../ui/theme-palette';
 import {fetchRemoteCount} from '../core/data-manager';
-import {RateLimitedFetch} from '../core/rate-limiter';
+import type {RateLimitedFetch} from '../core/rate-limiter';
 import {createModal, type ModalHandle} from '../ui/modal';
 import {
   applyPopoverChrome,
@@ -102,15 +102,12 @@ export class TagAnalyticsApp {
     db: Database,
     settings: SettingsManager,
     tagName: string,
-    rateLimiter?: RateLimitedFetch,
+    rateLimiter: RateLimitedFetch,
   ) {
     this.db = db;
     this.settings = settings;
     this.tagName = tagName;
-    const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter =
-      rateLimiter ??
-      new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps, rl.burst);
+    this.rateLimiter = rateLimiter;
     this.dataService = new TagAnalyticsDataService(
       db,
       this.rateLimiter,

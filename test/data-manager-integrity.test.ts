@@ -1576,7 +1576,10 @@ describe('sumDailyCounts', () => {
   }
 
   function managerFor(table: unknown): DataManager {
-    return new DataManager({uploads: table} as never);
+    return new DataManager(
+      {uploads: table} as never,
+      makeRateLimiter() as never,
+    );
   }
 
   it('sums the rows inside an inclusive date range', async () => {
@@ -1649,7 +1652,10 @@ describe('sumDailyCounts', () => {
   it('reads the table the metric names', async () => {
     const uploads = makeRangeTable([{id: '42_2025-12-05', count: 3}]);
     const notes = makeRangeTable([{id: '42_2025-12-05', count: 99}]);
-    const dm = new DataManager({uploads, notes} as never);
+    const dm = new DataManager(
+      {uploads, notes} as never,
+      makeRateLimiter() as never,
+    );
 
     expect(
       await dm.sumDailyCounts('notes', '42', '2025-12-01', '2025-12-31'),
@@ -1658,7 +1664,7 @@ describe('sumDailyCounts', () => {
   });
 
   it('returns 0 for an unknown metric instead of throwing', async () => {
-    const dm = new DataManager({} as never);
+    const dm = new DataManager({} as never, makeRateLimiter() as never);
     expect(
       await dm.sumDailyCounts(
         'uploads' as Metric,

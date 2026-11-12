@@ -1,6 +1,6 @@
 import {CONFIG} from '../config';
 import {createLogger} from './logger';
-import {RateLimitedFetch} from './rate-limiter';
+import type {RateLimitedFetch} from './rate-limiter';
 import type {
   Metric,
   MetricData,
@@ -90,14 +90,13 @@ export class DataManager {
    * @param {Database} db The Dexie database instance.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(db: any, rateLimiter: RateLimitedFetch | null = null) {
+  constructor(db: any, rateLimiter: RateLimitedFetch) {
     this.baseUrl = window.location.origin;
     this.db = db;
-    // Allow passing shared rate limiter, fallback to default if missing (though app should pass it)
-    const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter =
-      rateLimiter ||
-      new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps, rl.burst);
+    // Always the tab's one limiter (main.ts). A manager with a bucket of its
+    // own would ignore the multi-tab split and the 429 pause, and double
+    // the tab's rate alongside the shared one (G-1).
+    this.rateLimiter = rateLimiter;
   }
 
   /**
@@ -1146,9 +1145,12 @@ export class DataManager {
   /**
    * Gets statistics about the cache usage across storage methods.
    * Calculates item counts and approximate byte sizes for IndexedDB and LocalStorage.
+   * Static: it makes no requests, so the settings popover can call it
+   * without a manager (which would need the tab's rate limiter).
    * @return {Promise<{indexedDB: {count: number, size: number}, localStorage: {count: number, size: number}}>} Object containing count and size stats.
    */
-  async getCacheStats(): Promise<{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  static async getCacheStats(db: any): Promise<{
     indexedDB: {count: number; size: number};
     localStorage: {count: number; size: number};
   }> {
@@ -1167,7 +1169,7 @@ export class DataManager {
     try {
       const tables = ['uploads', 'approvals', 'notes'];
       for (const t of tables) {
-        const c = await this.db[t].count();
+        const c = await db[t].count();
         stats.indexedDB.count += c;
       }
       // Approximate size: navigator.storage (Origin total)
