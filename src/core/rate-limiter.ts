@@ -1,6 +1,7 @@
 import {CONFIG} from '../config';
 import {createLogger} from './logger';
 import {KNOWN_LANES, RateLane, parseXRateLimit} from './rate-lane';
+import type {RateLimitInfo} from './rate-lane';
 
 const log = createLogger('RateLimiter');
 
@@ -445,10 +446,16 @@ export class RateLimitedFetch {
     const header = response.headers?.get?.('x-rate-limit') ?? null;
     const now = Date.now();
     let lane = task.lane;
-    // A path we did not know was limited answered with its bucket: give it a
-    // lane so later requests to it wait in their own line.
-    if (!lane && header) lane = this.adoptLane(task.url, header, sentAt);
-    const info = lane ? lane.onResponse(now, sentAt, header) : null;
+    let info: RateLimitInfo | null = null;
+    if (lane) {
+      info = lane.onResponse(now, sentAt, header);
+    } else if (header) {
+      // A path we did not know was limited answered with its bucket. Later
+      // requests to it wait in a lane of their own; this one was not sent
+      // through it, so it only re-syncs the estimate.
+      lane = this.laneForHeader(task.url, header, sentAt);
+      info = lane?.calibrate(now, sentAt, header) ?? null;
+    }
     if (response.status !== 429) return;
     if (lane && info) {
       log.warn('429 on a per-action limit, holding that lane', {
@@ -466,20 +473,24 @@ export class RateLimitedFetch {
   }
 
   /**
-   * Creates a lane for `url`'s path from a header, if it parses. The request
-   * that brought the header is recorded as sent at `sentAt`, so the
-   * onResponse that follows balances it and reads the header against it.
+   * The lane for `url`'s path, created from the header on its first
+   * sighting. Several requests to such a path can be in flight before the
+   * first reply; they must all end up on the one lane, or the replies would
+   * each replace it and the requests already queued on the old one would
+   * keep a separate count.
    */
-  private adoptLane(
+  private laneForHeader(
     url: string,
     header: string,
     sentAt: number,
   ): RateLane | null {
-    const info = parseXRateLimit(header);
     const path = pathOf(url);
-    if (!info || !path) return null;
+    if (!path) return null;
+    const existing = this.lanes.get(path);
+    if (existing) return existing;
+    const info = parseXRateLimit(header);
+    if (!info) return null;
     const lane = new RateLane(path, info, sentAt);
-    lane.onSend(sentAt);
     this.lanes.set(path, lane);
     return lane;
   }

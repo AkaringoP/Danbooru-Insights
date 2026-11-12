@@ -143,11 +143,8 @@ export class RateLane {
   }
 
   /**
-   * Its response arrived. With a usable header the estimate is replaced by
-   * the server's count: its points after charging this request, plus what
-   * regenerated since it was sent, minus the requests sent after it that
-   * the server has charged but this header does not show yet. An older
-   * request's header arriving late never overrides a newer one.
+   * The response to a request sent through this lane arrived: frees its
+   * in-flight slot, then re-syncs from the header ({@link calibrate}).
    *
    * @param sentAt when the request was sent (as passed to {@link onSend}).
    * @return the parsed header, or null.
@@ -160,6 +157,27 @@ export class RateLane {
     this.inFlight = Math.max(0, this.inFlight - 1);
     const i = this.outstanding.indexOf(sentAt);
     if (i >= 0) this.outstanding.splice(i, 1);
+    return this.calibrate(now, sentAt, header);
+  }
+
+  /**
+   * Re-syncs the estimate from an `X-Rate-Limit` header. With a usable
+   * header the estimate is replaced by the server's count: its points after
+   * charging the request sent at `sentAt`, plus what regenerated since,
+   * minus the requests sent after it that the server has charged but this
+   * header does not show yet. An older request's header arriving late never
+   * overrides a newer one.
+   *
+   * Called on its own for a reply to a request that was sent before this
+   * lane existed (it holds no in-flight slot here).
+   *
+   * @return the parsed header, or null.
+   */
+  calibrate(
+    now: number,
+    sentAt: number,
+    header: string | null,
+  ): RateLimitInfo | null {
     const info = parseXRateLimit(header);
     if (!info || sentAt < this.lastAppliedSentAt) return info;
     this.lastAppliedSentAt = sentAt;

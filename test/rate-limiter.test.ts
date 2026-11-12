@@ -430,6 +430,44 @@ describe('per-action lanes', () => {
     expect(calls.filter(u => u.startsWith('/artists.json'))).toHaveLength(1);
     expect(calls).toContain('/posts.json');
   });
+
+  it('keeps one lane when several replies reveal the same limited path', async () => {
+    // Two requests leave before either reply. Each reply used to create a
+    // fresh lane and replace the last one, so the older, stale header (14
+    // points) wiped out what the newer one had said (0 points).
+    const reply: Array<(points: number) => void> = [];
+    global.fetch = vi.fn(
+      () =>
+        new Promise(resolve => {
+          reply.push(points =>
+            resolve({
+              status: 200,
+              ok: true,
+              headers: new Headers({
+                'X-Rate-Limit': header('artists:index', points),
+              }),
+            }),
+          );
+        }),
+    ) as unknown as typeof fetch;
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    void rl.fetch('/artists.json?page=1');
+    await vi.advanceTimersByTimeAsync(100);
+    void rl.fetch('/artists.json?page=2');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reply).toHaveLength(2);
+
+    reply[1](0); // the newer request's reply: the bucket is empty
+    await vi.advanceTimersByTimeAsync(0);
+    reply[0](14); // the older request's reply arrives late
+    await vi.advanceTimersByTimeAsync(0);
+
+    void rl.fetch('/artists.json?page=3');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(reply).toHaveLength(2); // still waiting for 2 points
+    await vi.advanceTimersByTimeAsync(600);
+    expect(reply).toHaveLength(3);
+  });
 });
 
 // After a pause the backlog used to leave as one burst (full bucket + every
