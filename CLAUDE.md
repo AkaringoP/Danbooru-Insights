@@ -195,6 +195,8 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 ### Gate 8 — e2e (머지 전 수동)
 `npm run test:e2e` (Playwright, ~8초). **pre-commit hook 에 없음** — dev 서버를 띄워야 해서 매 커밋마다 돌리기엔 무겁다. 대신 **브랜치 머지 직전에 반드시 1회 실행**. 안 그러면 시각 회귀 baseline 이 썩어도 아무도 모른다 (gate 밖에 있는 유일한 검증 구역)
 
+기준 이미지는 **플랫폼별** 파일이다 (`…-chromium-win32.png`, `…-chromium-darwin.png`). 그 플랫폼의 기준이 없으면 첫 실행이 "A snapshot doesn't exist … writing actual" 로 실패하면서 지금 코드로 기준을 만들어 버리고, 그 뒤의 통과는 방금 찍은 것과 비교한 것이라 의미가 없다 (2026-11-12 에 Windows 에서 실제로 겪음). 새 플랫폼의 기준은 반드시 `develop` 코드에서 만들어 커밋할 것. win32 기준은 `dadcbfc` (v9.11.3) 에서 만들었다
+
 ## 참조 (Level-3 문서 — 필요 시 로드)
 - **Danbooru 서버 소스**: [danbooru/danbooru](https://github.com/danbooru/danbooru) 의 **`production` 브랜치** (사이트가 실제로 도는 것. `master` 와 다를 수 있음). 한도·검색 규칙은 자주 바뀌므로 문서의 숫자보다 소스를 먼저 볼 것 — `app/models/user.rb` (등급별 태그·페이지·timeout 한도), `app/logical/post_query.rb` (무료 메타태그, count 캐시), `app/policies/*_policy.rb` (`rate_limit_for_*`), `config/initializers/content_security_policy.rb`
 - [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) — Danbooru API 엔드포인트 카탈로그
