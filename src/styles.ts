@@ -173,6 +173,11 @@ const GLOBAL_CSS = `
     .di-analytics-entry-btn:hover {
       background: rgba(128,128,128,0.2);
     }
+    /* Waiting for the contribution graph to load (G-7). */
+    .di-analytics-entry-btn.di-grass-locked {
+      opacity: 0.4;
+      cursor: progress;
+    }
 
     /* -- User History timeline: discoverability for scrollable overflow --
        Two-layer approach:

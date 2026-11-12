@@ -99,7 +99,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 ### Entry Point
 `src/main.ts` → `main()` → URL 경로 기반 라우팅:
-- **Profile 모드** (`/users/*`, `/profile`): `GrassApp` + `UserAnalyticsApp` 실행
+- **Profile 모드** (`/users/*`, `/profile`): `GrassApp` + `UserAnalyticsApp` 실행. Grass 가 받는 동안 📊 클릭은 sync 를 시작하지 않음 (`GrassLoadGate`, G-7 — [sync-strategies.md](.claude/rules/sync-strategies.md))
 - **Tag 모드** (`/wiki_pages/*`, `/artists/*`): `TagAnalyticsApp` 실행
 
 ### 데이터 흐름
@@ -112,7 +112,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 | 레이어 | 역할 | 예시 |
 |---|---|---|
-| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `rate-lane.ts`, `search-terms.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts`, `profile-summary.ts` |
+| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `rate-lane.ts`, `search-terms.ts`, `grass-load-gate.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts`, `profile-summary.ts` |
 | `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts`, `dashboard-preview-popover.ts`, `grass-month-popover.ts`, `profile-summary-view.ts` |
 | `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
 | `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts`, `log-capture.ts` |

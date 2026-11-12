@@ -19,6 +19,7 @@ vi.mock('../src/ui/graph-renderer', () => ({GraphRenderer: vi.fn()}));
 import {DataManager} from '../src/core/data-manager';
 import {GraphRenderer} from '../src/ui/graph-renderer';
 import {GrassApp} from '../src/apps/grass-app';
+import {GrassLoadGate} from '../src/core/grass-load-gate';
 import type {Database} from '../src/core/database';
 import type {SettingsManager} from '../src/core/settings';
 import type {ProfileContext} from '../src/core/profile-context';
@@ -28,12 +29,17 @@ import type {RateLimitedFetch} from '../src/core/rate-limiter';
 interface Deferred {
   promise: Promise<MetricData>;
   resolve: (v: MetricData) => void;
+  reject: (e: Error) => void;
 }
 
 function deferred(): Deferred {
   let resolve!: (v: MetricData) => void;
-  const promise = new Promise<MetricData>(r => (resolve = r));
-  return {promise, resolve};
+  let reject!: (e: Error) => void;
+  const promise = new Promise<MetricData>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return {promise, resolve, reject};
 }
 
 /** Flushes pending microtasks + timers so awaits inside run() settle. */
@@ -98,7 +104,7 @@ describe('GrassApp updateView supersede (issue #4)', () => {
     );
   });
 
-  function makeApp(): GrassApp {
+  function makeApp(gate?: GrassLoadGate): GrassApp {
     const settings = {
       getLastMode: vi.fn(() => 'uploads'),
       setLastMode: vi.fn(),
@@ -111,6 +117,7 @@ describe('GrassApp updateView supersede (issue #4)', () => {
       settings,
       context,
       {} as unknown as RateLimitedFetch,
+      gate,
     );
   }
 
@@ -201,5 +208,51 @@ describe('GrassApp updateView supersede (issue #4)', () => {
     const finalCall = renderGraph.mock.calls.find(c => c[0] === uploadsData);
     expect(finalCall).toBeDefined();
     expect(finalCall![2]).toBe('uploads');
+  });
+
+  // G-7: the report button waits while Grass loads. The gate follows the
+  // spinner of the *current* run only.
+  describe('load gate', () => {
+    it('is on while the current run loads and off once it paints', async () => {
+      const gate = new GrassLoadGate();
+      await makeApp(gate).run();
+      await flush();
+      expect(gate.isLoading()).toBe(true);
+
+      fetchCalls[0].d.resolve(uploadsData);
+      await flush();
+      expect(gate.isLoading()).toBe(false);
+    });
+
+    it('a superseded run finishing does not turn it off', async () => {
+      const gate = new GrassLoadGate();
+      await makeApp(gate).run();
+      await flush();
+      const onMetricChange = updateControls.mock.calls[0][4] as (
+        m: string,
+      ) => void;
+      onMetricChange('approvals');
+      await flush();
+
+      fetchCalls[0].d.resolve(uploadsData); // the stale uploads run
+      await flush();
+      expect(gate.isLoading()).toBe(true);
+
+      fetchCalls[1].d.resolve(approvalsData); // the current run
+      await flush();
+      expect(gate.isLoading()).toBe(false);
+    });
+
+    it('turns off when the current run fails', async () => {
+      const gate = new GrassLoadGate();
+      await makeApp(gate).run();
+      await flush();
+
+      fetchCalls[0].d.reject(new Error('HTTP 500'));
+      await flush();
+
+      expect(renderError).toHaveBeenCalled();
+      expect(gate.isLoading()).toBe(false);
+    });
   });
 });

@@ -12,6 +12,7 @@ import {
   wasDismissed,
   wouldTuningImprove,
 } from '../core/threshold-tuner';
+import {GrassLoadGate} from '../core/grass-load-gate';
 import type {RateLimitedFetch} from '../core/rate-limiter';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
@@ -29,6 +30,8 @@ export class GrassApp {
   settings: SettingsManager;
   context: ProfileContext;
   rateLimiter: RateLimitedFetch;
+  /** On while the current view loads; holds the report button (G-7). */
+  readonly loadGate: GrassLoadGate;
 
   /**
    * Initializes the GrassApp default instance.
@@ -36,17 +39,21 @@ export class GrassApp {
    * @param {SettingsManager} settings - The settings manager instance.
    * @param {ProfileContext} context - The current profile context containing target user info.
    * @param {RateLimitedFetch} rateLimiter - The tab's shared rate limiter.
+   * @param {GrassLoadGate=} loadGate - Shared with UserAnalyticsApp so its
+   *     report button waits for the graph.
    */
   constructor(
     db: Database,
     settings: SettingsManager,
     context: ProfileContext,
     rateLimiter: RateLimitedFetch,
+    loadGate: GrassLoadGate = new GrassLoadGate(),
   ) {
     this.db = db;
     this.settings = settings;
     this.context = context;
     this.rateLimiter = rateLimiter;
+    this.loadGate = loadGate;
   }
 
   /**
@@ -120,6 +127,10 @@ export class GrassApp {
       };
 
       renderer.setLoading(true);
+      // The gate follows this spinner: on now, off in `finally` only if this
+      // run is still the current one (a superseded run keeps fetching into
+      // the cache, but the report button must not wait for it).
+      this.loadGate.set(true);
       try {
         // Initial render for layout (skeleton — scroll deferred to final render)
         await renderer.renderGraph(
@@ -212,7 +223,10 @@ export class GrassApp {
         renderer.renderError(message, () => updateView());
       } finally {
         // A superseded run must not clear the spinner the newer run owns.
-        if (isCurrent()) renderer.setLoading(false);
+        if (isCurrent()) {
+          renderer.setLoading(false);
+          this.loadGate.set(false);
+        }
       }
     };
 
