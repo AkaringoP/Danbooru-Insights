@@ -136,7 +136,12 @@ async function main(): Promise<void> {
 
   // Shared rate limiter — one per tab, coordinated across tabs
   const rl = CONFIG.RATE_LIMITER;
-  const rateLimiter = new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+  const rateLimiter = new RateLimitedFetch(
+    rl.concurrency,
+    rl.jitter,
+    rl.rps,
+    rl.burst,
+  );
 
   // Cross-tab coordination
   const coordinator = new TabCoordinator();

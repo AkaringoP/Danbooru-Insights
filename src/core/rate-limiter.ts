@@ -127,9 +127,9 @@ const PAUSE_ESCALATION_FACTOR = 2;
  * Adaptive rate. Each 429 that arrives outside a pause halves the request
  * rate (and concurrency) down to `MIN_THROTTLE` of the configured value;
  * every `THROTTLE_RECOVERY_MS` without a 429 gives back `THROTTLE_STEP`.
- * The edge limiter's real budget is unknown and evidently below the 9 req/s
- * we configure, so the limiter finds a sustainable rate instead of
- * re-hitting the same wall every few seconds.
+ * The edge limiter's real budget is unknown (it was evidently below the
+ * 9 req/s configured before v9.12), so the limiter finds a sustainable
+ * rate instead of re-hitting the same wall every few seconds.
  *
  * Recovery is capped by a ceiling one step below the rate that drew the
  * last 429. Without it the throttle sawtoothed: a 46k-post run held 0.5
@@ -161,9 +161,16 @@ interface QueueTask {
 export class RateLimitedFetch {
   maxConcurrency: number;
   startDelayRange: [number, number];
+  /** Sustained rate, requests per second. */
   rateLimit: number;
+  /** ms per token at full rate. */
   refillRate: number;
   tokens: number;
+  /**
+   * Bucket capacity when set explicitly; null = one second's worth
+   * (`rateLimit`), which then follows {@link updateLimits}.
+   */
+  private readonly burstSize: number | null;
   lastRefill: number;
   queue: QueueTask[];
   activeWorkers: number;
@@ -194,20 +201,26 @@ export class RateLimitedFetch {
   /**
    * @param {number} maxConcurrency Maximum concurrent requests (for general queue).
    * @param {Array<number>} startDelayRange Random delay range before request [min, max] ms.
-   * @param {number} requestsPerSecond Rate limit for general requests (default: 5).
+   * @param {number} requestsPerSecond Sustained rate for general requests.
+   * @param {number=} burst Bucket capacity: how many requests may leave at
+   *     once after a quiet spell. Defaults to one second's worth. The app
+   *     passes `CONFIG.RATE_LIMITER.burst` (1), so a full bucket cannot add
+   *     a second's worth of requests on top of the steady rate.
    */
   constructor(
     maxConcurrency: number = 6,
     startDelayRange: [number, number] = [50, 150],
     requestsPerSecond: number = 6,
+    burst?: number,
   ) {
     this.maxConcurrency = maxConcurrency;
     this.startDelayRange = startDelayRange;
 
     // Token Bucket for General Requests
-    this.rateLimit = requestsPerSecond; // Max tokens (burst)
+    this.rateLimit = requestsPerSecond;
     this.refillRate = 1000 / requestsPerSecond; // ms per token
-    this.tokens = requestsPerSecond;
+    this.burstSize = burst ?? null;
+    this.tokens = this.burstLimit();
     this.lastRefill = Date.now();
 
     this.queue = [];
@@ -229,14 +242,20 @@ export class RateLimitedFetch {
 
   /**
    * Dynamically update rate limits (e.g., when tab count changes).
-   * Takes effect on the next queue processing cycle.
+   * Takes effect on the next queue processing cycle. An explicit burst is
+   * kept as is; each tab may still send that many at once.
    */
   updateLimits(requestsPerSecond: number, maxConcurrency: number): void {
     this.rateLimit = requestsPerSecond;
     this.refillRate = 1000 / requestsPerSecond;
     this.maxConcurrency = maxConcurrency;
-    // Clamp existing tokens to new burst limit
-    this.tokens = Math.min(this.tokens, this.rateLimit);
+    // Clamp existing tokens to the (possibly smaller) bucket.
+    this.tokens = Math.min(this.tokens, this.burstLimit());
+  }
+
+  /** Bucket capacity at full throttle. */
+  private burstLimit(): number {
+    return this.burstSize ?? this.rateLimit;
   }
 
   /**
@@ -398,7 +417,7 @@ export class RateLimitedFetch {
   /** Bucket capacity: 1 during slow start, else the throttled burst. */
   private burstCap(now: number): number {
     if (now < this.slowStartUntil) return 1;
-    return Math.max(1, Math.floor(this.rateLimit * this.throttle));
+    return Math.max(1, Math.floor(this.burstLimit() * this.throttle));
   }
 
   /** In-flight ceiling: narrowed during slow start, scaled by throttle. */

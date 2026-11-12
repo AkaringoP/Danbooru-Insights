@@ -152,9 +152,10 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 한도에 걸린 상태에서 보낸 요청은 1 초 분씩 점수를 더 깎음 (최저 −30). Rails 한도는 성공 응답과 429 양쪽에 `X-Rate-Limit` 헤더를 붙임. 흔히 말하는 "전체 10 req/s" 는 저장소에 없는 앞단(edge, Cloudflare) 설정으로 보이며 실제 규칙은 확인하지 못함. 클라이언트는 아래처럼 아직 이 액션별 구조를 따로 다루지 않음 (count 도 general 큐를 탐 — 감사 DA-18, PLAN.md Phase 2).
 
 **클라이언트** — Token bucket 알고리즘 기반 3-queue 시스템. 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
-- **General Queue**: 8 concurrent requests, 9 req/sec, 0-50ms jitter (v9.6 에서 6/6 → 8/9 으로 상향)
+- **General Queue**: 8 concurrent requests, **6 req/sec, 버스트 1**, 0-50ms jitter → 한 탭에서 임의의 1 초에 최대 7 건, 10 초에 최대 61 건 (결정 G-1, v9.12). v9.6 의 9 req/sec · 버스트 9 (버스트가 속도와 같았음) 는 Grass 와 sync 가 겹치면 1 초 16 건 · 10 초 98 건까지 나갔음. Grass · UserAnalytics · TagAnalytics 가 `main.ts` 가 만든 limiter 하나를 공유. `RateLimitedFetch` 의 4 번째 인자가 버스트 (생략하면 속도와 같음 — 테스트용)
 - **Report Queue**: 격리됨, `/reports/` URL 에 3 초 cooldown (`CONFIG.REPORT_COOLDOWN_MS`)
-- **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 분할해 앞단(edge)의 전체 상한 안에 유지
+- **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 탭 수로 분할 (버스트 1 은 탭마다 유지 — N 탭이면 최악의 1 초가 6 + N 건)
+- **모의 실험**: [test/rate-limiter-sim.test.ts](test/rate-limiter-sim.test.ts) 가 실제 limiter 를 Danbooru 서버 한도 모델 (`test/helpers/server-bucket.ts`, `rate_limit.rb` 그대로) 에 돌려 1 초 · 10 초 상한, 429 수, 유실을 단언. limiter 를 바꾸면 여기 숫자부터 확인
 - **429 global backoff**: 서버 대기시간을 따름. Danbooru 는 `Retry-After` 대신 `X-Rate-Limit` 헤더 (token bucket JSON: `rate`/`cost`/`limits{key: points}`) 를 보냄 → `(cost − 최저 points) / rate` 초 + 0.5s 동안 전체 큐 정지 (`backoffFromResponse`). 헤더 없으면 `Retry-After`, 그것도 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s). `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp. 제한 중 요청은 1 초씩 debt 를 늘리므로 (최대 ~30s) 고정 5s 로는 429 가 반복됐음
 - **Slow start + 적응형 rate**: 정지가 끝나면 5 초간 토큰 1 개 / 동시 2 개로만 재개 (정지 중 꽉 찬 버킷과 대기 타이머가 한꺼번에 터지며 다음 429 를 부르던 문제). 정지 밖에서 받은 429 마다 rate·동시성을 절반으로 (하한 25%), 429 없는 20 초마다 25%p 씩 복구. 복구 상한은 429 가 난 rate 보다 한 단계 (25%p) 아래 — 상한 없이는 0.5 에서 버티다 0.56~0.75 로 회복할 때마다 수 초 안에 429 가 나는 톱니가 생겼음. 상한은 429 없는 2 분마다 한 단계씩 올라감. 단, slow start 구간 (정지 직후) 에 난 429 는 "정지가 서버 페널티보다 짧았다" 로 보고 rate·상한은 그대로 두고 정지만 2 배로 늘림 (5→10→20s…, 최대 `MAX_BACKOFF_MS`, 서버가 대기시간을 주면 그 값) 실측상 Danbooru 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 와서 서버 대기시간 추종이 작동 안 함 — 이 두 장치가 실질적인 방어선
 

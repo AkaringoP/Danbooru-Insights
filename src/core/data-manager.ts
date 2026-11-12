@@ -83,7 +83,8 @@ export class DataManager {
     // Allow passing shared rate limiter, fallback to default if missing (though app should pass it)
     const rl = CONFIG.RATE_LIMITER;
     this.rateLimiter =
-      rateLimiter || new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+      rateLimiter ||
+      new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps, rl.burst);
   }
 
   /**

@@ -4348,9 +4348,9 @@ export class AnalyticsDataManager extends DataManager {
    * sync even though pages may complete out of order.
    *
    * Workers stagger their start (200ms * workerId) so the initial burst
-   * doesn't all hit the API at once. WORKER_DELAY (400ms) keeps each
-   * worker at ~2.5 req/s; with 5 workers that's ~12.5 req/s peak —
-   * below Danbooru's rate limit.
+   * doesn't all hit the API at once. WORKER_DELAY (400ms) between pages
+   * keeps a lone sync to about 5 req/s; the shared rate limiter (6 req/s,
+   * burst 1) is the actual cap when other traffic joins.
    */
   private createSyncPageWorker(args: {
     userInfo: TargetUser;
@@ -4389,7 +4389,7 @@ export class AnalyticsDataManager extends DataManager {
       perfStats,
     } = args;
     const limit = 200; // API Limit
-    const WORKER_DELAY = 400; // 5 workers * 1 req / 0.4s = 12.5 req/s (Max)
+    const WORKER_DELAY = 400; // pause between pages, per worker
 
     // T-26 baseline: arrow complexity 20. Worker body — retry/backoff +
     // buffer commit ordering + sequential `no` assignment + completion

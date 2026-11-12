@@ -5,8 +5,9 @@
  * Re-creates the 2026-11-12 audit's section 3.3 experiment as a standing
  * test (TASK.md T-201). Each scenario drives the limiter with the request
  * shapes the app really produces, under fake timers, and records what the
- * server saw. The assertions describe the CURRENT behaviour; T-202 (rate
- * 6 req/s, burst 1) and T-203 (per-action lanes) flip them to targets.
+ * server saw. The "G-1 cap" checks hold since T-202 (6 req/s, burst 1);
+ * the "current behaviour" checks still reproduce the audit's findings and
+ * are flipped by T-203 (per-action lanes).
  *
  * The edge (Cloudflare) rule is unknown; the B-edge scenarios try two
  * assumptions, as the audit did.
@@ -191,7 +192,12 @@ async function simulate(
   try {
     // Same construction as src/main.ts.
     const rl = CONFIG.RATE_LIMITER;
-    const limiter = new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+    const limiter = new RateLimitedFetch(
+      rl.concurrency,
+      rl.jitter,
+      rl.rps,
+      rl.burst,
+    );
     const start = Date.now();
     const durations: Record<string, number> = {};
     const lost: Record<string, number> = {};
@@ -319,7 +325,7 @@ describe('maxInWindow', () => {
 // ---------------------------------------------------------------------------
 // Scenarios. The harness checks hold for any limiter; the "current
 // behaviour" checks reproduce the audit's findings and are flipped by
-// T-202 / T-203.
+// T-203.
 // ---------------------------------------------------------------------------
 
 describe('limiter simulation — harness', () => {
@@ -342,25 +348,37 @@ describe('limiter simulation — harness', () => {
   });
 });
 
-describe('limiter simulation — current behaviour (pre-T-202/T-203)', () => {
-  it('B: overlapping Grass and sync run the limiter at its cap', () => {
-    // audit: 16 per 1 s, 98 per 10 s. G-1 caps one tab at 7 / 61 (T-202).
-    expect(results.B.max1s).toBeGreaterThan(7);
-    expect(results.B.max10s).toBeGreaterThan(61);
-    // The "100 per 10 s" edge assumption (audit D) is not reached.
-    expect(results.B.max10s).toBeLessThan(100);
+describe('limiter simulation — G-1 cap (6 req/s, burst 1)', () => {
+  it('one tab never sends more than 7 per 1 s or 61 per 10 s', () => {
+    // 1 stored token + 6 per second; the 0–50 ms jitter after a token is
+    // taken cannot fit an 8th request into any 1 s window.
+    for (const [name, r] of Object.entries(results)) {
+      expect(r.max1s, name).toBeLessThanOrEqual(7);
+      expect(r.max10s, name).toBeLessThanOrEqual(61);
+    }
   });
 
-  it('C: under a "10 per 1 s" edge, the same load draws 429s', () => {
-    // audit: 5 x 429, sync 72 s. T-202 brings this to 0.
-    expect(results.C.total429).toBeGreaterThan(0);
-    expect(results.C.durations.sync).toBeGreaterThan(results.B.durations.sync);
+  it('B: overlapping Grass and sync sit exactly at the cap, without 429s', () => {
+    // Before G-1 (9 req/s, burst 9): 16 per 1 s, 98 per 10 s.
+    expect(results.B.max1s).toBe(7);
+    expect(results.B.max10s).toBe(61);
+    // The cost: sync 46 s -> ~58 s, Grass 21 s -> ~33 s for this load.
+    expect(results.B.durations.sync).toBeLessThan(65_000);
   });
 
+  it('C: the "10 per 1 s" edge assumption draws no 429', () => {
+    // Before G-1: 4 x 429 (audit: 5).
+    expect(results.C.total429).toBe(0);
+    expect(results.C.durations).toEqual(results.B.durations);
+  });
+});
+
+describe('limiter simulation — current behaviour (pre-T-203)', () => {
   it('E: count 429s stall the whole queue, and counts are lost', () => {
-    // audit: 101 x 429, sync 250 s, 33 counts lost. A count 429 pauses the
-    // general queue, so the sync waits too. T-203's count lane: 0 / ~A / 0.
-    expect(results.E.total429).toBeGreaterThan(50);
+    // audit: 101 x 429, sync 250 s, 33 counts lost; after G-1 about 53 x
+    // 429 and 26 lost. A count 429 pauses the general queue, so the sync
+    // waits too. T-203's count lane: no 429, sync near A, nothing lost.
+    expect(results.E.total429).toBeGreaterThan(25);
     expect(results.E.lost.counts).toBeGreaterThan(0);
     expect(results.E.durations.sync).toBeGreaterThan(
       4 * results.A.durations.sync,

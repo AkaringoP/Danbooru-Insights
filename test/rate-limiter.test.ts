@@ -68,6 +68,43 @@ describe('RateLimitedFetch', () => {
     });
   });
 
+  describe('explicit burst (decision G-1)', () => {
+    it('starts with `burst` tokens and never refills past it', () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      expect(rl.tokens).toBe(1);
+      rl.tokens = 0;
+      rl.lastRefill = Date.now() - 5000;
+      rl.refillTokens();
+      expect(rl.tokens).toBe(1);
+    });
+
+    it('sends one request at once, then one per 1/rps', async () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      for (let i = 0; i < 10; i++) void rl.fetch(`/posts.json?page=${i}`);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      // The burst token plus 6 per second: at most 7 by the 1 s mark.
+      await vi.advanceTimersByTimeAsync(1000);
+      const sent = vi.mocked(global.fetch).mock.calls.length;
+      expect(sent).toBeGreaterThanOrEqual(6);
+      expect(sent).toBeLessThanOrEqual(7);
+    });
+
+    it('keeps the burst when tabs split the rate', () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      rl.updateLimits(3, 4);
+      expect(rl.refillRate).toBeCloseTo(1000 / 3);
+      rl.tokens = 0;
+      rl.lastRefill = Date.now() - 5000;
+      rl.refillTokens();
+      expect(rl.tokens).toBe(1);
+    });
+
+    it('is the configured default the app builds with', () => {
+      expect(CONFIG.RATE_LIMITER).toMatchObject({rps: 6, burst: 1});
+    });
+  });
+
   describe('setBackoff()', () => {
     it('sets backoffUntil to the given timestamp', () => {
       const rl = new RateLimitedFetch();

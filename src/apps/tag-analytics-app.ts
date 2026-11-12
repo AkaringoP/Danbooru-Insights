@@ -105,7 +105,8 @@ export class TagAnalyticsApp {
     this.tagName = tagName;
     const rl = CONFIG.RATE_LIMITER;
     this.rateLimiter =
-      rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+      rateLimiter ??
+      new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps, rl.burst);
     this.dataService = new TagAnalyticsDataService(
       db,
       this.rateLimiter,

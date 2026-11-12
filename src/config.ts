@@ -14,7 +14,12 @@ export const CONFIG: {
   FULL_REFRESH_HINT_DAYS: number;
   BACKOFF_DURATION_MS: number;
   MAX_BACKOFF_MS: number;
-  RATE_LIMITER: {concurrency: number; jitter: [number, number]; rps: number};
+  RATE_LIMITER: {
+    concurrency: number;
+    jitter: [number, number];
+    rps: number;
+    burst: number;
+  };
   TAB_COORDINATOR: {
     channelName: string;
     heartbeatInterval: number;
@@ -52,12 +57,17 @@ export const CONFIG: {
   BACKOFF_DURATION_MS: 5000,
   /** Upper bound (ms) on a server-derived 429 pause, against bogus headers. */
   MAX_BACKOFF_MS: 120_000,
-  // Danbooru enforces a server-side global cap of 10 read req/sec across
-  // all endpoints and accounts sharing an IP. We use 9 to leave a 1 req/sec
-  // safety margin; TabCoordinator divides this further when multiple tabs
-  // are open. Bumped from 6 → 9 in v9.6 to keep the new count-cache TTL
-  // refresh path (≈70 piestats requests) under ~10 s on stale-refresh.
-  RATE_LIMITER: {concurrency: 8, jitter: [0, 50], rps: 9},
+  // One token bucket shared by every app on the page — Grass, UserAnalytics
+  // and TagAnalytics all get the limiter main.ts builds. 6 req/s with a
+  // burst of 1 (decision G-1, 2026-11-12): from one tab, at most 7 requests
+  // in any second and 61 in any 10 s. Danbooru's overall (edge) limit is
+  // not public; its per-action limits are lower still for counts (1/s) and
+  // reports (1 per 3 s) — see CLAUDE.md "Rate Limiting". TabCoordinator
+  // divides rps and concurrency between tabs; the burst stays 1 per tab.
+  // Was 9 req/s with a burst of 9 (v9.6, for a count refresh that the
+  // server now caps at 1/s anyway), which let Grass + a sync reach 16
+  // requests in one second.
+  RATE_LIMITER: {concurrency: 8, jitter: [0, 50], rps: 6, burst: 1},
   TAB_COORDINATOR: {
     channelName: 'di-rate-coord',
     heartbeatInterval: 5000,

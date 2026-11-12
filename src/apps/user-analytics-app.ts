@@ -1317,7 +1317,8 @@ export class UserAnalyticsApp {
     this.context = context as ValidatedProfileContext;
     const rl = CONFIG.RATE_LIMITER;
     this.rateLimiter =
-      rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+      rateLimiter ??
+      new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps, rl.burst);
 
     this.dataManager = new AnalyticsDataManager(db, this.rateLimiter);
     // Share the rate limiter so the dashboard fetch + post-paint SWR
