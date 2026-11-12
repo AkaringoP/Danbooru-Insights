@@ -9,6 +9,7 @@ import {
   newestPoints,
   scatterPointToWindowPoint,
 } from '../core/profile-summary';
+import {numericExtent} from '../utils';
 import type {
   DistributionItem,
   ProfileSummaryInput,
@@ -763,8 +764,9 @@ export async function buildRecentSummaryInput(
       cached<DistributionItem[]>('copyright_dist', []),
       cached<DistributionItem[]>('character_dist', []),
     ]);
+  // One entry per synced upload — no spread into Math.min (see numericExtent).
   const firstTs = scatterData.length
-    ? Math.min(...scatterData.map(p => p.d))
+    ? numericExtent(scatterData.map(p => p.d)).min
     : null;
   return assembleProfileSummaryInput({
     dataManager,
