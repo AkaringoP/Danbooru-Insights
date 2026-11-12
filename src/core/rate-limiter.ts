@@ -197,6 +197,10 @@ export class RateLimitedFetch {
   private lastCeilingChangeAt = 0;
   /** Length of the pause most recently started by this tab's own 429. */
   private lastPauseMs = 0;
+  /** The general queue's one pending wakeup; see {@link scheduleWake}. */
+  private wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When {@link wakeTimer} fires (ms epoch). */
+  private wakeAt = 0;
 
   /**
    * @param {number} maxConcurrency Maximum concurrent requests (for general queue).
@@ -346,7 +350,7 @@ export class RateLimitedFetch {
 
     // Global backoff check
     if (now < this.backoffUntil) {
-      setTimeout(() => this.processQueue(), this.backoffUntil - now);
+      this.scheduleWake(this.backoffUntil - now);
       return;
     }
 
@@ -355,8 +359,12 @@ export class RateLimitedFetch {
     // Token Bucket Check
     this.refillTokens();
     if (this.tokens < 1) {
-      // Not enough tokens, schedule a retry after refill interval
-      setTimeout(() => this.processQueue(), this.refillInterval());
+      // Wake when the next token is due. refillTokens() needs strictly more
+      // than one interval to have passed, hence the +1.
+      const elapsed = Date.now() - this.lastRefill;
+      this.scheduleWake(
+        Math.max(1, Math.floor(this.refillInterval() - elapsed) + 1),
+      );
       return;
     }
 
@@ -395,6 +403,27 @@ export class RateLimitedFetch {
       // Fire-and-forget: recursive drain; errors handled per-task inside.
       void this.processQueue();
     }
+  }
+
+  /**
+   * Arms the general queue's single wakeup `delayMs` from now, unless one is
+   * already due no later than that. Every refused dispatch used to arm its
+   * own timer — each fetch(), completion and fill-capacity call that found
+   * no token or an active pause — so a backlog of 250 counts left tens of
+   * thousands of timers that mostly woke up to re-arm (audit DA-13).
+   */
+  private scheduleWake(delayMs: number): void {
+    const at = Date.now() + delayMs;
+    if (this.wakeTimer !== null) {
+      if (this.wakeAt <= at) return;
+      clearTimeout(this.wakeTimer);
+    }
+    this.wakeAt = at;
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = null;
+      // Fire-and-forget: queue drain; per-task resolve/reject handles errors.
+      void this.processQueue();
+    }, delayMs);
   }
 
   refillTokens(): void {

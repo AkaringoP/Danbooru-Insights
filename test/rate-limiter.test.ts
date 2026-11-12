@@ -105,6 +105,40 @@ describe('RateLimitedFetch', () => {
     });
   });
 
+  describe('single wakeup (audit DA-13)', () => {
+    // Every refused dispatch used to arm its own timer: 49 here.
+    it('keeps one timer however many requests wait for a token', async () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      for (let i = 0; i < 50; i++) void rl.fetch(`/posts.json?page=${i}`);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it('keeps one timer through a 429 pause, then resumes', async () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      rl.setBackoff(Date.now() + 10_000);
+      for (let i = 0; i < 50; i++) void rl.fetch(`/posts.json?page=${i}`);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      expect(global.fetch).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(global.fetch).toHaveBeenCalled();
+    });
+
+    it('moves the wakeup earlier when a sooner one is needed', async () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      rl.setBackoff(Date.now() + 10_000);
+      void rl.fetch('/posts.json?page=1');
+      await vi.advanceTimersByTimeAsync(0);
+      // Another tab's pause ends sooner: our own pause is cut short.
+      rl.backoffUntil = Date.now() + 1000;
+      void rl.fetch('/posts.json?page=2');
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(global.fetch).toHaveBeenCalled();
+    });
+  });
+
   describe('setBackoff()', () => {
     it('sets backoffUntil to the given timestamp', () => {
       const rl = new RateLimitedFetch();

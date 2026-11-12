@@ -241,9 +241,9 @@ const HISTORY_MONTHS = 250; // a tag page's first visit, 2005 to now
  * H (tag history alone) is T without the 4 rankings, which run on their
  * own queue and do not change the history numbers.
  *
- * Wall time: the long scenarios (B, C, T) take a few seconds each because
- * the limiter re-arms a timer on every refused dispatch, tens of thousands
- * of timers per run (audit DA-13). T-203 removes that.
+ * Wall time is well under a second. Before the limiter kept a single
+ * wakeup per queue (audit DA-13) every refused dispatch armed its own
+ * timer, tens of thousands per run, and this file took ~50 s.
  */
 const results: Record<string, SimResult> = {};
 
