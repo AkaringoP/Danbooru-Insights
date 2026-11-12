@@ -156,12 +156,12 @@ pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), `prepare` 스�
 | 1 | Type safety | `tsc --noEmit` (또는 `npm run build`) | TypeScript strict mode |
 | 2 | Lint/style | `npm run lint` | GTS (Google TS style) |
 | 3 | 테스트 통과 | `npx vitest run` | Vitest |
-| 4 | 아키텍처 invariant | (gate 3 가 커버) | [test/architecture.test.ts](test/architecture.test.ts) — 현재 13 개 규칙 (아래 목록) |
+| 4 | 아키텍처 invariant | (gate 3 가 커버) | [test/architecture.test.ts](test/architecture.test.ts) — 현재 14 개 규칙 (아래 목록) |
 | 5 | 빌드 성공 | `npm run build` | Pre-commit hook (gate 1+3 도 같이 실행) |
 | 6 | 복잡도 cap | `npm run lint` | T-26 ESLint 규칙 — `max-lines-per-function: 200` (skipBlankLines+skipComments), `max-depth: 6`, `complexity: 15`, `max-nested-callbacks: 4`. 기존 위반은 inline `// T-26 baseline:` disable; 신규 위반은 차단 |
 | 7 | Dead code 없음 | `npm run check:dead` | knip — entry points / project globs / `cal-heatmap` + `eslint` ignored. 미사용 파일/export/type/devDependency 잡음 |
 
-### Gate 4 상세 — architecture.test.ts 의 13 개 규칙
+### Gate 4 상세 — architecture.test.ts 의 14 개 규칙
 1–4. 의존 방향: `core/ ↛ apps/`, `core/ ↛ ui/`, `ui/ ↚ apps/`, `apps/ ↛ main`
 5. `[key: string]: any` index signature 금지
 6. raw `fetch()` 금지 — `rateLimiter.fetch()` 사용 (예외: `rate-limiter.ts`, `dev/`)
@@ -172,6 +172,7 @@ pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), `prepare` 스�
 11. `apps/` 에서 DataManager 계열 생성 시 **공유 rate limiter 를 인자로 전달 필수** (v9.9.0 — private token bucket 이 멀티탭 분배와 429 백오프를 무시하던 문제)
 12. popover 위치 공식 (`getBoundingClientRect` + `pageXOffset/pageYOffset`) 은 `ui/popover-utils.ts` 에만
 13. `dev/` 는 `core/`, `ui/`, `apps/` 를 import 하지 않음 (진단 모듈 격리)
+14. 마크업에 인라인 스크립트 금지 — HTML 문자열의 `on*="…"` 속성, `setAttribute`/d3 `.attr` 로 넣는 `on*` 속성, `javascript:` URL (v9.11.4 — Danbooru 가 2026-11-11 부터 `unsafe-inline` 없는 CSP 를 강제해서 조용히 동작하지 않음). 리스너로 붙이고, innerHTML 로 다시 그리는 곳은 바깥 컨테이너에 위임 리스너 (`ui/thumb-fallback.ts` 참고). 검출기 자체 검사 테스트가 같이 있음
 
 **주의 — 빈 통과 (vacuous pass)**: 이 테스트들은 파일 경로를 문자열로 필터링한다. 필터가 0 건을 매칭해도 위반 0 건이라 **통과로 보인다**. 경로 비교는 반드시 `relFromSrc()` / forward-slash 정규화된 값으로 할 것 (Windows `path.relative` 는 백슬래시를 뱉어 `'apps/'` 매칭이 전부 빗나감 — 실제로 규칙 11 이 Windows 에서 0 개 파일만 검사하며 통과하고 있었음). 새 규칙 추가 시 검사 대상 건수가 0 이 아닌지 확인해라
 
