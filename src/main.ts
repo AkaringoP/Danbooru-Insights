@@ -148,7 +148,7 @@ async function main(): Promise<void> {
   coordinator.onTabCountChange = count => {
     const rps = Math.max(1, Math.floor(rl.rps / count));
     const conc = Math.max(1, Math.floor(rl.concurrency / count));
-    rateLimiter.updateLimits(rps, conc);
+    rateLimiter.updateLimits(rps, conc, count);
   };
   coordinator.onBackoffReceived = until => {
     rateLimiter.setBackoff(until);

@@ -150,6 +150,13 @@ interface QueueTask {
 /** Queue key for traffic without a per-action limit. */
 const GENERAL = 'general';
 
+/**
+ * How long dispatch times are kept for the edge-429 log. Twice its widest
+ * window (60 s): the 429 may come back up to the 30 s request timeout after
+ * its request left, and the window is measured back from that departure.
+ */
+const SEND_LOG_KEEP_MS = 120_000;
+
 /** Path of a request URL, relative or absolute ('' if unparseable). */
 function pathOf(url: string): string {
   try {
@@ -221,6 +228,15 @@ export class RateLimitedFetch {
   private wakeTimer: ReturnType<typeof setTimeout> | null = null;
   /** When {@link wakeTimer} fires (ms epoch). */
   private wakeAt = 0;
+  /**
+   * When each recent request was dispatched (ms epoch, oldest first), kept
+   * for {@link SEND_LOG_KEEP_MS}. Only read by the edge-429 log: the edge's
+   * rule is unknown, and how many requests went out in the last 1 / 10 /
+   * 60 s before each 429 is how to infer it (T-208).
+   */
+  private readonly sendLog: number[] = [];
+  /** Tabs sharing the budget, as last told by {@link updateLimits}. */
+  private tabCount = 1;
 
   /**
    * @param {number} maxConcurrency Maximum concurrent requests (for general queue).
@@ -263,8 +279,16 @@ export class RateLimitedFetch {
    * Dynamically update rate limits (e.g., when tab count changes).
    * Takes effect on the next queue processing cycle. An explicit burst is
    * kept as is; each tab may still send that many at once.
+   *
+   * @param tabCount the tab count the new limits were split for; only
+   *     logged with an edge 429.
    */
-  updateLimits(requestsPerSecond: number, maxConcurrency: number): void {
+  updateLimits(
+    requestsPerSecond: number,
+    maxConcurrency: number,
+    tabCount?: number,
+  ): void {
+    if (tabCount !== undefined) this.tabCount = tabCount;
     this.rateLimit = requestsPerSecond;
     this.refillRate = 1000 / requestsPerSecond;
     this.maxConcurrency = maxConcurrency;
@@ -381,6 +405,7 @@ export class RateLimitedFetch {
     this.requestCounter++;
     const sentAt = now;
     task.lane?.onSend(sentAt);
+    this.logSend(sentAt);
 
     // Fill any remaining capacity now. Otherwise each completion admits only
     // one successor, and the in-flight count never climbs back up after a
@@ -469,7 +494,47 @@ export class RateLimitedFetch {
       void this.processQueue();
       return;
     }
-    this.triggerBackoff(task.url, response);
+    this.triggerBackoff(task.url, response, sentAt);
+  }
+
+  /** Appends a dispatch to {@link sendLog}, dropping what has aged out. */
+  private logSend(at: number): void {
+    this.sendLog.push(at);
+    const cutoff = at - SEND_LOG_KEEP_MS;
+    let stale = 0;
+    while (stale < this.sendLog.length && this.sendLog[stale] <= cutoff) {
+      stale++;
+    }
+    if (stale > 0) this.sendLog.splice(0, stale);
+  }
+
+  /**
+   * Requests dispatched in the 1 / 10 / 60 s up to and including the one
+   * sent at `sentAt` — the traffic the edge had seen when it refused it.
+   */
+  private sentBefore(sentAt: number): {
+    sent1s: number;
+    sent10s: number;
+    sent60s: number;
+  } {
+    const counts = {sent1s: 0, sent10s: 0, sent60s: 0};
+    for (const t of this.sendLog) {
+      if (t > sentAt) continue;
+      const age = sentAt - t;
+      if (age < 60_000) counts.sent60s++;
+      if (age < 10_000) counts.sent10s++;
+      if (age < 1_000) counts.sent1s++;
+    }
+    return counts;
+  }
+
+  /** Requests in flight per lane, for the edge-429 log. */
+  private laneInFlight(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [name, lane] of this.lanes) {
+      if (lane.inFlight > 0) out[name] = lane.inFlight;
+    }
+    return out;
   }
 
   /**
@@ -582,7 +647,11 @@ export class RateLimitedFetch {
    * listeners (e.g., TabCoordinator — other tabs share the same IP/user
    * bucket, so they pause for the same span).
    */
-  private triggerBackoff(url: string, response: Response): void {
+  private triggerBackoff(
+    url: string,
+    response: Response,
+    sentAt: number,
+  ): void {
     const now = Date.now();
     const {ms: serverMs, source} = backoffFromResponse(response, now);
     let ms = serverMs;
@@ -626,6 +695,12 @@ export class RateLimitedFetch {
       ceiling: this.throttleCeiling,
       xRateLimit: response.headers?.get?.('x-rate-limit') ?? null,
       url: url.slice(0, 160),
+      // What led up to it, to infer the edge's unknown rule (T-208).
+      ...this.sentBefore(sentAt),
+      inFlight: this.activeWorkers,
+      laneInFlight: this.laneInFlight(),
+      rps: this.rateLimit,
+      tabs: this.tabCount,
     });
     this.setBackoff(until);
     this.onBackoff?.(until);

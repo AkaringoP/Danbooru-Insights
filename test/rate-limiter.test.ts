@@ -303,6 +303,43 @@ describe('server-driven 429 backoff', () => {
     vi.advanceTimersByTime(8000);
     expect(rl.backoffRemainingMs()).toBe(0);
   });
+
+  it('logs how many requests left in the 1 / 10 / 60 s before an edge 429 (T-208)', async () => {
+    // The edge's rule is unknown; these counts, gathered over a few 429s,
+    // are how to infer its window and limit.
+    const ok = {ok: true, status: 200, headers: new Headers()};
+    const refused = {ok: false, status: 429, headers: new Headers()};
+    global.fetch = vi.fn().mockResolvedValue(ok);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const rl = new RateLimitedFetch(10, [0, 0], 100, 10);
+    rl.updateLimits(100, 10, 2);
+    const send = (n: number) =>
+      Promise.all(Array.from({length: n}, () => rl.fetch('/posts.json')));
+
+    await send(1); // t = 0: older than 60 s by the 429
+    vi.advanceTimersByTime(40_000);
+    await send(3); // t = 40 s
+    vi.advanceTimersByTime(20_000);
+    await send(2); // t = 60 s
+    vi.advanceTimersByTime(8_000);
+    await send(1); // t = 68 s
+    vi.advanceTimersByTime(500);
+    vi.mocked(global.fetch).mockResolvedValueOnce(refused as never);
+    await send(1); // t = 68.5 s → 429
+
+    const call = warn.mock.calls.find(c =>
+      String(c[0]).includes('429 received, pausing requests'),
+    );
+    expect(call?.[1]).toMatchObject({
+      sent1s: 2,
+      sent10s: 4,
+      sent60s: 7,
+      inFlight: 1,
+      laneInFlight: {},
+      rps: 100,
+      tabs: 2,
+    });
+  });
 });
 
 // Danbooru limits counts, reports and related tags with their own buckets
