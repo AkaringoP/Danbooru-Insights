@@ -139,10 +139,22 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - CSS 클래스 prefix: `di-` (Danbooru Insights)
 
 ## Rate Limiting (RateLimitedFetch)
-Token bucket 알고리즘 기반 3-queue 시스템. 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
+
+**서버 쪽 한도** (Danbooru `production` 소스 기준, 2026-11-11 확인). 한도는 전체 하나가 아니라 **액션별 토큰 버킷**이고, 키는 사용자·IP 대역·세션 각각:
+
+| 액션 | 한도 | 소스 |
+|---|---|---|
+| `/counts/posts.json` | 1 req/s, 버스트 15 (2026-11-05 부터) | `app/policies/post_query_policy.rb` |
+| `/reports/*` | 1 req / 3 s, 버스트 15 | `app/policies/report_policy.rb` |
+| `/related_tag.json` | 1 req/s, 버스트 30 | `app/policies/related_tag_query_policy.rb` |
+| 그 밖의 읽기 (`/posts.json` 등) | Rails 한도 없음 | `app/policies/application_policy.rb` 의 `rate_limit_for_read` |
+
+한도에 걸린 상태에서 보낸 요청은 1 초 분씩 점수를 더 깎음 (최저 −30). Rails 한도는 성공 응답과 429 양쪽에 `X-Rate-Limit` 헤더를 붙임. 흔히 말하는 "전체 10 req/s" 는 저장소에 없는 앞단(edge, Cloudflare) 설정으로 보이며 실제 규칙은 확인하지 못함. 클라이언트는 아래처럼 아직 이 액션별 구조를 따로 다루지 않음 (count 도 general 큐를 탐 — 감사 DA-18, PLAN.md Phase 2).
+
+**클라이언트** — Token bucket 알고리즘 기반 3-queue 시스템. 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
 - **General Queue**: 8 concurrent requests, 9 req/sec, 0-50ms jitter (v9.6 에서 6/6 → 8/9 으로 상향)
 - **Report Queue**: 격리됨, `/reports/` URL 에 3 초 cooldown (`CONFIG.REPORT_COOLDOWN_MS`)
-- **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 분할해 Danbooru 의 10 req/s 서버 상한 안에 유지
+- **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 분할해 앞단(edge)의 전체 상한 안에 유지
 - **429 global backoff**: 서버 대기시간을 따름. Danbooru 는 `Retry-After` 대신 `X-Rate-Limit` 헤더 (token bucket JSON: `rate`/`cost`/`limits{key: points}`) 를 보냄 → `(cost − 최저 points) / rate` 초 + 0.5s 동안 전체 큐 정지 (`backoffFromResponse`). 헤더 없으면 `Retry-After`, 그것도 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s). `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp. 제한 중 요청은 1 초씩 debt 를 늘리므로 (최대 ~30s) 고정 5s 로는 429 가 반복됐음
 - **Slow start + 적응형 rate**: 정지가 끝나면 5 초간 토큰 1 개 / 동시 2 개로만 재개 (정지 중 꽉 찬 버킷과 대기 타이머가 한꺼번에 터지며 다음 429 를 부르던 문제). 정지 밖에서 받은 429 마다 rate·동시성을 절반으로 (하한 25%), 429 없는 20 초마다 25%p 씩 복구. 복구 상한은 429 가 난 rate 보다 한 단계 (25%p) 아래 — 상한 없이는 0.5 에서 버티다 0.56~0.75 로 회복할 때마다 수 초 안에 429 가 나는 톱니가 생겼음. 상한은 429 없는 2 분마다 한 단계씩 올라감. 단, slow start 구간 (정지 직후) 에 난 429 는 "정지가 서버 페널티보다 짧았다" 로 보고 rate·상한은 그대로 두고 정지만 2 배로 늘림 (5→10→20s…, 최대 `MAX_BACKOFF_MS`, 서버가 대기시간을 주면 그 값) 실측상 Danbooru 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 와서 서버 대기시간 추종이 작동 안 함 — 이 두 장치가 실질적인 방어선
 
@@ -184,6 +196,7 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 `npm run test:e2e` (Playwright, ~8초). **pre-commit hook 에 없음** — dev 서버를 띄워야 해서 매 커밋마다 돌리기엔 무겁다. 대신 **브랜치 머지 직전에 반드시 1회 실행**. 안 그러면 시각 회귀 baseline 이 썩어도 아무도 모른다 (gate 밖에 있는 유일한 검증 구역)
 
 ## 참조 (Level-3 문서 — 필요 시 로드)
+- **Danbooru 서버 소스**: [danbooru/danbooru](https://github.com/danbooru/danbooru) 의 **`production` 브랜치** (사이트가 실제로 도는 것. `master` 와 다를 수 있음). 한도·검색 규칙은 자주 바뀌므로 문서의 숫자보다 소스를 먼저 볼 것 — `app/models/user.rb` (등급별 태그·페이지·timeout 한도), `app/logical/post_query.rb` (무료 메타태그, count 캐시), `app/policies/*_policy.rb` (`rate_limit_for_*`), `config/initializers/content_security_policy.rb`
 - [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) — Danbooru API 엔드포인트 카탈로그
 - [.claude/rules/database-schema.md](.claude/rules/database-schema.md) — Dexie.js 테이블 레이아웃 & compound index
 - [.claude/rules/sync-strategies.md](.claude/rules/sync-strategies.md) — Grass / User / Tag 동기화 알고리즘
@@ -216,5 +229,5 @@ preview popover 의 동작 카탈로그 (mintag/abandoned 판정 기준, 활동 
 - `mapConcurrent()` 유틸은 병렬 API 호출 제어용 (count fetch, tag filtering 에서 사용)
 - `MAX_OPTIMIZED_POSTS = 1200` — Quick Sync / Small Tag 경로의 분기 임계값 ([src/config.ts](src/config.ts))
 - Count cache TTL (v9.6): `getCountCacheTtlMs()` 기본 10 분, 사용자가 settings popover 에서 조절 가능. `tryGetCachedStats<T>` 가 일관 사용
-- **검색 태그 한도**: Member 조회자는 검색당 태그 2 개까지. `user:`/`id:`/`status:` 같은 검색 메타태그는 무료, 태그 이름은 Meta 카테고리 포함 1 개씩 (v8.0.3 규칙, 2026-10-30 Member 계정으로 재확인 — Meta 카테고리 태그 4 개 검색 시 Search Error). 새 쿼리는 이 규칙에 맞춰 작성. 상세·현재 우회 방식은 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Search tag limit"
+- **검색 태그 한도** (2026-11-10 부터): 비로그인 2, Member 3, Gold 이상 무제한 (조회하는 **열람자** 등급 기준). 무료인 메타태그는 `status rating limit is id date age filesize filetype parent child md5 width height duration mpixels ratio score upvote downvotes favcount embedded tagcount pixiv_id pixiv` 뿐 — **`user:` `order:` `has:` `fav:` `ordfav:` `source:` `gentags:` 류는 1 개로 계산**되고, 태그 이름은 Meta 카테고리 포함 1 개씩. `/counts/posts.json` 도 2026-11-05 부터 같은 검사를 받아 넘으면 422. 새 쿼리는 비로그인 기준(2)에 맞추거나, 넘는 쿼리는 등급별 처리를 둘 것. 상세·현재 우회 방식은 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Search tag limit"
 - Count 기반 통계 (status/rating/분포 9 개) 는 `countBatch()` 로 카운트를 받고 `cacheUnlessPartial()` 로 저장. 429·5xx·네트워크 실패는 1 회 재시도 (rate limiter 정지 뒤로 줄 섬), 그래도 잃은 카운트가 있으면 캐시 저장 안 함 → 이전 캐시를 보여주고 다음 열기에서 재시도. 결정적 4xx (예: Member 태그 한도 422) 는 재시도도 차단도 안 함. 새 분포 추가 시 `fetchRemoteCount` 직접 호출 대신 이 경로 사용
