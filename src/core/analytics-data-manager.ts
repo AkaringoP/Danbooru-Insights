@@ -1,4 +1,5 @@
-import {DataManager} from './data-manager';
+import {CountUnavailableError, DataManager} from './data-manager';
+import {fitsViewerTagLimit} from './search-terms';
 import type {ApiItem} from './data-manager';
 import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
@@ -185,8 +186,9 @@ export function computeUntaggedTranslation(
 
 /**
  * Builds the 6 subqueries for Untagged inclusion-exclusion calculation plus the
- * BC intersection query used for Assumption-1 runtime monitoring. All queries
- * use ≤2 real tags so they work on Member(Blue) accounts.
+ * BC intersection query used for Assumption-1 runtime monitoring. With the
+ * `user:X` prefix they cost up to 3 search terms (`user:` and the `*_text`
+ * wildcard count): fine for a Member (3), a 422 for an anonymous viewer (2).
  *
  * `prefix` is prepended to every subquery — `user:X` for user-side translation
  * distribution, a single tag name (e.g. `sword`) for tag-side. Pass it
@@ -439,9 +441,13 @@ export class AnalyticsDataManager extends DataManager {
    * caller passes it to `cacheUnlessPartial` — a ranking built on a 0 that
    * means "unknown" (a top character dropped from the pie) must not be cached.
    *
-   * Deterministic 4xx failures (e.g. 422 for a search over a Member's tag
+   * Deterministic 4xx failures (e.g. 422 for a search over the viewer's tag
    * limit) are not retried and do not count as lost: refetching cannot
    * change them, and refusing to cache would re-run them on every open.
+   *
+   * A `null` count ({@link CountUnavailableError}) is lost but not retried:
+   * the server caches that `null` for 5 minutes, so the retry would only
+   * spend a count-lane point to read it back.
    */
   private countBatch(): CountBatch {
     let failed = false;
@@ -449,11 +455,20 @@ export class AnalyticsDataManager extends DataManager {
       try {
         return await this.fetchRemoteCount(query);
       } catch (first: unknown) {
+        if (first instanceof CountUnavailableError) {
+          failed = true;
+          throw first;
+        }
         if (classifySyncFetchError(first) === 'fatal') throw first;
         try {
           return await this.fetchRemoteCount(query);
         } catch (second: unknown) {
-          if (classifySyncFetchError(second) !== 'fatal') failed = true;
+          if (
+            second instanceof CountUnavailableError ||
+            classifySyncFetchError(second) !== 'fatal'
+          ) {
+            failed = true;
+          }
           throw second;
         }
       }
@@ -2938,16 +2953,27 @@ export class AnalyticsDataManager extends DataManager {
     }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
-    const fetchCount = (tagQuery: string): Promise<number> =>
+    const fetchCount = (tagQuery: string): Promise<number | null> =>
       this.fetchRemoteCount(tagQuery).catch(e => {
         log.warn('Count query failed for user stats', {tagQuery, error: e});
-        return 0;
+        return null;
       });
 
     const [gentags, tagcount] = await Promise.all([
       fetchCount(`user:${normalizedName} gentags:<10`),
       fetchCount(`user:${normalizedName} tagcount:<10`),
     ]);
+    if (gentags === null || tagcount === null) {
+      // A lost count is not a 0: keep whatever was stored (even past its
+      // 24 h) and store nothing, so the next open asks again.
+      const stale = await this.db.user_stats.get(userId);
+      return stale
+        ? {
+            gentags_lt_10: stale.gentags_lt_10,
+            tagcount_lt_10: stale.tagcount_lt_10,
+          }
+        : null;
+    }
 
     const record: UserStatsRecord = {
       userId,
@@ -3260,12 +3286,14 @@ export class AnalyticsDataManager extends DataManager {
         try {
           results[item.idx].count = await counts.lookup(item.query);
         } catch (e: unknown) {
+          // "Untagged" is 4 terms: a 422 below Gold (T-408 replaces it).
+          results[item.idx].unknown = true;
           log.debug('Failed to fetch commentary count', {error: e});
         }
       },
     );
 
-    const filtered = results.filter(r => r.count > 0);
+    const filtered = results.filter(r => r.count > 0 || r.unknown);
     const shown = await this.cacheUnlessPartial(
       cacheKey,
       uploaderId,
@@ -3336,9 +3364,6 @@ export class AnalyticsDataManager extends DataManager {
       color: cat.color,
     }));
 
-    const fetchCount = (query: string): Promise<number> =>
-      counts.lookup(query).catch(() => 0);
-
     await this.mapConcurrent(
       categories.map((cat, i) => ({...cat, idx: i})),
       3,
@@ -3348,16 +3373,18 @@ export class AnalyticsDataManager extends DataManager {
         try {
           if (item.useInclusionExclusion) {
             // Untagged via inclusion-exclusion: max(0, t − a − b − c + ab + ac).
-            // See PLAN.md §9 for derivation. All 6 queries use ≤2 real tags
-            // so they work on Member(Blue) accounts.
+            // See PLAN.md §9 for derivation. b, c, ab and ac are 3 terms
+            // (the `*_text` wildcard counts), so an anonymous viewer gets a
+            // 422 on them; any lost term throws and leaves Untagged unknown
+            // rather than computed from a 0 that is not one.
             const q = buildUntaggedTranslationQueries(`user:${normalizedName}`);
             const [t, a, b, c, ab, ac] = await Promise.all([
-              fetchCount(q.t),
-              fetchCount(q.a),
-              fetchCount(q.b),
-              fetchCount(q.c),
-              fetchCount(q.ab),
-              fetchCount(q.ac),
+              counts.lookup(q.t),
+              counts.lookup(q.a),
+              counts.lookup(q.b),
+              counts.lookup(q.c),
+              counts.lookup(q.ab),
+              counts.lookup(q.ac),
             ]);
             results[item.idx].count = computeUntaggedTranslation({
               t,
@@ -3370,7 +3397,8 @@ export class AnalyticsDataManager extends DataManager {
 
             // Assumption-1 runtime validation (monitoring only, does not affect result).
             // If |R ∩ TR| / t > 0.5%, the mutual exclusivity assumption is violated.
-            fetchCount(q.bc)
+            if (!fitsViewerTagLimit(q.bc)) return;
+            this.fetchRemoteCount(q.bc)
               .then(bc => {
                 const ratio = bc / Math.max(1, t);
                 if (ratio > 0.005) {
@@ -3389,16 +3417,16 @@ export class AnalyticsDataManager extends DataManager {
                 /* monitoring only */
               });
           } else if (item.query) {
-            const count = await fetchCount(item.query);
-            if (count > 0) results[item.idx].count = count;
+            results[item.idx].count = await counts.lookup(item.query);
           }
         } catch (e: unknown) {
+          results[item.idx].unknown = true;
           log.debug('Failed to fetch translation count', {error: e});
         }
       },
     );
 
-    const filtered = results.filter(r => r.count > 0);
+    const filtered = results.filter(r => r.count > 0 || r.unknown);
     const shown = await this.cacheUnlessPartial(
       cacheKey,
       uploaderId,
@@ -3659,7 +3687,7 @@ export class AnalyticsDataManager extends DataManager {
       'absurdly_long_hair',
     ];
 
-    const results = hairLengthTags.map(tag => {
+    const results = hairLengthTags.map((tag): DistributionItem => {
       let label = tag;
       if (tag.includes('~bald')) label = 'Bald';
       else
@@ -3685,12 +3713,14 @@ export class AnalyticsDataManager extends DataManager {
           `user:${normalizedName} ${obj.originalTag}`,
         );
       } catch (e: unknown) {
+        // "Bald" is 3 terms: a 422 for an anonymous viewer.
+        obj.unknown = true;
         log.debug('Failed to fetch count', {error: e});
       }
     });
 
     const filtered = results
-      .filter(r => r.count > 0)
+      .filter(r => r.count > 0 || r.unknown)
       .sort((a, b) => b.count - a.count);
     // Reuse unchanged thumbs before this write replaces the cache (L-2).
     await this.carryOverThumbs(cacheKey, uploaderId, filtered);
@@ -3864,7 +3894,7 @@ export class AnalyticsDataManager extends DataManager {
     // Identify items needing thumbs
     // Explicitly check for null or empty string, but sometimes empty string means "tried and failed".
     // Let's assume null means "not yet fetched".
-    const toFetch = items.filter(i => !i.isOther && !i.thumb);
+    const toFetch = items.filter(i => !i.isOther && !i.thumb && !i.unknown);
 
     if (toFetch.length === 0) return;
 
@@ -3897,7 +3927,10 @@ export class AnalyticsDataManager extends DataManager {
         queryTags = `user:${normalizedName} ${tagPart} order:score rating:g`;
       }
 
-      // Special cases if any? No, mostly standard.
+      // 3 terms (`user:`/`fav:`, the tag, `order:`), 4 for Hair "Bald"'s
+      // `~bald ~bald_female`: over the viewer's limit the server answers
+      // 422, so the slice goes without a thumbnail and no request is sent.
+      if (!fitsViewerTagLimit(queryTags)) return;
 
       const thumb = await this.fetchThumbnailWithRetry(queryTags);
       if (thumb) {

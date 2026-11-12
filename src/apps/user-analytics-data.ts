@@ -372,6 +372,8 @@ export type PieDetails =
       color?: string;
       frequency?: number;
       name?: string;
+      /** The count could not be had: legend "—" (`DistributionItem.unknown`). */
+      unknown?: boolean;
       /**
        * Sub-tag breakdown for legend hover/tap (Copy / Fav_Copy / Char,
        * v9.6.0+). Source: `DistributionItem.subTags` from the resolver.

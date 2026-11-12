@@ -19,7 +19,9 @@ vi.mock('../src/ui/popover-utils', async () => {
 });
 
 import {
+  processSlices,
   renderHistoryChart,
+  renderPieLegend,
   renderPieWidget,
 } from '../src/apps/user-analytics-charts';
 import type {AnalyticsDataManager} from '../src/core/analytics-data-manager';
@@ -477,6 +479,40 @@ describe('renderPieWidget — lazy tab loading', () => {
       const fetcher = dm[FETCHER_BY_TAB[mode]] as ReturnType<typeof vi.fn>;
       expect(fetcher, `tab ${mode}`).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+describe('pie legend — unknown slices (T-204)', () => {
+  // A count the server would not give (422 over the viewer's tag limit, a
+  // null) is an `unknown` slice: "—" in the legend, not a 0.0% that reads
+  // as "none", and no share of the pie.
+  const DATA = [
+    {name: 'Commentary', tagName: 'commentary', count: 30},
+    {name: 'Requested', tagName: 'commentary_request', count: 10},
+    {name: 'Untagged', tagName: 'untagged_commentary', count: 0, unknown: true},
+  ].map(d => ({...d, frequency: 0, thumb: null, isOther: false}));
+
+  it('carries the flag into the slice details', () => {
+    const slices = processSlices(DATA, 'commentary');
+    expect(slices[2].details).toMatchObject({kind: 'tag', unknown: true});
+    expect(slices[2].value).toBe(0);
+  });
+
+  it('shows "—" with an explanation instead of a percentage', () => {
+    const legendDiv = document.createElement('div');
+    renderPieLegend({
+      legendDiv,
+      processedData: processSlices(DATA, 'commentary'),
+      currentPieTab: 'commentary',
+      pctFor: label => (label === 'Commentary' ? '75.0%' : '25.0%'),
+      normalizedName: 'fixture_user',
+    });
+
+    const rows = Array.from(
+      legendDiv.querySelectorAll<HTMLElement>('div[style*="margin-left:auto"]'),
+    );
+    expect(rows.map(r => r.textContent)).toEqual(['75.0%', '25.0%', '—']);
+    expect(rows[2].title).toMatch(/^Unknown/);
   });
 });
 

@@ -1839,6 +1839,246 @@ describe('getCharacterDistribution — lost counts', () => {
     expect(noaCalls).toHaveLength(1);
     expect(save).toHaveBeenCalled();
   });
+
+  it('a null count is not retried and not cached (DA-20)', async () => {
+    // Danbooru caches a timed-out count's null for 5 minutes, so a retry
+    // only reads it back; it used to read as 0 and drop Noa from the pie.
+    const base = buildDistFetch(script, 'user');
+    const fetchImpl = async (url: string) =>
+      url.startsWith('/counts/posts.json') &&
+      decodeURIComponent(url).includes('noa_(blue_archive)')
+        ? {ok: true, status: 200, json: async () => ({counts: {posts: null}})}
+        : base(url);
+    const {adm, rl} = makeDistAdm(fetchImpl, 50_000);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    await adm.getCharacterDistribution(user);
+
+    const noaCalls = rl.fetch.mock.calls.filter(
+      (c: [string]) =>
+        c[0].startsWith('/counts/posts.json') &&
+        decodeURIComponent(c[0]).includes('noa_(blue_archive)'),
+    );
+    expect(noaCalls).toHaveLength(1);
+    expect(save).not.toHaveBeenCalled();
+  });
+});
+
+// A count that cannot be had — 422 over the viewer's tag limit, a null, a
+// lost request — used to read as 0: a slice vanished, or an inclusion-
+// exclusion went on with a fake 0. It is now an `unknown` slice (G-4).
+describe('count distributions — unknown slices (T-204)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {
+      location: {origin: 'https://danbooru.donmai.us'},
+      dispatchEvent: vi.fn(),
+    });
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const user = makeSyncUser({id: '42', name: 'tester'});
+
+  /**
+   * Answers each count from `counts` by its decoded `tags`; a number is the
+   * count, `null` a timed-out count, a string `'422'` / `'429'` that status.
+   * Unlisted queries count 0.
+   */
+  function makeCountAdm(counts: Record<string, number | null | string>) {
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      const tags = new URLSearchParams(url.split('?')[1]).get('tags') ?? '';
+      const v = tags in counts ? counts[tags] : 0;
+      if (typeof v === 'string') {
+        return {ok: false, status: Number(v), json: async () => ({})};
+      }
+      return {ok: true, status: 200, json: async () => ({counts: {posts: v}})};
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    vi.spyOn(adm, 'getStats').mockResolvedValue(null);
+    vi.spyOn(
+      adm as unknown as {enrichThumbnails: () => Promise<void>},
+      'enrichThumbnails',
+    ).mockResolvedValue();
+    const save = vi.spyOn(adm, 'saveStats').mockResolvedValue();
+    return {adm, rl, save};
+  }
+
+  it('commentary: a 422 slice is kept as unknown and the run is cached', async () => {
+    const {adm, save} = makeCountAdm({
+      'user:tester commentary': 40,
+      'user:tester commentary_request': 10,
+      'user:tester has:commentary -commentary -commentary_request': '422',
+    });
+
+    const result = await adm.getCommentaryDistribution(user);
+
+    const untagged = result.find(r => r.name === 'Untagged');
+    expect(untagged).toMatchObject({count: 0, unknown: true});
+    expect(result.find(r => r.name === 'Commentary')?.count).toBe(40);
+    // 422 is deterministic: caching the unknown saves re-asking every open.
+    expect(save).toHaveBeenCalledWith('commentary_dist', 42, result);
+  });
+
+  it('commentary: a null slice is unknown and the run is not cached', async () => {
+    const {adm, save} = makeCountAdm({
+      'user:tester commentary': null,
+      'user:tester commentary_request': 10,
+    });
+
+    const result = await adm.getCommentaryDistribution(user);
+
+    expect(result.find(r => r.name === 'Commentary')).toMatchObject({
+      unknown: true,
+    });
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('translation: one lost inclusion-exclusion term leaves Untagged unknown', async () => {
+    // Before: the 422 read as 0, so t − a − b − c + ab + ac ran with ab = 0
+    // and showed a made-up Untagged count.
+    const {adm} = makeCountAdm({
+      'user:tester translated': 30,
+      'user:tester translation_request': 5,
+      'user:tester *_text': 100,
+      'user:tester english_text': 10,
+      'user:tester *_text translation_request': 5,
+      'user:tester *_text translated': 30,
+      'user:tester english_text translation_request': '422',
+      'user:tester english_text translated': 2,
+    });
+
+    const result = await adm.getTranslationDistribution(user);
+
+    const untagged = result.find(r => r.name === 'Untagged');
+    expect(untagged).toMatchObject({count: 0, unknown: true});
+    expect(result.find(r => r.name === 'Translated')?.count).toBe(30);
+  });
+
+  it('translation: with every term in, Untagged is computed', async () => {
+    const {adm} = makeCountAdm({
+      'user:tester translated': 30,
+      'user:tester *_text': 100,
+      'user:tester english_text': 10,
+      'user:tester *_text translation_request': 5,
+      'user:tester *_text translated': 30,
+      'user:tester english_text translation_request': 1,
+      'user:tester english_text translated': 2,
+    });
+
+    const result = await adm.getTranslationDistribution(user);
+
+    // 100 − 10 − 5 − 30 + 1 + 2 = 58
+    expect(result.find(r => r.name === 'Untagged')).toMatchObject({
+      count: 58,
+    });
+    expect(result.find(r => r.name === 'Untagged')?.unknown).toBeUndefined();
+  });
+
+  it('hair length: a 422 "Bald" is unknown, the rest is unchanged', async () => {
+    const {adm} = makeCountAdm({
+      'user:tester ~bald ~bald_female': '422',
+      'user:tester long_hair': 70,
+      'user:tester short_hair': 20,
+    });
+
+    const result = await adm.getHairLengthDistribution(user);
+
+    expect(result.find(r => r.name === 'Bald')).toMatchObject({
+      count: 0,
+      unknown: true,
+    });
+    expect(result.find(r => r.name === 'Long Hair')?.count).toBe(70);
+    // Zero-count buckets still drop out as before.
+    expect(result.find(r => r.name === 'Medium Hair')).toBeUndefined();
+  });
+
+  it('user stats: a lost count is not stored as 0', async () => {
+    const userStats = {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async () => undefined),
+    };
+    const rl = makeSyncRateLimiter(async (url: string) =>
+      url.includes('gentags')
+        ? {ok: true, status: 200, json: async () => ({counts: {posts: null}})}
+        : {ok: true, status: 200, json: async () => ({counts: {posts: 3}})},
+    );
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([]), {user_stats: userStats}) as never,
+      rl as never,
+    );
+
+    expect(await adm.getUserStats(user)).toBeNull();
+    expect(userStats.put).not.toHaveBeenCalled();
+  });
+});
+
+// Pie slice thumbnails are `user:X <tag> order:score rating:g`: 3 terms, 4
+// for Hair "Bald". Over the viewer's limit they can only 422, so they are
+// not sent (T-204 item 8).
+describe('enrichThumbnails — viewer tag limit', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function setViewerLevel(level: string) {
+    vi.stubGlobal('window', {
+      location: {origin: 'https://danbooru.donmai.us'},
+      dispatchEvent: vi.fn(),
+    });
+    vi.stubGlobal('document', {body: {dataset: {currentUserLevel: level}}});
+  }
+
+  async function thumbQueries(level: string): Promise<string[]> {
+    setViewerLevel(level);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      makeSyncRateLimiter() as never,
+    );
+    const fetchThumb = vi
+      .spyOn(adm, 'fetchThumbnailWithRetry')
+      .mockResolvedValue('t.webp');
+    vi.spyOn(adm, 'saveStats').mockResolvedValue();
+    const items = [
+      {name: 'Long Hair', originalTag: 'long_hair', count: 9},
+      {name: 'Bald', originalTag: '~bald ~bald_female', count: 1},
+      {name: 'Unknown', originalTag: 'short_hair', count: 0, unknown: true},
+    ];
+    await adm.enrichThumbnails(
+      'hair_length_dist',
+      42,
+      items as never,
+      makeSyncUser({name: 'tester'}),
+    );
+    return fetchThumb.mock.calls.map(c => c[0]);
+  }
+
+  it('anonymous (limit 2): sends none', async () => {
+    expect(await thumbQueries('0')).toEqual([]);
+  });
+
+  it('Member (limit 3): sends the 3-term one, not the 4-term Bald', async () => {
+    expect(await thumbQueries('20')).toEqual([
+      'user:tester long_hair order:score rating:g',
+    ]);
+  });
+
+  it('Gold (unlimited): sends both; never one for an unknown slice', async () => {
+    expect(await thumbQueries('30')).toEqual([
+      'user:tester long_hair order:score rating:g',
+      'user:tester ~bald ~bald_female order:score rating:g',
+    ]);
+  });
 });
 
 describe('getFavCopyrightDistribution — uses fav: count query', () => {

@@ -152,6 +152,10 @@ const LEGEND_TITLES: Record<string, string> = {
   commentary: 'COMMENTARY',
   translation: 'TRANSLATION',
 };
+/** Legend tooltip of a slice whose count could not be had (`unknown`). */
+const UNKNOWN_COUNT_TITLE =
+  'Unknown: Danbooru did not return this count. The search may be over ' +
+  "your account's tag limit.";
 /** Custom categorical order for the hair_length tab (count-based sort would
  *  reorder buckets in non-intuitive ways). */
 const HAIR_LENGTH_ORDER = [
@@ -191,7 +195,10 @@ function preprocessFrequencyTab(data: PieTabItem[]): PieTabItem[] {
  * upstream-supplied color, everything else falls back to PIE_PALETTE.
  * Pure.
  */
-function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
+export function processSlices(
+  data: PieTabItem[],
+  currentPieTab: string,
+): PieSlice[] {
   // T-26 baseline: arrow complexity 22. Tab-specific normalization (status
   // colors, rating labels, hair_color passthrough, tag fallbacks). Pure
   // mapping; refactor would be splitting per tab — over-abstraction risk.
@@ -211,6 +218,7 @@ function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
       frequency?: number;
       thumb?: string | null;
       count: number;
+      unknown?: boolean;
     };
 
     const tagDetails = (): PieDetails => ({
@@ -219,6 +227,7 @@ function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
       originalTag: item.originalTag,
       isOther: item.isOther,
       count: item.count,
+      unknown: item.unknown,
       thumb: item.thumb,
       color: item.color,
       frequency: item.frequency,
@@ -995,7 +1004,7 @@ function bindTouchPieInteractions(args: {
  * injected) and replaces the rest of the inner HTML with a fresh title +
  * one row per slice. Pure on processedData / pctFor.
  */
-function renderPieLegend(args: {
+export function renderPieLegend(args: {
   legendDiv: Element;
   processedData: PieSlice[];
   currentPieTab: string;
@@ -1028,7 +1037,8 @@ function renderPieLegend(args: {
 
   const listHtml = processedData
     .map((d, idx) => {
-      const pct = pctFor(d.label);
+      const isUnknown = d.details.kind === 'tag' && !!d.details.unknown;
+      const pct = isUnknown ? '—' : pctFor(d.label);
       const isOtherSlice = d.details.kind === 'tag' && !!d.details.isOther;
       let targetUrl = '#';
 
@@ -1047,9 +1057,11 @@ function renderPieLegend(args: {
       const swatchColor = safeColor(d.color);
       const safeLabel = escapeHtml(d.label);
       const safeUrl = escapeHtml(targetUrl);
-      const countTitle = d.details.count
-        ? escapeHtml(d.details.count.toLocaleString())
-        : '';
+      const countTitle = isUnknown
+        ? UNKNOWN_COUNT_TITLE
+        : d.details.count
+          ? escapeHtml(d.details.count.toLocaleString())
+          : '';
       // Mark every Copy/Fav_Copy/Char legend row for the post-render
       // wire-up — including Others, which needs its own mouseenter
       // handler to revert the sub-chart back to the main pie (v9.6.2+).

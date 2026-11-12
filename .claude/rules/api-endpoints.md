@@ -7,7 +7,7 @@ All API calls must go through `RateLimitedFetch`.
 | `/posts.json` | Fetch uploads (tags, only, limit, page) |
 | `/post_approvals.json` | Fetch approvals (search params) |
 | `/note_versions.json` | Fetch notes (search params) |
-| `/counts/posts.json` | Count queries (integrity checks, rating counts). Server rate limit 1 req/s, burst 15, and the search tag limit applies (both since 2026-11-05). A count the server cannot finish in time comes back as `{"counts":{"posts":null}}` with HTTP 200, and that `null` is cached server-side for 5 minutes |
+| `/counts/posts.json` | Count queries (integrity checks, rating counts). Server rate limit 1 req/s, burst 15, and the search tag limit applies (both since 2026-11-05). A count the server cannot finish in time comes back as `{"counts":{"posts":null}}` with HTTP 200, and that `null` is cached server-side for 5 minutes; `fetchRemoteCount` throws `CountUnavailableError` for it (never 0), and `countBatch` does not retry it |
 | `/reports/posts.json` | Tag page uploader / approver rankings (`fetchReportRanking`: `search[tags]`, `search[group]`, `search[from]`, `search[to]`). Also supports `search[period]=day…year` time series and `search[group]=rating` / `is_deleted`. Server rate limit 1 req / 3 s, burst 15. Time buckets are UTC (`date_trunc`); `from` / `to` are cut to dates and included at both ends |
 | `/related_tag.json` | Character/copyright distribution (category filter). Server rate limit 1 req/s, burst 30 |
 | `/tag_implications.json` | Top-level tag detection. Single-tag: `search[antecedent_name_matches]=<name>`. Batched (v10+): `search[antecedent_name_comma]=t1,t2,...&limit=1000` — used by `getTopLevelFlags` in `core/top-level-tags.ts` (50 names per request, cached 180d in `tag_implications_cache`) — shared by tag pages and the user dashboard's character / copyright / fav-copyright pies, which used to fire one single-tag request per candidate |
@@ -45,7 +45,11 @@ Verified live as anonymous (limit 2) in the 2026-11-12 audit: `user:X 1girl` →
 | Tag page commentary: `<tag> has:commentary commentary` / `… commentary_request`; tag-side translation inclusion-exclusion | 3 | **422** | ok | ok |
 | Suspicious upload tags: matched client-side on `tag_string_meta` inside the `id:<csv> status:any` lookup, never as a 4-term `~` search | 0 | ok | ok | ok |
 
-A 422 on one of these counts is currently read as 0 (audit DA-19; to be fixed by TASK.md T-204 / T-308 / T-408). A 422 on a thumbnail lookup returns `''` (`fetchThumbnailWithRetry`), so that slice simply shows no thumbnail.
+**How a lost count shows (v9.12, T-204).** In the user dashboard's Commentary, Translation and Hair length pies, a count that comes back 422, `null` or lost after its retry becomes an `unknown` slice (`DistributionItem.unknown`): the legend shows "—" with an explanation and the slice takes no share of the pie. Translation's "Untagged" is not computed when any of its six terms is missing. A 422 run is cached (it would 422 again); a `null` or lost count is not (`countBatch` → `cacheUnlessPartial`). The tag page's counts still read a 422 as 0 until T-308; T-408 stops sending the over-limit queries at all.
+
+`fetchRemoteCount` throws `CountUnavailableError` on a `null` count instead of returning 0, so every caller treats it as a failure: the Grass integrity check skips (it used to wipe the year), `getTotalPostCount` falls back to the profile, `getUserStats` keeps its previous value.
+
+Pie slice thumbnails over the viewer's limit are not requested at all (`fitsViewerTagLimit` in `core/search-terms.ts`, which counts terms like `PostQuery#term_count` and reads `<body data-current-user-level>`): an anonymous viewer gets no pie thumbnails, a Member none for Hair "Bald".
 
 **Known over-limit click-through links (intentional since v8.0.3).** Some pie-slice links keep the full conceptual query (`buildSearchQuery` in `apps/user-analytics-pie-helpers.ts`), so a viewer below the limit lands on the Search Error page; Gold+ get the real search:
 - Gender slices: `user:X ~1girl ~2girls ~3girls ~4girls ~5girls ~6+girls` (7 terms; same for boys / others), via `DistributionItem.originalTag`.
