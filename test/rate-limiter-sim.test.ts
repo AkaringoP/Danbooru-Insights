@@ -5,12 +5,12 @@
  * Re-creates the 2026-11-12 audit's section 3.3 experiment as a standing
  * test (TASK.md T-201). Each scenario drives the limiter with the request
  * shapes the app really produces, under fake timers, and records what the
- * server saw. The "G-1 cap" checks hold since T-202 (6 req/s, burst 1);
- * the "current behaviour" checks still reproduce the audit's findings and
- * are flipped by T-203 (per-action lanes).
+ * server saw. Each group of checks notes what the audit measured before
+ * the change it pins: the "G-1 cap" since T-202 (6 req/s, burst 1), the
+ * "per-action lanes" since T-203.
  *
- * The edge (Cloudflare) rule is unknown; the B-edge scenarios try two
- * assumptions, as the audit did.
+ * The edge (Cloudflare) rule is unknown; scenario C tries the audit's
+ * "10 per second" assumption, and B.max10s covers its "100 per 10 s" one.
  */
 import {describe, it, expect, vi, beforeAll, afterAll} from 'vitest';
 import {RateLimitedFetch} from '../src/core/rate-limiter';
@@ -323,9 +323,8 @@ describe('maxInWindow', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Scenarios. The harness checks hold for any limiter; the "current
-// behaviour" checks reproduce the audit's findings and are flipped by
-// T-203.
+// Scenarios. The harness checks hold for any limiter; the others pin what
+// T-202 and T-203 fixed, with the audit's "before" numbers in comments.
 // ---------------------------------------------------------------------------
 
 describe('limiter simulation — harness', () => {
@@ -373,27 +372,32 @@ describe('limiter simulation — G-1 cap (6 req/s, burst 1)', () => {
   });
 });
 
-describe('limiter simulation — current behaviour (pre-T-203)', () => {
-  it('E: count 429s stall the whole queue, and counts are lost', () => {
-    // audit: 101 x 429, sync 250 s, 33 counts lost; after G-1 about 53 x
-    // 429 and 26 lost. A count 429 pauses the general queue, so the sync
-    // waits too. T-203's count lane: no 429, sync near A, nothing lost.
-    expect(results.E.total429).toBeGreaterThan(25);
-    expect(results.E.lost.counts).toBeGreaterThan(0);
-    expect(results.E.durations.sync).toBeGreaterThan(
-      4 * results.A.durations.sync,
+describe('limiter simulation — per-action lanes (T-203)', () => {
+  it('E: counts wait in their own lane; the sync is not held up', () => {
+    // Before the lanes (one shared queue, a count 429 paused everything):
+    // audit 101 x 429, sync 250 s, 33 counts lost; after G-1 54 x 429,
+    // sync 196 s, 26 lost.
+    expect(results.E.total429).toBe(0);
+    expect(results.E.lost).toEqual({sync: 0, counts: 0});
+    expect(results.E.durations.sync).toBeLessThan(
+      1.3 * results.A.durations.sync,
     );
   });
 
-  it('T: a tag page first visit loses a large share of its months', () => {
-    // audit H: 59 of 250 lost (its model retried). fetchMonthlyCounts does
-    // not retry, as here. T-203's lane: 0 lost (it still takes ~4 min).
-    expect(results.T.lost.history).toBeGreaterThan(HISTORY_MONTHS / 4);
-    expect(results.T.total429).toBeGreaterThan(HISTORY_MONTHS / 4);
+  it('T: a tag page first visit loses no month', () => {
+    // Before: 117 of 250 months lost, each one a 429.
+    expect(results.T.lost.history).toBe(0);
+    expect(results.T.total429).toBe(0);
   });
 
-  it('T: the 3 s report cooldown makes 4 rankings take 9 s or more', () => {
-    // The server allows a burst of 15. T-203 drops the fixed cooldown: < 4 s.
-    expect(results.T.durations.ranking).toBeGreaterThanOrEqual(9000);
+  it('T: but 250 counts still take ~4 min at the server limit of 1/s', () => {
+    // 14 from the burst (one point kept in reserve), then 1/s. Only fewer
+    // requests helps: the monthly history moves to /reports in Phase 3.
+    expect(results.T.durations.history).toBeGreaterThan(230_000);
+  });
+
+  it('T: the 4 rankings no longer wait 3 s apart', () => {
+    // Before: a fixed 3 s cooldown, 13.6 s for 4 reports (server burst 15).
+    expect(results.T.durations.ranking).toBeLessThan(4000);
   });
 });

@@ -112,7 +112,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 | 레이어 | 역할 | 예시 |
 |---|---|---|
-| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts`, `profile-summary.ts` |
+| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `rate-lane.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts`, `profile-summary.ts` |
 | `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts`, `dashboard-preview-popover.ts`, `grass-month-popover.ts`, `profile-summary-view.ts` |
 | `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
 | `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts`, `log-capture.ts` |
@@ -149,14 +149,16 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 | `/related_tag.json` | 1 req/s, 버스트 30 | `app/policies/related_tag_query_policy.rb` |
 | 그 밖의 읽기 (`/posts.json` 등) | Rails 한도 없음 | `app/policies/application_policy.rb` 의 `rate_limit_for_read` |
 
-한도에 걸린 상태에서 보낸 요청은 1 초 분씩 점수를 더 깎음 (최저 −30). Rails 한도는 성공 응답과 429 양쪽에 `X-Rate-Limit` 헤더를 붙임. 흔히 말하는 "전체 10 req/s" 는 저장소에 없는 앞단(edge, Cloudflare) 설정으로 보이며 실제 규칙은 확인하지 못함. 클라이언트는 아래처럼 아직 이 액션별 구조를 따로 다루지 않음 (count 도 general 큐를 탐 — 감사 DA-18, PLAN.md Phase 2).
+한도에 걸린 상태에서 보낸 요청은 1 초 분씩 점수를 더 깎음 (최저 −30). Rails 한도는 성공 응답과 429 양쪽에 `X-Rate-Limit` 헤더를 붙임. 흔히 말하는 "전체 10 req/s" 는 저장소에 없는 앞단(edge, Cloudflare) 설정으로 보이며 실제 규칙은 확인하지 못함. 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 옴.
 
-**클라이언트** — Token bucket 알고리즘 기반 3-queue 시스템. 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
+**클라이언트** — 토큰 버킷 하나 + 서버 액션별 차선 (v9.12). 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
 - **General Queue**: 8 concurrent requests, **6 req/sec, 버스트 1**, 0-50ms jitter → 한 탭에서 임의의 1 초에 최대 7 건, 10 초에 최대 61 건 (결정 G-1, v9.12). v9.6 의 9 req/sec · 버스트 9 (버스트가 속도와 같았음) 는 Grass 와 sync 가 겹치면 1 초 16 건 · 10 초 98 건까지 나갔음. Grass · UserAnalytics · TagAnalytics 가 `main.ts` 가 만든 limiter 하나를 공유. `RateLimitedFetch` 의 4 번째 인자가 버스트 (생략하면 속도와 같음 — 테스트용)
-- **Report Queue**: 격리됨, `/reports/` URL 에 3 초 cooldown (`CONFIG.REPORT_COOLDOWN_MS`)
+- **차선** ([src/core/rate-lane.ts](src/core/rate-lane.ts)): counts · reports · related_tag 요청은 각자의 차선에서 기다림. 차선은 서버 버킷의 로컬 추정치 (처음엔 위 표의 수치, 이후 응답마다 오는 `X-Rate-Limit` 로 보정 — 다른 탭이 같은 버킷을 쓴 것도 반영) 가 2 점 이상 (1 점 여유) 이고 진행 중 요청이 2 건 미만일 때만 보냄. 차선 요청도 일반 버킷 토큰을 하나 씀 → count · report 를 합쳐도 위의 7 / 61 상한 안. 발송은 "차선이 준비된 요청 중 가장 먼저 온 것" 이라 기다리는 차선이 sync 를 막지 않음. 모르는 경로가 `X-Rate-Limit` 를 보내면 그 경로용 차선을 만듦. v9.11 까지의 report 전용 큐 (3 초 고정 대기) 는 없어짐
+- **429 의 범위**: `X-Rate-Limit` 이 붙은 429 (Rails 의 액션별 한도) 는 **그 차선만** 기다림 — 전체 정지 · 속도 절반 · 다른 탭 알림 없음. 헤더 없는 429 (앞단) 만 아래의 전체 정지로 감. `backoffRemainingMs()` 는 전체 정지만 뜻함
+- **깨움**: 큐 전체에 예약된 깨움 하나 (`scheduleWake`). 거절될 때마다 타이머를 걸던 방식은 250 건 대기에 타이머 수만 개를 만들었음 (감사 DA-13)
 - **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 탭 수로 분할 (버스트 1 은 탭마다 유지 — N 탭이면 최악의 1 초가 6 + N 건)
 - **모의 실험**: [test/rate-limiter-sim.test.ts](test/rate-limiter-sim.test.ts) 가 실제 limiter 를 Danbooru 서버 한도 모델 (`test/helpers/server-bucket.ts`, `rate_limit.rb` 그대로) 에 돌려 1 초 · 10 초 상한, 429 수, 유실을 단언. limiter 를 바꾸면 여기 숫자부터 확인
-- **429 global backoff**: 서버 대기시간을 따름. Danbooru 는 `Retry-After` 대신 `X-Rate-Limit` 헤더 (token bucket JSON: `rate`/`cost`/`limits{key: points}`) 를 보냄 → `(cost − 최저 points) / rate` 초 + 0.5s 동안 전체 큐 정지 (`backoffFromResponse`). 헤더 없으면 `Retry-After`, 그것도 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s). `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp. 제한 중 요청은 1 초씩 debt 를 늘리므로 (최대 ~30s) 고정 5s 로는 429 가 반복됐음
+- **429 global backoff** (헤더 없는 429): `Retry-After` 가 있으면 그 값, 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s) 동안 전체 큐 정지 (`backoffFromResponse`, `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp) 하고 다른 탭에 알림. (`backoffFromResponse` 는 `X-Rate-Limit` 에서 `(cost − 최저 points) / rate` 초 + 0.5s 를 계산하는 경로도 가지고 있지만, 그런 429 는 이제 차선이 받음)
 - **Slow start + 적응형 rate**: 정지가 끝나면 5 초간 토큰 1 개 / 동시 2 개로만 재개 (정지 중 꽉 찬 버킷과 대기 타이머가 한꺼번에 터지며 다음 429 를 부르던 문제). 정지 밖에서 받은 429 마다 rate·동시성을 절반으로 (하한 25%), 429 없는 20 초마다 25%p 씩 복구. 복구 상한은 429 가 난 rate 보다 한 단계 (25%p) 아래 — 상한 없이는 0.5 에서 버티다 0.56~0.75 로 회복할 때마다 수 초 안에 429 가 나는 톱니가 생겼음. 상한은 429 없는 2 분마다 한 단계씩 올라감. 단, slow start 구간 (정지 직후) 에 난 429 는 "정지가 서버 페널티보다 짧았다" 로 보고 rate·상한은 그대로 두고 정지만 2 배로 늘림 (5→10→20s…, 최대 `MAX_BACKOFF_MS`, 서버가 대기시간을 주면 그 값) 실측상 Danbooru 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 와서 서버 대기시간 추종이 작동 안 함 — 이 두 장치가 실질적인 방어선
 
 ## Evaluator Rubric (작업 완료 선언 전 self-evaluation 용)

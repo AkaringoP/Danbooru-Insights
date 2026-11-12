@@ -174,7 +174,7 @@ describe('RateLimitedFetch', () => {
   });
 
   describe('fetch() routing', () => {
-    it('routes /reports/ URLs to the report queue', async () => {
+    it('routes /reports/ URLs through the reports lane', async () => {
       const rl = new RateLimitedFetch(6, [0, 0], 6);
       const p = rl.fetch('/reports/something');
       await vi.runAllTimersAsync();
@@ -283,11 +283,12 @@ describe('server-driven 429 backoff', () => {
     });
   });
 
-  it('a 429 pauses the limiter for the server wait and broadcasts it', async () => {
+  it('a header-less 429 pauses everything for the server wait and broadcasts it', async () => {
+    // The edge in front of Danbooru: no X-Rate-Limit, maybe a Retry-After.
     global.fetch = vi.fn().mockResolvedValue({
       status: 429,
       ok: false,
-      headers: new Headers({'X-Rate-Limit': xRateLimit({'user/1': -9})}),
+      headers: new Headers({'Retry-After': '8'}),
     });
     const rl = new RateLimitedFetch(1, [0, 0], 10);
     const onBackoff = vi.fn();
@@ -296,12 +297,138 @@ describe('server-driven 429 backoff', () => {
 
     await rl.fetch('/posts.json');
 
-    // (1 - -9) / 1 s + 0.5 s margin
-    expect(rl.backoffUntil - start).toBe(10_500);
+    expect(rl.backoffUntil - start).toBe(8000);
     expect(onBackoff).toHaveBeenCalledWith(rl.backoffUntil);
-    expect(rl.backoffRemainingMs()).toBe(10_500);
-    vi.advanceTimersByTime(10_500);
+    expect(rl.backoffRemainingMs()).toBe(8000);
+    vi.advanceTimersByTime(8000);
     expect(rl.backoffRemainingMs()).toBe(0);
+  });
+});
+
+// Danbooru limits counts, reports and related tags with their own buckets
+// and sends the bucket on every reply. Their requests wait in their own
+// lane, sized from that header, and a 429 there holds only that lane.
+describe('per-action lanes', () => {
+  const header = (action: string, points: number, rate = 1, burst = 15) =>
+    JSON.stringify({
+      action,
+      rate,
+      burst,
+      cost: 1,
+      minimum_points: -30,
+      enabled: true,
+      limits: {'ip/1.2.3.0/24': points},
+    });
+  /** fetch double answering by path; anything unlisted is a plain 200. */
+  function serve(
+    routes: Record<string, {status: number; header?: string}>,
+  ): string[] {
+    const calls: string[] = [];
+    global.fetch = vi.fn(async (url: string) => {
+      calls.push(url);
+      const path = Object.keys(routes).find(p => url.startsWith(p));
+      const r = path ? routes[path] : {status: 200};
+      return {
+        status: r.status,
+        ok: r.status < 400,
+        headers: new Headers(r.header ? {'X-Rate-Limit': r.header} : {}),
+      };
+    }) as unknown as typeof fetch;
+    return calls;
+  }
+
+  it('a 429 with X-Rate-Limit holds only its lane, and is not broadcast', async () => {
+    const calls = serve({
+      '/counts/': {status: 429, header: header('counts:posts', -9)},
+    });
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    const onBackoff = vi.fn();
+    rl.onBackoff = onBackoff;
+
+    await rl.fetch('/counts/posts.json?tags=a');
+    expect(onBackoff).not.toHaveBeenCalled();
+    expect(rl.backoffRemainingMs()).toBe(0);
+
+    // General traffic goes straight through...
+    await rl.fetch('/posts.json?page=1');
+    // ...while the next count waits until the bucket holds 2 points:
+    // from -9 at 1 point/s, 11 s.
+    void rl.fetch('/counts/posts.json?tags=b');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls.filter(u => u.includes('tags=b'))).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(calls.filter(u => u.includes('tags=b'))).toHaveLength(1);
+  });
+
+  it('re-syncs a lane from the header of a successful reply', async () => {
+    // Another tab has spent the shared bucket: the server says 0 points.
+    const calls = serve({
+      '/counts/': {status: 200, header: header('counts:posts', 0)},
+    });
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    await rl.fetch('/counts/posts.json?tags=a');
+    void rl.fetch('/counts/posts.json?tags=b');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('a lane that must wait does not hold up requests queued after it', async () => {
+    const calls = serve({
+      '/counts/': {status: 200, header: header('counts:posts', -5)},
+    });
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    await rl.fetch('/counts/posts.json?tags=a');
+    void rl.fetch('/counts/posts.json?tags=b');
+    void rl.fetch('/posts.json?page=1');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(calls).toEqual(['/counts/posts.json?tags=a', '/posts.json?page=1']);
+  });
+
+  it('sends reports together instead of 3 s apart', async () => {
+    const calls = serve({});
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    for (let i = 0; i < 4; i++) void rl.fetch(`/reports/posts.json?g=${i}`);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toHaveLength(4);
+  });
+
+  it('caps a lane at 2 requests in flight until a reply calibrates it', async () => {
+    const release: Array<() => void> = [];
+    let sent = 0;
+    global.fetch = vi.fn(
+      () =>
+        new Promise(resolve => {
+          sent++;
+          release.push(() =>
+            resolve({status: 200, ok: true, headers: new Headers()}),
+          );
+        }),
+    ) as unknown as typeof fetch;
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    for (let i = 0; i < 5; i++) void rl.fetch(`/counts/posts.json?tags=${i}`);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sent).toBe(2);
+    release.splice(0).forEach(r => r());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sent).toBe(4);
+  });
+
+  it('learns a lane for a path that turns out to be rate-limited', async () => {
+    const calls = serve({
+      '/artists.json': {status: 429, header: header('artists:index', -3)},
+    });
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    const onBackoff = vi.fn();
+    rl.onBackoff = onBackoff;
+    await rl.fetch('/artists.json?page=1');
+    expect(onBackoff).not.toHaveBeenCalled();
+    void rl.fetch('/artists.json?page=2');
+    await rl.fetch('/posts.json');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls.filter(u => u.startsWith('/artists.json'))).toHaveLength(1);
+    expect(calls).toContain('/posts.json');
   });
 });
 

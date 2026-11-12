@@ -201,7 +201,8 @@ localStorage.removeItem('di.perf.enabled');
 2. In **Logs**:
    - `Page fetch attempt failed {page, attempt, kind, error}` — a page fetch that will be retried. `kind` is `rate-limit` (429), `transient` (5xx, timeout, network) or `fatal`.
    - `Page failed, stopping sync {page, error}` — retries ran out (or the error was fatal). This is what ends a sync early.
-   - `429 received, pausing requests {waitMs, source, cause, throttle, ceiling, xRateLimit}` — the shared rate limiter paused. `cause` is `rate` (sending too fast: rate halved), `pause-too-short` (429 right after resuming: next pause doubled) or `in-flight` (a request sent before the pause). `source: default` with `xRateLimit: null` means the 429 carried no wait hint.
+   - `429 received, pausing requests {waitMs, source, cause, throttle, ceiling, xRateLimit}` — a 429 from the edge in front of Danbooru (no `X-Rate-Limit`): the shared rate limiter paused everything. `cause` is `rate` (sending too fast: rate halved), `pause-too-short` (429 right after resuming: next pause doubled) or `in-flight` (a request sent before the pause). `source: default` means the 429 carried no wait hint.
+   - `429 on a per-action limit, holding that lane {lane, action, waitMs, xRateLimit, url}` — one of Danbooru's own per-action limits (counts, reports, related tags) refused a request. Only that lane waits; syncs and other traffic keep going. Seeing these regularly means the lane's estimate drifts from the server (another tab, or a changed limit).
    - `Partial fetch not cached {cacheKey}` — some counts behind a stat were lost even after a retry; that stat was shown but not saved, and the next open refetches it.
 3. In **UserAnalyticsApp**, `Posts in DB` should match the user's upload count after a successful sync.
 

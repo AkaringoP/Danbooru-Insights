@@ -8,7 +8,6 @@ export const CONFIG: {
   STORAGE_PREFIX: string;
   MAX_OPTIMIZED_POSTS: number;
   MAX_PREVIEW_ONLY_UPLOADS: number;
-  REPORT_COOLDOWN_MS: number;
   ANALYTICS_CLEANUP_THRESHOLD_MS: number;
   CACHE_EXPIRY_MS: number;
   FULL_REFRESH_HINT_DAYS: number;
@@ -34,8 +33,6 @@ export const CONFIG: {
   /** Total-uploads cap below which the icon click shows the preview popover
    *  instead of the full dashboard (avoids loading a near-empty report). */
   MAX_PREVIEW_ONLY_UPLOADS: 30,
-  /** Cooldown between report queue requests (ms). */
-  REPORT_COOLDOWN_MS: 3000,
   /** Retention threshold for analytics-data-manager cleanup (14 days). */
   ANALYTICS_CLEANUP_THRESHOLD_MS: 14 * DAY_MS,
   /** Cache expiry for tag_analytics and piestats (24 hours). */
