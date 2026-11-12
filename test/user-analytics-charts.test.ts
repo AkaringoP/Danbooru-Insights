@@ -18,9 +18,12 @@ vi.mock('../src/ui/popover-utils', async () => {
   };
 });
 
-import {renderPieWidget} from '../src/apps/user-analytics-charts';
+import {
+  renderHistoryChart,
+  renderPieWidget,
+} from '../src/apps/user-analytics-charts';
 import type {AnalyticsDataManager} from '../src/core/analytics-data-manager';
-import type {TargetUser} from '../src/types';
+import type {MilestoneEntry, TargetUser} from '../src/types';
 
 const TARGET_USER: TargetUser = {
   name: 'fixture_user',
@@ -474,5 +477,80 @@ describe('renderPieWidget — lazy tab loading', () => {
       const fetcher = dm[FETCHER_BY_TAB[mode]] as ReturnType<typeof vi.fn>;
       expect(fetcher, `tab ${mode}`).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+describe('renderHistoryChart - month column click (CSP-safe)', () => {
+  // Danbooru's CSP (2026-11-11) blocks inline `onclick` attributes, so the
+  // month → search link must come from a real listener.
+  const MONTHLY = [
+    {date: '2024-01', count: 3, label: 'Jan 2024'},
+    {date: '2024-02', count: 5, label: 'Feb 2024'},
+  ];
+  const STAR: MilestoneEntry = {
+    milestone: 1,
+    post: {
+      id: 777,
+      created_at: '2024-02-15T12:00:00Z',
+      uploader_id: 42,
+      rating: 'g',
+    },
+  };
+
+  async function renderChart(milestones: MilestoneEntry[] = []) {
+    const dm = {
+      getMonthlyStats: vi.fn(async () => MONTHLY),
+    } as unknown as AnalyticsDataManager;
+    const container = makeContainer();
+    await renderHistoryChart(
+      container,
+      dm,
+      {targetUser: TARGET_USER},
+      milestones,
+      [],
+    );
+    return container;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders no inline event handler attributes', async () => {
+    const container = await renderChart([STAR]);
+    const withHandler = Array.from(container.querySelectorAll('*')).filter(el =>
+      Array.from(el.attributes).some(a => /^on/i.test(a.name)),
+    );
+    expect(withHandler).toEqual([]);
+  });
+
+  it('opens the clicked month search in a new tab', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const container = await renderChart();
+    const columns = container.querySelectorAll('.month-column');
+    expect(columns.length).toBe(2);
+
+    columns[0]
+      .querySelector('.column-overlay')!
+      .dispatchEvent(new MouseEvent('click', {bubbles: true}));
+
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith(
+      '/posts?tags=user:fixture_user+date:2024-01-01...2024-02-01',
+      '_blank',
+    );
+  });
+
+  it('does not open a month search when a milestone star is clicked', async () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    const container = await renderChart([STAR]);
+    const star = Array.from(container.querySelectorAll('svg text')).find(t =>
+      t.textContent?.includes('★'),
+    );
+    expect(star).toBeDefined();
+
+    star!.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+
+    expect(open).not.toHaveBeenCalled();
   });
 });

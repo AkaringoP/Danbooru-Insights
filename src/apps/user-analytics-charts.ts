@@ -2943,7 +2943,7 @@ export async function renderHistoryChart(
     const searchUrl = `/posts?tags=user:${encodeURIComponent(context.targetUser.normalizedName)}+${dateFilter}`;
 
     svg += `
-      <g class="month-column" style="cursor: pointer;" onclick="window.open('${searchUrl}', '_blank')">
+      <g class="month-column" style="cursor: pointer;" data-search-url="${escapeHtml(searchUrl)}">
         <rect class="column-overlay" x="${colX}" y="0" width="${colWidth}" height="${vHeight - padBottom}" fill="transparent" />
         <rect class="monthly-bar" x="${x}" y="${y}" width="${barWidth}" height="${barH}" fill="#40c463" rx="2" style="pointer-events: none;" />
         <title>${m.label}: ${m.count} posts</title>
@@ -3024,7 +3024,7 @@ export async function renderHistoryChart(
              `;
         } else {
           svg += `
-               <a href="/posts/${m.post.id}" target="_blank" style="cursor: pointer; pointer-events: all;" onclick="event.stopPropagation()">
+               <a href="/posts/${m.post.id}" target="_blank" style="cursor: pointer; pointer-events: all;">
                   <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}">
                      ★
                      <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
@@ -3040,6 +3040,15 @@ export async function renderHistoryChart(
 
   chartDiv.innerHTML = chartHtml;
   chartWrapper.innerHTML = svg;
+  // Month click → that month's post search. One delegated listener rather
+  // than an inline `onclick`: Danbooru's CSP blocks inline handlers (see
+  // ui/thumb-fallback.ts). Milestone stars are siblings of the columns, not
+  // children, so a star click never matches `.month-column`.
+  chartWrapper.addEventListener('click', e => {
+    const column = (e.target as Element | null)?.closest?.('.month-column');
+    const url = column?.getAttribute('data-search-url');
+    if (url) window.open(url, '_blank');
+  });
   chartDiv.appendChild(mainWrapper);
 
   container.appendChild(chartDiv);

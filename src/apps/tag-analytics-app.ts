@@ -15,6 +15,7 @@ import {
 } from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
+import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
 import type {Database} from '../core/database';
 import {
   getNsfwEnabled,
@@ -1916,7 +1917,7 @@ export class TagAnalyticsApp {
       <div class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.latestPost.rating}">
          <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-latest">
             <a href="/posts/${tagData.latestPost.id}" target="_blank">
-                <img src="${getBestThumbnailUrl(tagData.latestPost)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+                <img src="${getBestThumbnailUrl(tagData.latestPost)}" class="${THUMB_FALLBACK_CLASS}">
             </a>
          </div>
          <div class="di-nsfw-monitor-label">Latest</div>
@@ -1930,7 +1931,7 @@ export class TagAnalyticsApp {
       <div id="trending-post-sfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPost.rating}">
          <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-trending">
             <a href="/posts/${tagData.trendingPost.id}" target="_blank">
-                  <img src="${getBestThumbnailUrl(tagData.trendingPost)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+                  <img src="${getBestThumbnailUrl(tagData.trendingPost)}" class="${THUMB_FALLBACK_CLASS}">
             </a>
          </div>
          <div class="di-nsfw-monitor-label-trending">Trending(3d)</div>
@@ -1944,7 +1945,7 @@ export class TagAnalyticsApp {
       <div id="trending-post-nsfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPostNSFW.rating}">
          <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-trending-nsfw">
             <a href="/posts/${tagData.trendingPostNSFW.id}" target="_blank">
-                  <img src="${getBestThumbnailUrl(tagData.trendingPostNSFW)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+                  <img src="${getBestThumbnailUrl(tagData.trendingPostNSFW)}" class="${THUMB_FALLBACK_CLASS}">
             </a>
          </div>
          <div class="di-nsfw-monitor-label-trending-nsfw">Trending(NSFW)</div>
@@ -2109,6 +2110,7 @@ export class TagAnalyticsApp {
     };
     const titleColor = colorMap[tagData.category] || 'var(--di-text, #333)';
 
+    installThumbFallback(content);
     content.innerHTML = `
       ${this.buildDashboardHeader(tagData, titleColor, categoryLabel)}
       ${this.buildMainGrid(tagData)}

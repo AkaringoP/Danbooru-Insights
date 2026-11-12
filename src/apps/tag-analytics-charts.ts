@@ -2,6 +2,7 @@ import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
 import {createBodyTooltip} from '../ui/popover-utils';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
+import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
 
 const log = createLogger('TagAnalyticsCharts');
 import type {
@@ -411,6 +412,7 @@ export class TagAnalyticsChartRenderer {
     if (loading) (loading as HTMLElement).style.display = 'none';
     if (!grid) return;
 
+    installThumbFallback(grid as HTMLElement);
     grid.innerHTML = '';
 
     if (milestonePosts.length === 0) {
@@ -482,7 +484,7 @@ export class TagAnalyticsChartRenderer {
                 <a href="/users/${p.uploader_id}" target="_blank" class="${getLevelClass(p.uploader_level ?? null)}" style="text-decoration: none;">${escapeHtml(uploaderName)}</a>
             </div>
             <a href="/posts/${p.id}" target="_blank" style="position: absolute; top: 10px; right: 10px; width: 60px; height: 60px; border-radius: 4px; overflow: hidden; background: var(--di-bg-tertiary, #f0f0f0); display: block;">
-                <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+                <img src="${thumbUrl}" class="${THUMB_FALLBACK_CLASS}" style="width: 100%; height: 100%; object-fit: cover;">
             </a>
         `;
 
