@@ -38,10 +38,7 @@ import type {
  * `fetchMonthlyCounts`'s history. `partial`: some month's count was lost
  * and reads as 0 in it, so the history must not be cached (G-4).
  */
-type MonthlyCountsData = HistoryEntry[] & {
-  historyCutoff?: string;
-  partial?: boolean;
-};
+type MonthlyCountsData = HistoryEntry[] & {partial?: boolean};
 
 /** A tag's monthly history from {@link TagAnalyticsDataService.fetchMonthlyHistory}. */
 export type MonthlyHistory = {
@@ -402,12 +399,24 @@ export class TagAnalyticsDataService {
   /**
    * Loads the tag analytics report from the cache if not expired.
    * Cache is considered stale after 24 hours.
+   *
+   * A report saved before histories were UTC months (no `historyBasis`) is
+   * not used: the analysis runs again, and this tag's monthly count rows go
+   * with it, so viewer-time-zone months never mix with UTC ones (T-303).
+   *
    * @return {Promise<?Object>} The cached data object or null if not found/expired.
    */
   async loadFromCache(): Promise<TagAnalyticsMeta | null> {
     if (!this.db || !this.db.tag_analytics) return null;
     try {
       const cached = await this.db.tag_analytics.get(this.tagName);
+      if (cached && !hasUtcHistory(cached.data)) {
+        log.debug('Cached report predates UTC history, refetching', {
+          tag: this.tagName,
+        });
+        await this.invalidateMonthlyCountsCache();
+        return null;
+      }
       if (cached) {
         // Check expiry (e.g. 24 hours)
         const age = Date.now() - cached.updatedAt;
@@ -473,6 +482,7 @@ export class TagAnalyticsDataService {
   /**
    * Bulk-reads monthly count cache entries for this tag.
    * Returns a Map keyed by `yearMonth` (missing entries are simply absent).
+   * Rows from before UTC months (no `basis`) count as missing.
    */
   private async readMonthlyCountsCache(
     yearMonths: string[],
@@ -483,7 +493,7 @@ export class TagAnalyticsDataService {
       const keys = yearMonths.map(ym => [this.tagName, ym] as [string, string]);
       const records = await this.db.tag_monthly_counts.bulkGet(keys);
       records.forEach((r, i) => {
-        if (r) result.set(yearMonths[i], r);
+        if (r?.basis === 'utc') result.set(yearMonths[i], r);
       });
     } catch (e) {
       log.warn('Failed to read monthly counts cache', {error: e});
@@ -506,6 +516,7 @@ export class TagAnalyticsDataService {
         yearMonth: e.yearMonth,
         count: e.count,
         fetchedAt: now,
+        basis: 'utc',
       }));
       // Tag pages have no current-user context; pass `0` so the evictor
       // can pick any user's posts as the LRU victim if quota is hit.
@@ -1090,149 +1101,6 @@ export class TagAnalyticsDataService {
     }
   }
 
-  async fetchHistoryBackwards(
-    tagName: string,
-    forwardStartDate: string,
-    targetTotal: number,
-    currentForwardTotal: number,
-  ): Promise<HistoryEntry[]> {
-    log.debug('Starting Reverse Scan', {
-      tag: tagName,
-      start: forwardStartDate,
-      target: targetTotal,
-      current: currentForwardTotal,
-    });
-    const history: HistoryEntry[] = [];
-    let totalSum = currentForwardTotal;
-    const currentMonth = new Date(forwardStartDate);
-
-    // We strictly start scanning from 1 month before the forward start date
-    // to avoid overlapping with fetchMonthlyCounts which already covers the starting month.
-    currentMonth.setMonth(currentMonth.getMonth() - 1); // Start from month BEFORE forward scan
-
-    // Danbooru founded in late 2005. Don't go past that.
-    const hardLimit = new Date('2005-01-01');
-
-    while (totalSum < targetTotal && currentMonth > hardLimit) {
-      const year = currentMonth.getFullYear();
-      const month = currentMonth.getMonth() + 1;
-
-      // Use next month's 1st day as end of range to include the last day of current month fully
-      const nextDate = new Date(currentMonth);
-      nextDate.setMonth(nextDate.getMonth() + 1);
-      const nYear = nextDate.getFullYear();
-      const nMonth = nextDate.getMonth() + 1;
-
-      const dateRange = `${year}-${String(month).padStart(2, '0')}-01...${nYear}-${String(nMonth).padStart(2, '0')}-01`;
-
-      try {
-        const count = await fetchRemoteCount(
-          this.rateLimiter,
-          `${tagName} date:${dateRange}`,
-        );
-
-        if (count > 0) {
-          history.unshift({
-            date: `${year}-${String(month).padStart(2, '0')}-01`,
-            count: count,
-            cumulative: 0, // Will fix in post-process
-          });
-          totalSum += count;
-          log.debug(`Reverse Scan Hit: ${year}-${month}`, {
-            count,
-            total: totalSum,
-            target: targetTotal,
-          });
-        }
-      } catch (e) {
-        log.warn(`Backward fetch failed for ${year}-${month}`, {error: e});
-      }
-
-      currentMonth.setMonth(currentMonth.getMonth() - 1);
-    }
-    log.debug('Reverse Scan Completed', {
-      total: totalSum,
-      target: targetTotal,
-      hitsCount: history.length,
-    });
-
-    // Calculate cumulative counts for backward data
-    let runningSum = 0;
-    for (let i = 0; i < history.length; i++) {
-      runningSum += history[i].count;
-      history[i].cumulative = runningSum;
-    }
-
-    return history;
-  }
-
-  async fetchHistoryDelta(
-    tagName: string,
-    lastDate: Date | string,
-    startDate: Date | string,
-  ): Promise<HistoryEntry[]> {
-    if (!lastDate) {
-      // Falling through to full scan — let the caching layer treat it as such.
-      return this.fetchMonthlyCounts(tagName, startDate, {isFullScan: true});
-    }
-
-    // Delta Sync: Check last 2 months only
-    const now = new Date();
-    const twoMonthsAgo = new Date(now);
-    twoMonthsAgo.setMonth(now.getMonth() - 2);
-    twoMonthsAgo.setDate(1); // Start from 1st of month
-
-    const effectiveStart =
-      lastDate && lastDate > twoMonthsAgo
-        ? twoMonthsAgo
-        : lastDate || startDate;
-
-    // Delta path: isFullScan=false (default) so forced-rescan/drift guard
-    // stay idle; the two months in range are always TTL-stale and get fetched.
-    return this.fetchMonthlyCounts(tagName, effectiveStart);
-  }
-
-  mergeHistory(
-    oldHistory: HistoryEntry[] | null,
-    newHistory: HistoryEntry[] | null,
-  ): HistoryEntry[] {
-    if (!oldHistory || oldHistory.length === 0) return newHistory ?? [];
-    if (!newHistory || newHistory.length === 0) return oldHistory;
-
-    // Map old history by date string (YYYY-MM-DD or time) for easy lookup?
-    // Actually, standard is array of objects { date: Date, count: number, cumulative: number }
-    // newHistory starts from lastDate.
-
-    // Remove overlapping months from oldHistory
-    // We keep old history UP TO the month before newStart.
-    // newStart is likely YYYY-MM-DD. We want to avoid duplication.
-    // fetchMonthlyCounts returns dates as YYYY-MM-01.
-
-    const newStart = newHistory[0].date;
-    const filteredOld = oldHistory.filter(h => h.date < newStart);
-
-    // Concatenate
-    let merged = filteredOld.concat(newHistory);
-
-    // Recalculate Cumulative strictly from start
-    // Note: This assumes the first item in merged has correct 'count' but 'cumulative' might need offset if we cropped pure start.
-    // But we are appending to a base.
-
-    // If we cut the tail of oldHistory, the last item of filteredOld has a cumulative count.
-    // We can just iterate and update.
-
-    let runningSum = 0;
-    merged = merged.map(h => {
-      // We can't just sum 'count' unless we are sure we have the WHOLE history from 2005.
-      // partial sync means we have (Old - Tail) + New.
-      // So valid history.
-      runningSum += h.count;
-      return {...h, cumulative: runningSum};
-    });
-
-    return merged;
-  }
-
   async fetchMilestonesDelta(
     tagName: string,
     currentTotal: number,
@@ -1763,7 +1631,6 @@ export class TagAnalyticsDataService {
     }
 
     const monthlyData: MonthlyCountsData = combined;
-    monthlyData.historyCutoff = now.toISOString();
     // A lost month reads as 0 above; the caller must not cache this history.
     if (fetchedResults.some(r => !r.ok)) monthlyData.partial = true;
     return monthlyData;

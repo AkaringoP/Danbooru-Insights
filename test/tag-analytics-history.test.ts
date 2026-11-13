@@ -216,6 +216,27 @@ describe('fetchMonthlyHistory — layer 2', () => {
     expect(result.history.at(-1)?.cumulative).toBe(143);
   });
 
+  it('does not read month rows saved before UTC months', async () => {
+    const cache = new Map<string, MonthlyCountRecord>();
+    await makeService(timesOutPast(150), cache).service.fetchMonthlyHistory(
+      'test_tag',
+    );
+    // The same rows as an older version wrote them: no `basis`.
+    for (const [ym, r] of cache) {
+      cache.set(ym, {
+        tag: r.tag,
+        yearMonth: ym,
+        count: r.count,
+        fetchedAt: r.fetchedAt,
+      });
+    }
+
+    const again = makeService(timesOutPast(150), cache);
+    await again.service.fetchMonthlyHistory('test_tag');
+
+    expect(rangeOf(again.reportCalls()[0]).from).toBe('2005-01-01');
+  });
+
   it('starts from 2005 again once a cached month has expired', async () => {
     const cache = new Map<string, MonthlyCountRecord>();
     await makeService(timesOutPast(150), cache).service.fetchMonthlyHistory(

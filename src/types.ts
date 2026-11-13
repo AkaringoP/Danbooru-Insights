@@ -821,6 +821,12 @@ export interface MonthlyCountRecord {
   count: number;
   /** Fetch timestamp in ms since epoch. */
   fetchedAt: number;
+  /**
+   * `'utc'` for counts of a UTC calendar month (written since T-303).
+   * Older rows counted the month in the viewer's time zone and are not
+   * read back. Not indexed, so adding it needed no schema version.
+   */
+  basis?: 'utc';
 }
 
 /**

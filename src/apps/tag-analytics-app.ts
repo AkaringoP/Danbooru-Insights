@@ -4,7 +4,6 @@ import {
   applyDashboardTheme,
   resolveEffectiveDashboardTheme,
 } from '../ui/theme-palette';
-import {fetchRemoteCount} from '../core/data-manager';
 import type {RateLimitedFetch} from '../core/rate-limiter';
 import {createModal, type ModalHandle} from '../ui/modal';
 import {
@@ -33,6 +32,7 @@ import {
 import type {
   InitialStats,
   LocalStats,
+  MonthlyHistory,
   RankingResult,
 } from './tag-analytics-data';
 import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
@@ -47,9 +47,6 @@ import type {
 } from '../types';
 
 const log = createLogger('TagAnalytics');
-
-/** fetchMonthlyCounts attaches historyCutoff to the returned array object. */
-type MonthlyHistoryData = HistoryEntry[] & {historyCutoff?: string};
 
 /** Result from _checkCache(). null = served from cache (caller should return). */
 interface CacheCheckResult {
@@ -72,12 +69,12 @@ interface QuickStatsResult {
 
 /** Promise bundle built by _buildHeavyStatPromises(). */
 interface HeavyStatPromises {
-  historyPromise: Promise<HistoryEntry[]>;
+  historyPromise: Promise<MonthlyHistory>;
   milestonesPromise: Promise<MilestoneEntry[]>;
   first100StatsPromise: Promise<LocalStats | undefined>;
 }
 
-/** Mutable container for backward-scan first-100 stats override. */
+/** Mutable container for the older-posts first-100 stats override. */
 interface First100Override {
   value: LocalStats | null;
 }
@@ -527,6 +524,8 @@ export class TagAnalyticsApp {
 
     // Attach Data
     meta.historyData = historyData;
+    // calculateHistoryFromPosts buckets by UTC month.
+    meta.historyBasis = 'utc';
     meta.firstPost = firstPost ?? undefined;
     meta.hundredthPost = hundredthPost ?? undefined;
     meta.timeToHundred = timeToHundred ?? undefined;
@@ -768,7 +767,6 @@ export class TagAnalyticsApp {
 
     const first100Override: First100Override = {value: null};
     const heavyPromises = this._buildHeavyStatPromises(
-      meta,
       initialStats,
       runDelta,
       baseData,
@@ -796,9 +794,9 @@ export class TagAnalyticsApp {
       {
         id: 'resolve_names',
         label: 'Resolving usernames...',
-        // first100StatsPromise is now self-contained: it returns either the
-        // backward-scan override (already name-resolved) or a fresh
-        // resolution of the initial first-100. No double-work.
+        // first100StatsPromise is self-contained: it returns the older-posts
+        // override, the cached rankings or a fresh resolution of the
+        // initial first-100 (already name-resolved). No double-work.
         promise: heavyPromises.first100StatsPromise,
       },
     ];
@@ -836,7 +834,7 @@ export class TagAnalyticsApp {
     log.debug('[Phase 2] Awaiting Heavy Stats...');
     const heavyResults = await heavyResultsPromise;
 
-    const [resolvedRankings, historyData, milestones, first100Stats] =
+    const [resolvedRankings, monthlyHistory, milestones, first100Stats] =
       heavyResults as [
         {
           uploaderAll: UserRanking[];
@@ -844,22 +842,22 @@ export class TagAnalyticsApp {
           uploaderYear: UserRanking[];
           approverYear: UserRanking[];
         },
-        HistoryEntry[],
+        MonthlyHistory,
         MilestoneEntry[],
         (
           | {uploaderRanking: UserRanking[]; approverRanking: UserRanking[]}
           | undefined
         ),
       ];
+    const historyData = monthlyHistory.history;
 
-    // Backward-scan may have refined firstPost/hundredthPost on initialStats.
-    // Always re-read to pick up the latest (the correctness guard in the
-    // backward-scan block only mutates when fresh posts are available, so
-    // re-reading is safe even when no scan ran).
+    // The older-posts check may have refined firstPost/hundredthPost on
+    // initialStats. Always re-read to pick up the latest (it only mutates
+    // when fresh posts are available, so re-reading is safe either way).
     firstPost = initialStats.firstPost;
     hundredthPost = initialStats.hundredthPost;
     if (first100Override.value) {
-      log.debug('Applying updated First 100 Rankings from backward scan.');
+      log.debug('Applying First 100 Rankings from the older posts.');
     }
 
     const {uploaderAll, approverAll, uploaderYear, approverYear} =
@@ -867,6 +865,7 @@ export class TagAnalyticsApp {
 
     // Assembly (Phase 2 fields)
     meta.historyData = historyData;
+    meta.historyBasis = 'utc';
     meta.precalculatedMilestones = milestones;
     meta.firstPost = firstPost ?? undefined;
     meta.hundredthPost = hundredthPost ?? undefined;
@@ -968,6 +967,18 @@ export class TagAnalyticsApp {
 
     // --- Finalize ---
     this.injectAnalyticsButton(meta, 100, '');
+    if (monthlyHistory.partial) {
+      // Some month's count was lost and shows as 0. Keep the previous
+      // report instead of saving this one for a day (G-4); the next open
+      // fetches again.
+      showToast({
+        type: 'warn',
+        message:
+          'Some months of the history could not be loaded and show as 0. ' +
+          'This report was not saved; it will be fetched again next time.',
+      });
+      return;
+    }
     await this.dataService.saveToCache(meta);
   }
 
@@ -1145,13 +1156,18 @@ export class TagAnalyticsApp {
 
   /**
    * Builds the heavy stat promise chain (history, milestones, first-100 stats).
-   * Handles delta-sync vs full-fetch branching and the backward history scan.
    *
-   * The backward scan may update `initialStats.firstPost/hundredthPost/timeToHundred`
-   * and `first100Override.value` as side effects.
+   * The history always comes whole from `fetchMonthlyHistory` — one report
+   * for most tags — on a revisit too. The incremental update, the merge
+   * with the cached history and the backward month-by-month scan are gone
+   * (T-303). Milestones still reuse the cached ones on a revisit.
+   *
+   * When the history starts before the first post `fetchInitialStats`
+   * found, {@link _refreshFirstPostsIfOlder} updates
+   * `initialStats.firstPost/hundredthPost/timeToHundred` and
+   * `first100Override.value` as side effects.
    */
   private _buildHeavyStatPromises(
-    meta: TagAnalyticsMeta,
     initialStats: InitialStats,
     runDelta: boolean,
     baseData: TagAnalyticsMeta | null,
@@ -1162,216 +1178,140 @@ export class TagAnalyticsApp {
   ): HeavyStatPromises {
     const tagName = this.tagName;
     const {totalCount} = initialStats;
-    const milestoneTargets = this.dataService.getMilestoneTargets(totalCount);
 
-    let historyPromise: Promise<HistoryEntry[]>;
-    let milestonesPromise: Promise<MilestoneEntry[]> | undefined;
-    let first100StatsPromise: Promise<LocalStats | undefined>;
-
-    if (runDelta && baseData) {
-      // --- Delta path ---
-      const lastHistory = baseData.historyData[baseData.historyData.length - 1];
-      const lastDate = lastHistory
-        ? new Date(lastHistory.date)
-        : (startDate ?? new Date());
-      const deltaStart = new Date(lastDate);
-      deltaStart.setDate(deltaStart.getDate() - 7);
-
-      historyPromise = this.dataService
-        .fetchHistoryDelta(tagName, deltaStart, startDate ?? new Date())
-        .then(delta =>
-          this.dataService.mergeHistory(baseData.historyData, delta),
-        );
-
-      milestonesPromise = historyPromise.then(fullHistory => {
-        return this.dataService
-          .fetchMilestonesDelta(
-            tagName,
-            totalCount,
-            baseData.precalculatedMilestones,
-            fullHistory,
-          )
-          .then(delta =>
-            this.dataService.mergeMilestones(
-              baseData.precalculatedMilestones,
-              delta,
-            ),
-          );
+    const historyPromise = measure(
+      'Monthly History',
+      this.dataService.fetchMonthlyHistory(tagName, {startDate, totalCount}),
+    ).then(async result => {
+      log.debug('Monthly history', {
+        layer: result.layer,
+        partial: result.partial,
+        months: result.history.length,
       });
-    } else {
-      // --- Full path ---
-      historyPromise = measure(
-        'Full History (Monthly)',
-        this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date(), {
-          isFullScan: true,
-          totalCount,
-        }),
+      await this._refreshFirstPostsIfOlder(
+        result.history,
+        startDate,
+        initialStats,
+        first100Override,
       );
-    }
+      return result;
+    });
 
-    // Chain backward scan onto history
-    historyPromise = historyPromise.then(
-      async (monthlyData: MonthlyHistoryData) => {
-        const forwardTotal =
-          monthlyData && monthlyData.length > 0
-            ? monthlyData[monthlyData.length - 1].cumulative
-            : 0;
-        let referenceTotal = meta.post_count;
-
-        if (monthlyData.historyCutoff) {
-          try {
-            referenceTotal = await fetchRemoteCount(
-              this.rateLimiter,
-              `${tagName} status:any date:<${monthlyData.historyCutoff}`,
-            );
-          } catch (e) {
-            log.warn(
-              'Failed to fetch cutoff total, falling back to meta.post_count',
-              {error: e},
-            );
-          }
-        }
-
-        log.debug(
-          `Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
-        );
-
-        if (forwardTotal < referenceTotal && !runDelta) {
-          this.injectAnalyticsButton(
-            null,
-            undefined,
-            'Scanning history backwards...',
-          );
-          // Phase 7 baseline instrumentation: isolates backward-scan duration
-          // in perf logs (namespace `sync.refreshStats.*`) so we can quantify
-          // the improvement before/after the planned parallelisation.
-          const backwardResult = await measure(
-            'Backward History Scan',
-            this.dataService.fetchHistoryBackwards(
+    const milestonesPromise: Promise<MilestoneEntry[]> =
+      runDelta && baseData
+        ? historyPromise.then(({history}) =>
+            this.dataService
+              .fetchMilestonesDelta(
+                tagName,
+                totalCount,
+                baseData.precalculatedMilestones,
+                history,
+              )
+              .then(delta =>
+                this.dataService.mergeMilestones(
+                  baseData.precalculatedMilestones,
+                  delta,
+                ),
+              ),
+          )
+        : historyPromise.then(({history}) =>
+            this.dataService.fetchMilestones(
               tagName,
-              (startDate ?? new Date()).toISOString().slice(0, 10),
-              referenceTotal,
-              forwardTotal,
+              history,
+              this.dataService.getMilestoneTargets(totalCount),
             ),
           );
 
-          if (backwardResult.length > 0) {
-            const backwardShift =
-              backwardResult[backwardResult.length - 1].cumulative;
-            const adjustedForward = monthlyData.map((h: HistoryEntry) => ({
-              ...h,
-              cumulative: h.cumulative + backwardShift,
-            }));
-            const fullHistory = [...backwardResult, ...adjustedForward];
+    // First-100 rankings are resolved once, after the history, from the
+    // right source: the older posts when the first posts were refreshed,
+    // else the cached rankings on a revisit, else the first 100 found at
+    // the start. Usernames are looked up only for what will be rendered.
+    const cachedRankings = runDelta ? baseData?.rankings : undefined;
+    const first100StatsPromise = historyPromise.then(async () => {
+      if (first100Override.value) return first100Override.value;
+      if (cachedRankings?.uploader?.first100) {
+        initialStats.first100Stats = {
+          uploaderRanking: cachedRankings.uploader.first100,
+          approverRanking: cachedRankings.approver.first100,
+          ratingCounts: {},
+        };
+        return initialStats.first100Stats;
+      }
+      const initial = this.dataService.calculateLocalStats(initialPosts || []);
+      try {
+        return await this.dataService.resolveFirst100Names(initial);
+      } catch (e) {
+        log.warn('Failed to resolve names for initial first-100', {error: e});
+        return initial;
+      }
+    });
 
-            const earliestDateFound = backwardResult[0].date;
-            const realInitialStats = await this.dataService.fetchInitialStats(
-              tagName,
-              null,
-              true,
-              earliestDateFound,
-            );
-            const hasFreshPosts = !!(
-              realInitialStats &&
-              realInitialStats.initialPosts &&
-              realInitialStats.initialPosts.length > 0
-            );
-            if (hasFreshPosts && realInitialStats) {
-              // Only overwrite when the retry fetch actually returned posts —
-              // the empty-fallback return shape of fetchInitialStats omits
-              // firstPost/hundredthPost, so mutating unconditionally would
-              // wipe the good initial values with undefined.
-              initialStats.firstPost = realInitialStats.firstPost;
-              initialStats.hundredthPost = realInitialStats.hundredthPost;
-              initialStats.timeToHundred = realInitialStats.timeToHundred;
-              log.debug('Recalculating First 100 Rankings for older posts...');
-              const newStats = this.dataService.calculateLocalStats(
-                realInitialStats.initialPosts!,
-              );
-              first100Override.value = await this.dataService
-                .resolveFirst100Names(newStats)
-                .catch(e => {
-                  log.warn('Failed to resolve names for older posts', {
-                    error: e,
-                  });
-                  return newStats;
-                });
-            } else {
-              // Silent-wrong-result guard: backward scan found older months,
-              // but the retry /posts.json call came back empty (typically a
-              // 5xx). Without this warning the dashboard displays first-100
-              // rankings from the *initial* fetch window, which excludes the
-              // older posts that backward scan just surfaced.
-              log.warn(
-                'Backward scan surfaced older posts, but the follow-up fetchInitialStats ' +
-                  'call returned no posts — first-100 rankings will reflect the initial ' +
-                  'fetch, not the older posts. Likely a transient server error; re-run ' +
-                  'analysis to recover.',
-                {
-                  tagName,
-                  earliestDateFound,
-                  backwardMonthsFound: backwardResult.length,
-                  retryResult: realInitialStats ? 'empty' : 'null',
-                },
-              );
-            }
-            return fullHistory;
-          }
-        }
-        return monthlyData;
-      },
+    return {historyPromise, milestonesPromise, first100StatsPromise};
+  }
+
+  /**
+   * `fetchInitialStats` looks for the first posts from the day the tag was
+   * created, so posts that carried it before then (a renamed or aliased
+   * tag) are missed. The history counts them, so when its first month is
+   * earlier than the first post found, the first posts are fetched again
+   * from that month: the first post, the 100th post and the first-100
+   * rankings then describe the real start of the tag.
+   *
+   * The condition used to be "the backward month-by-month scan found
+   * older months"; the scan is gone, the history now covers 2005 on.
+   */
+  private async _refreshFirstPostsIfOlder(
+    history: HistoryEntry[],
+    startDate: Date | undefined,
+    initialStats: InitialStats,
+    first100Override: First100Override,
+  ): Promise<void> {
+    const firstMonth = history[0]?.date.slice(0, 7);
+    const start =
+      startDate && !Number.isNaN(startDate.getTime()) ? startDate : new Date();
+    if (!firstMonth || firstMonth >= start.toISOString().slice(0, 7)) return;
+
+    const earliestDateFound = history[0].date;
+    this.injectAnalyticsButton(
+      null,
+      undefined,
+      'Looking at posts older than the tag...',
     );
-
-    // Milestones chain (full path only — delta path already set above)
-    if (!milestonesPromise) {
-      milestonesPromise = historyPromise.then(monthlyData => {
-        return this.dataService.fetchMilestones(
-          tagName,
-          monthlyData || [],
-          milestoneTargets,
-        );
-      });
+    const realInitialStats = await this.dataService.fetchInitialStats(
+      this.tagName,
+      null,
+      true,
+      earliestDateFound,
+    );
+    const hasFreshPosts = !!realInitialStats?.initialPosts?.length;
+    if (!hasFreshPosts || !realInitialStats) {
+      // The history shows older posts, but fetching them came back empty
+      // (typically a 5xx). Without this warning the dashboard shows the
+      // first-100 rankings of the later posts as if they were the first.
+      log.warn(
+        'History starts before the first post found, but fetching the ' +
+          'older posts returned none — first-100 rankings reflect the ' +
+          'later posts. Likely a transient server error; re-run analysis ' +
+          'to recover.',
+        {tagName: this.tagName, earliestDateFound},
+      );
+      return;
     }
-
-    // First-100 rankings resolution is chained on historyPromise so that we
-    // resolve usernames exactly once with the correct source: the
-    // backward-scan override when one was set (rename case), otherwise the
-    // initial first-100 captured before analysis began. Previously the
-    // resolution kicked off in parallel on the initial first-100 and was
-    // discarded when backward-scan later produced an override — burning up
-    // to ~10 /users.json batches on data that would never be rendered.
-    // Dashboard renders atomically, so moving this off the parallel hot
-    // path costs no perceived latency (rankingPromise and historyPromise
-    // remain the long poles).
-    if (runDelta && baseData?.rankings?.uploader?.first100) {
-      initialStats.first100Stats = {
-        uploaderRanking: baseData.rankings.uploader.first100,
-        approverRanking: baseData.rankings.approver.first100,
-        ratingCounts: {},
-      };
-      first100StatsPromise = Promise.resolve(initialStats.first100Stats);
-    } else {
-      first100StatsPromise = historyPromise.then(async () => {
-        if (first100Override.value) return first100Override.value;
-        const initial = this.dataService.calculateLocalStats(
-          initialPosts || [],
-        );
-        try {
-          return await this.dataService.resolveFirst100Names(initial);
-        } catch (e) {
-          log.warn('Failed to resolve names for initial first-100', {
-            error: e,
-          });
-          return initial;
-        }
+    // Only overwrite when the fetch actually returned posts: its empty
+    // fallback omits firstPost/hundredthPost and would wipe the good values.
+    initialStats.firstPost = realInitialStats.firstPost;
+    initialStats.hundredthPost = realInitialStats.hundredthPost;
+    initialStats.timeToHundred = realInitialStats.timeToHundred;
+    log.debug('Recalculating First 100 Rankings for older posts...');
+    const newStats = this.dataService.calculateLocalStats(
+      realInitialStats.initialPosts!,
+    );
+    first100Override.value = await this.dataService
+      .resolveFirst100Names(newStats)
+      .catch(e => {
+        log.warn('Failed to resolve names for older posts', {error: e});
+        return newStats;
       });
-    }
-
-    return {
-      historyPromise,
-      milestonesPromise,
-      first100StatsPromise,
-    };
   }
 
   /**
