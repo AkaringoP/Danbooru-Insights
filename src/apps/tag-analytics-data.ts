@@ -135,6 +135,36 @@ export function milestoneLookup(
   };
 }
 
+/**
+ * Reads a grouped report (`search[group]` without `search[period]`): rows
+ * like `{rating: "g", posts: 12}` or `{is_deleted: true, posts: 3}`, one
+ * per value that has posts. Keys are the values as strings. Throws on
+ * anything but such a list, so a broken reply is never read as zeros.
+ */
+export function parseGroupReport(
+  body: unknown,
+  column: string,
+): Map<string, number> {
+  if (!Array.isArray(body)) throw new Error('Group report is not a list');
+  const counts = new Map<string, number>();
+  for (const row of body as unknown[]) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    const value = r[column];
+    const posts = r['posts'];
+    if (
+      (typeof value !== 'string' && typeof value !== 'boolean') ||
+      typeof posts !== 'number' ||
+      !Number.isInteger(posts) ||
+      posts < 0
+    ) {
+      throw new Error(`Group report row unreadable: ${JSON.stringify(row)}`);
+    }
+    const key = String(value);
+    counts.set(key, (counts.get(key) ?? 0) + posts);
+  }
+  return counts;
+}
+
 /** A report request that came back with an HTTP error. */
 class ReportStatusError extends Error {
   constructor(readonly status: number) {
@@ -984,42 +1014,76 @@ export class TagAnalyticsDataService {
   }
 
   /**
+   * Posts per value of one report group (`search[group]`) over the tag's
+   * whole life (`from` to today). One request through the reports lane
+   * instead of one count per value (T-306). Throws on any failure, so the
+   * caller can fall back to the counts.
+   */
+  private async fetchReportGroups(
+    tagName: string,
+    group: 'rating' | 'is_deleted',
+    from: string,
+  ): Promise<Map<string, number>> {
+    const params = new URLSearchParams({
+      'search[tags]': tagName,
+      'search[group]': group,
+      'search[from]': from,
+      'search[to]': defaultReportTo(),
+    });
+    const resp = await this.rateLimiter.fetch(
+      `/reports/posts.json?${params.toString()}`,
+      {headers: {Accept: 'application/json'}},
+    );
+    if (!resp.ok) throw new ReportStatusError(resp.status);
+    return parseGroupReport(await resp.json(), group);
+  }
+
+  /**
    * Fetches post counts for each status (active, deleted, etc.).
+   *
+   * Deleted and active come from one `is_deleted` report (T-306): active is
+   * Danbooru's own definition, not deleted, pending or flagged
+   * (`Post.active`), and a post that is pending or flagged is never deleted
+   * (deleting clears both) — so active = not deleted − pending − flagged.
+   * Pending, flagged, appealed and banned stay counts. When the report
+   * fails, deleted and active are counted as before.
+   *
    * @param {string} tagName - The tag to analyze.
    * @return {Promise<Object>} - Map of status strings to counts.
    */
   async fetchStatusCounts(tagName: string): Promise<Record<string, number>> {
-    const statuses = [
-      'active',
-      'appealed',
-      'banned',
-      'deleted',
-      'flagged',
-      'pending',
-    ];
-    const results: Record<string, number> = {};
-
-    const tasks = statuses.map(async status => {
-      results[status] = await this.fetchCountWithRetry(
-        `${tagName} status:${status}`,
-      );
+    const deletedGroups = this.fetchReportGroups(
+      tagName,
+      'is_deleted',
+      MONTHLY_REPORT_FROM,
+    ).catch((e: unknown) => {
+      log.warn('Deleted report failed, counting statuses', {error: e});
+      return null;
     });
-
-    await Promise.all(tasks);
-
-    // [Integrity Check] Ensure all keys exist and are valid numbers
-    statuses.forEach(status => {
-      if (results[status] === undefined) {
-        log.warn(`Missing status key: ${status}. Defaulting to 0.`);
-        results[status] = 0;
-      }
-    });
-
-    return results;
+    const counted = ['appealed', 'banned', 'flagged', 'pending'] as const;
+    const [groups, ...counts] = await Promise.all([
+      deletedGroups,
+      ...counted.map(s => this.fetchCountWithRetry(`${tagName} status:${s}`)),
+    ]);
+    const [appealed, banned, flagged, pending] = counts;
+    let deleted: number;
+    let active: number;
+    if (groups) {
+      deleted = groups.get('true') ?? 0;
+      active = Math.max(0, (groups.get('false') ?? 0) - pending - flagged);
+    } else {
+      // Only the two the report was for; the other four are in hand.
+      [deleted, active] = await Promise.all([
+        this.fetchCountWithRetry(`${tagName} status:deleted`),
+        this.fetchCountWithRetry(`${tagName} status:active`),
+      ]);
+    }
+    return {active, appealed, banned, deleted, flagged, pending};
   }
 
   /**
-   * Fetches post counts for all ratings (g, s, q, e) for a tag.
+   * Fetches post counts for all ratings (g, s, q, e) for a tag, from one
+   * `rating` report (T-306); counted one rating at a time if it fails.
    * @param {string} tagName The tag name.
    * @param {?string} startDate Optional start date (YYYY-MM-DD) to optimize query.
    * @return {Promise<!Object<string, number>>} Map of rating characters to counts.
@@ -1027,6 +1091,27 @@ export class TagAnalyticsDataService {
   async fetchRatingCounts(
     tagName: string,
     startDate: string | null = null,
+  ): Promise<Record<string, number>> {
+    try {
+      const groups = await this.fetchReportGroups(
+        tagName,
+        'rating',
+        startDate ?? MONTHLY_REPORT_FROM,
+      );
+      // A rating without posts has no row in the report.
+      return Object.fromEntries(
+        ['g', 's', 'q', 'e'].map(r => [r, groups.get(r) ?? 0]),
+      );
+    } catch (e) {
+      log.warn('Rating report failed, counting each rating', {error: e});
+    }
+    return this.countRatings(tagName, startDate);
+  }
+
+  /** {@link fetchRatingCounts} with one count per rating (the fallback). */
+  private async countRatings(
+    tagName: string,
+    startDate: string | null,
   ): Promise<Record<string, number>> {
     const ratings = ['g', 's', 'q', 'e'];
     const results: Record<string, number> = {};
