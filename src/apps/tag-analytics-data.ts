@@ -59,7 +59,64 @@ export type RankingResult = {
   approverAll: UserRanking[];
   uploaderYear: UserRanking[];
   approverYear: UserRanking[];
+  /**
+   * Slots whose report could not be fetched (a 429, 5xx, network error or
+   * an error body). Their list is empty, which here means "unknown", not
+   * "nobody": see {@link keepCachedOnFailure}.
+   */
+  failed?: RankingSlot[];
 };
+
+/** One of the four report rankings in a {@link RankingResult}. */
+type RankingSlot =
+  | 'uploaderAll'
+  | 'approverAll'
+  | 'uploaderYear'
+  | 'approverYear';
+
+const RANKING_SLOTS: readonly RankingSlot[] = [
+  'uploaderAll',
+  'approverAll',
+  'uploaderYear',
+  'approverYear',
+];
+
+/**
+ * `fresh` with each failed slot filled from `cached`, so a report that
+ * failed never replaces a ranking that was there (the empty list would be
+ * shown and then saved for a day). A failed slot with nothing cached stays
+ * empty and stays listed in `failed`.
+ */
+export function keepCachedOnFailure(
+  fresh: RankingResult,
+  cached: Omit<RankingResult, 'failed'> | null,
+): RankingResult {
+  if (!fresh.failed?.length) return fresh;
+  const out: RankingResult = {...fresh};
+  const stillFailed: RankingSlot[] = [];
+  for (const slot of fresh.failed) {
+    const previous = cached?.[slot];
+    if (previous) out[slot] = previous;
+    else stillFailed.push(slot);
+  }
+  if (stillFailed.length > 0) out.failed = stillFailed;
+  else delete out.failed;
+  return out;
+}
+
+/** The report rankings saved with a cached tag report, or null. */
+export function cachedRankingResult(
+  meta: Pick<TagAnalyticsMeta, 'rankings'> | null | undefined,
+): RankingResult | null {
+  const r = meta?.rankings;
+  if (!r) return null;
+  return {
+    uploaderAll: r.uploader?.allTime,
+    approverAll: r.approver?.allTime,
+    uploaderYear: r.uploader?.year,
+    approverYear: r.approver?.year,
+  };
+}
 
 type UserEntry = {name: string; level: string};
 type UserEntryWithId = {id: number; name: string; level: string};
@@ -1212,19 +1269,27 @@ export class TagAnalyticsDataService {
     };
   }
 
+  /**
+   * Top 10 uploaders or approvers of `tagName` between two dates, from
+   * `/reports/posts.json` (`search[group]`, `search[group_limit]=10`;
+   * `from` / `to` are `YYYY-MM-DD`, both included). The reply is a JSON
+   * array of rows, one per user.
+   *
+   * Throws on a failed request, an HTTP error or a reply that is not an
+   * array. It used to read the error body as the ranking and come back
+   * empty, which then replaced the cached ranking (N-04).
+   */
   async fetchReportRanking(
     tagName: string,
-    group: string,
+    group: 'uploader' | 'approver',
     from: string,
     to: string,
   ): Promise<ReportEntry[]> {
-    // group: 'uploader' or 'approver'
-    // from/to: YYYY-MM-DD
     const params = new URLSearchParams({
       'search[tags]': tagName,
       'search[group]': group,
       'search[mode]': 'table',
-      'search[group_limit]': '10', // Top 100
+      'search[group_limit]': '10',
       commit: 'Search',
     });
 
@@ -1232,24 +1297,13 @@ export class TagAnalyticsDataService {
     if (to) params.append('search[to]', to);
 
     const url = `/reports/posts.json?${params.toString()}`;
-    try {
-      const resp = await this.rateLimiter.fetch(url, {
-        headers: {Accept: 'application/json'},
-      });
-      const data = await resp.json();
-
-      return data;
-      // Let's verify format. The user provided link returns a standard JSON structure?
-      // Actually reports/posts.json returns HTML table row data usually?
-      // Wait, user provided: reports/posts.json?...
-      // Let's assume it returns JSON with [ { id, count, ... } ] or similar.
-      // If it returns HTML, I might need to parse, but usually .json returns JSON.
-      // Based on Danbooru API, reports usually return a string or specific structure.
-      // For 'uploader', it returns list of objects.
-    } catch (e) {
-      log.warn(`Ranking fetch failed (${group})`, {error: e});
-      return [];
-    }
+    const resp = await this.rateLimiter.fetch(url, {
+      headers: {Accept: 'application/json'},
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data: unknown = await resp.json();
+    if (!Array.isArray(data)) throw new Error('Report reply is not a list');
+    return data as ReportEntry[];
   }
 
   // -----------------------------------
@@ -1916,44 +1970,28 @@ export class TagAnalyticsDataService {
     dateStrTomorrow: string,
     measure: <T>(label: string, promise: Promise<T>) => Promise<T>,
   ): Promise<RankingResult> {
-    // 1. Fetch all rankings in parallel (RateLimiter queues them)
+    // 1. Fetch all rankings in parallel (the reports lane paces them). A
+    // failed report is listed in `failed`, never passed off as empty.
+    const failed: RankingSlot[] = [];
+    const report = (
+      slot: RankingSlot,
+      label: string,
+      group: 'uploader' | 'approver',
+      from: string,
+    ): Promise<ReportEntry[]> =>
+      measure(
+        label,
+        this.fetchReportRanking(tagName, group, from, dateStrTomorrow),
+      ).catch((e: unknown) => {
+        log.warn(`Ranking fetch failed (${slot})`, {error: e});
+        failed.push(slot);
+        return [];
+      });
     const [uAll, aAll, uYear, aYear] = await Promise.all([
-      measure(
-        'Ranking (Uploader All)',
-        this.fetchReportRanking(
-          tagName,
-          'uploader',
-          '2005-01-01',
-          dateStrTomorrow,
-        ),
-      ),
-      measure(
-        'Ranking (Approver All)',
-        this.fetchReportRanking(
-          tagName,
-          'approver',
-          '2005-01-01',
-          dateStrTomorrow,
-        ),
-      ),
-      measure(
-        'Ranking (Uploader Year)',
-        this.fetchReportRanking(
-          tagName,
-          'uploader',
-          dateStr1Y,
-          dateStrTomorrow,
-        ),
-      ),
-      measure(
-        'Ranking (Approver Year)',
-        this.fetchReportRanking(
-          tagName,
-          'approver',
-          dateStr1Y,
-          dateStrTomorrow,
-        ),
-      ),
+      report('uploaderAll', 'Ranking (Uploader All)', 'uploader', '2005-01-01'),
+      report('approverAll', 'Ranking (Approver All)', 'approver', '2005-01-01'),
+      report('uploaderYear', 'Ranking (Uploader Year)', 'uploader', dateStr1Y),
+      report('approverYear', 'Ranking (Approver Year)', 'approver', dateStr1Y),
     ]);
 
     // 2. Resolve Users Immediately
@@ -2012,12 +2050,15 @@ export class TagAnalyticsDataService {
       return [];
     };
 
-    const result = {
+    const result: RankingResult = {
       uploaderAll: processReport(uAll),
       approverAll: processReport(aAll),
       uploaderYear: processReport(uYear),
       approverYear: processReport(aYear),
     };
+    if (failed.length > 0) {
+      result.failed = RANKING_SLOTS.filter(s => failed.includes(s));
+    }
     return result;
   }
 

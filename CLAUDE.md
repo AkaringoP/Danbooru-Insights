@@ -99,7 +99,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 ### Entry Point
 `src/main.ts` → `main()` → URL 경로 기반 라우팅:
-- **Profile 모드** (`/users/*`, `/profile`): `GrassApp` + `UserAnalyticsApp` 실행
+- **Profile 모드** (`/users/*`, `/profile`): `GrassApp` + `UserAnalyticsApp` 실행. Grass 가 받는 동안 📊 클릭은 sync 를 시작하지 않음 (`GrassLoadGate`, G-7 — [sync-strategies.md](.claude/rules/sync-strategies.md))
 - **Tag 모드** (`/wiki_pages/*`, `/artists/*`): `TagAnalyticsApp` 실행
 
 ### 데이터 흐름
@@ -112,7 +112,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 | 레이어 | 역할 | 예시 |
 |---|---|---|
-| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts`, `profile-summary.ts` |
+| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `rate-lane.ts`, `search-terms.ts`, `grass-load-gate.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts`, `profile-summary.ts` |
 | `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts`, `dashboard-preview-popover.ts`, `grass-month-popover.ts`, `profile-summary-view.ts` |
 | `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
 | `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts`, `log-capture.ts` |
@@ -139,11 +139,28 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - CSS 클래스 prefix: `di-` (Danbooru Insights)
 
 ## Rate Limiting (RateLimitedFetch)
-Token bucket 알고리즘 기반 3-queue 시스템. 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
-- **General Queue**: 8 concurrent requests, 9 req/sec, 0-50ms jitter (v9.6 에서 6/6 → 8/9 으로 상향)
-- **Report Queue**: 격리됨, `/reports/` URL 에 3 초 cooldown (`CONFIG.REPORT_COOLDOWN_MS`)
-- **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 분할해 Danbooru 의 10 req/s 서버 상한 안에 유지
-- **429 global backoff**: 서버 대기시간을 따름. Danbooru 는 `Retry-After` 대신 `X-Rate-Limit` 헤더 (token bucket JSON: `rate`/`cost`/`limits{key: points}`) 를 보냄 → `(cost − 최저 points) / rate` 초 + 0.5s 동안 전체 큐 정지 (`backoffFromResponse`). 헤더 없으면 `Retry-After`, 그것도 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s). `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp. 제한 중 요청은 1 초씩 debt 를 늘리므로 (최대 ~30s) 고정 5s 로는 429 가 반복됐음
+
+**서버 쪽 한도** (Danbooru `production` 소스 기준, 2026-11-11 확인). 한도는 전체 하나가 아니라 **액션별 토큰 버킷**이고, 키는 사용자·IP 대역·세션 각각:
+
+| 액션 | 한도 | 소스 |
+|---|---|---|
+| `/counts/posts.json` | 1 req/s, 버스트 15 (2026-11-05 부터) | `app/policies/post_query_policy.rb` |
+| `/reports/*` | 1 req / 3 s, 버스트 15 | `app/policies/report_policy.rb` |
+| `/related_tag.json` | 1 req/s, 버스트 30 | `app/policies/related_tag_query_policy.rb` |
+| 그 밖의 읽기 (`/posts.json` 등) | Rails 한도 없음 | `app/policies/application_policy.rb` 의 `rate_limit_for_read` |
+
+한도에 걸린 상태에서 보낸 요청은 1 초 분씩 점수를 더 깎음 (최저 −30). Rails 한도는 성공 응답과 429 양쪽에 `X-Rate-Limit` 헤더를 붙임. 흔히 말하는 "전체 10 req/s" 는 저장소에 없음 (`config/nginx.conf` 에 `limit_req` 없음, rack-attack 류 미들웨어 없음 — 2026-11-13 확인).
+
+**앞단 (Cloudflare) 한도** — 규칙은 비공개. 2026-11-13 실측: 앞단 429 는 `server: cloudflare`, **`cf-mitigated: challenge`** 헤더에 본문이 "Just a moment..." 챌린지 페이지 (HTML), `X-Rate-Limit` · `Retry-After` 없음. 즉 Cloudflare 속도 제한 규칙이 차단 대신 챌린지를 거는 것이고, fetch 는 챌린지를 풀 수 없어 429 로만 보임. 속도가 내려가면 다시 통과 (5 초 정지 뒤 바로 받아 줌). 기준은 **10 초에 약 50 건** 으로 보임: 독립된 429 두 번의 직전 10 초 요청 수가 정확히 49 였고, 상한을 4.5 req/s (10 초 최대 47 건) 로 낮춘 뒤 46k 계정 전체 sync 3 회 연속 429 0 건 (그 전에는 매번 1~2 회). 한때의 다른 후보 "2 분에 약 240 건" 은 같은 실행에서 120 초에 305 건이 통과해 기각. 표본이 한 계정 · 하루치라 확정은 아님. 새 측정은 진단 로그 `429 received` 의 `sent*` · `peakOk*` 와 `Sync traffic` 으로 ([docs/debugging.md](docs/debugging.md)).
+
+**클라이언트** — 토큰 버킷 하나 + 서버 액션별 차선 (v9.12). 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
+- **General Queue**: 8 concurrent requests, **4.5 req/sec, 버스트 1**, 0-50ms jitter → 한 탭에서 임의의 1 초에 최대 6 건, 10 초에 최대 47 건 (T-213, v9.12 — 위 "10 초에 약 50 건" 후보 아래로). 그 전 결정 G-1 은 6 req/sec (1 초 7 건 · 10 초 61 건). v9.6 의 9 req/sec · 버스트 9 (버스트가 속도와 같았음) 는 Grass 와 sync 가 겹치면 1 초 16 건 · 10 초 98 건까지 나갔음. 큰 계정의 Full Sync 는 이 상한이 아니라 worker 수 (`SYNC_WORKERS` 5, 평균 약 3.5 req/s) 가 속도를 정하고, 상한은 응답이 빠른 순간의 몰림만 깎음 ([sync-strategies.md](.claude/rules/sync-strategies.md)). Grass · UserAnalytics · TagAnalytics 가 `main.ts` 가 만든 limiter 하나를 공유 (생성자 필수 인자, gate 4 규칙 11). `RateLimitedFetch` 의 4 번째 인자가 버스트 (생략하면 속도와 같음 — 테스트용)
+- **차선** ([src/core/rate-lane.ts](src/core/rate-lane.ts)): counts · reports · related_tag 요청은 각자의 차선에서 기다림. 차선은 서버 버킷의 로컬 추정치 (처음엔 위 표의 수치, 이후 응답마다 오는 `X-Rate-Limit` 로 보정 — 다른 탭이 같은 버킷을 쓴 것도 반영) 가 2 점 이상 (1 점 여유) 이고 진행 중 요청이 2 건 미만일 때만 보냄. 차선 요청도 일반 버킷 토큰을 하나 씀 → count · report 를 합쳐도 위의 6 / 47 상한 안. 발송은 "차선이 준비된 요청 중 가장 먼저 온 것" 이라 기다리는 차선이 sync 를 막지 않음. 모르는 경로가 `X-Rate-Limit` 를 보내면 그 경로용 차선을 만듦. v9.11 까지의 report 전용 큐 (3 초 고정 대기) 는 없어짐
+- **429 의 범위**: `X-Rate-Limit` 이 붙은 429 (Rails 의 액션별 한도) 는 **그 차선만** 기다림 — 전체 정지 · 속도 절반 · 다른 탭 알림 없음. 헤더 없는 429 (앞단) 만 아래의 전체 정지로 감. `backoffRemainingMs()` 는 전체 정지만 뜻함
+- **깨움**: 큐 전체에 예약된 깨움 하나 (`scheduleWake`). 거절될 때마다 타이머를 걸던 방식은 250 건 대기에 타이머 수만 개를 만들었음 (감사 DA-13)
+- **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 탭 수로 분할 (나눈 값은 내림하지 않음 — 4.5 를 2 탭이 2.25 씩. 버스트 1 은 탭마다 유지 — N 탭이면 최악의 1 초가 약 5 + N 건)
+- **모의 실험**: [test/rate-limiter-sim.test.ts](test/rate-limiter-sim.test.ts) 가 실제 limiter 를 Danbooru 서버 한도 모델 (`test/helpers/server-bucket.ts`, `rate_limit.rb` 그대로) 에 돌려 1 초 · 10 초 상한, 429 수, 유실을 단언. limiter 를 바꾸면 여기 숫자부터 확인
+- **429 global backoff** (헤더 없는 429): `Retry-After` 가 있으면 그 값, 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s) 동안 전체 큐 정지 (`backoffFromResponse`, `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp) 하고 다른 탭에 알림. (`backoffFromResponse` 는 `X-Rate-Limit` 에서 `(cost − 최저 points) / rate` 초 + 0.5s 를 계산하는 경로도 가지고 있지만, 그런 429 는 이제 차선이 받음)
 - **Slow start + 적응형 rate**: 정지가 끝나면 5 초간 토큰 1 개 / 동시 2 개로만 재개 (정지 중 꽉 찬 버킷과 대기 타이머가 한꺼번에 터지며 다음 429 를 부르던 문제). 정지 밖에서 받은 429 마다 rate·동시성을 절반으로 (하한 25%), 429 없는 20 초마다 25%p 씩 복구. 복구 상한은 429 가 난 rate 보다 한 단계 (25%p) 아래 — 상한 없이는 0.5 에서 버티다 0.56~0.75 로 회복할 때마다 수 초 안에 429 가 나는 톱니가 생겼음. 상한은 429 없는 2 분마다 한 단계씩 올라감. 단, slow start 구간 (정지 직후) 에 난 429 는 "정지가 서버 페널티보다 짧았다" 로 보고 rate·상한은 그대로 두고 정지만 2 배로 늘림 (5→10→20s…, 최대 `MAX_BACKOFF_MS`, 서버가 대기시간을 주면 그 값) 실측상 Danbooru 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 와서 서버 대기시간 추종이 작동 안 함 — 이 두 장치가 실질적인 방어선
 
 ## Evaluator Rubric (작업 완료 선언 전 self-evaluation 용)
@@ -156,12 +173,12 @@ pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), `prepare` 스�
 | 1 | Type safety | `tsc --noEmit` (또는 `npm run build`) | TypeScript strict mode |
 | 2 | Lint/style | `npm run lint` | GTS (Google TS style) |
 | 3 | 테스트 통과 | `npx vitest run` | Vitest |
-| 4 | 아키텍처 invariant | (gate 3 가 커버) | [test/architecture.test.ts](test/architecture.test.ts) — 현재 13 개 규칙 (아래 목록) |
+| 4 | 아키텍처 invariant | (gate 3 가 커버) | [test/architecture.test.ts](test/architecture.test.ts) — 현재 14 개 규칙 (아래 목록) |
 | 5 | 빌드 성공 | `npm run build` | Pre-commit hook (gate 1+3 도 같이 실행) |
 | 6 | 복잡도 cap | `npm run lint` | T-26 ESLint 규칙 — `max-lines-per-function: 200` (skipBlankLines+skipComments), `max-depth: 6`, `complexity: 15`, `max-nested-callbacks: 4`. 기존 위반은 inline `// T-26 baseline:` disable; 신규 위반은 차단 |
 | 7 | Dead code 없음 | `npm run check:dead` | knip — entry points / project globs / `cal-heatmap` + `eslint` ignored. 미사용 파일/export/type/devDependency 잡음 |
 
-### Gate 4 상세 — architecture.test.ts 의 13 개 규칙
+### Gate 4 상세 — architecture.test.ts 의 14 개 규칙
 1–4. 의존 방향: `core/ ↛ apps/`, `core/ ↛ ui/`, `ui/ ↚ apps/`, `apps/ ↛ main`
 5. `[key: string]: any` index signature 금지
 6. raw `fetch()` 금지 — `rateLimiter.fetch()` 사용 (예외: `rate-limiter.ts`, `dev/`)
@@ -169,9 +186,10 @@ pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), `prepare` 스�
 8. legacy NSFW localStorage 키는 `core/settings.ts` 마이그레이션 코드에만
 9. `/counts/posts.json` URL 은 `fetchRemoteCount()` 로만 — 인라인 재롤 금지
 10. `/wiki_pages/` href 는 태그명을 반드시 encode (태그에 `/` 포함 가능 — `fate/grand_order`)
-11. `apps/` 에서 DataManager 계열 생성 시 **공유 rate limiter 를 인자로 전달 필수** (v9.9.0 — private token bucket 이 멀티탭 분배와 429 백오프를 무시하던 문제)
+11. `new RateLimitedFetch(` 는 **`main.ts` 에서만** — 탭당 버킷 하나 (v9.12, G-1). `DataManager` · `AnalyticsDataManager` · 세 App · `UserAnalyticsDataService` 의 생성자는 limiter 가 필수 인자 (빠뜨리면 tsc 가 잡음). 예전의 `rateLimiter ?? new RateLimitedFetch(…)` fallback 처럼 다른 곳에서 버킷을 새로 만들면 멀티탭 분배와 429 정지를 무시하고 속도가 두 배가 됨 (v9.9.0 H-1). 검사 대상 파일 수와 `main.ts` 의 1 건을 같이 단언 (빈 통과 방지)
 12. popover 위치 공식 (`getBoundingClientRect` + `pageXOffset/pageYOffset`) 은 `ui/popover-utils.ts` 에만
 13. `dev/` 는 `core/`, `ui/`, `apps/` 를 import 하지 않음 (진단 모듈 격리)
+14. 마크업에 인라인 스크립트 금지 — HTML 문자열의 `on*="…"` 속성, `setAttribute`/d3 `.attr` 로 넣는 `on*` 속성, `javascript:` URL (v9.11.4 — Danbooru 가 2026-11-11 부터 `unsafe-inline` 없는 CSP 를 강제해서 조용히 동작하지 않음). 리스너로 붙이고, innerHTML 로 다시 그리는 곳은 바깥 컨테이너에 위임 리스너 (`ui/thumb-fallback.ts` 참고). 검출기 자체 검사 테스트가 같이 있음
 
 **주의 — 빈 통과 (vacuous pass)**: 이 테스트들은 파일 경로를 문자열로 필터링한다. 필터가 0 건을 매칭해도 위반 0 건이라 **통과로 보인다**. 경로 비교는 반드시 `relFromSrc()` / forward-slash 정규화된 값으로 할 것 (Windows `path.relative` 는 백슬래시를 뱉어 `'apps/'` 매칭이 전부 빗나감 — 실제로 규칙 11 이 Windows 에서 0 개 파일만 검사하며 통과하고 있었음). 새 규칙 추가 시 검사 대상 건수가 0 이 아닌지 확인해라
 
@@ -182,7 +200,10 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 ### Gate 8 — e2e (머지 전 수동)
 `npm run test:e2e` (Playwright, ~8초). **pre-commit hook 에 없음** — dev 서버를 띄워야 해서 매 커밋마다 돌리기엔 무겁다. 대신 **브랜치 머지 직전에 반드시 1회 실행**. 안 그러면 시각 회귀 baseline 이 썩어도 아무도 모른다 (gate 밖에 있는 유일한 검증 구역)
 
+기준 이미지는 **플랫폼별** 파일이다 (`…-chromium-win32.png`, `…-chromium-darwin.png`). 그 플랫폼의 기준이 없으면 첫 실행이 "A snapshot doesn't exist … writing actual" 로 실패하면서 지금 코드로 기준을 만들어 버리고, 그 뒤의 통과는 방금 찍은 것과 비교한 것이라 의미가 없다 (2026-11-12 에 Windows 에서 실제로 겪음). 새 플랫폼의 기준은 반드시 `develop` 코드에서 만들어 커밋할 것. win32 기준은 `dadcbfc` (v9.11.3) 에서 만들었다
+
 ## 참조 (Level-3 문서 — 필요 시 로드)
+- **Danbooru 서버 소스**: [danbooru/danbooru](https://github.com/danbooru/danbooru) 의 **`production` 브랜치** (사이트가 실제로 도는 것. `master` 와 다를 수 있음). 한도·검색 규칙은 자주 바뀌므로 문서의 숫자보다 소스를 먼저 볼 것 — `app/models/user.rb` (등급별 태그·페이지·timeout 한도), `app/logical/post_query.rb` (무료 메타태그, count 캐시), `app/policies/*_policy.rb` (`rate_limit_for_*`), `config/initializers/content_security_policy.rb`
 - [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) — Danbooru API 엔드포인트 카탈로그
 - [.claude/rules/database-schema.md](.claude/rules/database-schema.md) — Dexie.js 테이블 레이아웃 & compound index
 - [.claude/rules/sync-strategies.md](.claude/rules/sync-strategies.md) — Grass / User / Tag 동기화 알고리즘
@@ -215,5 +236,5 @@ preview popover 의 동작 카탈로그 (mintag/abandoned 판정 기준, 활동 
 - `mapConcurrent()` 유틸은 병렬 API 호출 제어용 (count fetch, tag filtering 에서 사용)
 - `MAX_OPTIMIZED_POSTS = 1200` — Quick Sync / Small Tag 경로의 분기 임계값 ([src/config.ts](src/config.ts))
 - Count cache TTL (v9.6): `getCountCacheTtlMs()` 기본 10 분, 사용자가 settings popover 에서 조절 가능. `tryGetCachedStats<T>` 가 일관 사용
-- **검색 태그 한도**: Member 조회자는 검색당 태그 2 개까지. `user:`/`id:`/`status:` 같은 검색 메타태그는 무료, 태그 이름은 Meta 카테고리 포함 1 개씩 (v8.0.3 규칙, 2026-10-30 Member 계정으로 재확인 — Meta 카테고리 태그 4 개 검색 시 Search Error). 새 쿼리는 이 규칙에 맞춰 작성. 상세·현재 우회 방식은 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Search tag limit"
-- Count 기반 통계 (status/rating/분포 9 개) 는 `countBatch()` 로 카운트를 받고 `cacheUnlessPartial()` 로 저장. 429·5xx·네트워크 실패는 1 회 재시도 (rate limiter 정지 뒤로 줄 섬), 그래도 잃은 카운트가 있으면 캐시 저장 안 함 → 이전 캐시를 보여주고 다음 열기에서 재시도. 결정적 4xx (예: Member 태그 한도 422) 는 재시도도 차단도 안 함. 새 분포 추가 시 `fetchRemoteCount` 직접 호출 대신 이 경로 사용
+- **검색 태그 한도** (2026-11-10 부터): 비로그인 2, Member 3, Gold 이상 무제한 (조회하는 **열람자** 등급 기준). 무료인 메타태그는 `status rating limit is id date age filesize filetype parent child md5 width height duration mpixels ratio score upvote downvotes favcount embedded tagcount pixiv_id pixiv` 뿐 — **`user:` `order:` `has:` `fav:` `ordfav:` `source:` `gentags:` 류는 1 개로 계산**되고, 태그 이름은 Meta 카테고리 포함 1 개씩. `/counts/posts.json` 도 2026-11-05 부터 같은 검사를 받아 넘으면 422. 새 쿼리는 비로그인 기준(2)에 맞추거나, 넘는 쿼리는 등급별 처리를 둘 것. 상세·현재 우회 방식은 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Search tag limit"
+- Count 기반 통계 (status/rating/분포 9 개) 는 `countBatch()` 로 카운트를 받고 `cacheUnlessPartial()` 로 저장. 429·5xx·네트워크 실패는 1 회 재시도 (rate limiter 정지 뒤로 줄 섬), 그래도 잃은 카운트가 있으면 캐시 저장 안 함 → 이전 캐시를 보여주고 다음 열기에서 재시도. 결정적 4xx (예: Member 태그 한도 422) 는 재시도도 차단도 안 함. 서버가 `null` 을 준 카운트는 `fetchRemoteCount` 가 `CountUnavailableError` 를 던짐 (0 아님) — 재시도 안 하고 (서버가 5 분 캐시) 캐시도 안 함 (v9.12). Commentary · Translation · Hair length 에서 잃은 조각은 `unknown` (범례 "—", 파이 비율에서 제외). 새 분포 추가 시 `fetchRemoteCount` 직접 호출 대신 이 경로 사용. 열람자 태그 한도를 넘는 쿼리는 `core/search-terms.ts` 의 `fitsViewerTagLimit` 로 미리 걸러낼 수 있음

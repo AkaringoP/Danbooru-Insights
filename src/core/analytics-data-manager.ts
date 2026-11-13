@@ -1,4 +1,5 @@
-import {DataManager} from './data-manager';
+import {CountUnavailableError, DataManager} from './data-manager';
+import {fitsViewerTagLimit} from './search-terms';
 import type {ApiItem} from './data-manager';
 import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
@@ -185,8 +186,9 @@ export function computeUntaggedTranslation(
 
 /**
  * Builds the 6 subqueries for Untagged inclusion-exclusion calculation plus the
- * BC intersection query used for Assumption-1 runtime monitoring. All queries
- * use ≤2 real tags so they work on Member(Blue) accounts.
+ * BC intersection query used for Assumption-1 runtime monitoring. With the
+ * `user:X` prefix they cost up to 3 search terms (`user:` and the `*_text`
+ * wildcard count): fine for a Member (3), a 422 for an anonymous viewer (2).
  *
  * `prefix` is prepended to every subquery — `user:X` for user-side translation
  * distribution, a single tag name (e.g. `sword`) for tag-side. Pass it
@@ -287,6 +289,31 @@ export function shouldCountHttpAsFailure(status: number): boolean {
 /** Total fetch attempts per page in the full-sync worker pool. */
 export const SYNC_PAGE_MAX_ATTEMPTS = 5;
 
+/**
+ * Parallel page fetches in the full sync. With about 1 s of server time per
+ * 200-post page and 400 ms between a worker's pages, 5 workers send about
+ * 3.5 requests per second on average: this count, not the limiter's cap,
+ * sets a lone sync's pace. The cap (`CONFIG.RATE_LIMITER.rps`, 4.5) only
+ * trims the moments when pages come back faster, and those bursts are what
+ * Cloudflare's rule in front of Danbooru refuses (about 50 requests per
+ * 10 s, T-213).
+ *
+ * It was briefly 4 (T-211, about 2.9 req/s), when the 429s were read as a
+ * two-minute budget; that reading was ruled out and the cap took over the
+ * job (measured 2026-11-13: 4 workers at a 4.5 cap, no 429 in three full
+ * syncs of a 46k-upload account, 100–131 s each).
+ */
+export const SYNC_WORKERS = 5;
+
+/**
+ * Numbered pages the full sync asks for before it re-anchors the search on
+ * `id:>` the last post it has. Danbooru answers 410 past the viewer's page
+ * limit (`User.page_limit`: 1000 below Gold, 5000 from Gold), which at 200
+ * posts a page used to end a Member's sync of a larger account at 200,000
+ * posts. 1000 fits every level.
+ */
+export const SYNC_SEGMENT_PAGES = 1000;
+
 /** How the full-sync worker should react to a failed page fetch. */
 export type SyncFetchErrorKind = 'rate-limit' | 'transient' | 'fatal';
 
@@ -379,10 +406,10 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * @param {Database} db The Dexie database instance.
-   * @param {RateLimitedFetch=} rateLimiter Optional shared rate limiter.
+   * @param {RateLimitedFetch} rateLimiter The tab's shared rate limiter.
    */
-  constructor(db: Database, rateLimiter?: RateLimitedFetch | null) {
-    super(db, rateLimiter ?? null);
+  constructor(db: Database, rateLimiter: RateLimitedFetch) {
+    super(db, rateLimiter);
   }
 
   /**
@@ -439,9 +466,13 @@ export class AnalyticsDataManager extends DataManager {
    * caller passes it to `cacheUnlessPartial` — a ranking built on a 0 that
    * means "unknown" (a top character dropped from the pie) must not be cached.
    *
-   * Deterministic 4xx failures (e.g. 422 for a search over a Member's tag
+   * Deterministic 4xx failures (e.g. 422 for a search over the viewer's tag
    * limit) are not retried and do not count as lost: refetching cannot
    * change them, and refusing to cache would re-run them on every open.
+   *
+   * A `null` count ({@link CountUnavailableError}) is lost but not retried:
+   * the server caches that `null` for 5 minutes, so the retry would only
+   * spend a count-lane point to read it back.
    */
   private countBatch(): CountBatch {
     let failed = false;
@@ -449,11 +480,20 @@ export class AnalyticsDataManager extends DataManager {
       try {
         return await this.fetchRemoteCount(query);
       } catch (first: unknown) {
+        if (first instanceof CountUnavailableError) {
+          failed = true;
+          throw first;
+        }
         if (classifySyncFetchError(first) === 'fatal') throw first;
         try {
           return await this.fetchRemoteCount(query);
         } catch (second: unknown) {
-          if (classifySyncFetchError(second) !== 'fatal') failed = true;
+          if (
+            second instanceof CountUnavailableError ||
+            classifySyncFetchError(second) !== 'fatal'
+          ) {
+            failed = true;
+          }
           throw second;
         }
       }
@@ -2938,16 +2978,27 @@ export class AnalyticsDataManager extends DataManager {
     }
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
-    const fetchCount = (tagQuery: string): Promise<number> =>
+    const fetchCount = (tagQuery: string): Promise<number | null> =>
       this.fetchRemoteCount(tagQuery).catch(e => {
         log.warn('Count query failed for user stats', {tagQuery, error: e});
-        return 0;
+        return null;
       });
 
     const [gentags, tagcount] = await Promise.all([
       fetchCount(`user:${normalizedName} gentags:<10`),
       fetchCount(`user:${normalizedName} tagcount:<10`),
     ]);
+    if (gentags === null || tagcount === null) {
+      // A lost count is not a 0: keep whatever was stored (even past its
+      // 24 h) and store nothing, so the next open asks again.
+      const stale = await this.db.user_stats.get(userId);
+      return stale
+        ? {
+            gentags_lt_10: stale.gentags_lt_10,
+            tagcount_lt_10: stale.tagcount_lt_10,
+          }
+        : null;
+    }
 
     const record: UserStatsRecord = {
       userId,
@@ -3260,12 +3311,14 @@ export class AnalyticsDataManager extends DataManager {
         try {
           results[item.idx].count = await counts.lookup(item.query);
         } catch (e: unknown) {
+          // "Untagged" is 4 terms: a 422 below Gold (T-408 replaces it).
+          results[item.idx].unknown = true;
           log.debug('Failed to fetch commentary count', {error: e});
         }
       },
     );
 
-    const filtered = results.filter(r => r.count > 0);
+    const filtered = results.filter(r => r.count > 0 || r.unknown);
     const shown = await this.cacheUnlessPartial(
       cacheKey,
       uploaderId,
@@ -3336,9 +3389,6 @@ export class AnalyticsDataManager extends DataManager {
       color: cat.color,
     }));
 
-    const fetchCount = (query: string): Promise<number> =>
-      counts.lookup(query).catch(() => 0);
-
     await this.mapConcurrent(
       categories.map((cat, i) => ({...cat, idx: i})),
       3,
@@ -3348,16 +3398,18 @@ export class AnalyticsDataManager extends DataManager {
         try {
           if (item.useInclusionExclusion) {
             // Untagged via inclusion-exclusion: max(0, t − a − b − c + ab + ac).
-            // See PLAN.md §9 for derivation. All 6 queries use ≤2 real tags
-            // so they work on Member(Blue) accounts.
+            // See PLAN.md §9 for derivation. b, c, ab and ac are 3 terms
+            // (the `*_text` wildcard counts), so an anonymous viewer gets a
+            // 422 on them; any lost term throws and leaves Untagged unknown
+            // rather than computed from a 0 that is not one.
             const q = buildUntaggedTranslationQueries(`user:${normalizedName}`);
             const [t, a, b, c, ab, ac] = await Promise.all([
-              fetchCount(q.t),
-              fetchCount(q.a),
-              fetchCount(q.b),
-              fetchCount(q.c),
-              fetchCount(q.ab),
-              fetchCount(q.ac),
+              counts.lookup(q.t),
+              counts.lookup(q.a),
+              counts.lookup(q.b),
+              counts.lookup(q.c),
+              counts.lookup(q.ab),
+              counts.lookup(q.ac),
             ]);
             results[item.idx].count = computeUntaggedTranslation({
               t,
@@ -3370,7 +3422,8 @@ export class AnalyticsDataManager extends DataManager {
 
             // Assumption-1 runtime validation (monitoring only, does not affect result).
             // If |R ∩ TR| / t > 0.5%, the mutual exclusivity assumption is violated.
-            fetchCount(q.bc)
+            if (!fitsViewerTagLimit(q.bc)) return;
+            this.fetchRemoteCount(q.bc)
               .then(bc => {
                 const ratio = bc / Math.max(1, t);
                 if (ratio > 0.005) {
@@ -3389,16 +3442,16 @@ export class AnalyticsDataManager extends DataManager {
                 /* monitoring only */
               });
           } else if (item.query) {
-            const count = await fetchCount(item.query);
-            if (count > 0) results[item.idx].count = count;
+            results[item.idx].count = await counts.lookup(item.query);
           }
         } catch (e: unknown) {
+          results[item.idx].unknown = true;
           log.debug('Failed to fetch translation count', {error: e});
         }
       },
     );
 
-    const filtered = results.filter(r => r.count > 0);
+    const filtered = results.filter(r => r.count > 0 || r.unknown);
     const shown = await this.cacheUnlessPartial(
       cacheKey,
       uploaderId,
@@ -3659,7 +3712,7 @@ export class AnalyticsDataManager extends DataManager {
       'absurdly_long_hair',
     ];
 
-    const results = hairLengthTags.map(tag => {
+    const results = hairLengthTags.map((tag): DistributionItem => {
       let label = tag;
       if (tag.includes('~bald')) label = 'Bald';
       else
@@ -3685,12 +3738,14 @@ export class AnalyticsDataManager extends DataManager {
           `user:${normalizedName} ${obj.originalTag}`,
         );
       } catch (e: unknown) {
+        // "Bald" is 3 terms: a 422 for an anonymous viewer.
+        obj.unknown = true;
         log.debug('Failed to fetch count', {error: e});
       }
     });
 
     const filtered = results
-      .filter(r => r.count > 0)
+      .filter(r => r.count > 0 || r.unknown)
       .sort((a, b) => b.count - a.count);
     // Reuse unchanged thumbs before this write replaces the cache (L-2).
     await this.carryOverThumbs(cacheKey, uploaderId, filtered);
@@ -3864,7 +3919,7 @@ export class AnalyticsDataManager extends DataManager {
     // Identify items needing thumbs
     // Explicitly check for null or empty string, but sometimes empty string means "tried and failed".
     // Let's assume null means "not yet fetched".
-    const toFetch = items.filter(i => !i.isOther && !i.thumb);
+    const toFetch = items.filter(i => !i.isOther && !i.thumb && !i.unknown);
 
     if (toFetch.length === 0) return;
 
@@ -3897,7 +3952,10 @@ export class AnalyticsDataManager extends DataManager {
         queryTags = `user:${normalizedName} ${tagPart} order:score rating:g`;
       }
 
-      // Special cases if any? No, mostly standard.
+      // 3 terms (`user:`/`fav:`, the tag, `order:`), 4 for Hair "Bald"'s
+      // `~bald ~bald_female`: over the viewer's limit the server answers
+      // 422, so the slice goes without a thumbnail and no request is sent.
+      if (!fitsViewerTagLimit(queryTags)) return;
 
       const thumb = await this.fetchThumbnailWithRetry(queryTags);
       if (thumb) {
@@ -4117,6 +4175,8 @@ export class AnalyticsDataManager extends DataManager {
       finalCurrentNo: 0,
     };
     perfLogger.start('dbi:db:sync:full:total');
+    const edge429sAtStart = this.rateLimiter.trafficSummary().edge429s;
+    const syncStartedAt = Date.now();
 
     try {
       // 1. Get total count
@@ -4136,44 +4196,70 @@ export class AnalyticsDataManager extends DataManager {
       perfStats.initialCurrentNo = currentNo;
 
       // 3. Worker pool — claim pages, fetch with retry, commit in order.
-      let pageOffset = 1;
-      let hasMore = true;
+      // Danbooru refuses numbered pages past the viewer's page limit, so the
+      // pool runs one segment of SYNC_SEGMENT_PAGES at a time: when a
+      // segment runs out of page numbers with posts still coming, the next
+      // one searches `id:>` the last post committed and counts from page 1.
       let pageFailed = false;
       const seenIds = new Set<number>();
-      const buffer = new Map<number, DanbooruPost[]>();
-      let nextExpectedPage = 1;
-      const MAX_CONCURRENCY = 5;
+      let lastSeenId = startId;
+      let segmentStartId = startId;
+      for (;;) {
+        let pageOffset = 1;
+        let hasMore = true;
+        const buffer = new Map<number, DanbooruPost[]>();
+        let nextExpectedPage = 1;
 
-      const worker = this.createSyncPageWorker({
-        userInfo,
-        uploaderId,
-        startId,
-        getCurrentNo: () => currentNo,
-        bumpCurrentNo: () => ++currentNo,
-        total,
-        buffer,
-        getNextExpectedPage: () => nextExpectedPage,
-        bumpNextExpectedPage: () => ++nextExpectedPage,
-        claimPage: () => pageOffset++,
-        getHasMore: () => hasMore,
-        setHasMore: v => {
-          hasMore = v;
-        },
-        markFailed: () => {
+        const worker = this.createSyncPageWorker({
+          userInfo,
+          uploaderId,
+          startId: segmentStartId,
+          getCurrentNo: () => currentNo,
+          bumpCurrentNo: () => ++currentNo,
+          total,
+          buffer,
+          getNextExpectedPage: () => nextExpectedPage,
+          bumpNextExpectedPage: () => ++nextExpectedPage,
+          claimPage: () =>
+            pageOffset <= SYNC_SEGMENT_PAGES ? pageOffset++ : null,
+          getHasMore: () => hasMore,
+          setHasMore: v => {
+            hasMore = v;
+          },
+          markFailed: () => {
+            pageFailed = true;
+          },
+          markSeen: ids => {
+            for (const id of ids) {
+              seenIds.add(id);
+              if (id > lastSeenId) lastSeenId = id;
+            }
+          },
+          reportProgress,
+          perfStats,
+        });
+
+        const workers: Promise<void>[] = [];
+        for (let i = 0; i < SYNC_WORKERS; i++) {
+          workers.push(worker(i));
+        }
+        await Promise.all(workers);
+
+        // Still more to fetch only if every page of the segment came back
+        // with posts: no empty page (hasMore) and no failure.
+        const segmentFull =
+          hasMore && !pageFailed && nextExpectedPage > SYNC_SEGMENT_PAGES;
+        if (!segmentFull) break;
+        if (lastSeenId <= segmentStartId) {
+          // The next segment would repeat this one.
+          log.error('Sync segment did not advance, stopping', {
+            segmentStartId,
+          });
           pageFailed = true;
-        },
-        markSeen: ids => {
-          for (const id of ids) seenIds.add(id);
-        },
-        reportProgress,
-        perfStats,
-      });
-
-      const workers: Promise<void>[] = [];
-      for (let i = 0; i < MAX_CONCURRENCY; i++) {
-        workers.push(worker(i));
+          break;
+        }
+        segmentStartId = lastSeenId;
       }
-      await Promise.all(workers);
 
       // Reconcile the re-fetched window before the completion stamps: drop
       // rows the remote no longer returns, so the local DB is a snapshot of
@@ -4196,6 +4282,15 @@ export class AnalyticsDataManager extends DataManager {
       return {complete: !pageFailed, started: true};
     } finally {
       perfLogger.end('dbi:db:sync:full:total', perfStats);
+      // The edge's rule is unknown; a long sync is the best sample of it.
+      // Logged even with no 429, which bounds the limit from below (T-209).
+      const traffic = this.rateLimiter.trafficSummary();
+      log.info('Sync traffic', {
+        edge429s: traffic.edge429s - edge429sAtStart,
+        ...traffic.peakOk,
+        pages: perfStats.pagesCommitted,
+        elapsedMs: Date.now() - syncStartedAt,
+      });
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
     }
@@ -4348,9 +4443,11 @@ export class AnalyticsDataManager extends DataManager {
    * sync even though pages may complete out of order.
    *
    * Workers stagger their start (200ms * workerId) so the initial burst
-   * doesn't all hit the API at once. WORKER_DELAY (400ms) keeps each
-   * worker at ~2.5 req/s; with 5 workers that's ~12.5 req/s peak —
-   * below Danbooru's rate limit.
+   * doesn't all hit the API at once. Each worker's cycle is the server's
+   * time for a page (about 1 s live) plus WORKER_DELAY (400ms), so
+   * SYNC_WORKERS sets the sync's real pace; the shared rate limiter
+   * (`CONFIG.RATE_LIMITER`) caps it when pages come back faster or other
+   * traffic joins.
    */
   private createSyncPageWorker(args: {
     userInfo: TargetUser;
@@ -4362,7 +4459,8 @@ export class AnalyticsDataManager extends DataManager {
     buffer: Map<number, DanbooruPost[]>;
     getNextExpectedPage: () => number;
     bumpNextExpectedPage: () => number;
-    claimPage: () => number;
+    /** The next page number, or null once the segment has none left. */
+    claimPage: () => number | null;
     getHasMore: () => boolean;
     setHasMore: (v: boolean) => void;
     markFailed: () => void;
@@ -4389,7 +4487,7 @@ export class AnalyticsDataManager extends DataManager {
       perfStats,
     } = args;
     const limit = 200; // API Limit
-    const WORKER_DELAY = 400; // 5 workers * 1 req / 0.4s = 12.5 req/s (Max)
+    const WORKER_DELAY = 400; // pause between pages, per worker
 
     // T-26 baseline: arrow complexity 20. Worker body — retry/backoff +
     // buffer commit ordering + sequential `no` assignment + completion
@@ -4411,6 +4509,7 @@ export class AnalyticsDataManager extends DataManager {
         while (getHasMore()) {
           // 1. Claim a page
           const currentPage = claimPage();
+          if (currentPage === null) return;
           perfLogger.start(pageLabel);
           let pageFetchedCount = 0;
           let pageAttempts = 0;

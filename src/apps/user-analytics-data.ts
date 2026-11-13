@@ -9,6 +9,7 @@ import {
   newestPoints,
   scatterPointToWindowPoint,
 } from '../core/profile-summary';
+import {numericExtent} from '../utils';
 import type {
   DistributionItem,
   ProfileSummaryInput,
@@ -371,6 +372,8 @@ export type PieDetails =
       color?: string;
       frequency?: number;
       name?: string;
+      /** The count could not be had: legend "—" (`DistributionItem.unknown`). */
+      unknown?: boolean;
       /**
        * Sub-tag breakdown for legend hover/tap (Copy / Fav_Copy / Char,
        * v9.6.0+). Source: `DistributionItem.subTags` from the resolver.
@@ -392,7 +395,7 @@ export interface PieSlice {
  */
 export class UserAnalyticsDataService {
   private readonly db: Database;
-  private readonly rateLimiter: RateLimitedFetch | null;
+  private readonly rateLimiter: RateLimitedFetch;
 
   /**
    * @param db The Dexie database instance.
@@ -400,9 +403,8 @@ export class UserAnalyticsDataService {
    *   dashboard fetch (and the now-heavier post-paint SWR revalidate flood)
    *   on the TabCoordinator-managed, 429-backoff-aware limiter instead of a
    *   private bucket that would blow past Danbooru's server cap (audit H-1).
-   *   Optional so existing callers/tests that only need cache reads still work.
    */
-  constructor(db: Database, rateLimiter: RateLimitedFetch | null = null) {
+  constructor(db: Database, rateLimiter: RateLimitedFetch) {
     this.db = db;
     this.rateLimiter = rateLimiter;
   }
@@ -763,8 +765,9 @@ export async function buildRecentSummaryInput(
       cached<DistributionItem[]>('copyright_dist', []),
       cached<DistributionItem[]>('character_dist', []),
     ]);
+  // One entry per synced upload — no spread into Math.min (see numericExtent).
   const firstTs = scatterData.length
-    ? Math.min(...scatterData.map(p => p.d))
+    ? numericExtent(scatterData.map(p => p.d)).min
     : null;
   return assembleProfileSummaryInput({
     dataManager,

@@ -167,3 +167,15 @@ describe('buildRecentSummaryInput (popover)', () => {
     expect(input.window).toEqual([]);
   });
 });
+
+describe('buildRecentSummaryInput - very large accounts (DA-05)', () => {
+  it('finds the first upload among 150k local posts without a RangeError', async () => {
+    const dm = {
+      getRecentUploadWindow: vi.fn(async () => []),
+      getScatterData: vi.fn(async () => scatter(150_000)),
+      getStats: vi.fn(async () => null),
+    };
+    const input = await buildRecentSummaryInput(dm as never, user, 150_000);
+    expect(input.firstUploadDate?.getTime()).toBe(1_000);
+  });
+});

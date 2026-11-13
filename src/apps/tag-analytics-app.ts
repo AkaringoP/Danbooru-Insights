@@ -5,7 +5,7 @@ import {
   resolveEffectiveDashboardTheme,
 } from '../ui/theme-palette';
 import {fetchRemoteCount} from '../core/data-manager';
-import {RateLimitedFetch} from '../core/rate-limiter';
+import type {RateLimitedFetch} from '../core/rate-limiter';
 import {createModal, type ModalHandle} from '../ui/modal';
 import {
   applyPopoverChrome,
@@ -15,6 +15,7 @@ import {
 } from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
+import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
 import type {Database} from '../core/database';
 import {
   getNsfwEnabled,
@@ -24,7 +25,11 @@ import {
   setCountCacheTtlMin,
 } from '../core/settings';
 import type {SettingsManager} from '../core/settings';
-import {TagAnalyticsDataService} from './tag-analytics-data';
+import {
+  TagAnalyticsDataService,
+  cachedRankingResult,
+  keepCachedOnFailure,
+} from './tag-analytics-data';
 import type {
   InitialStats,
   LocalStats,
@@ -97,14 +102,12 @@ export class TagAnalyticsApp {
     db: Database,
     settings: SettingsManager,
     tagName: string,
-    rateLimiter?: RateLimitedFetch,
+    rateLimiter: RateLimitedFetch,
   ) {
     this.db = db;
     this.settings = settings;
     this.tagName = tagName;
-    const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter =
-      rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+    this.rateLimiter = rateLimiter;
     this.dataService = new TagAnalyticsDataService(
       db,
       this.rateLimiter,
@@ -735,26 +738,21 @@ export class TagAnalyticsApp {
     log.debug('[Phase 2] Starting Rankings & History in parallel...');
 
     // Ranking SWR: on revisit with cached rankings (delta sync path), the
-    // 4× fetchReportRanking calls (12s under the report-queue 3s cooldown)
-    // are moved off the critical path. `rankingPromise` resolves
-    // immediately with the cached report; the real network fetch runs via
-    // `rankingRevalidatePromise` and its result is applied after the
-    // dashboard is painted.
+    // 4× fetchReportRanking calls (the reports lane's 1 per 3 s once its
+    // burst is spent) are moved off the critical path. `rankingPromise`
+    // resolves immediately with the cached report; the real network fetch
+    // runs via `rankingRevalidatePromise` and its result is applied after
+    // the dashboard is painted.
     const canSwrRankings = Boolean(
       runDelta &&
       baseData?.rankings?.uploader?.allTime &&
       baseData?.rankings?.approver?.allTime,
     );
+    const cachedRankings = cachedRankingResult(baseData);
     let rankingPromise: Promise<RankingResult>;
     let rankingRevalidatePromise: Promise<RankingResult> | null = null;
-    if (canSwrRankings && baseData?.rankings) {
-      const cached = baseData.rankings;
-      rankingPromise = Promise.resolve({
-        uploaderAll: cached.uploader.allTime,
-        approverAll: cached.approver.allTime,
-        uploaderYear: cached.uploader.year,
-        approverYear: cached.approver.year,
-      });
+    if (canSwrRankings && cachedRankings) {
+      rankingPromise = Promise.resolve(cachedRankings);
       rankingRevalidatePromise = this.dataService.fetchRankingsAndResolve(
         tagName,
         dateStr1Y,
@@ -762,12 +760,10 @@ export class TagAnalyticsApp {
         measure,
       );
     } else {
-      rankingPromise = this.dataService.fetchRankingsAndResolve(
-        tagName,
-        dateStr1Y,
-        dateStrTomorrow,
-        measure,
-      );
+      // A report that fails here keeps whatever ranking the cache had.
+      rankingPromise = this.dataService
+        .fetchRankingsAndResolve(tagName, dateStr1Y, dateStrTomorrow, measure)
+        .then(fresh => keepCachedOnFailure(fresh, cachedRankings));
     }
 
     const first100Override: First100Override = {value: null};
@@ -924,7 +920,11 @@ export class TagAnalyticsApp {
     // skip the DOM churn.
     if (rankingRevalidatePromise) {
       try {
-        const fresh = await rankingRevalidatePromise;
+        // A failed report keeps the cached ranking rendered above.
+        const fresh = keepCachedOnFailure(
+          await rankingRevalidatePromise,
+          cachedRankings,
+        );
         const currentSignature = JSON.stringify({
           uA: meta.rankings?.uploader.allTime,
           aA: meta.rankings?.approver.allTime,
@@ -1916,7 +1916,7 @@ export class TagAnalyticsApp {
       <div class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.latestPost.rating}">
          <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-latest">
             <a href="/posts/${tagData.latestPost.id}" target="_blank">
-                <img src="${getBestThumbnailUrl(tagData.latestPost)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+                <img src="${getBestThumbnailUrl(tagData.latestPost)}" class="${THUMB_FALLBACK_CLASS}">
             </a>
          </div>
          <div class="di-nsfw-monitor-label">Latest</div>
@@ -1930,7 +1930,7 @@ export class TagAnalyticsApp {
       <div id="trending-post-sfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPost.rating}">
          <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-trending">
             <a href="/posts/${tagData.trendingPost.id}" target="_blank">
-                  <img src="${getBestThumbnailUrl(tagData.trendingPost)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+                  <img src="${getBestThumbnailUrl(tagData.trendingPost)}" class="${THUMB_FALLBACK_CLASS}">
             </a>
          </div>
          <div class="di-nsfw-monitor-label-trending">Trending(3d)</div>
@@ -1944,7 +1944,7 @@ export class TagAnalyticsApp {
       <div id="trending-post-nsfw" class="di-nsfw-monitor di-hover-translate-up" data-rating="${tagData.trendingPostNSFW.rating}">
          <div class="di-nsfw-monitor-thumb di-nsfw-monitor-thumb-trending-nsfw">
             <a href="/posts/${tagData.trendingPostNSFW.id}" target="_blank">
-                  <img src="${getBestThumbnailUrl(tagData.trendingPostNSFW)}" onerror="this.onerror=null;this.src='/favicon.ico';this.style.objectFit='contain';this.style.padding='4px';">
+                  <img src="${getBestThumbnailUrl(tagData.trendingPostNSFW)}" class="${THUMB_FALLBACK_CLASS}">
             </a>
          </div>
          <div class="di-nsfw-monitor-label-trending-nsfw">Trending(NSFW)</div>
@@ -2109,6 +2109,7 @@ export class TagAnalyticsApp {
     };
     const titleColor = colorMap[tagData.category] || 'var(--di-text, #333)';
 
+    installThumbFallback(content);
     content.innerHTML = `
       ${this.buildDashboardHeader(tagData, titleColor, categoryLabel)}
       ${this.buildMainGrid(tagData)}

@@ -247,6 +247,13 @@ export interface DistributionItem {
   isOther: boolean;
   color?: string;
   /**
+   * The count could not be had — a 422 (the query is over the viewer's
+   * search tag limit), a `null` count, or a request lost after its retry.
+   * `count` is then 0 but means "unknown", not "none": the legend shows "—"
+   * and the slice is left out of the pie and its percentages (v9.12).
+   */
+  unknown?: boolean;
+  /**
    * Sub-tag breakdown for legend hover/tap (v9.6.0+). Populated for Copy /
    * Fav_Copy / Char distributions when the top-level tag has implications
    * (sub-tags) that the user actually uses. Empty/undefined = no tooltip.

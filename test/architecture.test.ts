@@ -38,6 +38,36 @@ function extractImports(content: string): string[] {
   return Array.from(matches).map(m => m[1]);
 }
 
+/**
+ * Patterns that put script into markup, which Danbooru's CSP refuses to run
+ * (see the rule-14 test): an `on*=` attribute inside an HTML tag in a
+ * template string, an `on*` attribute set through setAttribute / d3 `.attr`,
+ * and a `javascript:` URL in a string literal.
+ */
+const INLINE_SCRIPT_PATTERNS: RegExp[] = [
+  /<[a-z][^>]*\son[a-z]+\s*=/i,
+  /(?:setAttribute|\.attr)\(\s*['"`]on[a-z]+['"`]/i,
+  /['"`]\s*javascript:/i,
+];
+
+/** 1-based line numbers in `content` that carry inline script. */
+function findInlineScriptLines(content: string): number[] {
+  const hits: number[] = [];
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (
+      trimmed.startsWith('//') ||
+      trimmed.startsWith('*') ||
+      trimmed.startsWith('/*')
+    ) {
+      continue;
+    }
+    if (INLINE_SCRIPT_PATTERNS.some(re => re.test(lines[i]))) hits.push(i + 1);
+  }
+  return hits;
+}
+
 describe('Architecture constraints', () => {
   const allFiles = collectTsFiles(SRC_DIR);
 
@@ -313,23 +343,23 @@ describe('Architecture constraints', () => {
     ).toEqual([]);
   });
 
-  it('apps/ must construct DataManager subclasses with the shared rate limiter', () => {
-    // H-1 recurrence guard. DataManager's constructor falls back to a brand
-    // new RateLimitedFetch when none is passed (core/data-manager.ts:86), so
-    // a limiter-less `new AnalyticsDataManager(db)` gets a private token
-    // bucket: it ignores TabCoordinator's multi-tab rps/concurrency split and
-    // keeps firing while the shared limiter is in 429 backoff. Every
-    // construction under apps/ must therefore pass a second argument.
-    //
-    // ui/settings-popover.ts is exempt: its manager only calls getCacheStats()
-    // (IndexedDB-only, no network), so its unused limiter never issues traffic.
+  it('only main.ts constructs a RateLimitedFetch — one bucket per tab', () => {
+    // H-1 / G-1 recurrence guard. Every request of a tab must go through the
+    // one limiter main.ts builds: a second bucket ignores TabCoordinator's
+    // multi-tab split and the shared 429 pause, and adds its own full rate on
+    // top. The constructors of DataManager, AnalyticsDataManager, the three
+    // apps and UserAnalyticsDataService take the limiter as a required
+    // argument (the type checker enforces passing one); this rule stops a
+    // new bucket being built anywhere else to satisfy them — which is what
+    // the old `rateLimiter ?? new RateLimitedFetch(…)` fallbacks did.
+    const ctorRe = /new\s+RateLimitedFetch\s*\(/;
     const violations: string[] = [];
-    const ctorRe = /new\s+(?:\w*DataManager)\s*\(([^)]*)\)/g;
+    let mainHits = 0;
+    let scanned = 0;
 
     for (const file of allFiles) {
       const rel = relFromSrc(file.path);
-      if (!rel.startsWith('apps/')) continue;
-
+      scanned++;
       const lines = file.content.split('\n');
       for (let i = 0; i < lines.length; i++) {
         const trimmed = lines[i].trim();
@@ -340,22 +370,20 @@ describe('Architecture constraints', () => {
         ) {
           continue;
         }
-        ctorRe.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        while ((m = ctorRe.exec(lines[i])) !== null) {
-          // A second constructor argument is the rate limiter.
-          if (!m[1].includes(',')) {
-            violations.push(`${rel}:${i + 1}: ${trimmed}`);
-          }
-        }
+        if (!ctorRe.test(lines[i])) continue;
+        if (rel === 'main.ts') mainHits++;
+        else violations.push(`${rel}:${i + 1}: ${trimmed}`);
       }
     }
 
+    // Not a vacuous pass: the scan saw the source tree and the one real
+    // construction in main.ts.
+    expect(scanned).toBeGreaterThan(20);
+    expect(mainHits).toBe(1);
     expect(
       violations,
-      'Pass the shared RateLimitedFetch as the second constructor argument ' +
-        '(e.g. `new AnalyticsDataManager(db, this.rateLimiter)`), or reuse an ' +
-        'existing manager such as `app.dataManager`.',
+      'Take the shared limiter as a constructor argument and pass it down ' +
+        'from main.ts (e.g. `new AnalyticsDataManager(db, this.rateLimiter)`).',
     ).toEqual([]);
   });
 
@@ -397,6 +425,59 @@ describe('Architecture constraints', () => {
       'Use calcPopoverPosition(target) from ui/popover-utils.ts instead of ' +
         'recomputing the page-offset + rect formula inline.',
     ).toEqual([]);
+  });
+
+  it('no inline event handlers or javascript: URLs in markup (Danbooru CSP)', () => {
+    // N-01 recurrence guard. Danbooru enforces a Content-Security-Policy
+    // without 'unsafe-inline' in script-src since 2026-11-11 (danbooru
+    // commit e0f459e). An `onclick="…"` / `onerror="…"` attribute in HTML we
+    // inject silently does nothing: the monthly-bar link and the thumbnail
+    // favicon fallback broke that way. Attach a listener instead (see
+    // ui/thumb-fallback.ts and renderHistoryChart's delegated click).
+    const violations: string[] = [];
+
+    for (const file of allFiles) {
+      for (const line of findInlineScriptLines(file.content)) {
+        const text = file.content.split('\n')[line - 1].trim();
+        violations.push(`${relFromSrc(file.path)}:${line}: ${text}`);
+      }
+    }
+
+    // Vacuous-pass guard: the scan must actually have covered the source.
+    expect(allFiles.length).toBeGreaterThan(50);
+    expect(
+      violations,
+      "Inline handlers are blocked by Danbooru's CSP. Use addEventListener " +
+        '(a delegated listener on a stable container works for innerHTML).',
+    ).toEqual([]);
+  });
+
+  it('inline-script detector flags the pre-v9.11.4 patterns and ignores safe code', () => {
+    // Self-test for the rule above, so a regex typo cannot turn it into a
+    // silent pass. The flagged samples are the six lines it replaced.
+    const flagged = [
+      '      <g class="month-column" style="cursor: pointer;" onclick="window.open(\'${searchUrl}\', \'_blank\')">',
+      '               <a href="/posts/${m.post.id}" target="_blank" style="cursor: pointer; pointer-events: all;" onclick="event.stopPropagation()">',
+      '                <img src="${thumbUrl}" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.onerror=null;this.src=\'/favicon.ico\';">',
+      '                <img src="${getBestThumbnailUrl(tagData.latestPost)}" onerror="this.onerror=null;">',
+      "    el.setAttribute('onclick', 'go()');",
+      "    sel.attr('onmouseover', 'hi()');",
+      '    a.href = "javascript:void(0)";',
+    ];
+    const safe = [
+      '    btn.onclick = async e => {',
+      '    nsfwCheck.onchange = e => {',
+      "    chartWrapper.addEventListener('click', e => {",
+      '      <g class="month-column" style="cursor: pointer;" data-search-url="${escapeHtml(searchUrl)}">',
+      ' * `<img src="..." onerror="...">`-style escapes when a malicious or',
+      '  // an inline onclick="…" would be blocked',
+    ];
+    for (const line of flagged) {
+      expect(findInlineScriptLines(line), line).toEqual([1]);
+    }
+    for (const line of safe) {
+      expect(findInlineScriptLines(line), line).toEqual([]);
+    }
   });
 
   it('dev/ should not import from core/, ui/, or apps/', () => {

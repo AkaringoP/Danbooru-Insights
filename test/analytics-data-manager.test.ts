@@ -11,6 +11,7 @@ import {
   classifySyncFetchError,
   syncRetryDelayMs,
   SYNC_PAGE_MAX_ATTEMPTS,
+  SYNC_SEGMENT_PAGES,
 } from '../src/core/analytics-data-manager';
 import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
 
@@ -436,6 +437,10 @@ function makeSyncRateLimiter(
     fetch: vi.fn(fetchImpl ?? defaultFetch),
     getRequestCount: vi.fn(() => 0),
     backoffRemainingMs: vi.fn(() => 0),
+    trafficSummary: vi.fn(() => ({
+      edge429s: 0,
+      peakOk: {sent1s: 0, sent10s: 0, sent60s: 0, sent120s: 0},
+    })),
   };
 }
 
@@ -798,6 +803,47 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
 
     // Flag MUST be back to false after the throw (finally block runs)
     expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
+  });
+
+  it('logs the traffic the edge saw during the sync when it ends (T-209)', async () => {
+    const postsTable = makePostsTable([]);
+    postsTable.where.mockImplementation(() => {
+      throw new Error('db read error');
+    });
+    const rl = makeSyncRateLimiter(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({counts: {posts: 5}}),
+    }));
+    // Two edge 429s before this sync, five after: three are its own.
+    rl.trafficSummary
+      .mockReturnValueOnce({
+        edge429s: 2,
+        peakOk: {sent1s: 0, sent10s: 0, sent60s: 0, sent120s: 0},
+      })
+      .mockReturnValueOnce({
+        edge429s: 5,
+        peakOk: {sent1s: 6, sent10s: 40, sent60s: 170, sent120s: 300},
+      });
+    const info = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(postsTable) as never,
+      rl as never,
+    );
+
+    // Logged even when the run throws (finally).
+    await expect(adm.syncAllPosts(makeSyncUser(), vi.fn())).rejects.toThrow();
+
+    const call = info.mock.calls.find(c =>
+      String(c[0]).includes('Sync traffic'),
+    );
+    expect(call?.[1]).toMatchObject({
+      edge429s: 3,
+      sent10s: 40,
+      sent60s: 170,
+      sent120s: 300,
+      elapsedMs: expect.any(Number),
+    });
   });
 
   it('total=0 with empty db: workers find nothing and sync completes without writing', async () => {
@@ -1174,6 +1220,93 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       .mock.calls.map((c: string[]) => c[0]);
     expect(removed).toContain('danbooru_grass_last_sync_42');
     expect(removed).toContain('di_post_metadata_v2_42');
+  });
+
+  // T-212: Danbooru answers 410 past the viewer's page limit (1000 below
+  // Gold), which used to end a Member's sync of a >200k-upload account as
+  // incomplete. The sync now re-anchors on `id:>` and counts pages from 1.
+  describe('page-limit segments (T-212)', () => {
+    /**
+     * One post per page, ids 1..lastId, so a segment's pages are easy to
+     * name. Pages past the limit answer 410 like Danbooru.
+     */
+    function servePostsUpTo(lastId: number) {
+      const asked: string[] = [];
+      const rl = makeSyncRateLimiter(async (url: string) => {
+        if (url.includes('/counts/posts.json')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({counts: {posts: lastId}}),
+          };
+        }
+        const q = new URLSearchParams(url.split('?')[1]);
+        const page = Number(q.get('page'));
+        const after = Number(/id:>(\d+)/.exec(q.get('tags') ?? '')?.[1]);
+        asked.push(`${after}/${page}`);
+        if (page > SYNC_SEGMENT_PAGES) {
+          return {ok: false, status: 410, json: async () => ({})};
+        }
+        const id = after + page;
+        const body =
+          id <= lastId
+            ? [
+                {
+                  id,
+                  uploader_id: 42,
+                  created_at: '2025-01-01T00:00:00Z',
+                  up_score: 1,
+                  down_score: 0,
+                  rating: 'g',
+                },
+              ]
+            : [];
+        return {ok: true, status: 200, json: async () => body};
+      });
+      return {rl, asked};
+    }
+
+    async function runSync(rl: ReturnType<typeof makeSyncRateLimiter>) {
+      // The pauses between pages are not under test.
+      vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable([])) as never,
+        rl as never,
+      );
+      vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+      vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+      const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+      const written = vi
+        .mocked(quotaManager.bulkPutSafe)
+        .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
+      return {outcome, written};
+    }
+
+    it('continues past the page limit from the last post, numbering on', async () => {
+      const lastId = SYNC_SEGMENT_PAGES + 3;
+      const {rl, asked} = servePostsUpTo(lastId);
+
+      const {outcome, written} = await runSync(rl);
+
+      expect(outcome).toEqual({complete: true, started: true});
+      // Never past the limit; the next segment starts after post 1000.
+      expect(asked).not.toContain(`0/${SYNC_SEGMENT_PAGES + 1}`);
+      expect(asked).toContain(`${SYNC_SEGMENT_PAGES}/1`);
+      expect(written).toHaveLength(lastId);
+      expect(written.every(r => r.no === r.id)).toBe(true);
+    });
+
+    it('an account that ends exactly on the limit finishes with one empty page', async () => {
+      const {rl, asked} = servePostsUpTo(SYNC_SEGMENT_PAGES);
+
+      const {outcome, written} = await runSync(rl);
+
+      expect(outcome.complete).toBe(true);
+      expect(written).toHaveLength(SYNC_SEGMENT_PAGES);
+      // The full segment cannot tell it was the last: one more page says so.
+      expect(asked).toContain(`${SYNC_SEGMENT_PAGES}/1`);
+      expect(asked).not.toContain(`0/${SYNC_SEGMENT_PAGES + 1}`);
+    });
   });
 
   it('a clean run reports complete:true', async () => {
@@ -1838,6 +1971,246 @@ describe('getCharacterDistribution — lost counts', () => {
     );
     expect(noaCalls).toHaveLength(1);
     expect(save).toHaveBeenCalled();
+  });
+
+  it('a null count is not retried and not cached (DA-20)', async () => {
+    // Danbooru caches a timed-out count's null for 5 minutes, so a retry
+    // only reads it back; it used to read as 0 and drop Noa from the pie.
+    const base = buildDistFetch(script, 'user');
+    const fetchImpl = async (url: string) =>
+      url.startsWith('/counts/posts.json') &&
+      decodeURIComponent(url).includes('noa_(blue_archive)')
+        ? {ok: true, status: 200, json: async () => ({counts: {posts: null}})}
+        : base(url);
+    const {adm, rl} = makeDistAdm(fetchImpl, 50_000);
+    const save = vi.spyOn(adm, 'saveStats');
+
+    await adm.getCharacterDistribution(user);
+
+    const noaCalls = rl.fetch.mock.calls.filter(
+      (c: [string]) =>
+        c[0].startsWith('/counts/posts.json') &&
+        decodeURIComponent(c[0]).includes('noa_(blue_archive)'),
+    );
+    expect(noaCalls).toHaveLength(1);
+    expect(save).not.toHaveBeenCalled();
+  });
+});
+
+// A count that cannot be had — 422 over the viewer's tag limit, a null, a
+// lost request — used to read as 0: a slice vanished, or an inclusion-
+// exclusion went on with a fake 0. It is now an `unknown` slice (G-4).
+describe('count distributions — unknown slices (T-204)', () => {
+  beforeEach(() => {
+    vi.stubGlobal('window', {
+      location: {origin: 'https://danbooru.donmai.us'},
+      dispatchEvent: vi.fn(),
+    });
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const user = makeSyncUser({id: '42', name: 'tester'});
+
+  /**
+   * Answers each count from `counts` by its decoded `tags`; a number is the
+   * count, `null` a timed-out count, a string `'422'` / `'429'` that status.
+   * Unlisted queries count 0.
+   */
+  function makeCountAdm(counts: Record<string, number | null | string>) {
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      const tags = new URLSearchParams(url.split('?')[1]).get('tags') ?? '';
+      const v = tags in counts ? counts[tags] : 0;
+      if (typeof v === 'string') {
+        return {ok: false, status: Number(v), json: async () => ({})};
+      }
+      return {ok: true, status: 200, json: async () => ({counts: {posts: v}})};
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      rl as never,
+    );
+    vi.spyOn(adm, 'getStats').mockResolvedValue(null);
+    vi.spyOn(
+      adm as unknown as {enrichThumbnails: () => Promise<void>},
+      'enrichThumbnails',
+    ).mockResolvedValue();
+    const save = vi.spyOn(adm, 'saveStats').mockResolvedValue();
+    return {adm, rl, save};
+  }
+
+  it('commentary: a 422 slice is kept as unknown and the run is cached', async () => {
+    const {adm, save} = makeCountAdm({
+      'user:tester commentary': 40,
+      'user:tester commentary_request': 10,
+      'user:tester has:commentary -commentary -commentary_request': '422',
+    });
+
+    const result = await adm.getCommentaryDistribution(user);
+
+    const untagged = result.find(r => r.name === 'Untagged');
+    expect(untagged).toMatchObject({count: 0, unknown: true});
+    expect(result.find(r => r.name === 'Commentary')?.count).toBe(40);
+    // 422 is deterministic: caching the unknown saves re-asking every open.
+    expect(save).toHaveBeenCalledWith('commentary_dist', 42, result);
+  });
+
+  it('commentary: a null slice is unknown and the run is not cached', async () => {
+    const {adm, save} = makeCountAdm({
+      'user:tester commentary': null,
+      'user:tester commentary_request': 10,
+    });
+
+    const result = await adm.getCommentaryDistribution(user);
+
+    expect(result.find(r => r.name === 'Commentary')).toMatchObject({
+      unknown: true,
+    });
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('translation: one lost inclusion-exclusion term leaves Untagged unknown', async () => {
+    // Before: the 422 read as 0, so t − a − b − c + ab + ac ran with ab = 0
+    // and showed a made-up Untagged count.
+    const {adm} = makeCountAdm({
+      'user:tester translated': 30,
+      'user:tester translation_request': 5,
+      'user:tester *_text': 100,
+      'user:tester english_text': 10,
+      'user:tester *_text translation_request': 5,
+      'user:tester *_text translated': 30,
+      'user:tester english_text translation_request': '422',
+      'user:tester english_text translated': 2,
+    });
+
+    const result = await adm.getTranslationDistribution(user);
+
+    const untagged = result.find(r => r.name === 'Untagged');
+    expect(untagged).toMatchObject({count: 0, unknown: true});
+    expect(result.find(r => r.name === 'Translated')?.count).toBe(30);
+  });
+
+  it('translation: with every term in, Untagged is computed', async () => {
+    const {adm} = makeCountAdm({
+      'user:tester translated': 30,
+      'user:tester *_text': 100,
+      'user:tester english_text': 10,
+      'user:tester *_text translation_request': 5,
+      'user:tester *_text translated': 30,
+      'user:tester english_text translation_request': 1,
+      'user:tester english_text translated': 2,
+    });
+
+    const result = await adm.getTranslationDistribution(user);
+
+    // 100 − 10 − 5 − 30 + 1 + 2 = 58
+    expect(result.find(r => r.name === 'Untagged')).toMatchObject({
+      count: 58,
+    });
+    expect(result.find(r => r.name === 'Untagged')?.unknown).toBeUndefined();
+  });
+
+  it('hair length: a 422 "Bald" is unknown, the rest is unchanged', async () => {
+    const {adm} = makeCountAdm({
+      'user:tester ~bald ~bald_female': '422',
+      'user:tester long_hair': 70,
+      'user:tester short_hair': 20,
+    });
+
+    const result = await adm.getHairLengthDistribution(user);
+
+    expect(result.find(r => r.name === 'Bald')).toMatchObject({
+      count: 0,
+      unknown: true,
+    });
+    expect(result.find(r => r.name === 'Long Hair')?.count).toBe(70);
+    // Zero-count buckets still drop out as before.
+    expect(result.find(r => r.name === 'Medium Hair')).toBeUndefined();
+  });
+
+  it('user stats: a lost count is not stored as 0', async () => {
+    const userStats = {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async () => undefined),
+    };
+    const rl = makeSyncRateLimiter(async (url: string) =>
+      url.includes('gentags')
+        ? {ok: true, status: 200, json: async () => ({counts: {posts: null}})}
+        : {ok: true, status: 200, json: async () => ({counts: {posts: 3}})},
+    );
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([]), {user_stats: userStats}) as never,
+      rl as never,
+    );
+
+    expect(await adm.getUserStats(user)).toBeNull();
+    expect(userStats.put).not.toHaveBeenCalled();
+  });
+});
+
+// Pie slice thumbnails are `user:X <tag> order:score rating:g`: 3 terms, 4
+// for Hair "Bald". Over the viewer's limit they can only 422, so they are
+// not sent (T-204 item 8).
+describe('enrichThumbnails — viewer tag limit', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function setViewerLevel(level: string) {
+    vi.stubGlobal('window', {
+      location: {origin: 'https://danbooru.donmai.us'},
+      dispatchEvent: vi.fn(),
+    });
+    vi.stubGlobal('document', {body: {dataset: {currentUserLevel: level}}});
+  }
+
+  async function thumbQueries(level: string): Promise<string[]> {
+    setViewerLevel(level);
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([])) as never,
+      makeSyncRateLimiter() as never,
+    );
+    const fetchThumb = vi
+      .spyOn(adm, 'fetchThumbnailWithRetry')
+      .mockResolvedValue('t.webp');
+    vi.spyOn(adm, 'saveStats').mockResolvedValue();
+    const items = [
+      {name: 'Long Hair', originalTag: 'long_hair', count: 9},
+      {name: 'Bald', originalTag: '~bald ~bald_female', count: 1},
+      {name: 'Unknown', originalTag: 'short_hair', count: 0, unknown: true},
+    ];
+    await adm.enrichThumbnails(
+      'hair_length_dist',
+      42,
+      items as never,
+      makeSyncUser({name: 'tester'}),
+    );
+    return fetchThumb.mock.calls.map(c => c[0]);
+  }
+
+  it('anonymous (limit 2): sends none', async () => {
+    expect(await thumbQueries('0')).toEqual([]);
+  });
+
+  it('Member (limit 3): sends the 3-term one, not the 4-term Bald', async () => {
+    expect(await thumbQueries('20')).toEqual([
+      'user:tester long_hair order:score rating:g',
+    ]);
+  });
+
+  it('Gold (unlimited): sends both; never one for an unknown slice', async () => {
+    expect(await thumbQueries('30')).toEqual([
+      'user:tester long_hair order:score rating:g',
+      'user:tester ~bald ~bald_female order:score rating:g',
+    ]);
   });
 });
 

@@ -12,6 +12,41 @@ export function escapeHtml(text: string): string {
   return el.innerHTML;
 }
 
+/* --- Helper: Large-array safe min / max / replace --- */
+/*
+ * Why loops instead of `Math.min(...xs)` / `xs.push(...ys)`: spreading an
+ * array into a call passes every element as an argument, which throws
+ * RangeError past roughly 124k elements in Chrome (and at 65,536 in Safari).
+ * Per-post arrays of big uploaders reach that, and the "At a glance" card
+ * silently vanished for them (audit DA-05).
+ */
+
+/**
+ * Smallest and largest of `values`. Empty input gives
+ * `{min: Infinity, max: -Infinity}`, the same as `Math.min()` / `Math.max()`.
+ */
+export function numericExtent(values: Iterable<number>): {
+  min: number;
+  max: number;
+} {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return {min, max};
+}
+
+/** Replaces the contents of `target` with `source`, keeping its identity. */
+export function replaceArrayContents<T>(
+  target: T[],
+  source: readonly T[],
+): void {
+  target.length = 0;
+  for (const item of source) target.push(item);
+}
+
 /* --- Helper: Tag Utility --- */
 /**
  * Returns the CSS class name for a Danbooru user level string.

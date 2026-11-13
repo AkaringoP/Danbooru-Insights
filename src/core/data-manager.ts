@@ -1,6 +1,6 @@
 import {CONFIG} from '../config';
 import {createLogger} from './logger';
-import {RateLimitedFetch} from './rate-limiter';
+import type {RateLimitedFetch} from './rate-limiter';
 import type {
   Metric,
   MetricData,
@@ -41,9 +41,22 @@ interface HourlyStatEntry {
 export type ApiItem = Record<string, any>;
 
 /**
+ * `/counts/posts.json` answered without a number — `{"counts":{"posts":null}}`
+ * with HTTP 200 when Danbooru could not finish the count in time. It is not
+ * a 0, and asking again soon does not help: the server caches that `null`
+ * for 5 minutes (`app/logical/post_query.rb`).
+ */
+export class CountUnavailableError extends Error {
+  constructor(readonly tags: string) {
+    super('Count unavailable: the server returned no number');
+    this.name = 'CountUnavailableError';
+  }
+}
+
+/**
  * Fetches the total post count for a given tag query via
- * `/counts/posts.json`. Throws on HTTP error; returns 0 when the response
- * shape is missing `counts.posts`.
+ * `/counts/posts.json`. Throws `Error('HTTP <status>')` on an HTTP error and
+ * {@link CountUnavailableError} when the reply holds no number.
  *
  * Standalone form for services that do not extend `DataManager` (e.g.
  * `TagAnalyticsDataService`). Subclasses of `DataManager` should prefer
@@ -57,9 +70,9 @@ export async function fetchRemoteCount(
   const resp = await rateLimiter.fetch(url);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const json: ApiItem = await resp.json();
-  return json['counts'] && typeof json['counts']['posts'] === 'number'
-    ? json['counts']['posts']
-    : 0;
+  const count: unknown = json?.['counts']?.['posts'];
+  if (typeof count !== 'number') throw new CountUnavailableError(tags);
+  return count;
 }
 
 /**
@@ -77,13 +90,13 @@ export class DataManager {
    * @param {Database} db The Dexie database instance.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(db: any, rateLimiter: RateLimitedFetch | null = null) {
+  constructor(db: any, rateLimiter: RateLimitedFetch) {
     this.baseUrl = window.location.origin;
     this.db = db;
-    // Allow passing shared rate limiter, fallback to default if missing (though app should pass it)
-    const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter =
-      rateLimiter || new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+    // Always the tab's one limiter (main.ts). A manager with a bucket of its
+    // own would ignore the multi-tab split and the 429 pause, and double
+    // the tab's rate alongside the shared one (G-1).
+    this.rateLimiter = rateLimiter;
   }
 
   /**
@@ -448,8 +461,10 @@ export class DataManager {
    * Past-year uploads-only integrity check: compare the remote count
    * (via `/counts/posts.json`) against the local Dexie sum. On mismatch,
    * delete this year's local rows and return `true` to force a full
-   * refetch downstream. Bail silently (return false) on network errors
-   * — the cache is still usable, just possibly stale.
+   * refetch downstream. Bail silently (return false) when the remote count
+   * cannot be had — a network error, or a `null` count
+   * ({@link CountUnavailableError}, which used to read as 0 and wipe the
+   * year) — the cache is still usable, just possibly stale.
    */
   private async runUploadsIntegrityCheck(args: {
     metric: Metric;
@@ -1130,9 +1145,12 @@ export class DataManager {
   /**
    * Gets statistics about the cache usage across storage methods.
    * Calculates item counts and approximate byte sizes for IndexedDB and LocalStorage.
+   * Static: it makes no requests, so the settings popover can call it
+   * without a manager (which would need the tab's rate limiter).
    * @return {Promise<{indexedDB: {count: number, size: number}, localStorage: {count: number, size: number}}>} Object containing count and size stats.
    */
-  async getCacheStats(): Promise<{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  static async getCacheStats(db: any): Promise<{
     indexedDB: {count: number; size: number};
     localStorage: {count: number; size: number};
   }> {
@@ -1151,7 +1169,7 @@ export class DataManager {
     try {
       const tables = ['uploads', 'approvals', 'notes'];
       for (const t of tables) {
-        const c = await this.db[t].count();
+        const c = await db[t].count();
         stats.indexedDB.count += c;
       }
       // Approximate size: navigator.storage (Origin total)

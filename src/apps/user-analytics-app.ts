@@ -4,7 +4,8 @@ import {
   resolveEffectiveDashboardTheme,
 } from '../ui/theme-palette';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
-import {RateLimitedFetch} from '../core/rate-limiter';
+import {GrassLoadGate} from '../core/grass-load-gate';
+import type {RateLimitedFetch} from '../core/rate-limiter';
 import {
   SettingsManager,
   getNsfwEnabled,
@@ -62,6 +63,17 @@ import type {ProfileContext} from '../core/profile-context';
 import type {ProfileSummaryInput, SyncOutcome} from '../types';
 
 const log = createLogger('UserAnalytics');
+
+/**
+ * How long Grass must have been loading before the report button shows as
+ * waiting (G-7). A cached graph paints well within it, so opening a profile
+ * does not flash the lock; a click is refused during it all the same.
+ */
+const GRASS_LOCK_DELAY_MS = 400;
+/** Class on the report button while it waits for Grass. */
+const GRASS_LOCK_CLASS = 'di-grass-locked';
+const GRASS_LOCK_MESSAGE =
+  'The contribution graph is still loading; the report opens after it';
 
 /** ProfileContext with a guaranteed non-null targetUser (post-validation). */
 type ValidatedProfileContext = ProfileContext & {
@@ -1300,24 +1312,30 @@ export class UserAnalyticsApp {
     typeof createDashboardPreviewPopover
   > | null = null;
 
+  /** Grass's loading state; the report waits for it (G-7). */
+  private readonly grassGate: GrassLoadGate;
+
   /**
    * Initializes the UserAnalyticsApp.
    * @param {Database} db The Dexie database instance.
    * @param {Object} settings The settings manager.
    * @param {ProfileContext} context The profile context.
+   * @param {RateLimitedFetch} rateLimiter The tab's shared rate limiter.
+   * @param {GrassLoadGate=} grassGate GrassApp's gate; without one (no
+   *     graph on the page) the button never locks.
    */
   constructor(
     db: Database,
     settings: SettingsManager,
     context: ProfileContext,
-    rateLimiter?: RateLimitedFetch,
+    rateLimiter: RateLimitedFetch,
+    grassGate: GrassLoadGate = new GrassLoadGate(),
   ) {
     this.db = db;
     this.settings = settings;
     this.context = context as ValidatedProfileContext;
-    const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter =
-      rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+    this.rateLimiter = rateLimiter;
+    this.grassGate = grassGate;
 
     this.dataManager = new AnalyticsDataManager(db, this.rateLimiter);
     // Share the rate limiter so the dashboard fetch + post-paint SWR
@@ -1372,6 +1390,56 @@ export class UserAnalyticsApp {
     if (closeBtn) {
       closeBtn.onclick = () => this.toggleModal(false);
     }
+  }
+
+  /**
+   * Shows the report button as waiting while Grass loads (G-7): a dimmed
+   * `di-grass-locked` button with `aria-disabled`, only once the load has
+   * run past {@link GRASS_LOCK_DELAY_MS} so a cached graph does not make it
+   * flicker on every profile open. The hover preview stays available.
+   */
+  private wireGrassLock(btn: HTMLElement): void {
+    const label = btn.getAttribute('aria-label') ?? '';
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const show = (locked: boolean) => {
+      btn.classList.toggle(GRASS_LOCK_CLASS, locked);
+      if (locked) {
+        btn.setAttribute('aria-disabled', 'true');
+        btn.setAttribute('aria-label', `${label} (${GRASS_LOCK_MESSAGE})`);
+      } else {
+        btn.removeAttribute('aria-disabled');
+        btn.setAttribute('aria-label', label);
+      }
+    };
+    const onChange = (loading: boolean) => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      if (!loading) {
+        show(false);
+        return;
+      }
+      const wait = GRASS_LOCK_DELAY_MS - this.grassGate.loadingForMs();
+      if (wait <= 0) {
+        show(true);
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        if (this.grassGate.isLoading()) show(true);
+      }, wait);
+    };
+    this.grassGate.subscribe(onChange);
+    if (this.grassGate.isLoading()) onChange(true);
+  }
+
+  /**
+   * While Grass loads, a report click explains instead of starting a sync.
+   * @return true when the click was refused.
+   */
+  private refuseWhileGrassLoads(): boolean {
+    if (!this.grassGate.isLoading()) return false;
+    showToast({type: 'info', message: `${GRASS_LOCK_MESSAGE}.`});
+    return true;
   }
 
   /**
@@ -1507,6 +1575,9 @@ export class UserAnalyticsApp {
           return;
         }
 
+        // Grass first (G-7): no sync or dashboard while the graph loads.
+        if (this.refuseWhileGrassLoads()) return;
+
         // Normal path: dismiss any hover popover, sync if needed, open modal.
         previewPopover.hide();
         if (this.isFullySynced === false) {
@@ -1518,6 +1589,7 @@ export class UserAnalyticsApp {
         }
         this.toggleModal(true);
       };
+      this.wireGrassLock(btn);
       container.appendChild(btn);
 
       // The touch-only 📋 mini-report button now lives in updateHeaderStatus(),

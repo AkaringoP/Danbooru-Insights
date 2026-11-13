@@ -6,7 +6,7 @@
  * hourly stats delta merge, and clearCache.
  */
 import {describe, it, expect, vi, beforeEach, afterEach} from 'vitest';
-import {DataManager} from '../src/core/data-manager';
+import {CountUnavailableError, DataManager} from '../src/core/data-manager';
 import type {Metric, TargetUser} from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -286,6 +286,35 @@ describe('getMetricData — integrity check', () => {
     await expect(
       dm.getMetricData('uploads', makeUser(), 2023),
     ).resolves.toBeDefined();
+  });
+
+  it('keeps the year when the remote count comes back null (DA-20)', async () => {
+    // A null count used to read as 0, differ from the local sum, and wipe
+    // the whole year's rows for a refetch. It means "unknown": skip.
+    const localRows = [
+      {id: '42_2023-03-15', userId: '42', date: '2023-03-15', count: 5},
+    ];
+    const uploadsTable = makeTable(localRows);
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: makeTable(),
+      hourly_stats: makeTable(),
+    });
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: null}}),
+        };
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+    const dm = new DataManager(db, rl as never);
+
+    await dm.getMetricData('uploads', makeUser(), 2023);
+
+    expect(uploadsTable._chain.delete).not.toHaveBeenCalled();
   });
 });
 
@@ -724,11 +753,39 @@ describe('fetchRemoteCount', () => {
     ).toBe(123);
   });
 
-  it('returns 0 when response has no counts', async () => {
+  it('throws CountUnavailableError when the response has no counts', async () => {
     const rl = makeRateLimiter(async () => ({
       ok: true,
       status: 200,
       json: async () => ({}),
+    }));
+    const dm = new DataManager(makeDb(), rl as never);
+
+    await expect(dm.fetchRemoteCount('user:test')).rejects.toBeInstanceOf(
+      CountUnavailableError,
+    );
+  });
+
+  it('throws CountUnavailableError on a null count (server timed out), never 0', async () => {
+    // Danbooru answers HTTP 200 {"counts":{"posts":null}} when it cannot
+    // finish the count in time, and caches that null for 5 minutes.
+    const rl = makeRateLimiter(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({counts: {posts: null}}),
+    }));
+    const dm = new DataManager(makeDb(), rl as never);
+
+    await expect(dm.fetchRemoteCount('user:test')).rejects.toBeInstanceOf(
+      CountUnavailableError,
+    );
+  });
+
+  it('still returns a real 0', async () => {
+    const rl = makeRateLimiter(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({counts: {posts: 0}}),
     }));
     const dm = new DataManager(makeDb(), rl as never);
 
@@ -1519,7 +1576,10 @@ describe('sumDailyCounts', () => {
   }
 
   function managerFor(table: unknown): DataManager {
-    return new DataManager({uploads: table} as never);
+    return new DataManager(
+      {uploads: table} as never,
+      makeRateLimiter() as never,
+    );
   }
 
   it('sums the rows inside an inclusive date range', async () => {
@@ -1592,7 +1652,10 @@ describe('sumDailyCounts', () => {
   it('reads the table the metric names', async () => {
     const uploads = makeRangeTable([{id: '42_2025-12-05', count: 3}]);
     const notes = makeRangeTable([{id: '42_2025-12-05', count: 99}]);
-    const dm = new DataManager({uploads, notes} as never);
+    const dm = new DataManager(
+      {uploads, notes} as never,
+      makeRateLimiter() as never,
+    );
 
     expect(
       await dm.sumDailyCounts('notes', '42', '2025-12-01', '2025-12-31'),
@@ -1601,7 +1664,7 @@ describe('sumDailyCounts', () => {
   });
 
   it('returns 0 for an unknown metric instead of throwing', async () => {
-    const dm = new DataManager({} as never);
+    const dm = new DataManager({} as never, makeRateLimiter() as never);
     expect(
       await dm.sumDailyCounts(
         'uploads' as Metric,

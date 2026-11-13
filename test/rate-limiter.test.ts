@@ -68,6 +68,79 @@ describe('RateLimitedFetch', () => {
     });
   });
 
+  describe('explicit burst (decision G-1)', () => {
+    it('starts with `burst` tokens and never refills past it', () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      expect(rl.tokens).toBe(1);
+      rl.tokens = 0;
+      rl.lastRefill = Date.now() - 5000;
+      rl.refillTokens();
+      expect(rl.tokens).toBe(1);
+    });
+
+    it('sends one request at once, then one per 1/rps', async () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      for (let i = 0; i < 10; i++) void rl.fetch(`/posts.json?page=${i}`);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      // The burst token plus 6 per second: at most 7 by the 1 s mark.
+      await vi.advanceTimersByTimeAsync(1000);
+      const sent = vi.mocked(global.fetch).mock.calls.length;
+      expect(sent).toBeGreaterThanOrEqual(6);
+      expect(sent).toBeLessThanOrEqual(7);
+    });
+
+    it('keeps the burst when tabs split the rate', () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      rl.updateLimits(3, 4);
+      expect(rl.refillRate).toBeCloseTo(1000 / 3);
+      rl.tokens = 0;
+      rl.lastRefill = Date.now() - 5000;
+      rl.refillTokens();
+      expect(rl.tokens).toBe(1);
+    });
+
+    it('is the configured default the app builds with', () => {
+      // 4.5 since T-213 (was 6): at most 47 requests in any 10 s.
+      expect(CONFIG.RATE_LIMITER).toMatchObject({rps: 4.5, burst: 1});
+      expect(10 * CONFIG.RATE_LIMITER.rps + 2).toBeLessThan(50);
+    });
+  });
+
+  describe('single wakeup (audit DA-13)', () => {
+    // Every refused dispatch used to arm its own timer: 49 here.
+    it('keeps one timer however many requests wait for a token', async () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      for (let i = 0; i < 50; i++) void rl.fetch(`/posts.json?page=${i}`);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it('keeps one timer through a 429 pause, then resumes', async () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      rl.setBackoff(Date.now() + 10_000);
+      for (let i = 0; i < 50; i++) void rl.fetch(`/posts.json?page=${i}`);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      expect(global.fetch).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(global.fetch).toHaveBeenCalled();
+    });
+
+    it('moves the wakeup earlier when a sooner one is needed', async () => {
+      const rl = new RateLimitedFetch(8, [0, 0], 6, 1);
+      rl.setBackoff(Date.now() + 10_000);
+      void rl.fetch('/posts.json?page=1');
+      await vi.advanceTimersByTimeAsync(0);
+      // Another tab's pause ends sooner: our own pause is cut short.
+      rl.backoffUntil = Date.now() + 1000;
+      void rl.fetch('/posts.json?page=2');
+      await vi.advanceTimersByTimeAsync(1001);
+      expect(global.fetch).toHaveBeenCalled();
+    });
+  });
+
   describe('setBackoff()', () => {
     it('sets backoffUntil to the given timestamp', () => {
       const rl = new RateLimitedFetch();
@@ -103,7 +176,7 @@ describe('RateLimitedFetch', () => {
   });
 
   describe('fetch() routing', () => {
-    it('routes /reports/ URLs to the report queue', async () => {
+    it('routes /reports/ URLs through the reports lane', async () => {
       const rl = new RateLimitedFetch(6, [0, 0], 6);
       const p = rl.fetch('/reports/something');
       await vi.runAllTimersAsync();
@@ -212,11 +285,12 @@ describe('server-driven 429 backoff', () => {
     });
   });
 
-  it('a 429 pauses the limiter for the server wait and broadcasts it', async () => {
+  it('a header-less 429 pauses everything for the server wait and broadcasts it', async () => {
+    // The edge in front of Danbooru: no X-Rate-Limit, maybe a Retry-After.
     global.fetch = vi.fn().mockResolvedValue({
       status: 429,
       ok: false,
-      headers: new Headers({'X-Rate-Limit': xRateLimit({'user/1': -9})}),
+      headers: new Headers({'Retry-After': '8'}),
     });
     const rl = new RateLimitedFetch(1, [0, 0], 10);
     const onBackoff = vi.fn();
@@ -225,12 +299,236 @@ describe('server-driven 429 backoff', () => {
 
     await rl.fetch('/posts.json');
 
-    // (1 - -9) / 1 s + 0.5 s margin
-    expect(rl.backoffUntil - start).toBe(10_500);
+    expect(rl.backoffUntil - start).toBe(8000);
     expect(onBackoff).toHaveBeenCalledWith(rl.backoffUntil);
-    expect(rl.backoffRemainingMs()).toBe(10_500);
-    vi.advanceTimersByTime(10_500);
+    expect(rl.backoffRemainingMs()).toBe(8000);
+    vi.advanceTimersByTime(8000);
     expect(rl.backoffRemainingMs()).toBe(0);
+  });
+
+  it('logs how many requests left in the windows before an edge 429 and the busiest ones it let through (T-208, T-209)', async () => {
+    // The edge's rule is unknown; these counts, gathered over a few 429s,
+    // are how to infer its window and limit: the refused request's windows
+    // bound it from above, the busiest accepted ones from below.
+    const ok = {ok: true, status: 200, headers: new Headers()};
+    const refused = {ok: false, status: 429, headers: new Headers()};
+    global.fetch = vi.fn().mockResolvedValue(ok);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const rl = new RateLimitedFetch(10, [0, 0], 100, 10);
+    rl.updateLimits(100, 10, 2);
+    const send = (n: number) =>
+      Promise.all(Array.from({length: n}, () => rl.fetch('/posts.json')));
+
+    await send(1); // t = 0: older than 60 s by the 429
+    vi.advanceTimersByTime(40_000);
+    await send(3); // t = 40 s
+    vi.advanceTimersByTime(20_000);
+    await send(2); // t = 60 s
+    vi.advanceTimersByTime(8_000);
+    await send(1); // t = 68 s
+    vi.advanceTimersByTime(500);
+    vi.mocked(global.fetch).mockResolvedValueOnce(refused as never);
+    await send(1); // t = 68.5 s → 429
+
+    const call = warn.mock.calls.find(c =>
+      String(c[0]).includes('429 received, pausing requests'),
+    );
+    expect(call?.[1]).toMatchObject({
+      sent1s: 2,
+      sent10s: 4,
+      sent60s: 7,
+      sent120s: 8,
+      // Best accepted: t = 40 s (3 in 10 s), t = 68 s (6 in 60 s, 7 in 120 s).
+      peakOk10s: 3,
+      peakOk60s: 6,
+      peakOk120s: 7,
+      inFlight: 1,
+      laneInFlight: {},
+      rps: 100,
+      tabs: 2,
+    });
+    // The 429 is counted and the next run-up is measured from scratch.
+    expect(rl.trafficSummary()).toEqual({
+      edge429s: 1,
+      peakOk: {sent1s: 0, sent10s: 0, sent60s: 0, sent120s: 0},
+    });
+  });
+});
+
+// Danbooru limits counts, reports and related tags with their own buckets
+// and sends the bucket on every reply. Their requests wait in their own
+// lane, sized from that header, and a 429 there holds only that lane.
+describe('per-action lanes', () => {
+  const header = (action: string, points: number, rate = 1, burst = 15) =>
+    JSON.stringify({
+      action,
+      rate,
+      burst,
+      cost: 1,
+      minimum_points: -30,
+      enabled: true,
+      limits: {'ip/1.2.3.0/24': points},
+    });
+  /** fetch double answering by path; anything unlisted is a plain 200. */
+  function serve(
+    routes: Record<string, {status: number; header?: string}>,
+  ): string[] {
+    const calls: string[] = [];
+    global.fetch = vi.fn(async (url: string) => {
+      calls.push(url);
+      const path = Object.keys(routes).find(p => url.startsWith(p));
+      const r = path ? routes[path] : {status: 200};
+      return {
+        status: r.status,
+        ok: r.status < 400,
+        headers: new Headers(r.header ? {'X-Rate-Limit': r.header} : {}),
+      };
+    }) as unknown as typeof fetch;
+    return calls;
+  }
+
+  it('a 429 with X-Rate-Limit got past the edge: it raises the accepted peak, not the edge count (T-209)', async () => {
+    serve({'/counts/': {status: 429, header: header('counts:posts', -9)}});
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+
+    await rl.fetch('/counts/posts.json?tags=a');
+
+    expect(rl.trafficSummary()).toEqual({
+      edge429s: 0,
+      peakOk: {sent1s: 1, sent10s: 1, sent60s: 1, sent120s: 1},
+    });
+  });
+
+  it('a 429 with X-Rate-Limit holds only its lane, and is not broadcast', async () => {
+    const calls = serve({
+      '/counts/': {status: 429, header: header('counts:posts', -9)},
+    });
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    const onBackoff = vi.fn();
+    rl.onBackoff = onBackoff;
+
+    await rl.fetch('/counts/posts.json?tags=a');
+    expect(onBackoff).not.toHaveBeenCalled();
+    expect(rl.backoffRemainingMs()).toBe(0);
+
+    // General traffic goes straight through...
+    await rl.fetch('/posts.json?page=1');
+    // ...while the next count waits until the bucket holds 2 points:
+    // from -9 at 1 point/s, 11 s.
+    void rl.fetch('/counts/posts.json?tags=b');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls.filter(u => u.includes('tags=b'))).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(calls.filter(u => u.includes('tags=b'))).toHaveLength(1);
+  });
+
+  it('re-syncs a lane from the header of a successful reply', async () => {
+    // Another tab has spent the shared bucket: the server says 0 points.
+    const calls = serve({
+      '/counts/': {status: 200, header: header('counts:posts', 0)},
+    });
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    await rl.fetch('/counts/posts.json?tags=a');
+    void rl.fetch('/counts/posts.json?tags=b');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('a lane that must wait does not hold up requests queued after it', async () => {
+    const calls = serve({
+      '/counts/': {status: 200, header: header('counts:posts', -5)},
+    });
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    await rl.fetch('/counts/posts.json?tags=a');
+    void rl.fetch('/counts/posts.json?tags=b');
+    void rl.fetch('/posts.json?page=1');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(calls).toEqual(['/counts/posts.json?tags=a', '/posts.json?page=1']);
+  });
+
+  it('sends reports together instead of 3 s apart', async () => {
+    const calls = serve({});
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    for (let i = 0; i < 4; i++) void rl.fetch(`/reports/posts.json?g=${i}`);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toHaveLength(4);
+  });
+
+  it('caps a lane at 2 requests in flight until a reply calibrates it', async () => {
+    const release: Array<() => void> = [];
+    let sent = 0;
+    global.fetch = vi.fn(
+      () =>
+        new Promise(resolve => {
+          sent++;
+          release.push(() =>
+            resolve({status: 200, ok: true, headers: new Headers()}),
+          );
+        }),
+    ) as unknown as typeof fetch;
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    for (let i = 0; i < 5; i++) void rl.fetch(`/counts/posts.json?tags=${i}`);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sent).toBe(2);
+    release.splice(0).forEach(r => r());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(sent).toBe(4);
+  });
+
+  it('learns a lane for a path that turns out to be rate-limited', async () => {
+    const calls = serve({
+      '/artists.json': {status: 429, header: header('artists:index', -3)},
+    });
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    const onBackoff = vi.fn();
+    rl.onBackoff = onBackoff;
+    await rl.fetch('/artists.json?page=1');
+    expect(onBackoff).not.toHaveBeenCalled();
+    void rl.fetch('/artists.json?page=2');
+    await rl.fetch('/posts.json');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls.filter(u => u.startsWith('/artists.json'))).toHaveLength(1);
+    expect(calls).toContain('/posts.json');
+  });
+
+  it('keeps one lane when several replies reveal the same limited path', async () => {
+    // Two requests leave before either reply. Each reply used to create a
+    // fresh lane and replace the last one, so the older, stale header (14
+    // points) wiped out what the newer one had said (0 points).
+    const reply: Array<(points: number) => void> = [];
+    global.fetch = vi.fn(
+      () =>
+        new Promise(resolve => {
+          reply.push(points =>
+            resolve({
+              status: 200,
+              ok: true,
+              headers: new Headers({
+                'X-Rate-Limit': header('artists:index', points),
+              }),
+            }),
+          );
+        }),
+    ) as unknown as typeof fetch;
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+    void rl.fetch('/artists.json?page=1');
+    await vi.advanceTimersByTimeAsync(100);
+    void rl.fetch('/artists.json?page=2');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reply).toHaveLength(2);
+
+    reply[1](0); // the newer request's reply: the bucket is empty
+    await vi.advanceTimersByTimeAsync(0);
+    reply[0](14); // the older request's reply arrives late
+    await vi.advanceTimersByTimeAsync(0);
+
+    void rl.fetch('/artists.json?page=3');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(reply).toHaveLength(2); // still waiting for 2 points
+    await vi.advanceTimersByTimeAsync(600);
+    expect(reply).toHaveLength(3);
   });
 });
 

@@ -1,5 +1,7 @@
 import {CONFIG} from '../config';
 import {createLogger} from './logger';
+import {KNOWN_LANES, RateLane, parseXRateLimit} from './rate-lane';
+import type {RateLimitInfo} from './rate-lane';
 
 const log = createLogger('RateLimiter');
 
@@ -33,21 +35,9 @@ const RATE_LIMIT_MARGIN_MS = 500;
  * @return null when the header is absent or unusable.
  */
 export function parseXRateLimitWaitMs(raw: string | null): number | null {
-  if (!raw) return null;
-  let data: {rate?: unknown; cost?: unknown; limits?: unknown};
-  try {
-    data = JSON.parse(raw) as typeof data;
-  } catch {
-    return null;
-  }
-  const rate = Number(data.rate);
-  const cost = data.cost === undefined ? 1 : Number(data.cost);
-  if (!(rate > 0) || !Number.isFinite(cost)) return null;
-  if (typeof data.limits !== 'object' || data.limits === null) return null;
-  const points = Object.values(data.limits).map(Number).filter(Number.isFinite);
-  if (points.length === 0) return null;
-  const lowest = Math.min(...points);
-  return Math.max(0, ((cost - lowest) / rate) * 1000);
+  const info = parseXRateLimit(raw);
+  if (!info) return null;
+  return Math.max(0, ((info.cost - info.lowest) / info.rate) * 1000);
 }
 
 /**
@@ -127,9 +117,9 @@ const PAUSE_ESCALATION_FACTOR = 2;
  * Adaptive rate. Each 429 that arrives outside a pause halves the request
  * rate (and concurrency) down to `MIN_THROTTLE` of the configured value;
  * every `THROTTLE_RECOVERY_MS` without a 429 gives back `THROTTLE_STEP`.
- * The edge limiter's real budget is unknown and evidently below the 9 req/s
- * we configure, so the limiter finds a sustainable rate instead of
- * re-hitting the same wall every few seconds.
+ * The edge limiter's real budget is unknown (it was evidently below the
+ * 9 req/s configured before v9.12), so the limiter finds a sustainable
+ * rate instead of re-hitting the same wall every few seconds.
  *
  * Recovery is capped by a ceiling one step below the rate that drew the
  * last 429. Without it the throttle sawtoothed: a 46k-post run held 0.5
@@ -151,25 +141,94 @@ interface QueueTask {
   options?: RequestInit;
   resolve: (value: Response) => void;
   reject: (reason?: unknown) => void;
+  /** The per-action lane it waits in; null = general traffic. */
+  lane: RateLane | null;
+  /** Arrival order across all queues (dispatch is first come, first served). */
+  seq: number;
+}
+
+/** Queue key for traffic without a per-action limit. */
+const GENERAL = 'general';
+
+/**
+ * How long dispatch times are kept for the edge-429 log: its widest window
+ * (120 s) plus the 30 s request timeout and a margin. A response may come
+ * back up to that timeout after its request left, and the windows are
+ * measured back from that departure.
+ */
+const SEND_LOG_KEEP_MS = 180_000;
+
+/** Requests dispatched in each window up to one request (T-208, T-209). */
+interface TrafficWindows {
+  sent1s: number;
+  sent10s: number;
+  sent60s: number;
+  sent120s: number;
+}
+
+/** What the edge has seen from this tab, for the logs (T-209). */
+export interface TrafficSummary {
+  /** Edge 429s (no `X-Rate-Limit`) this tab has received so far. */
+  edge429s: number;
+  /**
+   * The busiest windows among requests the edge let through since its last
+   * 429 (or since load): a lower bound on the edge's limit, where the 429
+   * log's `sent*` is an upper bound.
+   */
+  peakOk: TrafficWindows;
+}
+
+function emptyWindows(): TrafficWindows {
+  return {sent1s: 0, sent10s: 0, sent60s: 0, sent120s: 0};
+}
+
+/** Path of a request URL, relative or absolute ('' if unparseable). */
+function pathOf(url: string): string {
+  try {
+    return new URL(url, 'https://danbooru.invalid').pathname;
+  } catch {
+    return '';
+  }
 }
 
 /**
  * Helper: Rate Limited Fetch
- * Implements strict rate limiting using a Token Bucket algorithm and dedicated queues.
- * Supports dynamic limit updates (for cross-tab coordination) and global backoff.
+ *
+ * Every request takes a token from one bucket (`CONFIG.RATE_LIMITER`: rate,
+ * burst, concurrency), shared by all the apps on the page. On top of that,
+ * actions Danbooru limits on their own (counts, reports, related tags — see
+ * core/rate-lane.ts) wait in their own lane until the client's estimate of
+ * that server bucket allows them. A lane that has to wait never holds up
+ * other traffic: dispatch goes to the oldest request whose lane is ready.
+ *
+ * A 429 that carries `X-Rate-Limit` comes from one of those per-action
+ * limits and only that lane waits. A 429 without it (the edge in front of
+ * Danbooru) pauses everything — the global backoff, slow start and adaptive
+ * rate below — and is broadcast to other tabs.
  */
 export class RateLimitedFetch {
   maxConcurrency: number;
   startDelayRange: [number, number];
+  /** Sustained rate, requests per second. */
   rateLimit: number;
+  /** ms per token at full rate. */
   refillRate: number;
   tokens: number;
+  /**
+   * Bucket capacity when set explicitly; null = one second's worth
+   * (`rateLimit`), which then follows {@link updateLimits}.
+   */
+  private readonly burstSize: number | null;
   lastRefill: number;
-  queue: QueueTask[];
   activeWorkers: number;
   requestCounter: number;
-  reportQueue: QueueTask[];
-  isProcessingReport: boolean;
+  /** Waiting requests by lane key ({@link GENERAL} or a lane name). */
+  private readonly queues = new Map<string, QueueTask[]>();
+  /** Number of waiting requests across all queues. */
+  private pending = 0;
+  private nextSeq = 0;
+  /** Per-action lanes, by name; created on first use. */
+  private readonly lanes = new Map<string, RateLane>();
 
   /** Timestamp until which all requests should be paused (global backoff). */
   backoffUntil: number;
@@ -190,33 +249,52 @@ export class RateLimitedFetch {
   private lastCeilingChangeAt = 0;
   /** Length of the pause most recently started by this tab's own 429. */
   private lastPauseMs = 0;
+  /** The general queue's one pending wakeup; see {@link scheduleWake}. */
+  private wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When {@link wakeTimer} fires (ms epoch). */
+  private wakeAt = 0;
+  /**
+   * When each recent request was dispatched (ms epoch, oldest first), kept
+   * for {@link SEND_LOG_KEEP_MS}. Only read by the traffic logs: the edge's
+   * rule is unknown, and how many requests went out in the last 1 / 10 /
+   * 60 / 120 s before each 429 — and before each request it let through —
+   * is how to infer it (T-208, T-209).
+   */
+  private readonly sendLog: number[] = [];
+  /** See {@link TrafficSummary.peakOk}; reset by each edge 429. */
+  private peakOk: TrafficWindows = emptyWindows();
+  /** See {@link TrafficSummary.edge429s}. */
+  private edge429s = 0;
+  /** Tabs sharing the budget, as last told by {@link updateLimits}. */
+  private tabCount = 1;
 
   /**
    * @param {number} maxConcurrency Maximum concurrent requests (for general queue).
    * @param {Array<number>} startDelayRange Random delay range before request [min, max] ms.
-   * @param {number} requestsPerSecond Rate limit for general requests (default: 5).
+   * @param {number} requestsPerSecond Sustained rate for general requests.
+   * @param {number=} burst Bucket capacity: how many requests may leave at
+   *     once after a quiet spell. Defaults to one second's worth. The app
+   *     passes `CONFIG.RATE_LIMITER.burst` (1), so a full bucket cannot add
+   *     a second's worth of requests on top of the steady rate.
    */
   constructor(
     maxConcurrency: number = 6,
     startDelayRange: [number, number] = [50, 150],
     requestsPerSecond: number = 6,
+    burst?: number,
   ) {
     this.maxConcurrency = maxConcurrency;
     this.startDelayRange = startDelayRange;
 
     // Token Bucket for General Requests
-    this.rateLimit = requestsPerSecond; // Max tokens (burst)
+    this.rateLimit = requestsPerSecond;
     this.refillRate = 1000 / requestsPerSecond; // ms per token
-    this.tokens = requestsPerSecond;
+    this.burstSize = burst ?? null;
+    this.tokens = this.burstLimit();
     this.lastRefill = Date.now();
 
-    this.queue = [];
     this.activeWorkers = 0;
     this.requestCounter = 0;
-
-    // Dedicated Worker for Reports (Strict cooldown)
-    this.reportQueue = [];
-    this.isProcessingReport = false;
 
     // Global backoff
     this.backoffUntil = 0;
@@ -229,14 +307,28 @@ export class RateLimitedFetch {
 
   /**
    * Dynamically update rate limits (e.g., when tab count changes).
-   * Takes effect on the next queue processing cycle.
+   * Takes effect on the next queue processing cycle. An explicit burst is
+   * kept as is; each tab may still send that many at once.
+   *
+   * @param tabCount the tab count the new limits were split for; only
+   *     logged with an edge 429.
    */
-  updateLimits(requestsPerSecond: number, maxConcurrency: number): void {
+  updateLimits(
+    requestsPerSecond: number,
+    maxConcurrency: number,
+    tabCount?: number,
+  ): void {
+    if (tabCount !== undefined) this.tabCount = tabCount;
     this.rateLimit = requestsPerSecond;
     this.refillRate = 1000 / requestsPerSecond;
     this.maxConcurrency = maxConcurrency;
-    // Clamp existing tokens to new burst limit
-    this.tokens = Math.min(this.tokens, this.rateLimit);
+    // Clamp existing tokens to the (possibly smaller) bucket.
+    this.tokens = Math.min(this.tokens, this.burstLimit());
+  }
+
+  /** Bucket capacity at full throttle. */
+  private burstLimit(): number {
+    return this.burstSize ?? this.rateLimit;
   }
 
   /**
@@ -265,69 +357,52 @@ export class RateLimitedFetch {
   }
 
   async fetch(url: string, options?: RequestInit): Promise<Response> {
-    // 1. Intercept /reports/ requests (Legacy custom report endpoints if any)
-    if (url.includes('/reports/')) {
-      return new Promise((resolve, reject) => {
-        this.reportQueue.push({url, options, resolve, reject});
-        // Fire-and-forget: queue drain; per-task resolve/reject handles errors.
-        void this.processReportQueue();
-      });
-    }
-
-    // 2. General Queue (Token Bucket)
     return new Promise((resolve, reject) => {
-      this.queue.push({url, options, resolve, reject});
+      const lane = this.laneFor(url);
+      const key = lane?.name ?? GENERAL;
+      let queue = this.queues.get(key);
+      if (!queue) {
+        queue = [];
+        this.queues.set(key, queue);
+      }
+      queue.push({url, options, resolve, reject, lane, seq: this.nextSeq++});
+      this.pending++;
       // Fire-and-forget: queue drain; per-task resolve/reject handles errors.
       void this.processQueue();
     });
   }
 
-  async processReportQueue(): Promise<void> {
-    if (this.isProcessingReport || this.reportQueue.length === 0) return;
-
-    // Global backoff check
-    const now = Date.now();
-    if (now < this.backoffUntil) {
-      setTimeout(() => this.processReportQueue(), this.backoffUntil - now);
-      return;
+  /**
+   * The lane a request belongs to: one of Danbooru's known per-action limits
+   * by path, or a lane learned from an earlier `X-Rate-Limit` reply on the
+   * same path. Null for unlimited traffic.
+   */
+  private laneFor(url: string): RateLane | null {
+    const path = pathOf(url);
+    for (const known of KNOWN_LANES) {
+      if (!path.startsWith(known.pathPrefix)) continue;
+      let lane = this.lanes.get(known.name);
+      if (!lane) {
+        lane = new RateLane(known.name, known, Date.now());
+        this.lanes.set(known.name, lane);
+      }
+      return lane;
     }
-
-    this.isProcessingReport = true;
-    const task = this.reportQueue.shift();
-    if (!task) {
-      this.isProcessingReport = false;
-      return;
-    }
-    this.requestCounter++;
-
-    try {
-      const response = await fetch(task.url, task.options);
-      if (response.status === 429) this.triggerBackoff(task.url, response);
-      task.resolve(response);
-    } catch (e: unknown) {
-      log.error('Report fetch failed', {url: task.url, error: e});
-      task.reject(e);
-    } finally {
-      // Strict 3s cooldown for reports
-      await new Promise(r => setTimeout(r, CONFIG.REPORT_COOLDOWN_MS));
-      this.isProcessingReport = false;
-      // Fire-and-forget: recursive drain; errors handled per-task inside.
-      void this.processReportQueue();
-    }
+    return this.lanes.get(path) ?? null;
   }
 
   async processQueue(): Promise<void> {
     const now = Date.now();
     if (
       this.activeWorkers >= this.effectiveConcurrency(now) ||
-      this.queue.length === 0
+      this.pending === 0
     ) {
       return;
     }
 
     // Global backoff check
     if (now < this.backoffUntil) {
-      setTimeout(() => this.processQueue(), this.backoffUntil - now);
+      this.scheduleWake(this.backoffUntil - now);
       return;
     }
 
@@ -336,8 +411,21 @@ export class RateLimitedFetch {
     // Token Bucket Check
     this.refillTokens();
     if (this.tokens < 1) {
-      // Not enough tokens, schedule a retry after refill interval
-      setTimeout(() => this.processQueue(), this.refillInterval());
+      // Wake when the next token is due. refillTokens() needs strictly more
+      // than one interval to have passed, hence the +1.
+      const elapsed = Date.now() - this.lastRefill;
+      this.scheduleWake(
+        Math.max(1, Math.floor(this.refillInterval() - elapsed) + 1),
+      );
+      return;
+    }
+
+    const {task, waitMs} = this.takeNextReady(now);
+    if (!task) {
+      // Every waiting request is in a lane that is not ready yet. Wake when
+      // the soonest one is; a lane that is only short of in-flight slots is
+      // woken by its response instead.
+      if (Number.isFinite(waitMs)) this.scheduleWake(waitMs);
       return;
     }
 
@@ -345,17 +433,14 @@ export class RateLimitedFetch {
     this.tokens -= 1;
     this.activeWorkers++;
     this.requestCounter++;
-
-    const task = this.queue.shift();
-    if (!task) {
-      this.activeWorkers--;
-      return;
-    }
+    const sentAt = now;
+    task.lane?.onSend(sentAt);
+    this.logSend(sentAt);
 
     // Fill any remaining capacity now. Otherwise each completion admits only
     // one successor, and the in-flight count never climbs back up after a
     // slow-start window narrowed it.
-    if (this.queue.length > 0) void this.processQueue();
+    if (this.pending > 0) void this.processQueue();
 
     // Staggered Start Delay (minimal now, rely on token bucket for rate)
     const startDelay =
@@ -366,9 +451,10 @@ export class RateLimitedFetch {
 
     try {
       const response = await fetch(task.url, task.options);
-      if (response.status === 429) this.triggerBackoff(task.url, response);
+      this.onResponse(task, sentAt, response);
       task.resolve(response);
     } catch (e: unknown) {
+      task.lane?.onResponse(Date.now(), sentAt, null);
       task.reject(e);
     } finally {
       this.activeWorkers--;
@@ -376,6 +462,168 @@ export class RateLimitedFetch {
       // Fire-and-forget: recursive drain; errors handled per-task inside.
       void this.processQueue();
     }
+  }
+
+  /**
+   * Removes and returns the oldest waiting request whose lane may send now.
+   * General traffic is always ready (the token check already passed).
+   * @return the task, or null with the ms until the soonest lane is ready
+   *     (Infinity when the blocked lanes only wait for responses).
+   */
+  private takeNextReady(now: number): {task: QueueTask | null; waitMs: number} {
+    let best: QueueTask[] | null = null;
+    let waitMs = Infinity;
+    for (const queue of this.queues.values()) {
+      const head = queue[0];
+      if (!head) continue;
+      const wait = head.lane ? head.lane.waitMs(now) : 0;
+      if (wait > 0) {
+        waitMs = Math.min(waitMs, wait);
+        continue;
+      }
+      if (!best || head.seq < best[0].seq) best = queue;
+    }
+    const task = best?.shift() ?? null;
+    if (task) this.pending--;
+    return {task, waitMs};
+  }
+
+  /**
+   * Feeds a response back: lanes re-sync from its `X-Rate-Limit` header,
+   * and a 429 pauses either that lane (header present — a per-action Rails
+   * limit) or everything (no header — the edge).
+   */
+  private onResponse(
+    task: QueueTask,
+    sentAt: number,
+    response: Response,
+  ): void {
+    const header = response.headers?.get?.('x-rate-limit') ?? null;
+    const now = Date.now();
+    let lane = task.lane;
+    let info: RateLimitInfo | null = null;
+    if (lane) {
+      info = lane.onResponse(now, sentAt, header);
+    } else if (header) {
+      // A path we did not know was limited answered with its bucket. Later
+      // requests to it wait in a lane of their own; this one was not sent
+      // through it, so it only re-syncs the estimate.
+      lane = this.laneForHeader(task.url, header, sentAt);
+      info = lane?.calibrate(now, sentAt, header) ?? null;
+    }
+    // Anything but a header-less 429 got past the edge.
+    const edgeRefused = response.status === 429 && !(lane && info);
+    if (!edgeRefused) this.notePassed(sentAt);
+    if (response.status !== 429) return;
+    if (lane && info) {
+      log.warn('429 on a per-action limit, holding that lane', {
+        lane: lane.name,
+        action: info.action,
+        waitMs: Math.round(parseXRateLimitWaitMs(header) ?? 0),
+        xRateLimit: header,
+        url: task.url.slice(0, 160),
+      });
+      // Re-check later: a lane may now be the only thing left waiting.
+      void this.processQueue();
+      return;
+    }
+    this.triggerBackoff(task.url, response, sentAt);
+  }
+
+  /** Appends a dispatch to {@link sendLog}, dropping what has aged out. */
+  private logSend(at: number): void {
+    this.sendLog.push(at);
+    const cutoff = at - SEND_LOG_KEEP_MS;
+    let stale = 0;
+    while (stale < this.sendLog.length && this.sendLog[stale] <= cutoff) {
+      stale++;
+    }
+    if (stale > 0) this.sendLog.splice(0, stale);
+  }
+
+  /**
+   * Requests dispatched in the 1 / 10 / 60 / 120 s up to and including the
+   * one sent at `sentAt` — the traffic the edge had seen when it answered it.
+   */
+  private sentBefore(sentAt: number): TrafficWindows {
+    const counts = emptyWindows();
+    for (const t of this.sendLog) {
+      if (t > sentAt) continue;
+      const age = sentAt - t;
+      if (age < 120_000) counts.sent120s++;
+      if (age < 60_000) counts.sent60s++;
+      if (age < 10_000) counts.sent10s++;
+      if (age < 1_000) counts.sent1s++;
+    }
+    return counts;
+  }
+
+  /** Raises {@link peakOk} with a request the edge let through. */
+  private notePassed(sentAt: number): void {
+    const seen = this.sentBefore(sentAt);
+    const peak = this.peakOk;
+    peak.sent1s = Math.max(peak.sent1s, seen.sent1s);
+    peak.sent10s = Math.max(peak.sent10s, seen.sent10s);
+    peak.sent60s = Math.max(peak.sent60s, seen.sent60s);
+    peak.sent120s = Math.max(peak.sent120s, seen.sent120s);
+  }
+
+  /** What the edge has seen from this tab; logged when a sync ends (T-209). */
+  trafficSummary(): TrafficSummary {
+    return {edge429s: this.edge429s, peakOk: {...this.peakOk}};
+  }
+
+  /** Requests in flight per lane, for the edge-429 log. */
+  private laneInFlight(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const [name, lane] of this.lanes) {
+      if (lane.inFlight > 0) out[name] = lane.inFlight;
+    }
+    return out;
+  }
+
+  /**
+   * The lane for `url`'s path, created from the header on its first
+   * sighting. Several requests to such a path can be in flight before the
+   * first reply; they must all end up on the one lane, or the replies would
+   * each replace it and the requests already queued on the old one would
+   * keep a separate count.
+   */
+  private laneForHeader(
+    url: string,
+    header: string,
+    sentAt: number,
+  ): RateLane | null {
+    const path = pathOf(url);
+    if (!path) return null;
+    const existing = this.lanes.get(path);
+    if (existing) return existing;
+    const info = parseXRateLimit(header);
+    if (!info) return null;
+    const lane = new RateLane(path, info, sentAt);
+    this.lanes.set(path, lane);
+    return lane;
+  }
+
+  /**
+   * Arms the queue's single wakeup `delayMs` from now (lanes included),
+   * unless one is already due no later than that. Every refused dispatch used to arm its
+   * own timer — each fetch(), completion and fill-capacity call that found
+   * no token or an active pause — so a backlog of 250 counts left tens of
+   * thousands of timers that mostly woke up to re-arm (audit DA-13).
+   */
+  private scheduleWake(delayMs: number): void {
+    const at = Date.now() + delayMs;
+    if (this.wakeTimer !== null) {
+      if (this.wakeAt <= at) return;
+      clearTimeout(this.wakeTimer);
+    }
+    this.wakeAt = at;
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = null;
+      // Fire-and-forget: queue drain; per-task resolve/reject handles errors.
+      void this.processQueue();
+    }, delayMs);
   }
 
   refillTokens(): void {
@@ -398,7 +646,7 @@ export class RateLimitedFetch {
   /** Bucket capacity: 1 during slow start, else the throttled burst. */
   private burstCap(now: number): number {
     if (now < this.slowStartUntil) return 1;
-    return Math.max(1, Math.floor(this.rateLimit * this.throttle));
+    return Math.max(1, Math.floor(this.burstLimit() * this.throttle));
   }
 
   /** In-flight ceiling: narrowed during slow start, scaled by throttle. */
@@ -444,7 +692,11 @@ export class RateLimitedFetch {
    * listeners (e.g., TabCoordinator — other tabs share the same IP/user
    * bucket, so they pause for the same span).
    */
-  private triggerBackoff(url: string, response: Response): void {
+  private triggerBackoff(
+    url: string,
+    response: Response,
+    sentAt: number,
+  ): void {
     const now = Date.now();
     const {ms: serverMs, source} = backoffFromResponse(response, now);
     let ms = serverMs;
@@ -488,7 +740,20 @@ export class RateLimitedFetch {
       ceiling: this.throttleCeiling,
       xRateLimit: response.headers?.get?.('x-rate-limit') ?? null,
       url: url.slice(0, 160),
+      // What led up to it, to infer the edge's unknown rule (T-208): the
+      // windows of the refused request (upper bound) next to the busiest
+      // windows it let through since its last 429 (lower bound, T-209).
+      ...this.sentBefore(sentAt),
+      peakOk10s: this.peakOk.sent10s,
+      peakOk60s: this.peakOk.sent60s,
+      peakOk120s: this.peakOk.sent120s,
+      inFlight: this.activeWorkers,
+      laneInFlight: this.laneInFlight(),
+      rps: this.rateLimit,
+      tabs: this.tabCount,
     });
+    this.edge429s++;
+    this.peakOk = emptyWindows();
     this.setBackoff(until);
     this.onBackoff?.(until);
   }
