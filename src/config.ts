@@ -60,8 +60,9 @@ export const CONFIG: {
   // any 10 s. Danbooru's overall limit is a Cloudflare rule that is not
   // public; it answers 429 with a challenge page (`cf-mitigated:
   // challenge`). Two independent 429s each came with exactly 49 requests
-  // in the 10 s before, which suggests about 50 per 10 s — unconfirmed
-  // (T-213, 2026-11-13). The per-action limits are lower still for counts
+  // in the 10 s before, which suggests about 50 per 10 s; at 4.5 req/s
+  // three full syncs of that account in a row drew none, where every one
+  // had before (T-213, 2026-11-13). The per-action limits are lower still for counts
   // (1/s) and reports (1 per 3 s) — see CLAUDE.md "Rate Limiting".
   // TabCoordinator divides rps and concurrency between tabs; the burst
   // stays 1 per tab.
