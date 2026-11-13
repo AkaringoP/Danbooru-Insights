@@ -151,11 +151,36 @@ interface QueueTask {
 const GENERAL = 'general';
 
 /**
- * How long dispatch times are kept for the edge-429 log. Twice its widest
- * window (60 s): the 429 may come back up to the 30 s request timeout after
- * its request left, and the window is measured back from that departure.
+ * How long dispatch times are kept for the edge-429 log: its widest window
+ * (120 s) plus the 30 s request timeout and a margin. A response may come
+ * back up to that timeout after its request left, and the windows are
+ * measured back from that departure.
  */
-const SEND_LOG_KEEP_MS = 120_000;
+const SEND_LOG_KEEP_MS = 180_000;
+
+/** Requests dispatched in each window up to one request (T-208, T-209). */
+interface TrafficWindows {
+  sent1s: number;
+  sent10s: number;
+  sent60s: number;
+  sent120s: number;
+}
+
+/** What the edge has seen from this tab, for the logs (T-209). */
+export interface TrafficSummary {
+  /** Edge 429s (no `X-Rate-Limit`) this tab has received so far. */
+  edge429s: number;
+  /**
+   * The busiest windows among requests the edge let through since its last
+   * 429 (or since load): a lower bound on the edge's limit, where the 429
+   * log's `sent*` is an upper bound.
+   */
+  peakOk: TrafficWindows;
+}
+
+function emptyWindows(): TrafficWindows {
+  return {sent1s: 0, sent10s: 0, sent60s: 0, sent120s: 0};
+}
 
 /** Path of a request URL, relative or absolute ('' if unparseable). */
 function pathOf(url: string): string {
@@ -230,11 +255,16 @@ export class RateLimitedFetch {
   private wakeAt = 0;
   /**
    * When each recent request was dispatched (ms epoch, oldest first), kept
-   * for {@link SEND_LOG_KEEP_MS}. Only read by the edge-429 log: the edge's
+   * for {@link SEND_LOG_KEEP_MS}. Only read by the traffic logs: the edge's
    * rule is unknown, and how many requests went out in the last 1 / 10 /
-   * 60 s before each 429 is how to infer it (T-208).
+   * 60 / 120 s before each 429 — and before each request it let through —
+   * is how to infer it (T-208, T-209).
    */
   private readonly sendLog: number[] = [];
+  /** See {@link TrafficSummary.peakOk}; reset by each edge 429. */
+  private peakOk: TrafficWindows = emptyWindows();
+  /** See {@link TrafficSummary.edge429s}. */
+  private edge429s = 0;
   /** Tabs sharing the budget, as last told by {@link updateLimits}. */
   private tabCount = 1;
 
@@ -481,6 +511,9 @@ export class RateLimitedFetch {
       lane = this.laneForHeader(task.url, header, sentAt);
       info = lane?.calibrate(now, sentAt, header) ?? null;
     }
+    // Anything but a header-less 429 got past the edge.
+    const edgeRefused = response.status === 429 && !(lane && info);
+    if (!edgeRefused) this.notePassed(sentAt);
     if (response.status !== 429) return;
     if (lane && info) {
       log.warn('429 on a per-action limit, holding that lane', {
@@ -509,23 +542,35 @@ export class RateLimitedFetch {
   }
 
   /**
-   * Requests dispatched in the 1 / 10 / 60 s up to and including the one
-   * sent at `sentAt` — the traffic the edge had seen when it refused it.
+   * Requests dispatched in the 1 / 10 / 60 / 120 s up to and including the
+   * one sent at `sentAt` — the traffic the edge had seen when it answered it.
    */
-  private sentBefore(sentAt: number): {
-    sent1s: number;
-    sent10s: number;
-    sent60s: number;
-  } {
-    const counts = {sent1s: 0, sent10s: 0, sent60s: 0};
+  private sentBefore(sentAt: number): TrafficWindows {
+    const counts = emptyWindows();
     for (const t of this.sendLog) {
       if (t > sentAt) continue;
       const age = sentAt - t;
+      if (age < 120_000) counts.sent120s++;
       if (age < 60_000) counts.sent60s++;
       if (age < 10_000) counts.sent10s++;
       if (age < 1_000) counts.sent1s++;
     }
     return counts;
+  }
+
+  /** Raises {@link peakOk} with a request the edge let through. */
+  private notePassed(sentAt: number): void {
+    const seen = this.sentBefore(sentAt);
+    const peak = this.peakOk;
+    peak.sent1s = Math.max(peak.sent1s, seen.sent1s);
+    peak.sent10s = Math.max(peak.sent10s, seen.sent10s);
+    peak.sent60s = Math.max(peak.sent60s, seen.sent60s);
+    peak.sent120s = Math.max(peak.sent120s, seen.sent120s);
+  }
+
+  /** What the edge has seen from this tab; logged when a sync ends (T-209). */
+  trafficSummary(): TrafficSummary {
+    return {edge429s: this.edge429s, peakOk: {...this.peakOk}};
   }
 
   /** Requests in flight per lane, for the edge-429 log. */
@@ -695,13 +740,20 @@ export class RateLimitedFetch {
       ceiling: this.throttleCeiling,
       xRateLimit: response.headers?.get?.('x-rate-limit') ?? null,
       url: url.slice(0, 160),
-      // What led up to it, to infer the edge's unknown rule (T-208).
+      // What led up to it, to infer the edge's unknown rule (T-208): the
+      // windows of the refused request (upper bound) next to the busiest
+      // windows it let through since its last 429 (lower bound, T-209).
       ...this.sentBefore(sentAt),
+      peakOk10s: this.peakOk.sent10s,
+      peakOk60s: this.peakOk.sent60s,
+      peakOk120s: this.peakOk.sent120s,
       inFlight: this.activeWorkers,
       laneInFlight: this.laneInFlight(),
       rps: this.rateLimit,
       tabs: this.tabCount,
     });
+    this.edge429s++;
+    this.peakOk = emptyWindows();
     this.setBackoff(until);
     this.onBackoff?.(until);
   }

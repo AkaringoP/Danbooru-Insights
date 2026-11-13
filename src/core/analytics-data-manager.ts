@@ -4150,6 +4150,7 @@ export class AnalyticsDataManager extends DataManager {
       finalCurrentNo: 0,
     };
     perfLogger.start('dbi:db:sync:full:total');
+    const edge429sAtStart = this.rateLimiter.trafficSummary().edge429s;
 
     try {
       // 1. Get total count
@@ -4229,6 +4230,14 @@ export class AnalyticsDataManager extends DataManager {
       return {complete: !pageFailed, started: true};
     } finally {
       perfLogger.end('dbi:db:sync:full:total', perfStats);
+      // The edge's rule is unknown; a long sync is the best sample of it.
+      // Logged even with no 429, which bounds the limit from below (T-209).
+      const traffic = this.rateLimiter.trafficSummary();
+      log.info('Sync traffic', {
+        edge429s: traffic.edge429s - edge429sAtStart,
+        ...traffic.peakOk,
+        pages: perfStats.pagesCommitted,
+      });
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
     }

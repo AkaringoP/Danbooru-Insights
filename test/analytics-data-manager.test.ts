@@ -436,6 +436,10 @@ function makeSyncRateLimiter(
     fetch: vi.fn(fetchImpl ?? defaultFetch),
     getRequestCount: vi.fn(() => 0),
     backoffRemainingMs: vi.fn(() => 0),
+    trafficSummary: vi.fn(() => ({
+      edge429s: 0,
+      peakOk: {sent1s: 0, sent10s: 0, sent60s: 0, sent120s: 0},
+    })),
   };
 }
 
@@ -798,6 +802,46 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
 
     // Flag MUST be back to false after the throw (finally block runs)
     expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
+  });
+
+  it('logs the traffic the edge saw during the sync when it ends (T-209)', async () => {
+    const postsTable = makePostsTable([]);
+    postsTable.where.mockImplementation(() => {
+      throw new Error('db read error');
+    });
+    const rl = makeSyncRateLimiter(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({counts: {posts: 5}}),
+    }));
+    // Two edge 429s before this sync, five after: three are its own.
+    rl.trafficSummary
+      .mockReturnValueOnce({
+        edge429s: 2,
+        peakOk: {sent1s: 0, sent10s: 0, sent60s: 0, sent120s: 0},
+      })
+      .mockReturnValueOnce({
+        edge429s: 5,
+        peakOk: {sent1s: 6, sent10s: 40, sent60s: 170, sent120s: 300},
+      });
+    const info = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(postsTable) as never,
+      rl as never,
+    );
+
+    // Logged even when the run throws (finally).
+    await expect(adm.syncAllPosts(makeSyncUser(), vi.fn())).rejects.toThrow();
+
+    const call = info.mock.calls.find(c =>
+      String(c[0]).includes('Sync traffic'),
+    );
+    expect(call?.[1]).toMatchObject({
+      edge429s: 3,
+      sent10s: 40,
+      sent60s: 170,
+      sent120s: 300,
+    });
   });
 
   it('total=0 with empty db: workers find nothing and sync completes without writing', async () => {

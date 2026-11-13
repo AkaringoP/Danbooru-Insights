@@ -304,9 +304,10 @@ describe('server-driven 429 backoff', () => {
     expect(rl.backoffRemainingMs()).toBe(0);
   });
 
-  it('logs how many requests left in the 1 / 10 / 60 s before an edge 429 (T-208)', async () => {
+  it('logs how many requests left in the windows before an edge 429 and the busiest ones it let through (T-208, T-209)', async () => {
     // The edge's rule is unknown; these counts, gathered over a few 429s,
-    // are how to infer its window and limit.
+    // are how to infer its window and limit: the refused request's windows
+    // bound it from above, the busiest accepted ones from below.
     const ok = {ok: true, status: 200, headers: new Headers()};
     const refused = {ok: false, status: 429, headers: new Headers()};
     global.fetch = vi.fn().mockResolvedValue(ok);
@@ -334,10 +335,20 @@ describe('server-driven 429 backoff', () => {
       sent1s: 2,
       sent10s: 4,
       sent60s: 7,
+      sent120s: 8,
+      // Best accepted: t = 40 s (3 in 10 s), t = 68 s (6 in 60 s, 7 in 120 s).
+      peakOk10s: 3,
+      peakOk60s: 6,
+      peakOk120s: 7,
       inFlight: 1,
       laneInFlight: {},
       rps: 100,
       tabs: 2,
+    });
+    // The 429 is counted and the next run-up is measured from scratch.
+    expect(rl.trafficSummary()).toEqual({
+      edge429s: 1,
+      peakOk: {sent1s: 0, sent10s: 0, sent60s: 0, sent120s: 0},
     });
   });
 });
@@ -373,6 +384,18 @@ describe('per-action lanes', () => {
     }) as unknown as typeof fetch;
     return calls;
   }
+
+  it('a 429 with X-Rate-Limit got past the edge: it raises the accepted peak, not the edge count (T-209)', async () => {
+    serve({'/counts/': {status: 429, header: header('counts:posts', -9)}});
+    const rl = new RateLimitedFetch(8, [0, 0], 10);
+
+    await rl.fetch('/counts/posts.json?tags=a');
+
+    expect(rl.trafficSummary()).toEqual({
+      edge429s: 0,
+      peakOk: {sent1s: 1, sent10s: 1, sent60s: 1, sent120s: 1},
+    });
+  });
 
   it('a 429 with X-Rate-Limit holds only its lane, and is not broadcast', async () => {
     const calls = serve({
