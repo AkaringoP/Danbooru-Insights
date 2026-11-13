@@ -841,6 +841,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       sent10s: 40,
       sent60s: 170,
       sent120s: 300,
+      elapsedMs: expect.any(Number),
     });
   });
 
@@ -1085,7 +1086,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
           json: async () => ({counts: {posts: 1}}),
         };
       }
-      if (url.includes('page=a0&')) {
+      if (url.includes('page=1&')) {
         page1Calls++;
         if (page1Calls === 1) return failure();
         return {ok: true, status: 200, json: async () => onePost};
@@ -1160,7 +1161,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
           json: async () => ({counts: {posts: 1}}),
         };
       }
-      if (url.includes('page=a0&')) page1Calls++;
+      if (url.includes('page=1&')) page1Calls++;
       return {ok: false, status: 429, json: async () => ({})};
     });
     const adm = new AnalyticsDataManager(db as never, rl as never);
@@ -1185,7 +1186,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
           json: async () => ({counts: {posts: 3}}),
         };
       }
-      if (url.includes('page=a0&')) {
+      if (url.includes('page=1&')) {
         return {ok: true, status: 200, json: async () => onePost};
       }
       return {ok: false, status: 400, json: async () => ({})};
@@ -1218,124 +1219,6 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       .mock.calls.map((c: string[]) => c[0]);
     expect(removed).toContain('danbooru_grass_last_sync_42');
     expect(removed).toContain('di_post_metadata_v2_42');
-  });
-
-  // T-210: numbered pages are an OFFSET on the server, and every edge 429
-  // in three 46k-post syncs came past page 130. The sync walks the id
-  // cursor instead: `page=a<last id>`, one page at a time.
-  describe('id cursor (T-210)', () => {
-    const post = (id: number) => ({
-      id,
-      uploader_id: 42,
-      created_at: '2025-01-01T00:00:00Z',
-      up_score: 1,
-      down_score: 0,
-      rating: 'g',
-    });
-
-    function serveCursorPages(
-      pages: Record<string, ReturnType<typeof post>[]>,
-    ): {rl: ReturnType<typeof makeSyncRateLimiter>; urls: string[]} {
-      const urls: string[] = [];
-      const rl = makeSyncRateLimiter(async (url: string) => {
-        if (url.includes('/counts/posts.json')) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({counts: {posts: 5}}),
-          };
-        }
-        urls.push(url);
-        const cursor = new URLSearchParams(url.split('?')[1]).get('page') ?? '';
-        return {ok: true, status: 200, json: async () => pages[cursor] ?? []};
-      });
-      return {rl, urls};
-    }
-
-    function makeAdm(rl: ReturnType<typeof makeSyncRateLimiter>) {
-      const adm = new AnalyticsDataManager(
-        makeSyncDb(makePostsTable([])) as never,
-        rl as never,
-      );
-      vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
-      vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
-      return adm;
-    }
-
-    it('follows the last id, stores pages oldest first, and ends on an empty page', async () => {
-      // Danbooru answers a cursor page newest first. A short page is not the
-      // end (posts the viewer cannot see are left out); only an empty one is.
-      const {rl, urls} = serveCursorPages({
-        a0: [post(12), post(11), post(10)],
-        a12: [post(30)],
-      });
-
-      const outcome = await makeAdm(rl).syncAllPosts(makeSyncUser(), vi.fn());
-
-      expect(outcome).toEqual({complete: true, started: true});
-      const params = urls.map(u => new URLSearchParams(u.split('?')[1]));
-      expect(params.map(p => p.get('page'))).toEqual(['a0', 'a12', 'a30']);
-      // One plain tag: no order:/id: terms, no numbered page.
-      expect(params.every(p => p.get('tags') === 'user:test_user')).toBe(true);
-
-      const written = vi
-        .mocked(quotaManager.bulkPutSafe)
-        .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
-      expect(written.map(r => [r.id, r.no])).toEqual([
-        [10, 1],
-        [11, 2],
-        [12, 3],
-        [30, 4],
-      ]);
-    });
-
-    it('stops as incomplete when the cursor does not advance', async () => {
-      // A page at or below the cursor would be asked for again forever.
-      const {rl, urls} = serveCursorPages({a0: [post(5)], a5: [post(5)]});
-
-      const outcome = await makeAdm(rl).syncAllPosts(makeSyncUser(), vi.fn());
-
-      expect(outcome.complete).toBe(false);
-      expect(urls).toHaveLength(2);
-    });
-
-    it('a failed write stops the run as incomplete instead of throwing', async () => {
-      const {rl} = serveCursorPages({a0: [post(1)], a1: [post(2)]});
-      vi.mocked(quotaManager.bulkPutSafe).mockRejectedValueOnce(
-        new Error('disk full'),
-      );
-      const progress = vi.fn();
-
-      const outcome = await makeAdm(rl).syncAllPosts(makeSyncUser(), progress);
-
-      expect(outcome).toEqual({complete: false, started: true});
-      // Nothing was committed, and the preparing step says so.
-      expect(progress).toHaveBeenCalledWith(0, 5, 'PREPARING');
-    });
-
-    it('retries a page whose body is not a post list', async () => {
-      let calls = 0;
-      const rl = makeSyncRateLimiter(async (url: string) => {
-        if (url.includes('/counts/posts.json')) {
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({counts: {posts: 1}}),
-          };
-        }
-        calls++;
-        if (calls === 1) {
-          return {ok: true, status: 200, json: async () => ({success: false})};
-        }
-        return {ok: true, status: 200, json: async () => []};
-      });
-      vi.stubGlobal('setTimeout', (fn: () => void) => fn());
-
-      const outcome = await makeAdm(rl).syncAllPosts(makeSyncUser(), vi.fn());
-
-      expect(outcome.complete).toBe(true);
-      expect(calls).toBe(2);
-    });
   });
 
   it('a clean run reports complete:true', async () => {

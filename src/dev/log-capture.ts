@@ -2,7 +2,7 @@
  * In-memory console capture for the diagnostic panel.
  *
  * Mobile browsers have no DevTools, so WARN/ERROR lines such as the
- * full sync's `Page failed, stopping sync` are invisible there.
+ * worker-pool sync's `Page failed, stopping sync` are invisible there.
  * When the diagnostic gate is on, main.ts installs this capture before any
  * app runs; the panel's Logs section then reads the buffer back and the
  * Copy button exports it with the rest of the report.

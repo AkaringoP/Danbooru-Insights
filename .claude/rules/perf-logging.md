@@ -58,7 +58,7 @@ recording → reload page → spans show up under "User Timing".
 | Prefix | Scope |
 |---|---|
 | `dbi:db:sync:quick:*` | `quickSyncAllPosts` (≤1200 posts path) |
-| `dbi:db:sync:full:*` | `syncAllPosts` (id-cursor path; through v9.11 a 5-worker pool whose labels carried a `.wN` worker suffix) |
+| `dbi:db:sync:full:*` | `syncAllPosts` (worker-pool path); suffix `.wN` = worker ID |
 | `dbi:db:refresh:*` | `refreshAllStats` and per-distribution fetches |
 | `dbi:render:total` | `renderDashboard` end-to-end |
 | `dbi:render:precheck` / `dbi:render:precheck:*` | Pre-sync stats+total check |
