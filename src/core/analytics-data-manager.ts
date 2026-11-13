@@ -289,6 +289,19 @@ export function shouldCountHttpAsFailure(status: number): boolean {
 /** Total fetch attempts per page in the full-sync worker pool. */
 export const SYNC_PAGE_MAX_ATTEMPTS = 5;
 
+/**
+ * Parallel page fetches in the full sync. With about 1 s of server time per
+ * 200-post page and 400 ms between a worker's pages, 4 workers send about
+ * 2.9 requests per second.
+ *
+ * It was 5 (about 3.5 req/s) through v9.11. Measured on a 46k-upload
+ * account (2026-11-13, T-209 / T-210): at 3.1–3.8 req/s the edge in front of
+ * Danbooru answered 429 after 40–60 s in every full sync, while 2.6 req/s
+ * over two minutes and 1 req/s over four passed. The limiter's own cap
+ * (6 req/s) is never reached by a lone sync, so this count is what paces it.
+ */
+export const SYNC_WORKERS = 4;
+
 /** How the full-sync worker should react to a failed page fetch. */
 export type SyncFetchErrorKind = 'rate-limit' | 'transient' | 'fatal';
 
@@ -4177,7 +4190,6 @@ export class AnalyticsDataManager extends DataManager {
       const seenIds = new Set<number>();
       const buffer = new Map<number, DanbooruPost[]>();
       let nextExpectedPage = 1;
-      const MAX_CONCURRENCY = 5;
 
       const worker = this.createSyncPageWorker({
         userInfo,
@@ -4205,7 +4217,7 @@ export class AnalyticsDataManager extends DataManager {
       });
 
       const workers: Promise<void>[] = [];
-      for (let i = 0; i < MAX_CONCURRENCY; i++) {
+      for (let i = 0; i < SYNC_WORKERS; i++) {
         workers.push(worker(i));
       }
       await Promise.all(workers);
@@ -4392,9 +4404,10 @@ export class AnalyticsDataManager extends DataManager {
    * sync even though pages may complete out of order.
    *
    * Workers stagger their start (200ms * workerId) so the initial burst
-   * doesn't all hit the API at once. WORKER_DELAY (400ms) between pages
-   * keeps a lone sync to about 5 req/s; the shared rate limiter (6 req/s,
-   * burst 1) is the actual cap when other traffic joins.
+   * doesn't all hit the API at once. Each worker's cycle is the server's
+   * time for a page (about 1 s live) plus WORKER_DELAY (400ms), so
+   * SYNC_WORKERS sets the sync's real pace; the shared rate limiter
+   * (6 req/s, burst 1) only caps it when other traffic joins.
    */
   private createSyncPageWorker(args: {
     userInfo: TargetUser;

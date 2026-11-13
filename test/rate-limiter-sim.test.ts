@@ -17,6 +17,7 @@ import {RateLimitedFetch} from '../src/core/rate-limiter';
 import {CONFIG} from '../src/config';
 import {
   SYNC_PAGE_MAX_ATTEMPTS,
+  SYNC_WORKERS,
   classifySyncFetchError,
   syncRetryDelayMs,
 } from '../src/core/analytics-data-manager';
@@ -64,7 +65,7 @@ function seededRandom(seed: number): () => number {
 // ---------------------------------------------------------------------------
 
 /**
- * Full sync (AnalyticsDataManager.createSyncPageWorker): 5 workers started
+ * Full sync (AnalyticsDataManager.createSyncPageWorker): SYNC_WORKERS started
  * 200 ms apart, 400 ms between pages, up to SYNC_PAGE_MAX_ATTEMPTS per page
  * with syncRetryDelayMs. A worker that exhausts a page's retries stops.
  */
@@ -96,7 +97,7 @@ function syncDriver(pages: number): Driver {
         if (next <= pages) await sleep(400);
       }
     };
-    await Promise.all(range(5).map(worker));
+    await Promise.all(range(SYNC_WORKERS).map(worker));
     return pages - fetched;
   };
 }
@@ -332,8 +333,10 @@ describe('limiter simulation — harness', () => {
     expect(results.A.lost.sync).toBe(0);
     expect(results.A.log).toHaveLength(SYNC_PAGES);
     expect(results.A.total429).toBe(0);
-    // audit: 43 s, at most 7 per second, 55 per 10 s.
-    expect(results.A.durations.sync).toBeLessThan(50_000);
+    // audit (5 workers): 43 s, at most 7 per second, 55 per 10 s. With 4
+    // workers (T-210): ~54 s at this model's 500 ms per page. Live pages
+    // take about 1 s, so the real sync is slower than either number.
+    expect(results.A.durations.sync).toBeLessThan(60_000);
     expect(results.A.max1s).toBeLessThanOrEqual(7);
   });
 
@@ -361,8 +364,9 @@ describe('limiter simulation — G-1 cap (6 req/s, burst 1)', () => {
     // Before G-1 (9 req/s, burst 9): 16 per 1 s, 98 per 10 s.
     expect(results.B.max1s).toBe(7);
     expect(results.B.max10s).toBe(61);
-    // The cost: sync 46 s -> ~58 s, Grass 21 s -> ~33 s for this load.
-    expect(results.B.durations.sync).toBeLessThan(65_000);
+    // The cost with 5 workers: sync 46 s -> ~58 s, Grass 21 s -> ~33 s for
+    // this load. With 4 workers (T-210) the sync takes ~65 s here.
+    expect(results.B.durations.sync).toBeLessThan(72_000);
   });
 
   it('C: the "10 per 1 s" edge assumption draws no 429', () => {
