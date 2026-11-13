@@ -337,9 +337,10 @@ describe('limiter simulation — harness', () => {
     expect(results.A.lost.sync).toBe(0);
     expect(results.A.log).toHaveLength(SYNC_PAGES);
     expect(results.A.total429).toBe(0);
-    // audit (5 workers): 43 s, at most 7 per second, 55 per 10 s. With 4
-    // workers (T-210): ~54 s at this model's 500 ms per page. Live pages
-    // take about 1 s, so the real sync is slower than either number.
+    // audit (6 req/s): 43 s, at most 7 per second, 55 per 10 s. At the
+    // 4.5 req/s cap (T-213): ~51 s, because this model answers a page in
+    // 500 ms and the 5 workers run into the cap. Live pages take about
+    // 1 s, so the real sync is paced by its workers and is slower.
     expect(results.A.durations.sync).toBeLessThan(60_000);
     expect(results.A.max1s).toBeLessThanOrEqual(7);
   });
@@ -370,10 +371,10 @@ describe('limiter simulation — the cap (4.5 req/s, burst 1)', () => {
     // burst 1 gave 7 and 61.
     expect(results.B.max1s).toBe(5);
     expect(results.B.max10s).toBe(46);
-    // The cost for this load: sync ~54 s alone -> ~75 s, Grass ~40 s
+    // The cost for this load: sync ~51 s alone -> ~74 s, Grass ~44 s
     // (at 6 req/s: ~65 s and ~33 s).
     expect(results.B.durations.sync).toBeLessThan(80_000);
-    expect(results.B.durations.grass).toBeLessThan(45_000);
+    expect(results.B.durations.grass).toBeLessThan(50_000);
   });
 
   it('C: the "10 per 1 s" edge assumption draws no 429', () => {
@@ -399,7 +400,7 @@ describe('limiter simulation — per-action lanes (T-203)', () => {
     expect(results.E.total429).toBe(0);
     expect(results.E.lost).toEqual({sync: 0, counts: 0});
     // Each count also takes a token from the shared bucket (about 1 of
-    // the 4.5 per second), so the sync gives up that much: ~54 s -> ~70 s.
+    // the 4.5 per second), so the sync gives up that much: ~51 s -> ~70 s.
     expect(results.E.durations.sync).toBeLessThan(
       1.4 * results.A.durations.sync,
     );

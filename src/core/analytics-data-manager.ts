@@ -291,17 +291,19 @@ export const SYNC_PAGE_MAX_ATTEMPTS = 5;
 
 /**
  * Parallel page fetches in the full sync. With about 1 s of server time per
- * 200-post page and 400 ms between a worker's pages, 4 workers send about
- * 2.9 requests per second.
+ * 200-post page and 400 ms between a worker's pages, 5 workers send about
+ * 3.5 requests per second on average: this count, not the limiter's cap,
+ * sets a lone sync's pace. The cap (`CONFIG.RATE_LIMITER.rps`, 4.5) only
+ * trims the moments when pages come back faster, and those bursts are what
+ * Cloudflare's rule in front of Danbooru refuses (about 50 requests per
+ * 10 s, T-213).
  *
- * It was 5 (about 3.5 req/s) through v9.11. Measured on a 46k-upload
- * account (2026-11-13, T-209 / T-210): at 3.1–3.8 req/s the edge in front of
- * Danbooru answered 429 after 40–60 s in every full sync, while 2.6 req/s
- * over two minutes and 1 req/s over four passed. The limiter's own cap
- * (`CONFIG.RATE_LIMITER.rps`) is not what a lone sync runs into at that
- * server time, so this count is what paces it.
+ * It was briefly 4 (T-211, about 2.9 req/s), when the 429s were read as a
+ * two-minute budget; that reading was ruled out and the cap took over the
+ * job (measured 2026-11-13: 4 workers at a 4.5 cap, no 429 in three full
+ * syncs of a 46k-upload account, 100–131 s each).
  */
-export const SYNC_WORKERS = 4;
+export const SYNC_WORKERS = 5;
 
 /**
  * Numbered pages the full sync asks for before it re-anchors the search on
