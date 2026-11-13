@@ -895,6 +895,12 @@ export interface TagAnalyticsMeta {
   hundredthPost?: DanbooruPost;
   timeToHundred?: number;
   historyData: HistoryEntry[];
+  /**
+   * `'utc'` when `historyData` counts UTC calendar months (reports and
+   * UTC-bounded counts, T-302). Records without it predate that and count
+   * months in the viewer's time zone; see `hasUtcHistory`.
+   */
+  historyBasis?: 'utc';
   precalculatedMilestones: MilestoneEntry[];
   rankings: {
     uploader: {

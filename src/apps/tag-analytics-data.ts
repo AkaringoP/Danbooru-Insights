@@ -5,6 +5,18 @@ import {
 } from '../core/analytics-data-manager';
 import {fetchRemoteCount} from '../core/data-manager';
 import {createLogger} from '../core/logger';
+import {
+  MONTHLY_REPORT_FROM,
+  buildMonthlyReportUrl,
+  defaultReportTo,
+  mergeMonthlyCounts,
+  monthKeysBetween,
+  parseMonthlyReport,
+  splitReportRange,
+  trimMonthlyCounts,
+  utcDateString,
+  type MonthlyCounts,
+} from '../core/monthly-report';
 import {bulkPutSafe, evictOldestNonCurrentUser} from '../core/quota-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {getTopLevelFlags} from '../core/top-level-tags';
@@ -22,7 +34,65 @@ import type {
   MonthlyCountRecord,
 } from '../types';
 
-type MonthlyCountsData = HistoryEntry[] & {historyCutoff?: string};
+/**
+ * `fetchMonthlyCounts`'s history. `partial`: some month's count was lost
+ * and reads as 0 in it, so the history must not be cached (G-4).
+ */
+type MonthlyCountsData = HistoryEntry[] & {
+  historyCutoff?: string;
+  partial?: boolean;
+};
+
+/** A tag's monthly history from {@link TagAnalyticsDataService.fetchMonthlyHistory}. */
+export type MonthlyHistory = {
+  /** Consecutive UTC months from the first one with posts, running total. */
+  history: HistoryEntry[];
+  /**
+   * How it was fetched: 1 one report for the whole range, 2 the range in
+   * pieces (or a remainder after cached months), 3 one count per month.
+   */
+  layer: 1 | 2 | 3;
+  /** Some month was lost (layer 3 only): show it, but do not cache it. */
+  partial: boolean;
+};
+
+/**
+ * Reports a monthly history may cost before it falls back to one count per
+ * month (layer 3). The first, whole-range request counts.
+ */
+export const REPORT_HISTORY_MAX_REQUESTS = 24;
+
+/** The smallest piece a timed-out report range is split into, in months. */
+const REPORT_HISTORY_MIN_SPLIT_MONTHS = 12;
+
+/**
+ * Whether a cached tag report's history is in UTC months (`historyBasis`).
+ * Records saved before T-302 counted months in the viewer's time zone (and
+ * could hold a lost month as 0); their history and the tag's monthly count
+ * cache are dropped once rather than mixed with UTC months (PLAN.md 4.2).
+ */
+export function hasUtcHistory(
+  meta: Pick<TagAnalyticsMeta, 'historyBasis'> | null | undefined,
+): boolean {
+  return meta?.historyBasis === 'utc';
+}
+
+/** A report request that came back with an HTTP error. */
+class ReportStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+    this.name = 'ReportStatusError';
+  }
+}
+
+/**
+ * Whether a failed report is worth asking for again in smaller pieces: the
+ * server ran out of time (Danbooru answers a statement timeout with 500)
+ * or a gateway in front of it did.
+ */
+function isReportTimeout(e: unknown): boolean {
+  return e instanceof ReportStatusError && e.status >= 500;
+}
 
 export type InitialStats = {
   firstPost?: DanbooruPost;
@@ -1309,7 +1379,163 @@ export class TagAnalyticsDataService {
   // -----------------------------------
 
   /**
-   * Fetches monthly post counts for the tag since the start date.
+   * The tag's monthly history (UTC months) from Danbooru's reports, in up
+   * to three layers (PLAN.md 4.2, T-302):
+   *
+   * 1. One report for the whole range, 2005 to today. Most tags end here,
+   *    with no monthly count cache involved.
+   * 2. A report the server could not finish in time (5xx) is asked for
+   *    again in halves, down to {@link REPORT_HISTORY_MIN_SPLIT_MONTHS}
+   *    months and {@link REPORT_HISTORY_MAX_REQUESTS} requests in all. The
+   *    finished months are then cached (`tag_monthly_counts`), and the
+   *    next run starts after the cached months it can still trust
+   *    (`isMonthlyCountValid`), so a heavy tag only asks for its recent
+   *    part.
+   * 3. When the reports cannot give the history (still timing out, an
+   *    error reply, an unreadable body), one count per month from
+   *    `startDate`, through {@link fetchMonthlyCounts}. A lost month there
+   *    makes the result `partial`.
+   *
+   * @param opts `startDate` (the tag's first post) bounds layer 3;
+   *     `totalCount` feeds its drift guard.
+   */
+  async fetchMonthlyHistory(
+    tagName: string,
+    opts: {startDate?: Date | string; totalCount?: number} = {},
+  ): Promise<MonthlyHistory> {
+    const now = new Date();
+    const cached = await this.readCachedMonthPrefix(now);
+    const state = {requests: 0, split: false, failed: false};
+    try {
+      const fetched = await this.fetchReportRange(
+        tagName,
+        cached.nextFrom,
+        defaultReportTo(now),
+        state,
+      );
+      if (state.split) await this.cacheClosedMonths(fetched, now);
+      return {
+        history: trimMonthlyCounts(
+          mergeMonthlyCounts([cached.counts, fetched]),
+          now,
+        ),
+        layer: state.split || cached.counts.size > 0 ? 2 : 1,
+        partial: false,
+      };
+    } catch (e) {
+      log.warn('Monthly report failed, counting month by month', {
+        tag: tagName,
+        requests: state.requests,
+        error: e,
+      });
+    }
+
+    const counted = await this.fetchMonthlyCounts(
+      tagName,
+      opts.startDate ?? MONTHLY_REPORT_FROM,
+      {isFullScan: true, totalCount: opts.totalCount},
+    );
+    return {history: [...counted], layer: 3, partial: !!counted.partial};
+  }
+
+  /**
+   * The monthly report for `[from, to]`, halved and asked again while the
+   * server times out (layer 2). Throws when a piece cannot be split any
+   * further, the request budget is spent, or the reply is not a timeout;
+   * the other pieces then send nothing more (`failed`).
+   */
+  private async fetchReportRange(
+    tagName: string,
+    from: string,
+    to: string,
+    state: {requests: number; split: boolean; failed: boolean},
+  ): Promise<MonthlyCounts> {
+    if (state.failed) throw new Error('Monthly report already failed');
+    state.requests++;
+    try {
+      return await this.fetchMonthlyReport(tagName, from, to);
+    } catch (e) {
+      const mid = isReportTimeout(e)
+        ? splitReportRange(from, to, REPORT_HISTORY_MIN_SPLIT_MONTHS)
+        : null;
+      if (
+        state.failed ||
+        !mid ||
+        state.requests + 2 > REPORT_HISTORY_MAX_REQUESTS
+      ) {
+        state.failed = true;
+        throw e;
+      }
+      state.split = true;
+      log.debug('Monthly report timed out, splitting', {from, mid, to});
+      const halves = await Promise.all([
+        this.fetchReportRange(tagName, from, mid, state),
+        this.fetchReportRange(tagName, mid, to, state),
+      ]);
+      return mergeMonthlyCounts(halves);
+    }
+  }
+
+  /**
+   * One monthly report. A 429 is asked again once: the reports lane of the
+   * shared limiter holds the retry until Danbooru's bucket allows it.
+   */
+  private async fetchMonthlyReport(
+    tagName: string,
+    from: string,
+    to: string,
+  ): Promise<MonthlyCounts> {
+    const url = buildMonthlyReportUrl(tagName, {from, to});
+    const init = {headers: {Accept: 'application/json'}};
+    let resp = await this.rateLimiter.fetch(url, init);
+    if (resp.status === 429) resp = await this.rateLimiter.fetch(url, init);
+    if (!resp.ok) throw new ReportStatusError(resp.status);
+    return parseMonthlyReport(await resp.json());
+  }
+
+  /**
+   * The cached months this tag's history can start from: the longest run
+   * from {@link MONTHLY_REPORT_FROM} with every month still valid, and the
+   * date to ask the report from after it. Only a layer-2 run writes such a
+   * run (it caches from 2005 on); otherwise the cache gives nothing here
+   * and the report starts in 2005.
+   */
+  private async readCachedMonthPrefix(
+    now: Date,
+  ): Promise<{counts: MonthlyCounts; nextFrom: string}> {
+    const months = monthKeysBetween(MONTHLY_REPORT_FROM, utcDateString(now));
+    const records = await this.readMonthlyCountsCache(months);
+    const counts: MonthlyCounts = new Map();
+    for (const month of months) {
+      const r = records.get(month);
+      if (!r || !isMonthlyCountValid(month, r.fetchedAt, now.getTime())) {
+        return {counts, nextFrom: `${month}-01`};
+      }
+      counts.set(month, r.count);
+    }
+    // Unreachable in practice: the current month is never valid.
+    return {counts, nextFrom: utcDateString(now)};
+  }
+
+  /**
+   * Caches the months of a split report that will not change any more
+   * (two or more months back), leading empty months included, so the next
+   * run can start after them.
+   */
+  private async cacheClosedMonths(
+    counts: MonthlyCounts,
+    now: Date,
+  ): Promise<void> {
+    const closed = [...counts]
+      .filter(([month]) => computeMonthsDistance(month, now) >= 2)
+      .map(([yearMonth, count]) => ({yearMonth, count}));
+    await this.writeMonthlyCountsCache(closed);
+  }
+
+  /**
+   * Fetches monthly post counts for the tag since the start date, one
+   * count per UTC month. Layer 3 of {@link fetchMonthlyHistory}; months
+   * whose count is lost read as 0 and mark the result `partial`.
    *
    * Cache-aware path: when the `tag_monthly_counts` table has entries for
    * months outside the Delta sync window (current + previous month), those
@@ -1340,8 +1566,10 @@ export class TagAnalyticsDataService {
     const startDateObj =
       startDate instanceof Date ? startDate : new Date(startDate);
 
-    const startYear = startDateObj.getFullYear();
-    const startMonth = startDateObj.getMonth(); // 0-based
+    // UTC months, like the reports (layers 1-2) and the small-tag path.
+    // Local getters started a month early west of UTC.
+    const startYear = startDateObj.getUTCFullYear();
+    const startMonth = startDateObj.getUTCMonth(); // 0-based
 
     const now = new Date();
     const nowMs = now.getTime();
@@ -1366,8 +1594,11 @@ export class TagAnalyticsDataService {
       const nextY = nextMonth.getUTCFullYear();
       const nextM = nextMonth.getUTCMonth() + 1;
 
-      // Danbooru counts API needs the date filter INSIDE the tags parameter
-      let rangeEnd = `${nextY}-${String(nextM).padStart(2, '0')}-01`;
+      // Danbooru counts API needs the date filter INSIDE the tags parameter.
+      // Explicit UTC instants: a bare date is read in the viewer's time zone
+      // (`Time.zone.parse`), which shifted every month by its offset.
+      // `a...b` excludes `b`.
+      let rangeEnd = `${nextY}-${String(nextM).padStart(2, '0')}-01T00:00:00Z`;
 
       // [OPTIMIZATION] Cap range at NOW when the month is the current one to
       // avoid race conditions with posts added during the fetch.
@@ -1375,7 +1606,7 @@ export class TagAnalyticsDataService {
         rangeEnd = now.toISOString();
       }
 
-      const queryDate = `${y}-${String(m).padStart(2, '0')}-01...${rangeEnd}`;
+      const queryDate = `${y}-${String(m).padStart(2, '0')}-01T00:00:00Z...${rangeEnd}`;
 
       tasks.push({dateStr, yearMonth, queryDate});
 
@@ -1533,6 +1764,8 @@ export class TagAnalyticsDataService {
 
     const monthlyData: MonthlyCountsData = combined;
     monthlyData.historyCutoff = now.toISOString();
+    // A lost month reads as 0 above; the caller must not cache this history.
+    if (fetchedResults.some(r => !r.ok)) monthlyData.partial = true;
     return monthlyData;
   }
 

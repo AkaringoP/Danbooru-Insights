@@ -53,6 +53,16 @@ function utcMonthKey(date: Date): string {
 }
 
 /**
+ * The default `to`: today (UTC) plus {@link MONTHLY_REPORT_TO_MARGIN_DAYS},
+ * so that today's posts fall inside the range.
+ */
+export function defaultReportTo(now: Date = new Date()): string {
+  return utcDateString(
+    new Date(now.getTime() + MONTHLY_REPORT_TO_MARGIN_DAYS * DAY_MS),
+  );
+}
+
+/**
  * The reports URL for `tagName`'s monthly history. `status:any` so deleted
  * posts count, as on the tag's own post count; it is a free metatag, so the
  * search stays at one term for any viewer.
@@ -66,16 +76,11 @@ export function buildMonthlyReportUrl(
   range: {from?: string; to?: string} = {},
   now: Date = new Date(),
 ): string {
-  const to =
-    range.to ??
-    utcDateString(
-      new Date(now.getTime() + MONTHLY_REPORT_TO_MARGIN_DAYS * DAY_MS),
-    );
   const params = new URLSearchParams({
     'search[tags]': `${tagName} status:any`,
     'search[period]': 'month',
     'search[from]': range.from ?? MONTHLY_REPORT_FROM,
-    'search[to]': to,
+    'search[to]': range.to ?? defaultReportTo(now),
   });
   return `/reports/posts.json?${params.toString()}`;
 }
@@ -137,6 +142,47 @@ function nextMonthKey(month: string): string {
   return m === 12
     ? `${year + 1}-01`
     : `${year}-${String(m + 1).padStart(2, '0')}`;
+}
+
+/** Months since year 0 for a `YYYY-MM…` string, to count and step months. */
+function monthIndex(date: string): number {
+  return Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1;
+}
+
+/** `YYYY-MM-01` of a {@link monthIndex}. */
+function monthStart(index: number): string {
+  const year = Math.floor(index / 12);
+  return `${year}-${String((index % 12) + 1).padStart(2, '0')}-01`;
+}
+
+/** Every `YYYY-MM` from `from` to `to`, both included (empty if reversed). */
+export function monthKeysBetween(from: string, to: string): string[] {
+  const keys: string[] = [];
+  for (let m = from.slice(0, 7); m <= to.slice(0, 7); m = nextMonthKey(m)) {
+    keys.push(m);
+  }
+  return keys;
+}
+
+/**
+ * Where to halve a report range the server could not finish in time
+ * (layer 2 of T-302): the first day of the month in the middle, or null
+ * when either half would cover fewer than `minMonths` months — the
+ * smallest piece worth asking for on its own.
+ *
+ * The halves are `[from, mid]` and `[mid, to]`: they meet at 00:00 of
+ * `mid`, and {@link mergeMonthlyCounts} adds up the month that falls in.
+ */
+export function splitReportRange(
+  from: string,
+  to: string,
+  minMonths: number,
+): string | null {
+  const first = monthIndex(from);
+  const months = monthIndex(to) - first + 1;
+  const half = Math.floor(months / 2);
+  if (half < minMonths || months - half < minMonths) return null;
+  return monthStart(first + half);
 }
 
 /**

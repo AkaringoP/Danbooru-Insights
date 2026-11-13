@@ -3,11 +3,49 @@ import {
   MONTHLY_REPORT_FROM,
   MonthlyReportFormatError,
   buildMonthlyReportUrl,
+  defaultReportTo,
   mergeMonthlyCounts,
+  monthKeysBetween,
   parseMonthlyReport,
+  splitReportRange,
   trimMonthlyCounts,
   utcDateString,
 } from '../src/core/monthly-report';
+
+describe('defaultReportTo', () => {
+  it('is two days past the UTC date', () => {
+    expect(defaultReportTo(new Date('2026-11-30T23:59:00Z'))).toBe(
+      '2026-12-02',
+    );
+  });
+});
+
+describe('monthKeysBetween', () => {
+  it('lists every month of the range, both ends included', () => {
+    expect(monthKeysBetween('2025-11-01', '2026-02-15')).toEqual([
+      '2025-11',
+      '2025-12',
+      '2026-01',
+      '2026-02',
+    ]);
+    expect(monthKeysBetween('2026-03-01', '2026-03-31')).toEqual(['2026-03']);
+    expect(monthKeysBetween('2026-04-01', '2026-03-01')).toEqual([]);
+  });
+});
+
+describe('splitReportRange', () => {
+  it('halves a range at the first day of its middle month', () => {
+    // 2005-01 .. 2026-11 is 263 months: 131 before the split, 132 from it.
+    expect(splitReportRange('2005-01-01', '2026-11-15', 12)).toBe('2015-12-01');
+    expect(splitReportRange('2020-01-01', '2021-12-31', 12)).toBe('2021-01-01');
+  });
+
+  it('will not cut a piece below the minimum', () => {
+    // 23 months: the halves would be 11 and 12.
+    expect(splitReportRange('2020-01-01', '2021-11-30', 12)).toBeNull();
+    expect(splitReportRange('2026-11-01', '2026-11-15', 1)).toBeNull();
+  });
+});
 
 /** The search params of a built URL, decoded. */
 function paramsOf(url: string): Record<string, string> {
