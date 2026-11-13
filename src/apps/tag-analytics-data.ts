@@ -74,6 +74,67 @@ export function hasUtcHistory(
   return meta?.historyBasis === 'utc';
 }
 
+/** Milestone posts fetched at a time (the shared limiter paces them). */
+const MILESTONE_CONCURRENCY = 3;
+
+/**
+ * Numbered pages every viewer may ask for: Danbooru answers 410 past
+ * `User.page_limit` (1000 below Gold, 5000 from Gold).
+ */
+const MILESTONE_MAX_PAGE = 1000;
+
+/** Where to find one milestone post: the search, the page, the row. */
+export type MilestoneLookup = {
+  milestone: number;
+  /** `<tag> status:any date:>=<UTC month start> order:id`. */
+  query: string;
+  limit: number;
+  page: number;
+  /** Zero-based row of the post on that page. */
+  index: number;
+};
+
+/**
+ * Where the `target`-th post of the tag is (T-304): the month the running
+ * total reaches it, then its place among that month's posts in id order.
+ *
+ * - The month starts at its UTC instant, like the history's months. The
+ *   old `date:>` the previous month's last day was a bare date (read in the
+ *   viewer's time zone) and let that day's posts in, so the post found was
+ *   ahead of the milestone by them.
+ * - The page size grows with the offset, `limit = ceil(offset / 1000)` up
+ *   to 200, so the page number stays within 1000 — the page limit of every
+ *   account level — up to 200,000 posts into the month.
+ *
+ * Null when the history never reaches `target`, or the post would lie past
+ * that page limit.
+ */
+export function milestoneLookup(
+  tagName: string,
+  history: HistoryEntry[],
+  target: number,
+): MilestoneLookup | null {
+  let prevCumulative = 0;
+  const month = history.find(m => {
+    if (m.cumulative >= target) return true;
+    prevCumulative = m.cumulative;
+    return false;
+  });
+  if (!month) return null;
+
+  const offset = target - prevCumulative;
+  const limit = Math.min(200, Math.max(1, Math.ceil(offset / 1000)));
+  const page = Math.ceil(offset / limit);
+  if (page > MILESTONE_MAX_PAGE) return null;
+  return {
+    milestone: target,
+    query: `${tagName} status:any date:>=${month.date.slice(0, 7)}-01T00:00:00Z order:id`,
+    limit,
+    page,
+    index: (offset - 1) % limit,
+  };
+}
+
 /** A report request that came back with an HTTP error. */
 class ReportStatusError extends Error {
   constructor(readonly status: number) {
@@ -1652,107 +1713,83 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Identifies milestone posts (e.g., 100th, 1000th) from the monthly data.
-   * Precision depends on the granularity of the monthly data.
-   * @param {string} tagName The tag name.
-   * @param {!Array<{date: !Date, count: number, cumulative: number}>} monthlyData The history data.
-   * @param {!Array<number>} targets The milestone targets (e.g., [1, 100, 1000]).
-   * @return {Promise<!Array<{milestone: number, post: ?Object}>>} Array of milestones.
+   * Finds the milestone posts (the 1st, 100th, 1000th, … post of the tag)
+   * from the monthly history: each target's month from the running total,
+   * then the post at its place in that month ({@link milestoneLookup}).
+   * Three lookups at a time; the shared rate limiter paces them.
+   *
+   * @param tagName The tag name.
+   * @param monthlyData The history, oldest month first (UTC months).
+   * @param targets The milestone targets (e.g., [1, 100, 1000]).
+   * @return The milestones found; a target whose post could not be fetched
+   *     is left out.
    */
   async fetchMilestones(
     tagName: string,
     monthlyData: HistoryEntry[],
     targets: number[],
   ): Promise<MilestoneEntry[]> {
-    const milestones: MilestoneEntry[] = [];
-
-    // Sort targets
-    targets.sort((a, b) => a - b);
-
     if (!monthlyData || monthlyData.length === 0) return [];
 
-    for (const target of targets) {
-      // Find month where accum >= target
-      // monthlyData is sorted by date asc
-      let targetData = null;
-      let prevCumulative = 0;
+    const lookups = [...targets]
+      .sort((a, b) => a - b)
+      .map(target => milestoneLookup(tagName, monthlyData, target))
+      .filter((l): l is MilestoneLookup => l !== null);
 
-      for (const mData of monthlyData) {
-        if (mData.cumulative >= target) {
-          targetData = mData;
-          break;
-        }
-        prevCumulative = mData.cumulative;
+    const found: Array<MilestoneEntry | null> = new Array(lookups.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < lookups.length) {
+        const i = next++;
+        found[i] = await this.fetchMilestonePost(lookups[i]);
       }
-
-      if (targetData) {
-        const offset = target - prevCumulative;
-
-        // targetData.date is a "YYYY-MM-01" string (HistoryEntry.date: string)
-        let y, m;
-        {
-          const dParts = targetData.date.split('-');
-          y = parseInt(dParts[0], 10);
-          m = parseInt(dParts[1], 10); // 1-12
-        }
-
-        // Date(y, m-1, 0) gives last day of prev month
-        // Month is 0-indexed in Date constructor.
-        // m is 1-based (Feb=2). Date(2020, 1, 1) is Feb 1.
-        // We want last day of Jan. Date(2020, 0, 0)? No.
-        // Date(year, monthIndex, 0) is the last day of the *previous* month.
-        // So Date(2020, 1, 0) is Jan 31? Yes.
-        // targetData.date is 2020-02-01. m=2.
-        // new Date(y, m - 1, 0) -> new Date(2020, 1, 0) -> 2020-01-31.
-
-        const prevMonthEnd = new Date(y, m - 1, 0);
-        // Format to YYYY-MM-DD
-        const prevDateStr = `${prevMonthEnd.getFullYear()}-${String(prevMonthEnd.getMonth() + 1).padStart(2, '0')}-${String(prevMonthEnd.getDate()).padStart(2, '0')}`;
-
-        const limit = 200;
-        const page = Math.ceil(offset / limit);
-        const indexInPage = (offset - 1) % limit;
-
-        // Query
-        // Note: order:id assumes IDs increase with time. Usually true but imported posts might break this.
-        // User asked for "date:>..." and "offset".
-        // We must use order:id to ensure deterministic sort matching the "count" order roughly.
-        // Actually "count" is just total.
-        const params = new URLSearchParams({
-          tags: `${tagName} status:any date:>${prevDateStr} order:id`,
-          limit: String(limit),
-          page: String(page),
-          only: 'id,created_at,uploader_id,uploader_name,variants,rating,preview_file_url',
-        });
-
-        const url = `/posts.json?${params.toString()}`;
-
-        try {
-          const posts: DanbooruPost[] = await this.rateLimiter
-            .fetch(url)
-            .then((r: Response) => r.json());
-          if (posts && posts[indexInPage]) {
-            milestones.push({
-              milestone: target,
-              post: posts[indexInPage],
-            } as MilestoneEntry);
-          } else {
-            log.warn(`Milestone ${target} post not found`, {
-              index: indexInPage,
-              page,
-              postsLen: posts ? posts.length : 0,
-            });
-          }
-        } catch (e) {
-          log.warn(`Failed milestone ${target}`, {error: e});
-        }
-      }
-    }
+    };
+    await Promise.all(
+      Array.from(
+        {length: Math.min(MILESTONE_CONCURRENCY, lookups.length)},
+        worker,
+      ),
+    );
+    const milestones = found.filter((m): m is MilestoneEntry => m !== null);
 
     // Batch Fetch Uploaders for Milestones
     await this.backfillUploaderNames(milestones);
 
     return milestones;
+  }
+
+  /** One milestone post, or null when it could not be fetched. */
+  private async fetchMilestonePost(
+    lookup: MilestoneLookup,
+  ): Promise<MilestoneEntry | null> {
+    const params = new URLSearchParams({
+      tags: lookup.query,
+      limit: String(lookup.limit),
+      page: String(lookup.page),
+      only: 'id,created_at,uploader_id,uploader_name,variants,rating,preview_file_url',
+    });
+    try {
+      const resp = await this.rateLimiter.fetch(
+        `/posts.json?${params.toString()}`,
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const posts: unknown = await resp.json();
+      const post = Array.isArray(posts)
+        ? (posts[lookup.index] as DanbooruPost | undefined)
+        : undefined;
+      if (!post) {
+        log.warn(`Milestone ${lookup.milestone} post not found`, {
+          index: lookup.index,
+          page: lookup.page,
+          postsLen: Array.isArray(posts) ? posts.length : 0,
+        });
+        return null;
+      }
+      return {milestone: lookup.milestone, post} as MilestoneEntry;
+    } catch (e) {
+      log.warn(`Failed milestone ${lookup.milestone}`, {error: e});
+      return null;
+    }
   }
 
   /**
