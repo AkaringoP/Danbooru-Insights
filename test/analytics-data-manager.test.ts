@@ -11,6 +11,7 @@ import {
   classifySyncFetchError,
   syncRetryDelayMs,
   SYNC_PAGE_MAX_ATTEMPTS,
+  SYNC_SEGMENT_PAGES,
 } from '../src/core/analytics-data-manager';
 import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
 
@@ -1219,6 +1220,93 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       .mock.calls.map((c: string[]) => c[0]);
     expect(removed).toContain('danbooru_grass_last_sync_42');
     expect(removed).toContain('di_post_metadata_v2_42');
+  });
+
+  // T-212: Danbooru answers 410 past the viewer's page limit (1000 below
+  // Gold), which used to end a Member's sync of a >200k-upload account as
+  // incomplete. The sync now re-anchors on `id:>` and counts pages from 1.
+  describe('page-limit segments (T-212)', () => {
+    /**
+     * One post per page, ids 1..lastId, so a segment's pages are easy to
+     * name. Pages past the limit answer 410 like Danbooru.
+     */
+    function servePostsUpTo(lastId: number) {
+      const asked: string[] = [];
+      const rl = makeSyncRateLimiter(async (url: string) => {
+        if (url.includes('/counts/posts.json')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({counts: {posts: lastId}}),
+          };
+        }
+        const q = new URLSearchParams(url.split('?')[1]);
+        const page = Number(q.get('page'));
+        const after = Number(/id:>(\d+)/.exec(q.get('tags') ?? '')?.[1]);
+        asked.push(`${after}/${page}`);
+        if (page > SYNC_SEGMENT_PAGES) {
+          return {ok: false, status: 410, json: async () => ({})};
+        }
+        const id = after + page;
+        const body =
+          id <= lastId
+            ? [
+                {
+                  id,
+                  uploader_id: 42,
+                  created_at: '2025-01-01T00:00:00Z',
+                  up_score: 1,
+                  down_score: 0,
+                  rating: 'g',
+                },
+              ]
+            : [];
+        return {ok: true, status: 200, json: async () => body};
+      });
+      return {rl, asked};
+    }
+
+    async function runSync(rl: ReturnType<typeof makeSyncRateLimiter>) {
+      // The pauses between pages are not under test.
+      vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable([])) as never,
+        rl as never,
+      );
+      vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+      vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+      const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+      const written = vi
+        .mocked(quotaManager.bulkPutSafe)
+        .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
+      return {outcome, written};
+    }
+
+    it('continues past the page limit from the last post, numbering on', async () => {
+      const lastId = SYNC_SEGMENT_PAGES + 3;
+      const {rl, asked} = servePostsUpTo(lastId);
+
+      const {outcome, written} = await runSync(rl);
+
+      expect(outcome).toEqual({complete: true, started: true});
+      // Never past the limit; the next segment starts after post 1000.
+      expect(asked).not.toContain(`0/${SYNC_SEGMENT_PAGES + 1}`);
+      expect(asked).toContain(`${SYNC_SEGMENT_PAGES}/1`);
+      expect(written).toHaveLength(lastId);
+      expect(written.every(r => r.no === r.id)).toBe(true);
+    });
+
+    it('an account that ends exactly on the limit finishes with one empty page', async () => {
+      const {rl, asked} = servePostsUpTo(SYNC_SEGMENT_PAGES);
+
+      const {outcome, written} = await runSync(rl);
+
+      expect(outcome.complete).toBe(true);
+      expect(written).toHaveLength(SYNC_SEGMENT_PAGES);
+      // The full segment cannot tell it was the last: one more page says so.
+      expect(asked).toContain(`${SYNC_SEGMENT_PAGES}/1`);
+      expect(asked).not.toContain(`0/${SYNC_SEGMENT_PAGES + 1}`);
+    });
   });
 
   it('a clean run reports complete:true', async () => {

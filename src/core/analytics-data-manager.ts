@@ -302,6 +302,15 @@ export const SYNC_PAGE_MAX_ATTEMPTS = 5;
  */
 export const SYNC_WORKERS = 4;
 
+/**
+ * Numbered pages the full sync asks for before it re-anchors the search on
+ * `id:>` the last post it has. Danbooru answers 410 past the viewer's page
+ * limit (`User.page_limit`: 1000 below Gold, 5000 from Gold), which at 200
+ * posts a page used to end a Member's sync of a larger account at 200,000
+ * posts. 1000 fits every level.
+ */
+export const SYNC_SEGMENT_PAGES = 1000;
+
 /** How the full-sync worker should react to a failed page fetch. */
 export type SyncFetchErrorKind = 'rate-limit' | 'transient' | 'fatal';
 
@@ -4184,43 +4193,70 @@ export class AnalyticsDataManager extends DataManager {
       perfStats.initialCurrentNo = currentNo;
 
       // 3. Worker pool — claim pages, fetch with retry, commit in order.
-      let pageOffset = 1;
-      let hasMore = true;
+      // Danbooru refuses numbered pages past the viewer's page limit, so the
+      // pool runs one segment of SYNC_SEGMENT_PAGES at a time: when a
+      // segment runs out of page numbers with posts still coming, the next
+      // one searches `id:>` the last post committed and counts from page 1.
       let pageFailed = false;
       const seenIds = new Set<number>();
-      const buffer = new Map<number, DanbooruPost[]>();
-      let nextExpectedPage = 1;
+      let lastSeenId = startId;
+      let segmentStartId = startId;
+      for (;;) {
+        let pageOffset = 1;
+        let hasMore = true;
+        const buffer = new Map<number, DanbooruPost[]>();
+        let nextExpectedPage = 1;
 
-      const worker = this.createSyncPageWorker({
-        userInfo,
-        uploaderId,
-        startId,
-        getCurrentNo: () => currentNo,
-        bumpCurrentNo: () => ++currentNo,
-        total,
-        buffer,
-        getNextExpectedPage: () => nextExpectedPage,
-        bumpNextExpectedPage: () => ++nextExpectedPage,
-        claimPage: () => pageOffset++,
-        getHasMore: () => hasMore,
-        setHasMore: v => {
-          hasMore = v;
-        },
-        markFailed: () => {
+        const worker = this.createSyncPageWorker({
+          userInfo,
+          uploaderId,
+          startId: segmentStartId,
+          getCurrentNo: () => currentNo,
+          bumpCurrentNo: () => ++currentNo,
+          total,
+          buffer,
+          getNextExpectedPage: () => nextExpectedPage,
+          bumpNextExpectedPage: () => ++nextExpectedPage,
+          claimPage: () =>
+            pageOffset <= SYNC_SEGMENT_PAGES ? pageOffset++ : null,
+          getHasMore: () => hasMore,
+          setHasMore: v => {
+            hasMore = v;
+          },
+          markFailed: () => {
+            pageFailed = true;
+          },
+          markSeen: ids => {
+            for (const id of ids) {
+              seenIds.add(id);
+              if (id > lastSeenId) lastSeenId = id;
+            }
+          },
+          reportProgress,
+          perfStats,
+        });
+
+        const workers: Promise<void>[] = [];
+        for (let i = 0; i < SYNC_WORKERS; i++) {
+          workers.push(worker(i));
+        }
+        await Promise.all(workers);
+
+        // Still more to fetch only if every page of the segment came back
+        // with posts: no empty page (hasMore) and no failure.
+        const segmentFull =
+          hasMore && !pageFailed && nextExpectedPage > SYNC_SEGMENT_PAGES;
+        if (!segmentFull) break;
+        if (lastSeenId <= segmentStartId) {
+          // The next segment would repeat this one.
+          log.error('Sync segment did not advance, stopping', {
+            segmentStartId,
+          });
           pageFailed = true;
-        },
-        markSeen: ids => {
-          for (const id of ids) seenIds.add(id);
-        },
-        reportProgress,
-        perfStats,
-      });
-
-      const workers: Promise<void>[] = [];
-      for (let i = 0; i < SYNC_WORKERS; i++) {
-        workers.push(worker(i));
+          break;
+        }
+        segmentStartId = lastSeenId;
       }
-      await Promise.all(workers);
 
       // Reconcile the re-fetched window before the completion stamps: drop
       // rows the remote no longer returns, so the local DB is a snapshot of
@@ -4419,7 +4455,8 @@ export class AnalyticsDataManager extends DataManager {
     buffer: Map<number, DanbooruPost[]>;
     getNextExpectedPage: () => number;
     bumpNextExpectedPage: () => number;
-    claimPage: () => number;
+    /** The next page number, or null once the segment has none left. */
+    claimPage: () => number | null;
     getHasMore: () => boolean;
     setHasMore: (v: boolean) => void;
     markFailed: () => void;
@@ -4468,6 +4505,7 @@ export class AnalyticsDataManager extends DataManager {
         while (getHasMore()) {
           // 1. Claim a page
           const currentPage = claimPage();
+          if (currentPage === null) return;
           perfLogger.start(pageLabel);
           let pageFetchedCount = 0;
           let pageAttempts = 0;
