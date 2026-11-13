@@ -6,11 +6,12 @@
  * test (TASK.md T-201). Each scenario drives the limiter with the request
  * shapes the app really produces, under fake timers, and records what the
  * server saw. Each group of checks notes what the audit measured before
- * the change it pins: the "G-1 cap" since T-202 (6 req/s, burst 1), the
- * "per-action lanes" since T-203.
+ * the change it pins: the cap since T-202 (6 req/s, burst 1; 4.5 req/s
+ * since T-213), the "per-action lanes" since T-203.
  *
- * The edge (Cloudflare) rule is unknown; scenario C tries the audit's
- * "10 per second" assumption, and B.max10s covers its "100 per 10 s" one.
+ * The edge (Cloudflare) rule is not public; scenario C tries the audit's
+ * "10 per second" assumption, B.max10s covers its "100 per 10 s" one, and
+ * F tries the "50 per 10 s" that the live 429s of 2026-11-13 point at.
  */
 import {describe, it, expect, vi, beforeAll, afterAll} from 'vitest';
 import {RateLimitedFetch} from '../src/core/rate-limiter';
@@ -270,6 +271,9 @@ beforeAll(async () => {
   results.C = await simulate(syncAndGrass(), {
     edge: {windowMs: 1000, max: 10},
   });
+  results.F = await simulate(syncAndGrass(), {
+    edge: {windowMs: 10_000, max: 50},
+  });
   results.E = await simulate({
     sync: syncDriver(SYNC_PAGES),
     counts: dashboardCountsDriver(150),
@@ -350,29 +354,40 @@ describe('limiter simulation — harness', () => {
   });
 });
 
-describe('limiter simulation — G-1 cap (6 req/s, burst 1)', () => {
-  it('one tab never sends more than 7 per 1 s or 61 per 10 s', () => {
-    // 1 stored token + 6 per second; the 0–50 ms jitter after a token is
-    // taken cannot fit an 8th request into any 1 s window.
+describe('limiter simulation — the cap (4.5 req/s, burst 1)', () => {
+  it('one tab never sends more than 6 per 1 s or 47 per 10 s', () => {
+    // 1 stored token + 4.5 per second. The point of 4.5 (T-213): stay
+    // under the "about 50 per 10 s" the live 429s suggest. At 6 req/s
+    // (G-1) the bounds were 7 and 61.
     for (const [name, r] of Object.entries(results)) {
-      expect(r.max1s, name).toBeLessThanOrEqual(7);
-      expect(r.max10s, name).toBeLessThanOrEqual(61);
+      expect(r.max1s, name).toBeLessThanOrEqual(6);
+      expect(r.max10s, name).toBeLessThanOrEqual(47);
     }
   });
 
-  it('B: overlapping Grass and sync sit exactly at the cap, without 429s', () => {
-    // Before G-1 (9 req/s, burst 9): 16 per 1 s, 98 per 10 s.
-    expect(results.B.max1s).toBe(7);
-    expect(results.B.max10s).toBe(61);
-    // The cost with 5 workers: sync 46 s -> ~58 s, Grass 21 s -> ~33 s for
-    // this load. With 4 workers (T-210) the sync takes ~65 s here.
-    expect(results.B.durations.sync).toBeLessThan(72_000);
+  it('B: overlapping Grass and sync sit at the cap, without 429s', () => {
+    // History: 9 req/s burst 9 gave 16 per 1 s and 98 per 10 s; 6 req/s
+    // burst 1 gave 7 and 61.
+    expect(results.B.max1s).toBe(5);
+    expect(results.B.max10s).toBe(46);
+    // The cost for this load: sync ~54 s alone -> ~75 s, Grass ~40 s
+    // (at 6 req/s: ~65 s and ~33 s).
+    expect(results.B.durations.sync).toBeLessThan(80_000);
+    expect(results.B.durations.grass).toBeLessThan(45_000);
   });
 
   it('C: the "10 per 1 s" edge assumption draws no 429', () => {
     // Before G-1: 4 x 429 (audit: 5).
     expect(results.C.total429).toBe(0);
     expect(results.C.durations).toEqual(results.B.durations);
+  });
+
+  it('F: a "50 per 10 s" edge rule draws no 429 either', () => {
+    // The rule the live 429s point at (two of them came with exactly 49
+    // requests in the 10 s before). 6 req/s could send 61 in 10 s.
+    expect(results.F.total429).toBe(0);
+    expect(results.F.lost).toEqual({sync: 0, grass: 0});
+    expect(results.F.durations).toEqual(results.B.durations);
   });
 });
 
@@ -383,8 +398,10 @@ describe('limiter simulation — per-action lanes (T-203)', () => {
     // sync 196 s, 26 lost.
     expect(results.E.total429).toBe(0);
     expect(results.E.lost).toEqual({sync: 0, counts: 0});
+    // Each count also takes a token from the shared bucket (about 1 of
+    // the 4.5 per second), so the sync gives up that much: ~54 s -> ~70 s.
     expect(results.E.durations.sync).toBeLessThan(
-      1.3 * results.A.durations.sync,
+      1.4 * results.A.durations.sync,
     );
   });
 

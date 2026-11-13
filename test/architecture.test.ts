@@ -346,7 +346,7 @@ describe('Architecture constraints', () => {
   it('only main.ts constructs a RateLimitedFetch — one bucket per tab', () => {
     // H-1 / G-1 recurrence guard. Every request of a tab must go through the
     // one limiter main.ts builds: a second bucket ignores TabCoordinator's
-    // multi-tab split and the shared 429 pause, and adds its own 6 req/s on
+    // multi-tab split and the shared 429 pause, and adds its own full rate on
     // top. The constructors of DataManager, AnalyticsDataManager, the three
     // apps and UserAnalyticsDataService take the limiter as a required
     // argument (the type checker enforces passing one); this rule stops a

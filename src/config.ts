@@ -55,16 +55,20 @@ export const CONFIG: {
   /** Upper bound (ms) on a server-derived 429 pause, against bogus headers. */
   MAX_BACKOFF_MS: 120_000,
   // One token bucket shared by every app on the page — Grass, UserAnalytics
-  // and TagAnalytics all get the limiter main.ts builds. 6 req/s with a
-  // burst of 1 (decision G-1, 2026-11-12): from one tab, at most 7 requests
-  // in any second and 61 in any 10 s. Danbooru's overall (edge) limit is
-  // not public; its per-action limits are lower still for counts (1/s) and
-  // reports (1 per 3 s) — see CLAUDE.md "Rate Limiting". TabCoordinator
-  // divides rps and concurrency between tabs; the burst stays 1 per tab.
-  // Was 9 req/s with a burst of 9 (v9.6, for a count refresh that the
-  // server now caps at 1/s anyway), which let Grass + a sync reach 16
-  // requests in one second.
-  RATE_LIMITER: {concurrency: 8, jitter: [0, 50], rps: 6, burst: 1},
+  // and TagAnalytics all get the limiter main.ts builds. 4.5 req/s with a
+  // burst of 1: from one tab, at most 6 requests in any second and 47 in
+  // any 10 s. Danbooru's overall limit is a Cloudflare rule that is not
+  // public; it answers 429 with a challenge page (`cf-mitigated:
+  // challenge`). Two independent 429s each came with exactly 49 requests
+  // in the 10 s before, which suggests about 50 per 10 s — unconfirmed
+  // (T-213, 2026-11-13). The per-action limits are lower still for counts
+  // (1/s) and reports (1 per 3 s) — see CLAUDE.md "Rate Limiting".
+  // TabCoordinator divides rps and concurrency between tabs; the burst
+  // stays 1 per tab.
+  // History: 9 req/s with a burst of 9 (v9.6), which let Grass + a sync
+  // reach 16 requests in one second; then 6 req/s with a burst of 1
+  // (decision G-1, 2026-11-12: at most 7 per second, 61 per 10 s).
+  RATE_LIMITER: {concurrency: 8, jitter: [0, 50], rps: 4.5, burst: 1},
   TAB_COORDINATOR: {
     channelName: 'di-rate-coord',
     heartbeatInterval: 5000,

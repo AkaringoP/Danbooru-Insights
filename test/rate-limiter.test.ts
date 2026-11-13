@@ -101,7 +101,9 @@ describe('RateLimitedFetch', () => {
     });
 
     it('is the configured default the app builds with', () => {
-      expect(CONFIG.RATE_LIMITER).toMatchObject({rps: 6, burst: 1});
+      // 4.5 since T-213 (was 6): at most 47 requests in any 10 s.
+      expect(CONFIG.RATE_LIMITER).toMatchObject({rps: 4.5, burst: 1});
+      expect(10 * CONFIG.RATE_LIMITER.rps + 2).toBeLessThan(50);
     });
   });
 

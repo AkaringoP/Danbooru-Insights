@@ -147,7 +147,9 @@ async function main(): Promise<void> {
   // Cross-tab coordination
   const coordinator = new TabCoordinator();
   coordinator.onTabCountChange = count => {
-    const rps = Math.max(1, Math.floor(rl.rps / count));
+    // Not floored: the rate may be fractional (4.5), and flooring a split
+    // would quietly drop the tabs' total below the configured rate.
+    const rps = Math.max(1, rl.rps / count);
     const conc = Math.max(1, Math.floor(rl.concurrency / count));
     rateLimiter.updateLimits(rps, conc, count);
   };

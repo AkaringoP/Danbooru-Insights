@@ -298,7 +298,8 @@ export const SYNC_PAGE_MAX_ATTEMPTS = 5;
  * account (2026-11-13, T-209 / T-210): at 3.1–3.8 req/s the edge in front of
  * Danbooru answered 429 after 40–60 s in every full sync, while 2.6 req/s
  * over two minutes and 1 req/s over four passed. The limiter's own cap
- * (6 req/s) is never reached by a lone sync, so this count is what paces it.
+ * (`CONFIG.RATE_LIMITER.rps`) is not what a lone sync runs into at that
+ * server time, so this count is what paces it.
  */
 export const SYNC_WORKERS = 4;
 
@@ -4443,7 +4444,8 @@ export class AnalyticsDataManager extends DataManager {
    * doesn't all hit the API at once. Each worker's cycle is the server's
    * time for a page (about 1 s live) plus WORKER_DELAY (400ms), so
    * SYNC_WORKERS sets the sync's real pace; the shared rate limiter
-   * (6 req/s, burst 1) only caps it when other traffic joins.
+   * (`CONFIG.RATE_LIMITER`) caps it when pages come back faster or other
+   * traffic joins.
    */
   private createSyncPageWorker(args: {
     userInfo: TargetUser;
