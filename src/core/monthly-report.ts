@@ -155,6 +155,30 @@ function monthStart(index: number): string {
   return `${year}-${String((index % 12) + 1).padStart(2, '0')}-01`;
 }
 
+/**
+ * `YYYY-MM-01` of the UTC month an instant falls in (the history bar a
+ * post belongs to), or null when `timestamp` cannot be read.
+ */
+export function utcMonthStartOf(timestamp: string): string | null {
+  const t = new Date(timestamp).getTime();
+  if (Number.isNaN(t)) return null;
+  return `${new Date(t).toISOString().slice(0, 7)}-01`;
+}
+
+/**
+ * The post search a history bar opens: `tagName`'s posts in the UTC month
+ * starting `month` (`YYYY-MM-01`). The bounds are explicit UTC instants:
+ * a bare date would be read in the viewer's Danbooru time zone
+ * (`Time.zone.parse`) and open a different month than the bar counts.
+ * `a...b` excludes `b`. Built from the string alone, so the browser's time
+ * zone cannot shift it either.
+ */
+export function monthPostsQuery(tagName: string, month: string): string {
+  const start = `${month.slice(0, 7)}-01`;
+  const next = monthStart(monthIndex(month) + 1);
+  return `${tagName} date:${start}T00:00:00Z...${next}T00:00:00Z`;
+}
+
 /** Every `YYYY-MM` from `from` to `to`, both included (empty if reversed). */
 export function monthKeysBetween(from: string, to: string): string[] {
   const keys: string[] = [];

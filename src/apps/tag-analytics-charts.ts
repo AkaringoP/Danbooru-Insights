@@ -1,5 +1,6 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
+import {monthPostsQuery, utcMonthStartOf} from '../core/monthly-report';
 import {createBodyTooltip} from '../ui/popover-utils';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
 import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
@@ -677,6 +678,17 @@ export class TagAnalyticsChartRenderer {
     titleEl.style.textAlign = 'left'; // Left aligned
     titleEl.style.borderLeft = '4px solid var(--di-link, #007bff)';
     titleEl.style.paddingLeft = '10px';
+    // The bars are UTC calendar months (T-305), which can differ from the
+    // viewer's own month near its edges.
+    const utcNote = document.createElement('span');
+    utcNote.textContent = 'UTC';
+    utcNote.title =
+      'Months are UTC calendar months. Clicking a month opens the posts of that UTC month.';
+    utcNote.style.marginLeft = '6px';
+    utcNote.style.fontSize = '11px';
+    utcNote.style.fontWeight = 'normal';
+    utcNote.style.color = 'var(--di-text-muted, #888)';
+    titleEl.appendChild(utcNote);
     container.appendChild(titleEl);
 
     // 2. Main Wrapper (Flexbox to separate Fixed Y and Scrollable Content)
@@ -771,16 +783,11 @@ export class TagAnalyticsChartRenderer {
     // 4. Clickable Monthly Overlays (Full height clickable area)
     const overlayGroups = svg.append('g').attr('class', 'monthly-overlays');
     data.forEach(d => {
-      // HistoryEntry.date is always a YYYY-MM-DD string
+      // HistoryEntry.date is always a YYYY-MM-01 string: a UTC month. The
+      // click opens exactly that UTC month (T-305), not the month in the
+      // viewer's Danbooru time zone that a bare date range would give.
       const dateStr = d.date;
-      const dateObj = new Date(dateStr);
-
-      const nextDate = new Date(dateObj);
-      nextDate.setMonth(nextDate.getMonth() + 1);
-      const nextDateStr = nextDate.toLocaleDateString('en-CA');
-
-      const dateRange = `${dateStr}...${nextDateStr}`;
-      const searchUrl = `/posts?tags=${encodeURIComponent(tagName)}+date:${dateRange}`;
+      const searchUrl = `/posts?tags=${encodeURIComponent(monthPostsQuery(tagName, dateStr))}`;
 
       const colWidth = x.step();
       // Use the string date key for x-scale lookup
@@ -811,7 +818,9 @@ export class TagAnalyticsChartRenderer {
           window.open(searchUrl, '_blank');
         })
         .append('title')
-        .text(`${dateStr}\nCount: ${d.count.toLocaleString()}`);
+        .text(
+          `${dateStr.slice(0, 7)} (UTC)\nCount: ${d.count.toLocaleString()}`,
+        );
     });
 
     // 4. Bars
@@ -858,9 +867,10 @@ export class TagAnalyticsChartRenderer {
         if (!m.post) return;
         if (m.milestone !== 1 && m.milestone % 1000 !== 0) return;
 
-        const pDate = new Date(m.post.created_at);
-        // Use local date methods to match fetchMonthlyCounts buckets
-        const mKey = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}-01`; // Match string format
+        // The UTC month, like the bars. The browser's month put a post
+        // from the first or last hours of a month on the neighbouring bar.
+        const mKey = utcMonthStartOf(m.post.created_at);
+        if (!mKey) return;
         if (!milestonesByMonth[mKey]) milestonesByMonth[mKey] = [];
         milestonesByMonth[mKey].push(m);
       });
@@ -925,10 +935,12 @@ export class TagAnalyticsChartRenderer {
     }
 
     // X Axis
+    // Year ticks on January, read from the `YYYY-MM-01` keys themselves:
+    // parsing them as dates put the ticks on February west of UTC.
     const xAxis = d3
       .axisBottom(x)
-      .tickValues(x.domain().filter(d => new Date(d).getMonth() === 0)) // Parse string to Date for month check
-      .tickFormat(d => d3.timeFormat('%Y')(new Date(d))); // Parse string to Date for formatting
+      .tickValues(x.domain().filter((d: string) => d.slice(5, 7) === '01'))
+      .tickFormat((d: string) => d.slice(0, 4));
 
     svg
       .append('g')
@@ -1106,7 +1118,9 @@ export class TagAnalyticsChartRenderer {
           if (!d) return;
 
           const dateObj = new Date(d.date);
-          const dateStr = dateObj.toLocaleDateString('en-CA');
+          // The month key as is: a local date showed the previous month's
+          // last day west of UTC.
+          const dateStr = d.date;
 
           focus.attr(
             'transform',

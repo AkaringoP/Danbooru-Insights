@@ -48,6 +48,10 @@ import type {
 
 const log = createLogger('TagAnalytics');
 
+/** Footer line of the tag dashboard: what a "month" means in its history. */
+const TAG_HISTORY_UTC_NOTE =
+  'Monthly history uses UTC calendar months; clicking a month opens that UTC month.';
+
 /** Result from _checkCache(). null = served from cache (caller should return). */
 interface CacheCheckResult {
   runDelta: boolean;
@@ -2055,7 +2059,7 @@ export class TagAnalyticsApp {
       ${this.buildMainGrid(tagData)}
       ${this.buildRankingsSection(tagData)}
       ${this.buildBottomSections()}
-      ${dashboardFooterHtml()}
+      ${dashboardFooterHtml(TAG_HISTORY_UTC_NOTE)}
     `;
 
     // Inject Header Controls (Settings, Reset)

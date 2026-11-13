@@ -6,11 +6,32 @@ import {
   defaultReportTo,
   mergeMonthlyCounts,
   monthKeysBetween,
+  monthPostsQuery,
   parseMonthlyReport,
   splitReportRange,
   trimMonthlyCounts,
   utcDateString,
+  utcMonthStartOf,
 } from '../src/core/monthly-report';
+
+describe('monthPostsQuery', () => {
+  it('searches the UTC month with explicit instants, end excluded', () => {
+    expect(monthPostsQuery('touhou', '2024-02-01')).toBe(
+      'touhou date:2024-02-01T00:00:00Z...2024-03-01T00:00:00Z',
+    );
+    expect(monthPostsQuery('a', '2023-12-01')).toBe(
+      'a date:2023-12-01T00:00:00Z...2024-01-01T00:00:00Z',
+    );
+  });
+});
+
+describe('utcMonthStartOf', () => {
+  it('is the UTC month of the instant', () => {
+    expect(utcMonthStartOf('2024-04-01T05:00:00+09:00')).toBe('2024-03-01');
+    expect(utcMonthStartOf('2024-02-29T20:00:00-08:00')).toBe('2024-03-01');
+    expect(utcMonthStartOf('not a date')).toBeNull();
+  });
+});
 
 describe('defaultReportTo', () => {
   it('is two days past the UTC date', () => {

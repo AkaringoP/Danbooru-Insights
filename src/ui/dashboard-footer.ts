@@ -1,3 +1,4 @@
+import {escapeHtml} from '../utils';
 import {
   APP_VERSION,
   APP_REPO_URL,
@@ -9,8 +10,14 @@ import {
  * Returns the HTML markup for the small credit footer shown at the bottom
  * of both UserAnalyticsApp and TagAnalyticsApp dashboards. Kept as a single
  * helper so any tweak (wording, link, styling) propagates to both apps.
+ *
+ * @param note An extra line under the credits, as plain text (escaped
+ *     here) — e.g. the tag dashboard's "UTC months" note.
  */
-export function dashboardFooterHtml(): string {
+export function dashboardFooterHtml(note?: string): string {
+  const noteHtml = note
+    ? `<div class="di-dashboard-footer-note" style="margin-top: 4px;">${escapeHtml(note)}</div>`
+    : '';
   return `
     <div class="di-dashboard-footer" style="
       margin-top: 30px;
@@ -26,6 +33,7 @@ export function dashboardFooterHtml(): string {
       </a>
       <span style="margin: 0 6px; opacity: 0.6;">·</span>
       <span>made by <a href="${APP_AUTHOR_URL}" target="_blank" rel="noopener" style="color: var(--di-text-muted, #888); text-decoration: none;">${APP_AUTHOR}</a></span>
+      ${noteHtml}
     </div>
   `;
 }
