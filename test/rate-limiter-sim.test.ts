@@ -64,40 +64,27 @@ function seededRandom(seed: number): () => number {
 // ---------------------------------------------------------------------------
 
 /**
- * Full sync (AnalyticsDataManager.createSyncPageWorker): 5 workers started
- * 200 ms apart, 400 ms between pages, up to SYNC_PAGE_MAX_ATTEMPTS per page
- * with syncRetryDelayMs. A worker that exhausts a page's retries stops.
+ * Full sync (AnalyticsDataManager.fetchPostsByCursor, T-210): one id-cursor
+ * page at a time, each sent as soon as the previous one answered, up to
+ * SYNC_PAGE_MAX_ATTEMPTS per page with syncRetryDelayMs. A page that
+ * exhausts its retries stops the run.
  */
 function syncDriver(pages: number): Driver {
   return async rl => {
-    let next = 1;
-    let fetched = 0;
-    const worker = async (id: number) => {
-      if (id > 0) await sleep(id * 200);
-      while (next <= pages) {
-        const page = next++;
-        let attempts = 0;
-        let ok = false;
-        while (attempts < SYNC_PAGE_MAX_ATTEMPTS) {
-          const resp = await rl.fetch(`/posts.json?sync=1&page=${page}`);
-          if (resp.ok) {
-            ok = true;
-            break;
-          }
-          attempts++;
-          const kind = classifySyncFetchError(new Error(`HTTP ${resp.status}`));
-          if (kind === 'fatal' || attempts >= SYNC_PAGE_MAX_ATTEMPTS) break;
-          await sleep(
-            syncRetryDelayMs(kind, attempts, rl.backoffRemainingMs()),
-          );
+    for (let page = 1; page <= pages; page++) {
+      let attempts = 0;
+      for (;;) {
+        const resp = await rl.fetch(`/posts.json?sync=1&page=a${page}`);
+        if (resp.ok) break;
+        attempts++;
+        const kind = classifySyncFetchError(new Error(`HTTP ${resp.status}`));
+        if (kind === 'fatal' || attempts >= SYNC_PAGE_MAX_ATTEMPTS) {
+          return pages - (page - 1);
         }
-        if (!ok) return;
-        fetched++;
-        if (next <= pages) await sleep(400);
+        await sleep(syncRetryDelayMs(kind, attempts, rl.backoffRemainingMs()));
       }
-    };
-    await Promise.all(range(5).map(worker));
-    return pages - fetched;
+    }
+    return 0;
   };
 }
 
@@ -332,9 +319,11 @@ describe('limiter simulation — harness', () => {
     expect(results.A.lost.sync).toBe(0);
     expect(results.A.log).toHaveLength(SYNC_PAGES);
     expect(results.A.total429).toBe(0);
-    // audit: 43 s, at most 7 per second, 55 per 10 s.
-    expect(results.A.durations.sync).toBeLessThan(50_000);
-    expect(results.A.max1s).toBeLessThanOrEqual(7);
+    // One cursor page at a time (T-210): bound by the server time, 500 ms
+    // per page in this model, ~121 s. The 5-worker numbered pages took
+    // ~43 s here, but drew edge 429s live once the pages got deep.
+    expect(results.A.durations.sync).toBeLessThan(130_000);
+    expect(results.A.max1s).toBeLessThanOrEqual(3);
   });
 
   it('B: sync and Grass together still finish without loss', () => {
@@ -357,12 +346,16 @@ describe('limiter simulation — G-1 cap (6 req/s, burst 1)', () => {
     }
   });
 
-  it('B: overlapping Grass and sync sit exactly at the cap, without 429s', () => {
-    // Before G-1 (9 req/s, burst 9): 16 per 1 s, 98 per 10 s.
-    expect(results.B.max1s).toBe(7);
-    expect(results.B.max10s).toBe(61);
-    // The cost: sync 46 s -> ~58 s, Grass 21 s -> ~33 s for this load.
-    expect(results.B.durations.sync).toBeLessThan(65_000);
+  it('B: overlapping Grass and sync stay under the cap, without 429s', () => {
+    // Before G-1 (9 req/s, burst 9): 16 per 1 s, 98 per 10 s. With the
+    // 5-worker sync the pair sat exactly at 7 / 61; the cursor sync sends
+    // one page at a time, so the pair stays below it.
+    expect(results.B.max1s).toBeLessThanOrEqual(7);
+    expect(results.B.max10s).toBeLessThanOrEqual(61);
+    // The sync leaves enough room that Grass barely slows it down.
+    expect(results.B.durations.sync).toBeLessThan(
+      1.2 * results.A.durations.sync,
+    );
   });
 
   it('C: the "10 per 1 s" edge assumption draws no 429', () => {

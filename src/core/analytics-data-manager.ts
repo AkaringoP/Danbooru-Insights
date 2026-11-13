@@ -286,8 +286,36 @@ export function shouldCountHttpAsFailure(status: number): boolean {
   return status !== 429;
 }
 
-/** Total fetch attempts per page in the full-sync worker pool. */
+/** Total fetch attempts per page in the full sync. */
 export const SYNC_PAGE_MAX_ATTEMPTS = 5;
+
+/** Posts per sync page (the API's maximum). */
+const SYNC_PAGE_LIMIT = 200;
+
+/** Post fields a sync stores (see {@link toStoredPost}). */
+const SYNC_POST_FIELDS =
+  'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url';
+
+/** A synced post as stored in the `posts` table, numbered `no`. */
+function toStoredPost(p: DanbooruPost, no: number) {
+  const ds = p.down_score ?? 0;
+  const us = p.up_score ?? 0;
+  return {
+    id: p.id,
+    uploader_id: p.uploader_id,
+    created_at: p.created_at,
+    score: us + ds,
+    up_score: us,
+    down_score: ds,
+    is_deleted: p.is_deleted ?? false,
+    is_banned: p.is_banned ?? false,
+    rating: p.rating,
+    tag_count_general: p.tag_count_general ?? 0,
+    variants: p.variants,
+    preview_file_url: p.preview_file_url,
+    no,
+  };
+}
 
 /** How the full-sync worker should react to a failed page fetch. */
 export type SyncFetchErrorKind = 'rate-limit' | 'transient' | 'fatal';
@@ -4099,9 +4127,9 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Syncs all posts for the user using parallel buffered fetching.
-   * Orchestrator only — the three private helpers below
-   * (calculateResumeStartId → createSyncPageWorker → finalizeSyncMetadata)
+   * Syncs all posts for the user, walking Danbooru's id cursor from the
+   * resume point. Orchestrator only — the private helpers below
+   * (calculateResumeStartId → fetchPostsByCursor → finalizeSyncMetadata)
    * carry the actual logic.
    *
    * @param {Object} userInfo The user's info object.
@@ -4151,6 +4179,7 @@ export class AnalyticsDataManager extends DataManager {
     };
     perfLogger.start('dbi:db:sync:full:total');
     const edge429sAtStart = this.rateLimiter.trafficSummary().edge429s;
+    const syncStartedAt = Date.now();
 
     try {
       // 1. Get total count
@@ -4165,49 +4194,22 @@ export class AnalyticsDataManager extends DataManager {
       // currentNo only becomes positive when startId > 0).
       const resume = await this.calculateResumeStartId(uploaderId);
       const {startId} = resume;
-      let {currentNo} = resume;
       perfStats.startId = startId;
-      perfStats.initialCurrentNo = currentNo;
+      perfStats.initialCurrentNo = resume.currentNo;
 
-      // 3. Worker pool — claim pages, fetch with retry, commit in order.
-      let pageOffset = 1;
-      let hasMore = true;
-      let pageFailed = false;
-      const seenIds = new Set<number>();
-      const buffer = new Map<number, DanbooruPost[]>();
-      let nextExpectedPage = 1;
-      const MAX_CONCURRENCY = 5;
-
-      const worker = this.createSyncPageWorker({
+      // 3. Walk the id cursor — one page at a time, committed as it lands.
+      const run = await this.fetchPostsByCursor({
         userInfo,
         uploaderId,
         startId,
-        getCurrentNo: () => currentNo,
-        bumpCurrentNo: () => ++currentNo,
+        firstNo: resume.currentNo,
         total,
-        buffer,
-        getNextExpectedPage: () => nextExpectedPage,
-        bumpNextExpectedPage: () => ++nextExpectedPage,
-        claimPage: () => pageOffset++,
-        getHasMore: () => hasMore,
-        setHasMore: v => {
-          hasMore = v;
-        },
-        markFailed: () => {
-          pageFailed = true;
-        },
-        markSeen: ids => {
-          for (const id of ids) seenIds.add(id);
-        },
         reportProgress,
         perfStats,
       });
-
-      const workers: Promise<void>[] = [];
-      for (let i = 0; i < MAX_CONCURRENCY; i++) {
-        workers.push(worker(i));
-      }
-      await Promise.all(workers);
+      const currentNo = run.lastNo;
+      const pageFailed = !run.complete;
+      const seenIds = run.seenIds;
 
       // Reconcile the re-fetched window before the completion stamps: drop
       // rows the remote no longer returns, so the local DB is a snapshot of
@@ -4237,6 +4239,7 @@ export class AnalyticsDataManager extends DataManager {
         edge429s: traffic.edge429s - edge429sAtStart,
         ...traffic.peakOk,
         pages: perfStats.pagesCommitted,
+        elapsedMs: Date.now() - syncStartedAt,
       });
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
@@ -4377,236 +4380,152 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Build the worker function used by the syncAllPosts worker pool.
-   * Each worker:
-   *   1. claims the next page via `claimPage` (shared atomic counter),
-   *   2. fetches with retries on 429 / 5xx / timeout / network errors
-   *      (classifySyncFetchError, up to SYNC_PAGE_MAX_ATTEMPTS),
-   *   3. buffers the result by page number,
-   *   4. drains the buffer in order — bulkPut'ing each batch with
-   *      `no: ++currentNo` sequential numbering.
+   * Fetches this user's posts above `startId`, oldest first, one page at a
+   * time with Danbooru's id cursor (`page=a<id>`: the next posts after that
+   * id), and commits each page as it lands with `no` counting on from
+   * `firstNo`.
    *
-   * Ordered commit ensures the `no` field is monotonic across the whole
-   * sync even though pages may complete out of order.
+   * Why a cursor (T-210): a numbered page is an OFFSET on the server, so
+   * page 181 makes Danbooru step over 36,000 rows before it can answer. In
+   * three full syncs of a 46k-upload account every edge 429 came on a page
+   * past 130, never on the first 130 at the same request rate. A cursor page
+   * is an index seek whatever its depth. It needs the previous page's last
+   * id, so pages come one at a time — which also commits them in order with
+   * no reordering buffer.
    *
-   * Workers stagger their start (200ms * workerId) so the initial burst
-   * doesn't all hit the API at once. WORKER_DELAY (400ms) between pages
-   * keeps a lone sync to about 5 req/s; the shared rate limiter (6 req/s,
-   * burst 1) is the actual cap when other traffic joins.
+   * The run ends on an empty page. A short page is not taken as the end:
+   * the API may leave out posts the viewer cannot see, and the cursor moves
+   * past them all the same.
+   *
+   * A page that still fails after its retries stops the run. What was
+   * committed is a prefix, so the next sync resumes after it.
    */
-  private createSyncPageWorker(args: {
+  private async fetchPostsByCursor(args: {
     userInfo: TargetUser;
     uploaderId: number;
     startId: number;
-    getCurrentNo: () => number;
-    bumpCurrentNo: () => number;
+    firstNo: number;
     total: number;
-    buffer: Map<number, DanbooruPost[]>;
-    getNextExpectedPage: () => number;
-    bumpNextExpectedPage: () => number;
-    claimPage: () => number;
-    getHasMore: () => boolean;
-    setHasMore: (v: boolean) => void;
-    markFailed: () => void;
-    markSeen: (ids: number[]) => void;
     reportProgress: (c: number, t: number, msg?: string) => void;
     perfStats: {pagesCommitted: number};
-  }): (workerId: number) => Promise<void> {
-    const {
-      userInfo,
-      uploaderId,
-      startId,
-      getCurrentNo,
-      bumpCurrentNo,
-      total,
-      buffer,
-      getNextExpectedPage,
-      bumpNextExpectedPage,
-      claimPage,
-      getHasMore,
-      setHasMore,
-      markFailed,
-      markSeen,
-      reportProgress,
-      perfStats,
-    } = args;
-    const limit = 200; // API Limit
-    const WORKER_DELAY = 400; // pause between pages, per worker
+  }): Promise<{complete: boolean; lastNo: number; seenIds: Set<number>}> {
+    const {userInfo, uploaderId, startId, total, reportProgress, perfStats} =
+      args;
+    const name = userInfo.name.replace(/ /g, '_');
+    const seenIds = new Set<number>();
+    let no = args.firstNo;
+    let cursor = startId;
 
-    // T-26 baseline: arrow complexity 20. Worker body — retry/backoff +
-    // buffer commit ordering + sequential `no` assignment + completion
-    // detection. Already a T-25 extracted helper; further split would
-    // fragment the retry state.
-    // eslint-disable-next-line complexity
-    return async (workerId: number) => {
-      const workerLabel = `dbi:db:sync:full:worker.${workerId}`;
-      const pageLabel = `dbi:db:sync:full:page.w${workerId}`;
-      const bulkPutLabel = `dbi:db:sync:full:bulkPut.w${workerId}`;
-      let pagesFetched = 0;
-      let pagesCommittedByWorker = 0;
-      perfLogger.start(workerLabel);
-
-      // Staggered Start: Prevent initial burst
-      if (workerId > 0) await new Promise(r => setTimeout(r, workerId * 200));
-
+    for (let page = 1; ; page++) {
+      perfLogger.start('dbi:db:sync:full:page');
+      let fetched = 0;
       try {
-        while (getHasMore()) {
-          // 1. Claim a page
-          const currentPage = claimPage();
-          perfLogger.start(pageLabel);
-          let pageFetchedCount = 0;
-          let pageAttempts = 0;
-
-          try {
-            const params: Record<string, string> = {
-              limit: String(limit),
-              page: String(currentPage),
-              tags: `user:${userInfo.name.replace(/ /g, '_')} order:id id:>${startId}`,
-              only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
-            };
-            const q = new URLSearchParams(params);
-            const url = `/posts.json?${q.toString()}`;
-
-            const pending = buffer.size;
-            reportProgress(
-              getCurrentNo(),
-              total,
-              `Fetching Page ${currentPage} (Pending: ${pending})...`,
-            );
-
-            // Retry Logic — see classifySyncFetchError for what is retried.
-            let items: DanbooruPost[] | null = null;
-            let attempts = 0;
-            while (attempts < SYNC_PAGE_MAX_ATTEMPTS) {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
-              try {
-                const fetchResp = await this.rateLimiter.fetch(url, {
-                  signal: controller.signal,
-                });
-                if (!fetchResp.ok) throw new Error(`HTTP ${fetchResp.status}`);
-                items = await fetchResp.json();
-                break; // Success
-              } catch (err: unknown) {
-                attempts++;
-                const kind = classifySyncFetchError(err);
-                workerLog.warn('Page fetch attempt failed', {
-                  workerId,
-                  page: currentPage,
-                  attempt: attempts,
-                  kind,
-                  error: err instanceof Error ? err.message : String(err),
-                });
-
-                if (kind === 'fatal' || attempts >= SYNC_PAGE_MAX_ATTEMPTS) {
-                  throw err; // Give up or fatal error
-                }
-                const waitMs = syncRetryDelayMs(
-                  kind,
-                  attempts,
-                  this.rateLimiter.backoffRemainingMs(),
-                );
-                await new Promise(r => setTimeout(r, waitMs));
-              } finally {
-                clearTimeout(timeoutId);
-              }
-            }
-            pageAttempts = attempts + 1;
-
-            if (!items || items.length === 0) {
-              setHasMore(false); // Signal end
-              return;
-            }
-            pageFetchedCount = items.length;
-            pagesFetched++;
-
-            // 2. Buffer the result
-            buffer.set(currentPage, items);
-
-            // 3. Ordered Commit Loop (Check if we can save)
-            while (buffer.has(getNextExpectedPage())) {
-              const expected = getNextExpectedPage();
-              const batchItems = buffer.get(expected);
-              buffer.delete(expected); // Remove from buffer
-
-              if (batchItems && batchItems.length > 0) {
-                // Assign Sequential Numbers
-                const bulkData = batchItems.map((p: DanbooruPost) => {
-                  const ds = p.down_score ?? 0;
-                  const us = p.up_score ?? 0;
-                  return {
-                    id: p.id,
-                    uploader_id: p.uploader_id,
-                    created_at: p.created_at,
-                    score: us + ds,
-                    up_score: us,
-                    down_score: ds,
-                    is_deleted: p.is_deleted ?? false,
-                    is_banned: p.is_banned ?? false,
-                    rating: p.rating,
-                    tag_count_general: p.tag_count_general ?? 0,
-                    variants: p.variants,
-                    preview_file_url: p.preview_file_url,
-                    no: bumpCurrentNo(),
-                  };
-                });
-
-                perfLogger.start(bulkPutLabel);
-                await bulkPutSafe(this.db.posts, bulkData, () =>
-                  evictOldestNonCurrentUser(this.db, uploaderId),
-                );
-                // Remember what the remote actually returned, so a clean run
-                // can prune rows the remote no longer has (see pruneGhostPosts).
-                markSeen(bulkData.map(r => r.id));
-                perfLogger.end(bulkPutLabel, {
-                  workerId,
-                  page: expected,
-                  count: bulkData.length,
-                });
-                pagesCommittedByWorker++;
-                perfStats.pagesCommitted++;
-
-                // Update Progress — currentNo is monotonic via bumpCurrentNo
-                const current = getCurrentNo();
-                reportProgress(current, total > current ? total : current);
-              }
-
-              bumpNextExpectedPage();
-            }
-          } catch (e: unknown) {
-            workerLog.error('Page failed, stopping sync', {
-              workerId,
-              page: currentPage,
-              error: e,
-            });
-            // Stopping here leaves the DB prefix-consistent (ordered commit),
-            // so the next sync resumes cleanly — but the run did NOT cover
-            // every page. Flag it so the caller skips the "synced" stamp and
-            // warns, instead of reporting success over partial data.
-            markFailed();
-            setHasMore(false);
-          } finally {
-            perfLogger.end(pageLabel, {
-              workerId,
-              page: currentPage,
-              fetched: pageFetchedCount,
-              attempts: pageAttempts,
-            });
-          }
-
-          // Rate Limit Sleep
-          if (getHasMore()) {
-            await new Promise(r => setTimeout(r, WORKER_DELAY));
-          }
-        }
-      } finally {
-        perfLogger.end(workerLabel, {
-          workerId,
-          pagesFetched,
-          pagesCommittedByWorker,
+        const params = new URLSearchParams({
+          limit: String(SYNC_PAGE_LIMIT),
+          page: `a${cursor}`,
+          tags: `user:${name}`,
+          only: SYNC_POST_FIELDS,
         });
+        reportProgress(no, total, `Fetching page ${page}...`);
+
+        let batch: DanbooruPost[];
+        try {
+          batch = await this.fetchSyncPage(`/posts.json?${params}`, page);
+        } catch (e: unknown) {
+          workerLog.error('Page failed, stopping sync', {
+            page,
+            cursor,
+            error: e,
+          });
+          return {complete: false, lastNo: no, seenIds};
+        }
+        if (batch.length === 0) return {complete: true, lastNo: no, seenIds};
+        fetched = batch.length;
+
+        // Store oldest first, whatever order the page came back in.
+        batch.sort((a, b) => a.id - b.id);
+        if (batch[batch.length - 1].id <= cursor) {
+          // The cursor would not move: stop rather than loop on this page.
+          workerLog.error('Cursor did not advance, stopping sync', {
+            page,
+            cursor,
+          });
+          return {complete: false, lastNo: no, seenIds};
+        }
+        // `no` moves only once the page is written, so a failed write
+        // reports what was really committed.
+        const rows = batch.map((p, i) => toStoredPost(p, no + 1 + i));
+        perfLogger.start('dbi:db:sync:full:bulkPut');
+        try {
+          await bulkPutSafe(this.db.posts, rows, () =>
+            evictOldestNonCurrentUser(this.db, uploaderId),
+          );
+        } catch (e: unknown) {
+          // Like a failed fetch: what is committed is still a prefix.
+          workerLog.error('Page write failed, stopping sync', {page, error: e});
+          return {complete: false, lastNo: no, seenIds};
+        } finally {
+          perfLogger.end('dbi:db:sync:full:bulkPut', {
+            page,
+            count: rows.length,
+          });
+        }
+        no += rows.length;
+        // Remember what the remote returned, so a clean run can prune rows
+        // it no longer has (see pruneGhostPosts).
+        for (const r of rows) seenIds.add(r.id);
+        perfStats.pagesCommitted++;
+        reportProgress(no, total > no ? total : no);
+
+        cursor = rows[rows.length - 1].id;
+      } finally {
+        perfLogger.end('dbi:db:sync:full:page', {page, cursor, fetched});
       }
-    };
+    }
+  }
+
+  /**
+   * One sync page, retried on 429 / 5xx / timeout / network errors
+   * (classifySyncFetchError, up to SYNC_PAGE_MAX_ATTEMPTS). Throws when the
+   * retries run out or the error is fatal.
+   */
+  private async fetchSyncPage(
+    url: string,
+    page: number,
+  ): Promise<DanbooruPost[]> {
+    for (let attempts = 1; ; attempts++) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s Timeout
+      try {
+        const resp = await this.rateLimiter.fetch(url, {
+          signal: controller.signal,
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const body: unknown = await resp.json();
+        if (!Array.isArray(body)) {
+          // A 200 that is not the list we asked for: retry like a bad body.
+          throw new SyntaxError('Sync page is not a post list');
+        }
+        return body as DanbooruPost[];
+      } catch (err: unknown) {
+        const kind = classifySyncFetchError(err);
+        workerLog.warn('Page fetch attempt failed', {
+          page,
+          attempt: attempts,
+          kind,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        if (kind === 'fatal' || attempts >= SYNC_PAGE_MAX_ATTEMPTS) throw err;
+        const waitMs = syncRetryDelayMs(
+          kind,
+          attempts,
+          this.rateLimiter.backoffRemainingMs(),
+        );
+        await new Promise(r => setTimeout(r, waitMs));
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
   }
 
   /**
@@ -4681,7 +4600,8 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Quickly syncs all posts for small users (total ≤ 1200) using sequential
-   * cursor-based pagination. Simpler and faster than the full worker-pool approach.
+   * cursor-based pagination: it clears the user's rows and refetches them all,
+   * with no resume point, retries or ghost pruning (see syncAllPosts).
    * @param {TargetUser} userInfo The user's info object.
    * @param {Function=} onProgress Optional progress callback (current, total, message).
    * @return {Promise<void>}
@@ -4739,7 +4659,7 @@ export class AnalyticsDataManager extends DataManager {
           tags: `user:${normalizedName}`,
           limit: String(limit),
           page,
-          only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
+          only: SYNC_POST_FIELDS,
         });
         const url = `/posts.json?${params.toString()}`;
 
@@ -4766,25 +4686,7 @@ export class AnalyticsDataManager extends DataManager {
         }
 
         // Store batch with sequential no values
-        const bulkData = batch.map((p: DanbooruPost) => {
-          const ds = p.down_score ?? 0;
-          const us = p.up_score ?? 0;
-          return {
-            id: p.id,
-            uploader_id: p.uploader_id,
-            created_at: p.created_at,
-            score: us + ds,
-            up_score: us,
-            down_score: ds,
-            is_deleted: p.is_deleted ?? false,
-            is_banned: p.is_banned ?? false,
-            rating: p.rating,
-            tag_count_general: p.tag_count_general ?? 0,
-            variants: p.variants,
-            preview_file_url: p.preview_file_url,
-            no: ++no,
-          };
-        });
+        const bulkData = batch.map(p => toStoredPost(p, ++no));
 
         perfLogger.start('dbi:db:sync:quick:bulkPut');
         await bulkPutSafe(this.db.posts, bulkData, () =>

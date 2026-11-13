@@ -89,7 +89,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 |---|---|
 | Grass | GitHub 스타일 캘린더 히트맵 (기여 그래프) |
 | Quick Sync | ≤1200 포스트 유저용 빠른 경로 — 순차 cursor pagination |
-| Full Sync | 큰 유저용 표준 pagination + 재시도 |
+| Full Sync | 큰 유저용 — 이어받기 지점부터 id 커서 (`page=a<id>`) 순차 + 재시도 (v9.11 까지는 번호 페이지 5 worker 병렬, T-210) |
 | Delta Sync | 태그 분석 증분 갱신 — 첫 100 포스트 받아서 diff ≥ 50 면 재집계 |
 | Piestats | 파이 차트용 캐시된 집계 통계 (24h 만료) |
 | At a glance | 유저 요약 2 줄. 대시보드 = 전체 업로드 (`lifetime`), 팝오버 = 최근 200 (`recent`) |

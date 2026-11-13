@@ -1110,7 +1110,7 @@ function showResumeSyncGate(
 /**
  * Renders the "Data Synchronization Required" view. Hit when the local DB
  * is materially behind the remote total — drives a full `syncAllPosts`
- * worker-pool run on button click, with progress mirrored from the
+ * run on button click, with progress mirrored from the
  * AnalyticsDataManager singleton's shared progress channel.
  *
  * The caller is responsible for early-returning after this; the function
@@ -1721,7 +1721,7 @@ export class UserAnalyticsApp {
         return;
       }
       // quickSync throws on any fetch failure, so reaching the code below on
-      // that path means it completed; only the worker-pool sync can finish
+      // that path means it completed; only the full sync can finish
       // partially.
       let syncOutcome: SyncOutcome = {complete: true, started: true};
       if (syncTotal <= MAX_QUICK_SYNC_POSTS) {
