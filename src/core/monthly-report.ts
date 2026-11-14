@@ -191,6 +191,31 @@ export function monthPostsQuery(tagName: string, month: string): string {
   return `${tagName} date:${start}T00:00:00Z...${next}T00:00:00Z`;
 }
 
+/**
+ * The `date:` term of the search for a tag's first `posts` posts, from its
+ * history: from the first month to the start of the month after the one
+ * whose running total reaches `posts`, as explicit UTC instants (`a...b`
+ * excludes `b`); open-ended when the total never gets there, null for an
+ * empty history.
+ *
+ * A narrow range keeps the search small. The open `date:>=<first month>`
+ * matched the whole tag (1.1M posts for touhou) and could answer 500, and
+ * its bare date was read in the viewer's Danbooru time zone, which west of
+ * UTC left out the first hours of the month.
+ */
+export function firstPostsDateTerm(
+  history: HistoryEntry[],
+  posts: number,
+): string | null {
+  const first = history[0];
+  if (!first) return null;
+  const start = `${first.date.slice(0, 7)}-01T00:00:00Z`;
+  const reached = history.find(h => h.cumulative >= posts);
+  if (!reached) return `date:>=${start}`;
+  const end = monthStart(monthIndex(reached.date) + 1);
+  return `date:${start}...${end}T00:00:00Z`;
+}
+
 /** Every `YYYY-MM` from `from` to `to`, both included (empty if reversed). */
 export function monthKeysBetween(from: string, to: string): string[] {
   const keys: string[] = [];

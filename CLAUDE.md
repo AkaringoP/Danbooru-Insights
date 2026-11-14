@@ -76,7 +76,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run compile` — `tsc` 단독 (타입 체크만, 번들 없음)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 1269 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 1279 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 7 개)
 - `npm run test:e2e:update` — e2e 스냅샷 baseline 갱신 (의도한 시각 변경일 때만)

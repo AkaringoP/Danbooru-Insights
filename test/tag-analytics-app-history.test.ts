@@ -115,15 +115,51 @@ describe('_refreshFirstPostsIfOlder', () => {
       override,
     );
 
+    // 12 posts in all: the range never reaches 200, so it stays open.
     expect(fetchInitial).toHaveBeenCalledWith(
       'test_tag',
       null,
       true,
-      '2015-01-01',
+      'date:>=2015-01-01T00:00:00Z',
     );
     expect(stats.firstPost).toBe(older);
     expect(stats.timeToHundred).toBe(145);
     expect(override.value).toBe(resolved);
+  });
+
+  it('asks the narrow UTC range of the first 200 posts, once more after a failure', async () => {
+    const {app, internals} = makeApp();
+    const older = post(1, '2005-05-03T00:00:00Z');
+    const fetchInitial = vi
+      .spyOn(app.dataService, 'fetchInitialStats')
+      // The first attempt comes back empty (a 500 reads as no posts).
+      .mockResolvedValueOnce({...initialStats(), initialPosts: []})
+      .mockResolvedValueOnce({...initialStats(older), initialPosts: [older]});
+    vi.spyOn(app.dataService, 'resolveFirst100Names').mockImplementation(
+      async s => s,
+    );
+    const stats = initialStats(post(50, '2013-03-01T00:00:00Z'));
+
+    await internals._refreshFirstPostsIfOlder(
+      [
+        month('2005-05-01', 40, 40),
+        month('2005-06-01', 100, 140),
+        month('2005-07-01', 90, 230),
+        month('2005-08-01', 500, 730),
+      ],
+      stats.startDate,
+      stats,
+      {value: null},
+    );
+
+    expect(fetchInitial).toHaveBeenCalledTimes(2);
+    expect(fetchInitial).toHaveBeenLastCalledWith(
+      'test_tag',
+      null,
+      true,
+      'date:2005-05-01T00:00:00Z...2005-08-01T00:00:00Z',
+    );
+    expect(stats.firstPost).toBe(older);
   });
 
   it('leaves them alone when the history starts in the first post month', async () => {
@@ -158,12 +194,11 @@ describe('_refreshFirstPostsIfOlder', () => {
     expect(fetchInitial).not.toHaveBeenCalled();
   });
 
-  it('keeps the first posts it had when the older ones come back empty', async () => {
+  it('keeps the first posts it had when the older ones come back empty twice', async () => {
     const {app, internals} = makeApp();
-    vi.spyOn(app.dataService, 'fetchInitialStats').mockResolvedValue({
-      ...initialStats(),
-      initialPosts: [],
-    });
+    const fetchInitial = vi
+      .spyOn(app.dataService, 'fetchInitialStats')
+      .mockResolvedValue({...initialStats(), initialPosts: []});
     const first = post(50, '2016-03-10T00:00:00Z');
     const stats = initialStats(first);
     const override = {value: null};
@@ -175,8 +210,55 @@ describe('_refreshFirstPostsIfOlder', () => {
       override,
     );
 
+    expect(fetchInitial).toHaveBeenCalledTimes(2);
     expect(stats.firstPost).toBe(first);
     expect(override.value).toBeNull();
+  });
+});
+
+describe('fetchInitialStats search', () => {
+  function makeService() {
+    const fetch = vi.fn(
+      async (_url: string) =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => [post(7, '2005-05-03T00:00:00Z')],
+        }) as unknown as Response,
+    );
+    const service = new TagAnalyticsDataService(
+      {} as unknown as Database,
+      {fetch} as unknown as RateLimitedFetch,
+      'touhou',
+    );
+    vi.spyOn(service, 'fetchTagData').mockResolvedValue({
+      name: 'touhou',
+      post_count: 5000,
+      created_at: '2013-02-28T00:00:00Z',
+      category: 3,
+    } as DanbooruTag);
+    const tags = () =>
+      new URLSearchParams(fetch.mock.calls[0][0].split('?')[1]).get('tags');
+    return {service, tags};
+  }
+
+  it('searches the date term it is given instead of the creation date', async () => {
+    const {service, tags} = makeService();
+    await service.fetchInitialStats(
+      'touhou',
+      null,
+      true,
+      'date:2005-05-01T00:00:00Z...2005-08-01T00:00:00Z',
+    );
+    expect(tags()).toBe(
+      'touhou date:2005-05-01T00:00:00Z...2005-08-01T00:00:00Z',
+    );
+  });
+
+  it('searches from the creation date without one', async () => {
+    const {service, tags} = makeService();
+    await service.fetchInitialStats('touhou');
+    expect(tags()).toBe('touhou date:>=2013-02-28T00:00:00Z');
   });
 });
 

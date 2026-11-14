@@ -4,6 +4,7 @@ import {
   MonthlyReportFormatError,
   buildMonthlyReportUrl,
   defaultReportTo,
+  firstPostsDateTerm,
   mergeMonthlyCounts,
   monthKeysBetween,
   monthPostsQuery,
@@ -31,6 +32,36 @@ describe('utcMonthStartOf', () => {
     expect(utcMonthStartOf('2024-04-01T05:00:00+09:00')).toBe('2024-03-01');
     expect(utcMonthStartOf('2024-02-29T20:00:00-08:00')).toBe('2024-03-01');
     expect(utcMonthStartOf('not a date')).toBeNull();
+  });
+});
+
+describe('firstPostsDateTerm', () => {
+  const h = (date: string, count: number, cumulative: number) => ({
+    date,
+    count,
+    cumulative,
+  });
+
+  it('ends after the month whose running total reaches the posts asked', () => {
+    const history = [
+      h('2005-05-01', 40, 40),
+      h('2005-06-01', 100, 140),
+      h('2005-12-01', 90, 230),
+      h('2006-01-01', 500, 730),
+    ];
+    expect(firstPostsDateTerm(history, 200)).toBe(
+      'date:2005-05-01T00:00:00Z...2006-01-01T00:00:00Z',
+    );
+    expect(firstPostsDateTerm(history, 40)).toBe(
+      'date:2005-05-01T00:00:00Z...2005-06-01T00:00:00Z',
+    );
+  });
+
+  it('stays open when the total never gets there, and is null without a history', () => {
+    expect(firstPostsDateTerm([h('2015-01-01', 3, 3)], 200)).toBe(
+      'date:>=2015-01-01T00:00:00Z',
+    );
+    expect(firstPostsDateTerm([], 200)).toBeNull();
   });
 });
 

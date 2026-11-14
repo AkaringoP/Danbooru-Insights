@@ -13,7 +13,7 @@ import {
   DASHBOARD_THEME_SELECT_HTML,
 } from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
-import {utcDayOf} from '../core/monthly-report';
+import {firstPostsDateTerm, utcDayOf} from '../core/monthly-report';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
 import type {Database} from '../core/database';
@@ -51,6 +51,13 @@ import type {
 } from '../types';
 
 const log = createLogger('TagAnalytics');
+
+/**
+ * Posts the search for a renamed tag's older first posts must hold: twice
+ * the 100 a large tag's first page asks for, since the history counts every
+ * status and the post search can hide a few (banned posts).
+ */
+const OLDER_POSTS_RANGE = 200;
 
 /** Footer line of the tag dashboard: its dates and months are UTC. */
 const TAG_HISTORY_UTC_NOTE =
@@ -1274,6 +1281,11 @@ export class TagAnalyticsApp {
    *
    * The condition used to be "the backward month-by-month scan found
    * older months"; the scan is gone, the history now covers 2005 on.
+   *
+   * The search is the history's narrow UTC range that holds the first
+   * posts (`firstPostsDateTerm`), and a failure is retried once: the open
+   * `date:>=<first month>` over all of touhou (1.1M posts) answered 500 in
+   * a browser check (2026-11-14), leaving the later first posts in place.
    */
   private async _refreshFirstPostsIfOlder(
     history: HistoryEntry[],
@@ -1286,29 +1298,31 @@ export class TagAnalyticsApp {
       startDate && !Number.isNaN(startDate.getTime()) ? startDate : new Date();
     if (!firstMonth || firstMonth >= start.toISOString().slice(0, 7)) return;
 
-    const earliestDateFound = history[0].date;
     this.injectAnalyticsButton(
       null,
       undefined,
       'Looking at posts older than the tag...',
     );
-    const realInitialStats = await this.dataService.fetchInitialStats(
-      this.tagName,
-      null,
-      true,
-      earliestDateFound,
-    );
-    const hasFreshPosts = !!realInitialStats?.initialPosts?.length;
-    if (!hasFreshPosts || !realInitialStats) {
+    const dateTerm = firstPostsDateTerm(history, OLDER_POSTS_RANGE);
+    let realInitialStats: InitialStats | null = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      realInitialStats = await this.dataService.fetchInitialStats(
+        this.tagName,
+        null,
+        true,
+        dateTerm,
+      );
+      if (realInitialStats?.initialPosts?.length) break;
+    }
+    if (!realInitialStats?.initialPosts?.length) {
       // The history shows older posts, but fetching them came back empty
-      // (typically a 5xx). Without this warning the dashboard shows the
-      // first-100 rankings of the later posts as if they were the first.
+      // twice (typically a 5xx). Without this warning the dashboard shows
+      // the first-100 rankings of the later posts as if they were the first.
       log.warn(
         'History starts before the first post found, but fetching the ' +
-          'older posts returned none — first-100 rankings reflect the ' +
-          'later posts. Likely a transient server error; re-run analysis ' +
-          'to recover.',
-        {tagName: this.tagName, earliestDateFound},
+          'older posts returned none twice — first-100 rankings reflect ' +
+          'the later posts until the next analysis.',
+        {tagName: this.tagName, dateTerm},
       );
       return;
     }

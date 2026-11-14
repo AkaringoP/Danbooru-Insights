@@ -942,8 +942,9 @@ export class TagAnalyticsDataService {
    * @param {string} tagName - The tag to analyze.
    * @param {?Object} cachedData - Existing cached data to serve as a base for delta updates.
    * @param {boolean} absoluteOldest - If true, forces a scan from 2005-01-01 (ignoring cache/hints).
-   * @param {?string} foundEarliestDate - An optimized starting date (YYYY-MM-DD) found via reverse scan.
-   *                                      Used to narrow the search range for recent tags.
+   * @param {?string} dateTerm - A `date:` term searched instead of the
+   *     tag's creation date: the history's range of the posts older than
+   *     the tag (`firstPostsDateTerm`).
    * @return {Promise<Object|null>} - Initial stats object or null on failure.
    */
   // T-26 baseline: complexity 31. Cache/hint/cold-start branches × full vs
@@ -953,7 +954,7 @@ export class TagAnalyticsDataService {
     tagName: string,
     cachedData?: TagAnalyticsMeta | null,
     absoluteOldest?: boolean,
-    foundEarliestDate?: string | null,
+    dateTerm?: string | null,
   ): Promise<InitialStats | null> {
     // Get Tag Metadata first to know count and category
     const tagData = await this.fetchTagData(tagName); // Existing helper
@@ -972,15 +973,13 @@ export class TagAnalyticsDataService {
       };
     }
 
-    // Extract created_at from tagData
-    // If absoluteOldest is true, we ignore created_at to find history hidden by renames
-    // If foundEarliestDate is provided (from Reverse Scan), use it as a strong hint!
-
-    let tagCreatedAt = tagData.created_at;
-    if (foundEarliestDate) {
-      tagCreatedAt = foundEarliestDate;
+    // From the tag's creation date, unless the history says older posts
+    // carry it (renamed tag): then its range (`dateTerm`), or all of it.
+    let dateFilter = `date:>=${tagData.created_at}`;
+    if (dateTerm) {
+      dateFilter = dateTerm;
     } else if (absoluteOldest) {
-      tagCreatedAt = '2005-01-01';
+      dateFilter = 'date:>=2005-01-01';
     }
 
     let posts: DanbooruPost[] = [];
@@ -996,7 +995,7 @@ export class TagAnalyticsDataService {
       while (hasMore && posts.length < targetFetchCount) {
         const fetchLimit = Math.min(limit, targetFetchCount - posts.length);
         const params = new URLSearchParams({
-          tags: `${tagName} date:>=${tagCreatedAt}`,
+          tags: `${tagName} ${dateFilter}`,
           limit: String(fetchLimit),
           page: currentPage,
           only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
