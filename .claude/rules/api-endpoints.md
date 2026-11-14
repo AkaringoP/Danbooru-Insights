@@ -66,6 +66,14 @@ Pie slice thumbnails over the viewer's limit are not requested at all (`fitsView
 - On 2026-10-30 a Member-account test confirmed Meta-category tags count: `~off-topic ~third-party_edit ~ai-generated ~pixel-perfect_duplicate` → "Search Error — You cannot search for more than 2 tags at a time." Commit `480cab4` briefly stated the opposite in comments; `e0bbb0c` and the next docs commit corrected it.
 - 2026-11-10: Member limit raised 2 → 3, anonymous set to 2, Gold aligned with Platinum (unlimited).
 
+## Posts the viewer cannot see
+
+A banned post is hidden from viewers below Approver, and a post with a restricted tag from viewers below Gold (its uploader excepted); `Post#visible?` in `app/models/post.rb`. Such a post **stays in search results**, and `PostPolicy#api_attributes` drops only `md5`, `file_url`, `large_file_url` and `preview_file_url` from its JSON. An `only=` naming them just leaves them out. Every other field still comes back, including the tag strings, `rating`, `tag_count*` and the status flags.
+
+Verified live 2026-11-15: `user:X status:banned` with `only=id,is_banned,rating,tag_count_general,tag_string_character,tag_string_copyright,preview_file_url` returned the banned posts with their tags and rating, and without `preview_file_url`.
+
+So the sync stores these posts with full tags, and the local pies (T-406) count them the same way `/counts/posts.json` does. Only their thumbnail is missing: `getBestThumbnailUrl` returns `''`, and the milestone lookup (`getMilestones`) asks again for such a row each time it recomputes; the rest of T-506 is to stop that.
+
 ## Mintag / abandoned detection (v9.7.1 — preview popover section A)
 
 `AnalyticsDataManager.getRecentPostsPreview` fires a third parallel request alongside the recent-uploads + appeal fetches: `buildMintagVersionsUrl(userId, limit)` → `/post_versions.json?search[is_new]=true&search[updater_id]=<id>&only=post_id,added_tags`. `buildUploaderTagCounts` reduces it to `Map<post_id, added_tags.length>` — the number of tags *that uploader* added in the post's first version (not the post's current `tag_count_general`, which others inflate). A preview is **mintagged** (orange) when `uploaderTagCount ≤ 10` (`isMintagged`).
