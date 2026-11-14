@@ -1,6 +1,10 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
-import {monthPostsQuery, utcMonthStartOf} from '../core/monthly-report';
+import {
+  monthPostsQuery,
+  utcDateString,
+  utcMonthStartOf,
+} from '../core/monthly-report';
 import {createBodyTooltip} from '../ui/popover-utils';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
 import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
@@ -1018,10 +1022,12 @@ export class TagAnalyticsChartRenderer {
               .style('pointer-events', 'all')
               .text('★');
 
+            // The UTC date, like the star's bar and the milestone card;
+            // the browser's date could show the next or previous day.
             star
               .append('title')
               .text(
-                `Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})`,
+                `Milestone #${m.milestone} (${utcDateString(new Date(m.post.created_at))})`,
               );
           });
         }

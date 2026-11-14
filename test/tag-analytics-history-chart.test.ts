@@ -147,4 +147,17 @@ describe('milestone stars', () => {
       );
     });
   });
+
+  it('names the UTC date in its tooltip, as the milestone card does', () => {
+    // March 1 03:00 UTC is February 29 in Los Angeles: the browser's date
+    // would disagree with the card for the same post.
+    inTimeZone('America/Los_Angeles', () => {
+      const chart = render(history(['2024-01-01', '2024-03-01']), [
+        star('2024-03-01T03:00:00Z'),
+      ]);
+      expect(
+        chart.querySelector('.di-milestone-stars title')?.textContent,
+      ).toBe('Milestone #1 (2024-03-01)');
+    });
+  });
 });
