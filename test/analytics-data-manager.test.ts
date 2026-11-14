@@ -3788,3 +3788,191 @@ describe('row numbering and the sync mark (T-404)', () => {
     expect(deleted).toEqual([8]);
   });
 });
+
+// T-406: with every row at fields version 2, a completed sync and intact
+// numbering, the status, rating, character and copyright pies and the user
+// stats are counted from the local rows instead of /counts/posts.json.
+describe('pies from the local rows (T-406)', () => {
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    resetTopLevelSessionCache();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map([['danbooru_grass_last_sync_42', '2026-11-14']]);
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+    vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  let nextId = 1;
+  const v2 = (fields: Record<string, unknown>) => ({
+    id: nextId,
+    no: nextId++,
+    uploader_id: 42,
+    created_at: '2025-01-01T00:00:00Z',
+    score: 1,
+    rating: 'g',
+    tag_count_general: 20,
+    is_deleted: false,
+    is_banned: false,
+    pend: false,
+    flag: false,
+    tc: 30,
+    chr: '',
+    cpy: '',
+    ...fields,
+  });
+
+  function setUp(
+    meta: Record<string, unknown> | undefined,
+    rows?: Record<string, unknown>[],
+  ) {
+    nextId = 1;
+    const postRows = rows ?? [
+      v2({rating: 'e', chr: 'reimu marisa', cpy: 'touhou'}),
+      v2({is_deleted: true, chr: 'reimu', cpy: 'touhou'}),
+      v2({pend: true, rating: 's', cpy: 'fate'}),
+      v2({tag_count_general: 5, tc: 8}),
+    ];
+    const asked: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      asked.push(decodeURIComponent(url));
+      if (url.startsWith('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 3}}),
+        };
+      }
+      // Implication lookups: nothing implies anything; thumbnails: none.
+      return {ok: true, status: 200, json: async () => []};
+    });
+    const posts = makePostsTable(postRows);
+    const db = makeSyncDb(posts, {
+      sync_meta: {get: vi.fn(async () => meta)},
+    });
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    const user = makeSyncUser({id: '42'});
+    const counted = () => asked.filter(u => u.startsWith('/counts/'));
+    return {adm, user, asked, counted, posts};
+  }
+
+  it('counts every status but appealed from the rows', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2});
+
+    const status = await adm.getStatusDistribution(user, null, true);
+
+    expect(counted()).toEqual([
+      '/counts/posts.json?tags=user:test_user status:appealed',
+    ]);
+    expect(Object.fromEntries(status.map(s => [s.name, s.count]))).toEqual({
+      active: 2,
+      appealed: 3,
+      banned: 0,
+      deleted: 1,
+      flagged: 0,
+      pending: 1,
+    });
+    expect(Object.keys(status[0]).sort()).toEqual(['count', 'label', 'name']);
+  });
+
+  it('counts the ratings with no request at all', async () => {
+    const {adm, user, asked} = setUp({fieldsVersion: 2});
+
+    const rating = await adm.getRatingDistribution(user, null, true);
+
+    expect(asked).toEqual([]);
+    expect(rating).toEqual([
+      {rating: 'g', count: 2, label: 'General'},
+      {rating: 's', count: 1, label: 'Sensitive'},
+      {rating: 'q', count: 0, label: 'Questionable'},
+      {rating: 'e', count: 1, label: 'Explicit'},
+    ]);
+  });
+
+  it('builds the character pie from the rows: no related tags, no counts', async () => {
+    const {adm, user, asked, counted} = setUp({fieldsVersion: 2});
+
+    const chars = await adm.getCharacterDistribution(user, true);
+
+    expect(asked.some(u => u.startsWith('/related_tag.json'))).toBe(false);
+    expect(counted()).toEqual([]);
+    expect(chars.map(c => [c.tagName, c.count, c.isOther])).toEqual([
+      ['reimu', 2, false],
+      ['marisa', 1, false],
+      // 4 posts − 3 tagged.
+      ['', 1, true],
+    ]);
+  });
+
+  it('builds the copyright pie the same way', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2});
+
+    const copy = await adm.getCopyrightDistribution(user, true);
+
+    expect(counted()).toEqual([]);
+    expect(copy.slice(0, 2).map(c => [c.tagName, c.count])).toEqual([
+      ['touhou', 2],
+      ['fate', 1],
+    ]);
+  });
+
+  it('gives the user stats from the rows', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2});
+
+    expect(await adm.getUserStats(user)).toEqual({
+      gentags_lt_10: 1,
+      tagcount_lt_10: 1,
+    });
+    expect(counted()).toEqual([]);
+  });
+
+  it('scans the rows once for one load', async () => {
+    const {adm, user, posts} = setUp({fieldsVersion: 2});
+
+    await adm.getStatusDistribution(user, null, true);
+    await adm.getRatingDistribution(user, null, true);
+    await adm.getUserStats(user);
+
+    expect(posts._chain.each).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['rows below fields version 2', undefined],
+    ['a sync under way or failed', {fieldsVersion: 2, syncStartedAt: 1}],
+  ])('keeps counting remotely with %s', async (_label, meta) => {
+    const {adm, user, counted} = setUp(meta);
+
+    await adm.getRatingDistribution(user, null, true);
+
+    expect(counted()).toHaveLength(4);
+  });
+
+  it('keeps counting remotely without a completed sync', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2});
+    storage.clear();
+
+    await adm.getRatingDistribution(user, null, true);
+
+    expect(counted()).toHaveLength(4);
+  });
+
+  it('keeps counting remotely when the numbering has a gap', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2}, [
+      {...v2({}), no: 1},
+      {...v2({}), no: 5},
+    ]);
+
+    await adm.getRatingDistribution(user, null, true);
+
+    expect(counted()).toHaveLength(4);
+  });
+});

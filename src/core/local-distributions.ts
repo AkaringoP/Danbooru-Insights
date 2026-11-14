@@ -19,7 +19,7 @@ interface LocalStatusCounts {
   flagged: number;
 }
 
-interface LocalDistributions {
+export interface LocalDistributions {
   /** Rows counted. */
   rows: number;
   /** Posts per rating letter (`g`, `s`, `q`, `e`). */

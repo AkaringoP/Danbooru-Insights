@@ -1,5 +1,9 @@
 import {CountUnavailableError, DataManager} from './data-manager';
 import {
+  createLocalDistributionCounter,
+  type LocalDistributions,
+} from './local-distributions';
+import {
   POST_FIELDS_VERSION,
   SYNC_POST_FIELDS,
   toPostRecord,
@@ -317,6 +321,21 @@ export function isStaleUser(
   return now - lastSyncAt > threshold;
 }
 
+/**
+ * How long one scan's local distributions serve a dashboard load's pies
+ * (T-406): the five callers run together, and a sync or backfill drops it.
+ */
+const LOCAL_DISTRIBUTIONS_MEMO_MS = 10_000;
+
+/** Tags checked per top-level lookup on the local tag pies (T-406). */
+const LOCAL_TOP_LEVEL_BATCH = 50;
+
+/**
+ * The most tags the local tag pies check for ten top-level ones: a few
+ * lookups (cached 180 days), not one per tag of a dispersed account.
+ */
+const LOCAL_TOP_LEVEL_SCAN_LIMIT = 200;
+
 /** Id ranges a fields backfill walks in parallel (T-403). */
 const BACKFILL_RANGES = 3;
 
@@ -473,6 +492,12 @@ export class AnalyticsDataManager extends DataManager {
   private totalCountMemo = new Map<
     string,
     {at: number; promise: Promise<number>}
+  >();
+
+  /** One scan's local distributions per user ({@link getLocalDistributions}). */
+  private localDistributionsMemo = new Map<
+    number,
+    {at: number; value: Promise<LocalDistributions | null>}
   >();
 
   /**
@@ -1161,6 +1186,38 @@ export class AnalyticsDataManager extends DataManager {
       'pending',
     ];
 
+    // Local rows (T-406): every status but appealed — an appeal pending on
+    // a deleted post is not a post field, so it stays one count (N-07).
+    const local = await this.getLocalDistributions(uploaderId);
+    if (local) {
+      const counts = this.countBatch();
+      let appealed = 0;
+      try {
+        appealed = await counts.lookup(
+          `user:${normalizedName} status:appealed`,
+        );
+      } catch (e: unknown) {
+        log.warn('Failed to fetch count for status', {
+          status: 'appealed',
+          error: e,
+        });
+      }
+      const result = statuses.map(status => ({
+        name: status,
+        count:
+          status === 'appealed'
+            ? appealed
+            : local.status[status as keyof typeof local.status],
+        label: status.charAt(0).toUpperCase() + status.slice(1),
+      }));
+      return this.cacheUnlessPartial(
+        cacheKey,
+        uploaderId,
+        result,
+        counts.failed,
+      );
+    }
+
     const counts = this.countBatch();
     const tasks = statuses.map(async status => {
       try {
@@ -1223,6 +1280,17 @@ export class AnalyticsDataManager extends DataManager {
       q: 'Questionable',
       e: 'Explicit',
     };
+
+    // Local rows (T-406): no count at all.
+    const local = await this.getLocalDistributions(uploaderId);
+    if (local) {
+      const result = ratings.map(rating => ({
+        rating,
+        count: local.rating[rating] ?? 0,
+        label: labelMap[rating],
+      }));
+      return this.cacheUnlessPartial(cacheKey, uploaderId, result, false);
+    }
 
     const counts = this.countBatch();
     const tasks = ratings.map(async rating => {
@@ -1643,6 +1711,16 @@ export class AnalyticsDataManager extends DataManager {
     );
     if (cached) return cached;
 
+    const local = await this.getLocalDistributions(uploaderId);
+    if (local) {
+      return this.localTagDistribution(
+        'character',
+        userInfo,
+        local,
+        reportSubStatus,
+      );
+    }
+
     const normalizedName = userInfo.name.replace(/ /g, '_');
     // limit=1000 (server caps at 500): the sub-tag breakdown wires
     // user-having from this response, so the default 100-row cutoff was
@@ -1801,6 +1879,16 @@ export class AnalyticsDataManager extends DataManager {
     );
     if (cached) return cached;
 
+    const local = await this.getLocalDistributions(uploaderId);
+    if (local) {
+      return this.localTagDistribution(
+        'copyright',
+        userInfo,
+        local,
+        reportSubStatus,
+      );
+    }
+
     const normalizedName = userInfo.name.replace(/ /g, '_');
     // limit=1000: see comment in getCharacterDistribution — needed so the
     // sub-tag breakdown's user-having signal isn't truncated at row 100.
@@ -1940,6 +2028,158 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
+   * The user's distributions counted from the local rows, or null when the
+   * rows may not stand for Danbooru's counts (T-406). All of:
+   *  - `sync_meta.fieldsVersion` ≥ 2: every row holds the tag fields;
+   *  - no sync under way or left failed (`syncStartedAt` unset), and a
+   *    completed sync on record;
+   *  - the rows' numbering is intact (T-404) and there is at least one.
+   * Otherwise the pies keep counting with `/counts/posts.json`.
+   *
+   * One scan serves the status, rating, character and copyright pies and
+   * the user stats of one dashboard load: the result is kept for
+   * {@link LOCAL_DISTRIBUTIONS_MEMO_MS} and dropped whenever the user's rows
+   * change (sync, backfill, reset).
+   */
+  async getLocalDistributions(
+    uploaderId: number,
+  ): Promise<LocalDistributions | null> {
+    if (!uploaderId) return null;
+    const hit = this.localDistributionsMemo.get(uploaderId);
+    if (hit && Date.now() - hit.at < LOCAL_DISTRIBUTIONS_MEMO_MS) {
+      return hit.value;
+    }
+    const value = this.countLocalDistributions(uploaderId).catch(
+      (e: unknown) => {
+        log.warn('Local distributions failed, counting remotely', {error: e});
+        return null;
+      },
+    );
+    this.localDistributionsMemo.set(uploaderId, {at: Date.now(), value});
+    return value;
+  }
+
+  private async countLocalDistributions(
+    uploaderId: number,
+  ): Promise<LocalDistributions | null> {
+    const meta = await readSyncMeta(this.db, uploaderId);
+    let notUsed: string | null = null;
+    if ((meta?.fieldsVersion ?? 0) < POST_FIELDS_VERSION) {
+      notUsed = 'fields version below 2';
+    } else if (meta?.syncStartedAt !== undefined) {
+      notUsed = 'a sync is under way or failed';
+    } else if (
+      !localStorage.getItem(`danbooru_grass_last_sync_${uploaderId}`)
+    ) {
+      notUsed = 'no completed sync';
+    } else if (!(await this.rowNumberingIntact(uploaderId))) {
+      notUsed = 'row numbering has a gap';
+    }
+    if (notUsed) {
+      log.debug('Pies count remotely', {uploaderId, reason: notUsed});
+      return null;
+    }
+    const counter = createLocalDistributionCounter();
+    await this.db.posts
+      .where('uploader_id')
+      .equals(uploaderId)
+      .each((row: PostRecord) => counter.add(row));
+    const result = counter.result();
+    return result.rows > 0 ? result : null;
+  }
+
+  /** Drops the local distributions memo after the user's rows changed. */
+  private invalidateLocalDistributions(uploaderId: number): void {
+    this.localDistributionsMemo.delete(uploaderId);
+  }
+
+  /**
+   * The character or copyright pie from local counts (T-406): the same
+   * shape and cache key as the counted path, without `/related_tag.json`
+   * or one count per candidate. Tags are ranked by their exact local count;
+   * the top-level check (implication cache, {@link getTopLevelFlags}) walks
+   * that order in batches until ten survive, and the sub-tag breakdown
+   * reads the local counts too.
+   */
+  private async localTagDistribution(
+    kind: 'character' | 'copyright',
+    userInfo: TargetUser,
+    local: LocalDistributions,
+    reportSubStatus: ((msg: string) => void) | null,
+  ): Promise<DistributionItem[]> {
+    const uploaderId = parseInt(userInfo.id || '0');
+    const cacheKey = kind === 'character' ? 'character_dist' : 'copyright_dist';
+    const counts = kind === 'character' ? local.characters : local.copyrights;
+    const ranked = [...counts].sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+    );
+
+    const top10: DistributionItem[] = [];
+    for (
+      let i = 0;
+      i < ranked.length && i < LOCAL_TOP_LEVEL_SCAN_LIMIT && top10.length < 10;
+      i += LOCAL_TOP_LEVEL_BATCH
+    ) {
+      const batch = ranked.slice(i, i + LOCAL_TOP_LEVEL_BATCH);
+      const flags = await getTopLevelFlags(
+        this.rateLimiter,
+        this.db,
+        batch.map(([tag]) => tag),
+        uploaderId,
+      );
+      for (const [tag, count] of batch) {
+        if (top10.length >= 10) break;
+        if (flags.get(tag) === false) continue;
+        top10.push({
+          name: tag.replace(/_/g, ' '),
+          tagName: tag,
+          count,
+          frequency: count / local.rows,
+          thumb: null,
+          isOther: false,
+        });
+      }
+    }
+
+    await this.attachSubTagBreakdownsFrom(
+      top10,
+      new Set(counts.keys()),
+      async sub => counts.get(sub) ?? 0,
+    );
+
+    // Others = the user's posts − Σ top 10; see getCharacterDistribution.
+    const sum = top10.reduce((acc, item) => acc + item.count, 0);
+    const others = Math.max(0, local.rows - sum);
+    if (others > 0) {
+      top10.push({
+        name: 'Others',
+        tagName: '',
+        count: others,
+        frequency: 0,
+        thumb: '',
+        isOther: true,
+      });
+    }
+
+    await this.carryOverThumbs(cacheKey, uploaderId, top10);
+    const shown = await this.cacheUnlessPartial(
+      cacheKey,
+      uploaderId,
+      top10,
+      false,
+    );
+    await this.enrichThumbnails(
+      cacheKey,
+      uploaderId,
+      shown,
+      userInfo,
+      reportSubStatus,
+      true,
+    );
+    return shown;
+  }
+
+  /**
    * Mutates `top10` in place to attach `subTags` breakdown rows where the
    * user has sub-tag variants of a displayed parent. Pure data, no DOM —
    * the UI layer reads `DistributionItem.subTags` to render the legend
@@ -1963,6 +2203,28 @@ export class AnalyticsDataManager extends DataManager {
     countQueryPrefix: string,
     counts: CountBatch,
   ): Promise<void> {
+    // Tags the user has at all (presence-only signal from /related_tag.json).
+    // Drives which sub candidates are worth a per-sub count fetch — we never
+    // spend a /counts/posts.json call on a sub the user has zero of.
+    const userTagNames = new Set<string>();
+    for (const item of allUserTags) {
+      if (item.frequency > 0) userTagNames.add(item.tag.name);
+    }
+    await this.attachSubTagBreakdownsFrom(top10, userTagNames, sub =>
+      counts.lookup(`${countQueryPrefix} ${sub}`),
+    );
+  }
+
+  /**
+   * {@link attachSubTagBreakdowns} given the tags the user has and how to
+   * count one: `/counts/posts.json` there, the local rows' counts on the
+   * local path (T-406).
+   */
+  private async attachSubTagBreakdownsFrom(
+    top10: DistributionItem[],
+    userTagNames: Set<string>,
+    subCount: (sub: string) => Promise<number>,
+  ): Promise<void> {
     const topLevelNames = top10
       .map(t => t.tagName)
       .filter((n): n is string => typeof n === 'string' && n.length > 0);
@@ -1973,14 +2235,6 @@ export class AnalyticsDataManager extends DataManager {
       this.db,
       topLevelNames,
     );
-
-    // Tags the user has at all (presence-only signal from /related_tag.json).
-    // Drives which sub candidates are worth a per-sub count fetch — we never
-    // spend a /counts/posts.json call on a sub the user has zero of.
-    const userTagNames = new Set<string>();
-    for (const item of allUserTags) {
-      if (item.frequency > 0) userTagNames.add(item.tag.name);
-    }
 
     const subsToFetch = new Set<string>();
     for (const subs of subsByParent.values()) {
@@ -1993,7 +2247,7 @@ export class AnalyticsDataManager extends DataManager {
     const userTagCounts = new Map<string, number>();
     await this.mapConcurrent([...subsToFetch], 5, async sub => {
       try {
-        const c = await counts.lookup(`${countQueryPrefix} ${sub}`);
+        const c = await subCount(sub);
         if (c > 0) userTagCounts.set(sub, c);
       } catch (e: unknown) {
         log.debug('Failed to fetch sub-tag count', {sub, error: e});
@@ -2930,6 +3184,7 @@ export class AnalyticsDataManager extends DataManager {
     });
     // Full success: any earlier failure history is stale.
     this.clearBackfillFailureState(uploaderId);
+    this.invalidateLocalDistributions(uploaderId);
   }
 
   /**
@@ -3035,6 +3290,22 @@ export class AnalyticsDataManager extends DataManager {
   ): Promise<{gentags_lt_10: number; tagcount_lt_10: number} | null> {
     const userId = userInfo.id;
     if (!userId) return null;
+
+    // Local rows (T-406): always current, no count; stored as before so the
+    // cache stays filled for when the rows cannot be used.
+    const local = await this.getLocalDistributions(parseInt(userId));
+    if (local) {
+      const fromRows = {
+        gentags_lt_10: local.gentagsUnder10,
+        tagcount_lt_10: local.tagcountUnder10,
+      };
+      await this.db.user_stats.put({
+        userId,
+        ...fromRows,
+        updated_at: Date.now(),
+      });
+      return fromRows;
+    }
 
     if (!force) {
       const cached = await this.db.user_stats.get(userId);
@@ -4835,6 +5106,8 @@ export class AnalyticsDataManager extends DataManager {
     // Refresh the critical (cheap, must-be-fresh) stats after sync. If startId
     // was 0, it was a Full Sync; otherwise it's a Partial Sync. Heavy tag
     // distributions freshen post-paint via fetchDashboardData's SWR revalidate.
+    // The rows changed: count them again (T-406).
+    this.invalidateLocalDistributions(uploaderId);
     await this.refreshCriticalStats(userInfo, startId === 0);
 
     // First successful sync = meaningful engagement signal. Ask the
@@ -4996,6 +5269,7 @@ export class AnalyticsDataManager extends DataManager {
 
       // 7. Refresh critical stats (full sync). Heavy tag distributions
       // freshen post-paint via fetchDashboardData's SWR revalidate.
+      this.invalidateLocalDistributions(uploaderId);
       await this.refreshCriticalStats(userInfo, true);
 
       // Engagement signal — see syncAllPosts for rationale.
@@ -5139,6 +5413,7 @@ export class AnalyticsDataManager extends DataManager {
     // watermark, a backfill plan): left behind, it would vouch for whatever
     // the next, possibly partial, sync writes.
     await this.db.sync_meta?.delete(uploaderId);
+    this.invalidateLocalDistributions(uploaderId);
 
     // Clear metadata (Last Sync Time)
     const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
