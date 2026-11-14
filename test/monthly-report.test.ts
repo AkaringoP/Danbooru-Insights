@@ -11,6 +11,7 @@ import {
   splitReportRange,
   trimMonthlyCounts,
   utcDateString,
+  utcDayOf,
   utcMonthStartOf,
 } from '../src/core/monthly-report';
 
@@ -30,6 +31,16 @@ describe('utcMonthStartOf', () => {
     expect(utcMonthStartOf('2024-04-01T05:00:00+09:00')).toBe('2024-03-01');
     expect(utcMonthStartOf('2024-02-29T20:00:00-08:00')).toBe('2024-03-01');
     expect(utcMonthStartOf('not a date')).toBeNull();
+  });
+});
+
+describe('utcDayOf', () => {
+  it('is the UTC day of the instant, whatever offset it carries', () => {
+    // Danbooru gives created_at in the viewer's account time zone.
+    expect(utcDayOf('2005-07-25T20:30:00-04:00')).toBe('2005-07-26');
+    expect(utcDayOf('2005-07-26T05:00:00+09:00')).toBe('2005-07-25');
+    expect(utcDayOf(Date.UTC(2026, 10, 13, 23, 59))).toBe('2026-11-13');
+    expect(utcDayOf('not a date')).toBeNull();
   });
 });
 

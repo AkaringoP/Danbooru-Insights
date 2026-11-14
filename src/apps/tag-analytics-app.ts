@@ -13,6 +13,7 @@ import {
   DASHBOARD_THEME_SELECT_HTML,
 } from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
+import {utcDayOf} from '../core/monthly-report';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
 import type {Database} from '../core/database';
@@ -51,9 +52,10 @@ import type {
 
 const log = createLogger('TagAnalytics');
 
-/** Footer line of the tag dashboard: what a "month" means in its history. */
+/** Footer line of the tag dashboard: its dates and months are UTC. */
 const TAG_HISTORY_UTC_NOTE =
-  'Monthly history uses UTC calendar months; clicking a month opens that UTC month.';
+  'Dates are in UTC, and the monthly history counts UTC calendar months; ' +
+  'clicking a month opens that UTC month.';
 
 /** Result from _checkCache(). null = served from cache (caller should return). */
 interface CacheCheckResult {
@@ -172,7 +174,7 @@ export class TagAnalyticsApp {
       if (rawCache) {
         const age = Date.now() - rawCache.updatedAt;
         const isStale = age >= CONFIG.CACHE_EXPIRY_MS;
-        const date = new Date(rawCache.updatedAt).toLocaleDateString();
+        const date = utcDayOf(rawCache.updatedAt) ?? 'N/A';
 
         if (isStale) {
           statusLabel.textContent = `Updated: ${date} · Sync needed`;
@@ -199,7 +201,7 @@ export class TagAnalyticsApp {
   _showUpdatedStatus(updatedAt: number): void {
     const statusLabel = document.getElementById('tag-analytics-status');
     if (!statusLabel) return;
-    const date = new Date(updatedAt).toLocaleDateString();
+    const date = utcDayOf(updatedAt) ?? 'N/A';
     statusLabel.textContent = `Updated: ${date}`;
     statusLabel.style.color = '#28a745';
     statusLabel.style.display = 'inline';
@@ -1835,9 +1837,9 @@ export class TagAnalyticsApp {
               <h2 style="color: ${titleColor};">${escapeHtml(tagData.name.replace(/_/g, ' '))}</h2>
               <div class="di-tag-header-meta">
                   <span class="di-category-badge">${categoryLabel}</span>
-                  <span class="di-tag-header-date">Created: ${tagData.created_at ? new Date(tagData.created_at).toLocaleDateString('en-CA') : 'N/A'}</span>
+                  <span class="di-tag-header-date">Created: ${(tagData.created_at && utcDayOf(tagData.created_at)) || 'N/A'}</span>
                   <span class="di-tag-header-date di-tag-header-date-updated" id="tag-updated-at">
-                      Updated: ${tagData.updatedAt ? new Date(tagData.updatedAt).toLocaleDateString('en-CA') : 'N/A'}
+                      Updated: ${(tagData.updatedAt && utcDayOf(tagData.updatedAt)) || 'N/A'}
                       <span id="tag-settings-anchor"></span>
                   </span>
               </div>
@@ -1873,7 +1875,7 @@ export class TagAnalyticsApp {
             </a>
          </div>
          <div class="di-nsfw-monitor-label">Latest</div>
-         <div class="di-nsfw-monitor-sublabel">${tagData.latestPost.created_at.split('T')[0]}</div>
+         <div class="di-nsfw-monitor-sublabel">${utcDayOf(tagData.latestPost.created_at) ?? ''}</div>
       </div>
     `
       : '';

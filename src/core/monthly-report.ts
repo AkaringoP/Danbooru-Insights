@@ -156,6 +156,18 @@ function monthStart(index: number): string {
 }
 
 /**
+ * `YYYY-MM-DD` of the UTC day an instant falls in, or null when it cannot
+ * be read. The tag dashboard shows every date this way, like its months:
+ * Danbooru's `created_at` carries the viewer's account time zone, and the
+ * browser's calendar may differ from both.
+ */
+export function utcDayOf(timestamp: string | number): string | null {
+  const t = new Date(timestamp).getTime();
+  if (Number.isNaN(t)) return null;
+  return utcDateString(new Date(t));
+}
+
+/**
  * `YYYY-MM-01` of the UTC month an instant falls in (the history bar a
  * post belongs to), or null when `timestamp` cannot be read.
  */
