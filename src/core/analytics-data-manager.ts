@@ -1060,17 +1060,18 @@ export class AnalyticsDataManager extends DataManager {
       .anyOf(targets.map((no: number) => [uploaderId, no]))
       .toArray();
 
-    // NEW: Fetch missing thumbnails for Safety logic
-    // We want to show thumbnails for Safe(s) or General(g) posts.
-    // OR if NSFW is enabled, show all.
-    // If we don't have 'preview_file_url' locally (old sync), we fetch it now.
+    // Thumbnails are shown for Safe(s) / General(g) posts, or all when NSFW is
+    // on. A row normally has one already (the sync stores
+    // `preview_file_url`); only a row without any thumbnail URL is looked up.
+    // The test used to be "no `variants`", which a post search never returns,
+    // so every recompute — each sync and each dashboard open — sent a lookup
+    // that changed nothing (T-506; one of them drew an edge 429 right after
+    // a full sync, 2026-11-15).
     const missingIds: number[] = [];
     matches.forEach(p => {
       const isSafe = p.rating === 's' || p.rating === 'g';
       const shouldFetch = isNsfwEnabled || isSafe;
-      if (shouldFetch && (!p.variants || p.variants.length === 0)) {
-        missingIds.push(p.id);
-      }
+      if (shouldFetch && !getBestThumbnailUrl(p)) missingIds.push(p.id);
     });
 
     if (missingIds.length > 0) {

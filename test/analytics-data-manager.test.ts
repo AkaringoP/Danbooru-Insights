@@ -2784,8 +2784,8 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
     vi.unstubAllGlobals();
   });
 
-  // Three milestone posts with modern metadata (non-empty variants → the
-  // getMilestones missing-thumbnail path never fires an API call). Their `no`
+  // Three milestone posts with a thumbnail URL (→ the getMilestones
+  // missing-thumbnail path never fires an API call). Their `no`
   // values line up with the auto-step targets for total=200 (1, 100, 200).
   const milestonePosts = [1, 100, 200].map(no => ({
     id: 1000 + no,
@@ -2879,6 +2879,96 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
     expect(db.piestats.put).toHaveBeenCalledWith(
       expect.objectContaining({key: 'milestones_auto_0__count', data: 200}),
     );
+  });
+
+  describe('thumbnail lookup (T-506)', () => {
+    /** A milestone row as the sync stores it: a preview URL, no variants. */
+    const syncedRow = (no: number, extra: Record<string, unknown> = {}) => ({
+      id: 1000 + no,
+      uploader_id: 42,
+      no,
+      rating: 'g',
+      score: 5,
+      created_at: '2025-01-01T00:00:00Z',
+      preview_file_url: `http://x/${no}.jpg`,
+      ...extra,
+    });
+
+    /** Milestone rows for total=200 (targets 1, 100, 200) and a posts.update spy. */
+    function makeDbWith(rows: Record<string, unknown>[]) {
+      const postsTable = makePostsTable(rows);
+      (postsTable._chain.count as ReturnType<typeof vi.fn>).mockResolvedValue(
+        200,
+      );
+      const update = vi.fn(async () => 1);
+      const db = makeSyncDb(Object.assign(postsTable, {update}));
+      return {db, update};
+    }
+
+    it('sends nothing for rows that have a preview URL but no variants', async () => {
+      // The sync never gets `variants`; the old "no variants" test sent a
+      // lookup on every recompute (each sync, each dashboard open).
+      const {db} = makeDbWith([syncedRow(1), syncedRow(100), syncedRow(200)]);
+      const rl = makeSyncRateLimiter();
+      const adm = new AnalyticsDataManager(db as never, rl as never);
+
+      await adm.getMilestones(makeSyncUser(), false, 'auto');
+      await adm.getMilestones(makeSyncUser(), true, 'auto');
+
+      expect(rl.fetch).not.toHaveBeenCalled();
+    });
+
+    it('looks up only a row without any thumbnail URL and stores the answer', async () => {
+      const {db, update} = makeDbWith([
+        syncedRow(1),
+        syncedRow(100, {preview_file_url: undefined}),
+        syncedRow(200),
+      ]);
+      const rl = makeSyncRateLimiter(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [
+          {id: 1100, rating: 'g', preview_file_url: 'http://x/100-new.jpg'},
+        ],
+      }));
+      const adm = new AnalyticsDataManager(db as never, rl as never);
+
+      const result = await adm.getMilestones(makeSyncUser(), false, 'auto');
+
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
+      const url = rl.fetch.mock.calls[0][0];
+      expect(url).toContain('tags=id:1100&');
+      expect(update).toHaveBeenCalledWith(
+        1100,
+        expect.objectContaining({preview_file_url: 'http://x/100-new.jpg'}),
+      );
+      const m100 = result.find(m => m.milestone === 100);
+      expect(m100?.post.preview_file_url).toBe('http://x/100-new.jpg');
+    });
+
+    it('leaves an explicit row without a URL alone unless NSFW is on', async () => {
+      const rows = [
+        syncedRow(1),
+        syncedRow(100, {rating: 'e', preview_file_url: undefined}),
+        syncedRow(200),
+      ];
+      const rl = makeSyncRateLimiter();
+
+      const sfw = makeDbWith(rows);
+      await new AnalyticsDataManager(
+        sfw.db as never,
+        rl as never,
+      ).getMilestones(makeSyncUser(), false, 'auto');
+      expect(rl.fetch).not.toHaveBeenCalled();
+
+      const nsfw = makeDbWith(rows);
+      await new AnalyticsDataManager(
+        nsfw.db as never,
+        rl as never,
+      ).getMilestones(makeSyncUser(), true, 'auto');
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
+      expect(rl.fetch.mock.calls[0][0]).toContain('tags=id:1100&');
+    });
   });
 });
 
