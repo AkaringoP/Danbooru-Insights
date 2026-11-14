@@ -3789,6 +3789,18 @@ describe('fields backfill (T-403)', () => {
     expect(storage.has(backfillFailureStorageKey(42))).toBe(true);
   });
 
+  it('counts a run whose parallel ranges all fail as one failure', async () => {
+    const {rl} = serveRemote([10, 20, 30], () => 500);
+    const {adm} = setUp(oldRows([10, 20, 30]), rl);
+
+    await adm.backfillPostMetadata(user);
+
+    // The three ranges were in flight together and all failed.
+    expect(rl.fetch).toHaveBeenCalledTimes(3);
+    const state = JSON.parse(storage.get(backfillFailureStorageKey(42))!);
+    expect(state.failureCount).toBe(1);
+  });
+
   it('stops on a 429 without counting it as a failure', async () => {
     const {rl} = serveRemote([10, 20, 30], () => 429);
     const {adm, metaRows} = setUp(oldRows([10, 20, 30]), rl);

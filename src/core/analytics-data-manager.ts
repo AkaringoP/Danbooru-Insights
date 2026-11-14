@@ -439,6 +439,8 @@ interface BackfillRun {
   /** The plan, with each range's progress; saved after every page. */
   ranges: Array<{after: number; to: number}>;
   failed: boolean;
+  /** The run has counted toward the cooldown (once per run, see below). */
+  failureRecorded: boolean;
   done: number;
   total: number;
   /** The user's rows at the start, by id. */
@@ -3232,6 +3234,7 @@ export class AnalyticsDataManager extends DataManager {
         meta?.backfill?.ranges ?? splitIdRanges(ids, BACKFILL_RANGES)
       ).map(r => ({...r})),
       failed: false,
+      failureRecorded: false,
       done: 0,
       byId: new Map(rows.map(r => [r.id, r])),
       total: 0,
@@ -3329,8 +3332,9 @@ export class AnalyticsDataManager extends DataManager {
         if (shouldCountHttpAsFailure(resp.status)) {
           log.warn('Backfill HTTP error — pausing backfill', {
             status: resp.status,
+            url,
           });
-          this.recordBackfillFailure(uploaderId);
+          this.recordBackfillRunFailure(run, uploaderId);
         } else {
           // 429: the rate limiter is already pausing; not our failure.
           log.warn('Backfill HTTP 429 — stopping this run');
@@ -3344,10 +3348,24 @@ export class AnalyticsDataManager extends DataManager {
     } catch (e) {
       // Network or parse failure: rarely transient at page-load scale, and
       // the cooldown gives 24 h before the next try.
-      log.warn('Backfill fetch failed', {error: e});
-      this.recordBackfillFailure(uploaderId);
+      log.warn('Backfill fetch failed', {error: e, url});
+      this.recordBackfillRunFailure(run, uploaderId);
       return null;
     }
+  }
+
+  /**
+   * Counts a failed run toward the cooldown once, however many of its
+   * parallel ranges fail. The cooldown means three failed runs; the
+   * ranges' requests are in flight together and tend to fail together,
+   * so counting each one could put a single bad moment straight into 24 h
+   * of cooldown (a browser check on 2026-11-15 found an account already in
+   * cooldown on the build's first day).
+   */
+  private recordBackfillRunFailure(run: BackfillRun, uploaderId: number): void {
+    if (run.failureRecorded) return;
+    run.failureRecorded = true;
+    this.recordBackfillFailure(uploaderId);
   }
 
   /**
