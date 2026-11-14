@@ -16,7 +16,7 @@ Schema changes require a new version number in `database.ts` (Dexie.js migration
 | `tag_analytics` | tagName, updatedAt, lastFullScanAt | Wiki/artist tag report cache (24h expiry); `lastFullScanAt` schemaless, added v12 for 90-day forced rescan |
 | `grass_settings` | userId, width, xOffset | Graph layout persistence |
 | `user_stats` | userId | User-level aggregate counters (v10) |
-| `tag_monthly_counts` | [tag+yearMonth], tag, fetchedAt | Per-tag, per-month post counts; distance-based TTL (v12). Written by the monthly history's layers 2–3 only; rows without `basis: 'utc'` (unindexed, v9.12) are from viewer-time-zone months and are not read |
-| `tag_implications_cache` | tagName, fetchedAt | Global cache for top-level (implication antecedent) flags, shared by tag pages and user pies via `core/top-level-tags.ts`; 180d TTL (v12) |
+| `tag_monthly_counts` | [tag+yearMonth], tag, fetchedAt | Per-tag, per-month post counts; distance-based TTL (v12). Written by the monthly history's layers 2–3 only; rows without `basis: 'utc'` (unindexed, v9.12) are from viewer-time-zone months and are not read. Deleted with their tag's expired report, and in the tag page's daily sweep when no report owns them (T-309) |
+| `tag_implications_cache` | tagName, fetchedAt | Global cache for top-level (implication antecedent) flags, shared by tag pages and user pies via `core/top-level-tags.ts`; 180d TTL (v12), expired rows deleted by `pruneImplicationCache` in the tag page's daily sweep (T-309) |
 
 Key compound indexes: `[uploader_id+no]` (milestone lookups), `[uploader_id+score]` (top-score queries), `[uploader_id+created_at]` (per-user last-sync lookup, v11), `[tag+yearMonth]` (monthly count cache, v12).

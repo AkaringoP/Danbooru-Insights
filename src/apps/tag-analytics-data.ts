@@ -21,7 +21,7 @@ import {
 import {bulkPutSafe, evictOldestNonCurrentUser} from '../core/quota-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
 import {fitsViewerTagLimit} from '../core/search-terms';
-import {getTopLevelFlags} from '../core/top-level-tags';
+import {getTopLevelFlags, pruneImplicationCache} from '../core/top-level-tags';
 import type {Database} from '../core/database';
 import type {
   DanbooruPost,
@@ -379,6 +379,27 @@ export function keepKnownCounts(
 /** Whether `data` has a count pie that lost a count. */
 function hasUnknownPie(data: TagAnalyticsMeta): boolean {
   return COUNT_PIES.some(pie => hasUnknownCount(data[pie]));
+}
+
+/** localStorage key: when the tag page's daily cache sweep last ran (T-309). */
+const TAG_CACHE_SWEEP_KEY = 'di.tagCache.sweptAt';
+
+/**
+ * Whether the daily cache sweep is due, claiming it if so. The stamp is
+ * written before the sweep, so a sweep that fails does not run again on
+ * every open, and a second tab opened at the same time usually skips it.
+ * Due when the stamp cannot be read.
+ */
+function claimDailyTagCacheSweep(now: number): boolean {
+  try {
+    const last = Number(localStorage.getItem(TAG_CACHE_SWEEP_KEY));
+    const age = now - last;
+    if (last > 0 && age >= 0 && age < DAY_MS) return false;
+    localStorage.setItem(TAG_CACHE_SWEEP_KEY, String(now));
+  } catch {
+    // Storage unavailable: sweep anyway.
+  }
+  return true;
 }
 
 type UserEntry = {name: string; level: string};
@@ -841,20 +862,77 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Deletes tag analytics cache entries older than the retention threshold.
-   * @return {Promise<void>}
+   * Deletes tag reports older than the retention period together with
+   * their monthly count rows, and once a day sweeps what no report owns
+   * (T-309). Through v9.11 only the reports went: their month rows and the
+   * expired implication rows were never removed.
    */
-  async cleanupOldCache(): Promise<void> {
-    if (!this.db || !this.db.tag_analytics) return;
-
-    const retentionDays = this.getRetentionDays();
-    const cutoff = Date.now() - retentionDays * DAY_MS;
+  async cleanupOldCache(now = Date.now()): Promise<void> {
+    if (!this.db?.tag_analytics || !this.db.tag_monthly_counts) return;
+    const cutoff = now - this.getRetentionDays() * DAY_MS;
 
     try {
-      await this.db.tag_analytics.where('updatedAt').below(cutoff).delete();
+      await this.deleteExpiredReports(cutoff);
     } catch (e) {
       log.warn('Cleanup failed', {error: e});
     }
+
+    if (!claimDailyTagCacheSweep(now)) return;
+    try {
+      const monthRows = await this.sweepMonthlyCounts(cutoff);
+      log.debug('Daily tag cache sweep', {monthRows});
+    } catch (e) {
+      log.warn('Monthly count sweep failed', {error: e});
+    }
+    await pruneImplicationCache(this.db, now);
+  }
+
+  /**
+   * Expired reports and their tags' monthly count rows, in one transaction
+   * so a failure cannot leave rows that no expired report points to any more.
+   */
+  private async deleteExpiredReports(cutoff: number): Promise<void> {
+    const db = this.db!;
+    await db.transaction(
+      'rw',
+      db.tag_analytics,
+      db.tag_monthly_counts,
+      async () => {
+        const tags = await db.tag_analytics
+          .where('updatedAt')
+          .below(cutoff)
+          .primaryKeys();
+        if (tags.length === 0) return;
+        await db.tag_analytics.bulkDelete(tags);
+        const monthRows = await db.tag_monthly_counts
+          .where('tag')
+          .anyOf(tags)
+          .delete();
+        log.debug('Expired tag reports deleted', {
+          reports: tags.length,
+          monthRows,
+        });
+      },
+    );
+  }
+
+  /**
+   * Daily: drops monthly count rows of viewer-time-zone months (no
+   * `basis: 'utc'`, never read since T-303) and rows no report owns. A row
+   * without a report but fetched inside the retention period is kept: a
+   * first visit writes its months before it saves its report (maybe in
+   * another tab), and a partial history caches its months without one.
+   * Rows of reports deleted before T-309 are swept here. Scans the table,
+   * which since T-303 holds only the split ranges of the largest tags.
+   */
+  private async sweepMonthlyCounts(cutoff: number): Promise<number> {
+    const db = this.db!;
+    const owned = new Set(await db.tag_analytics.toCollection().primaryKeys());
+    return db.tag_monthly_counts
+      .filter(
+        r => r.basis !== 'utc' || (r.fetchedAt < cutoff && !owned.has(r.tag)),
+      )
+      .delete();
   }
 
   /**
