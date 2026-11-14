@@ -145,11 +145,11 @@ describe('responseServerTime', () => {
 });
 
 describe('viewerTimeZone', () => {
-  it('reads the body attribute', () => {
+  it('reads the body attribute as is (a Rails zone name)', () => {
     vi.stubGlobal('document', {
-      body: {dataset: {currentUserTimeZone: 'Asia/Seoul'}},
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
     });
-    expect(viewerTimeZone()).toBe('Asia/Seoul');
+    expect(viewerTimeZone()).toBe('Seoul');
   });
 
   it('is undefined off a Danbooru page', () => {

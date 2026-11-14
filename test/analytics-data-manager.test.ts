@@ -1392,7 +1392,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     ) {
       vi.stubGlobal('setTimeout', (fn: () => void) => fn());
       vi.stubGlobal('document', {
-        body: {dataset: {currentUserTimeZone: 'Asia/Seoul'}},
+        body: {dataset: {currentUserTimeZone: 'Seoul'}},
       });
       const syncMeta = makeSyncMeta();
       const adm = new AnalyticsDataManager(
@@ -1449,7 +1449,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
         userId: 42,
         fieldsVersion: 2,
         changeWatermark: Date.parse(DATE),
-        timeZone: 'Asia/Seoul',
+        timeZone: 'Seoul',
       });
     });
 
@@ -3610,7 +3610,7 @@ describe('fields backfill (T-403)', () => {
       removeItem: vi.fn((k: string) => storage.delete(k)),
     });
     vi.stubGlobal('document', {
-      body: {dataset: {currentUserTimeZone: 'Asia/Seoul'}},
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
     });
   });
 
@@ -3743,7 +3743,7 @@ describe('fields backfill (T-403)', () => {
     expect(metaRows.get(42)).toMatchObject({
       fieldsVersion: 2,
       changeWatermark: Date.parse(DATE),
-      timeZone: 'Asia/Seoul',
+      timeZone: 'Seoul',
       backfill: undefined,
     });
     expect(progress).toHaveBeenLastCalledWith(3, 3);

@@ -448,7 +448,9 @@ export interface SyncMetaRecord {
   /**
    * The viewer's Danbooru time zone during the sync
    * (`<body data-current-user-time-zone>`): Grass may reuse the rows'
-   * dates only under the same one.
+   * dates only under the same one. A Rails zone name such as "Seoul"
+   * (seen 2026-11-15), not an IANA id: compare it, do not hand it to
+   * `Intl` (which throws on "Seoul").
    */
   timeZone?: string;
   /**
