@@ -37,15 +37,17 @@ Verified live as anonymous (limit 2) in the 2026-11-12 audit: `user:X 1girl` →
 |---|---|---|---|---|
 | `user:X <tag>`, `user:X gentags:<10`, `user:X status:<s>`, `user:X rating:<r>`, `user:X order:score …` (free metatags only) | ≤ 2 | ok | ok | ok |
 | Gender pies: `~1girl ~2girls … ~6+girls` split into one `user:X <term>` count per term and summed (v8.0.3) | 2 | ok | ok | ok |
-| Translation "Untagged": inclusion-exclusion (`buildUntaggedTranslationQueries`); 4 of its 6 queries are `user:X <a> <b>` | 3 | **422** | ok | ok |
-| Hair "Bald": `user:X ~bald ~bald_female` | 3 | **422** | ok | ok |
-| Commentary "Untagged": `user:X has:commentary -commentary -commentary_request` | 4 | **422** | **422** | ok |
+| Translation "Untagged": inclusion-exclusion (`buildUntaggedTranslationQueries`); 4 of its 6 queries are `user:X <a> <b>` | 3 | not sent, 🔒 (T-408) | ok | ok |
+| Hair "Bald": `user:X ~bald ~bald_female` | 3 | not sent, 🔒 (T-408) | ok | ok |
+| Commentary "Untagged" (T-408, G-5): `user:X has:commentary` − `user:X has:commentary commentary` − `user:X has:commentary commentary_request` (`buildUntaggedCommentaryQueries`). Was one 4-term search, a 422 below Gold | 3 | not sent, 🔒 | ok | ok |
 | Pie slice thumbnails (`enrichThumbnails`): `user:X <tag> order:score rating:g` (`fav:X …` for fav-copyright) | 3 | **422** | ok | ok |
 | … the Hair "Bald" slice's thumbnail: `user:X ~bald ~bald_female order:score rating:g` | 4 | **422** | **422** | ok |
 | Tag page commentary: `<tag> has:commentary commentary` / `… commentary_request`; tag-side translation inclusion-exclusion | 3 | not sent, 🔒 (T-308) | ok | ok |
 | Suspicious upload tags: matched client-side on `tag_string_meta` inside the `id:<csv> status:any` lookup, never as a 4-term `~` search | 0 | ok | ok | ok |
 
-**How a lost count shows (v9.12, T-204).** In the user dashboard's Commentary, Translation and Hair length pies, a count that comes back 422, `null` or lost after its retry becomes an `unknown` slice (`DistributionItem.unknown`): the legend shows "—" with an explanation and the slice takes no share of the pie. Translation's "Untagged" is not computed when any of its six terms is missing. A 422 run is cached (it would 422 again); a `null` or lost count is not (`countBatch` → `cacheUnlessPartial`). T-408 stops sending the user side's over-limit queries at all.
+**How a lost count shows (v9.12, T-204).** In the user dashboard's Commentary, Translation and Hair length pies, a count that comes back 422, `null` or lost after its retry becomes an `unknown` slice (`DistributionItem.unknown`): the legend shows "—" with an explanation and the slice takes no share of the pie. Translation's "Untagged" is not computed when any of its six terms is missing. A 422 run is cached (it would 422 again); a `null` or lost count is not (`countBatch` → `cacheUnlessPartial`).
+
+**Locked slices (T-408).** Before sending, the user side's Commentary, Translation and Hair length pies check each slice's searches with `fitsViewerTagLimit`; a slice over the viewer's limit is not asked and becomes `unknown` + `locked` (`DistributionItem.locked`): the legend shows "🔒" with "Log in to see it", the slice takes no share. Only an anonymous viewer (limit 2) meets it today — Commentary and Translation "Untagged" and Hair "Bald"; a Member (3) runs them all. A locked run is cached like a 422 run (piestats TTL).
 
 **Tag page (v9.12, T-308).** `fetchCountWithRetry` gives `null`, never 0, for a count it cannot have: a 422 or other 4xx and a `null` count are not retried, a 429 / 5xx / network failure is retried once, and a search over the viewer's limit is not sent (`fitsViewerTagLimit`). The pies' counts are `TagCountMap` (`number | null`); an unknown slice is listed with "—", a locked one with "🔒" (`buildPieSlices`), neither takes a share. For an anonymous viewer the commentary pie asks nothing (its breakdowns are 3 tags; `total` alone shows nothing) and translation asks only Translated and Requested.
 
@@ -56,7 +58,7 @@ Pie slice thumbnails over the viewer's limit are not requested at all (`fitsView
 **Known over-limit click-through links (intentional since v8.0.3).** Some pie-slice links keep the full conceptual query (`buildSearchQuery` in `apps/user-analytics-pie-helpers.ts`), so a viewer below the limit lands on the Search Error page; Gold+ get the real search:
 - Gender slices: `user:X ~1girl ~2girls ~3girls ~4girls ~5girls ~6+girls` (7 terms; same for boys / others), via `DistributionItem.originalTag`.
 - Translation "Untagged" slice: `user:X *_text -english_text -translation_request -translated` (5 terms).
-- Commentary "Untagged" slice (4 terms) and the Hair "Bald" slice (3 terms) follow the counts in the table above.
+- Commentary "Untagged" slice: `user:X has:commentary -commentary -commentary_request` (4 terms) — the count now comes from three smaller searches (T-408), the link keeps the one search that shows those posts. The Hair "Bald" slice: 3 terms.
 
 **History:**
 - Before 2026-11-05 `/counts/posts.json` did not check the tag limit at all, which is why queries designed under the wrong rule below still returned numbers.

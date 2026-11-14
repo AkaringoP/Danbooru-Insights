@@ -2240,7 +2240,8 @@ describe('count distributions — unknown slices (T-204)', () => {
     const {adm, save} = makeCountAdm({
       'user:tester commentary': 40,
       'user:tester commentary_request': 10,
-      'user:tester has:commentary -commentary -commentary_request': '422',
+      'user:tester has:commentary': 70,
+      'user:tester has:commentary commentary': '422',
     });
 
     const result = await adm.getCommentaryDistribution(user);
@@ -2251,6 +2252,66 @@ describe('count distributions — unknown slices (T-204)', () => {
     // 422 is deterministic: caching the unknown saves re-asking every open.
     expect(save).toHaveBeenCalledWith('commentary_dist', 42, result);
   });
+
+  // T-408: "Untagged" from three counts instead of one 4-term search, and
+  // a slice over the viewer's tag limit is not asked but shown locked.
+  it('commentary: Untagged is has:commentary minus its two tagged parts', async () => {
+    const {adm, rl} = makeCountAdm({
+      'user:tester commentary': 40,
+      'user:tester commentary_request': 10,
+      'user:tester has:commentary': 100,
+      'user:tester has:commentary commentary': 40,
+      'user:tester has:commentary commentary_request': 10,
+    });
+
+    const result = await adm.getCommentaryDistribution(user);
+
+    expect(result.find(r => r.name === 'Untagged')?.count).toBe(50);
+    const asked = rl.fetch.mock.calls.map(c =>
+      new URLSearchParams(c[0].split('?')[1]).get('tags'),
+    );
+    expect(asked).not.toContain(
+      'user:tester has:commentary -commentary -commentary_request',
+    );
+  });
+
+  it.each([
+    ['0', true],
+    ['20', false],
+  ])(
+    'viewer level %s: the 3-term slices are locked and not asked = %s',
+    async (level, locked) => {
+      vi.stubGlobal('document', {body: {dataset: {currentUserLevel: level}}});
+      const {adm, rl} = makeCountAdm({
+        'user:tester commentary': 40,
+        'user:tester has:commentary': 100,
+        'user:tester ~bald ~bald_female': 3,
+      });
+
+      const commentary = await adm.getCommentaryDistribution(user);
+      const translation = await adm.getTranslationDistribution(user);
+      const hair = await adm.getHairLengthDistribution(user);
+
+      const asked = rl.fetch.mock.calls.map(
+        c => new URLSearchParams(c[0].split('?')[1]).get('tags') ?? '',
+      );
+      const threeTerm = asked.filter(q => q.split(' ').length > 2);
+      if (locked) {
+        expect(threeTerm).toEqual([]);
+        for (const pie of [commentary, translation, hair]) {
+          const lockedSlice = pie.find(r => r.locked);
+          expect(lockedSlice).toMatchObject({unknown: true, locked: true});
+        }
+        // The 2-term slices are still counted.
+        expect(commentary.find(r => r.name === 'Commentary')?.count).toBe(40);
+      } else {
+        expect(threeTerm.length).toBeGreaterThan(0);
+        for (const pie of [commentary, translation, hair]) {
+          expect(pie.some(r => r.locked)).toBe(false);
+        }
+      }
+    },
+  );
 
   it('commentary: a null slice is unknown and the run is not cached', async () => {
     const {adm, save} = makeCountAdm({

@@ -207,6 +207,45 @@ export function computeUntaggedTranslation(
 }
 
 /**
+ * A pie slice whose search is over the viewer's tag limit (T-408): not
+ * asked, shown locked, and — like any unknown count — given no share.
+ */
+function markLocked(slice: DistributionItem): void {
+  slice.unknown = true;
+  slice.locked = true;
+}
+
+/**
+ * The three counts behind the commentary pie's "Untagged" (T-408, decision
+ * G-5): posts with commentary, and those of them tagged `commentary` or
+ * `commentary_request`. Untagged ≈ total − both, assuming the two tags
+ * rarely meet on a post (Translation's Untagged assumes the same). Up to 3
+ * search terms: a Member can run them all, an anonymous viewer the first
+ * only. The old single query (`has:commentary -commentary
+ * -commentary_request`) was 4 terms, over every limit below Gold.
+ */
+function buildUntaggedCommentaryQueries(prefix: string): {
+  total: string;
+  commentary: string;
+  request: string;
+} {
+  return {
+    total: `${prefix} has:commentary`,
+    commentary: `${prefix} has:commentary commentary`,
+    request: `${prefix} has:commentary commentary_request`,
+  };
+}
+
+/** Untagged commentary from {@link buildUntaggedCommentaryQueries}'s counts. */
+function computeUntaggedCommentary(counts: {
+  total: number;
+  commentary: number;
+  request: number;
+}): number {
+  return Math.max(0, counts.total - counts.commentary - counts.request);
+}
+
+/**
  * Builds the 6 subqueries for Untagged inclusion-exclusion calculation plus the
  * BC intersection query used for Assumption-1 runtime monitoring. With the
  * `user:X` prefix they cost up to 3 search terms (`user:` and the `*_text`
@@ -3778,7 +3817,13 @@ export class AnalyticsDataManager extends DataManager {
     if (cached) return cached;
 
     const normalizedName = userInfo.name.replace(/ /g, '_');
-    const categories = [
+    const categories: Array<{
+      name: string;
+      tagName: string;
+      query?: string;
+      untagged?: boolean;
+      color: string;
+    }> = [
       {
         name: 'Commentary',
         tagName: 'commentary',
@@ -3792,9 +3837,10 @@ export class AnalyticsDataManager extends DataManager {
         color: '#ffc107',
       },
       {
+        // Three counts (T-408): see buildUntaggedCommentaryQueries.
         name: 'Untagged',
         tagName: 'untagged_commentary',
-        query: `user:${normalizedName} has:commentary -commentary -commentary_request`,
+        untagged: true,
         color: '#6c757d',
       },
     ];
@@ -3815,11 +3861,33 @@ export class AnalyticsDataManager extends DataManager {
       async item => {
         if (reportSubStatus)
           reportSubStatus(`Fetching Commentary: ${item.name}`);
+        const slice = results[item.idx];
         try {
-          results[item.idx].count = await counts.lookup(item.query);
+          if (item.untagged) {
+            const q = buildUntaggedCommentaryQueries(`user:${normalizedName}`);
+            if (!Object.values(q).every(fitsViewerTagLimit)) {
+              markLocked(slice);
+              return;
+            }
+            const [total, commentary, request] = await Promise.all([
+              counts.lookup(q.total),
+              counts.lookup(q.commentary),
+              counts.lookup(q.request),
+            ]);
+            slice.count = computeUntaggedCommentary({
+              total,
+              commentary,
+              request,
+            });
+          } else if (item.query) {
+            if (!fitsViewerTagLimit(item.query)) {
+              markLocked(slice);
+              return;
+            }
+            slice.count = await counts.lookup(item.query);
+          }
         } catch (e: unknown) {
-          // "Untagged" is 4 terms: a 422 below Gold (T-408 replaces it).
-          results[item.idx].unknown = true;
+          slice.unknown = true;
           log.debug('Failed to fetch commentary count', {error: e});
         }
       },
@@ -3910,6 +3978,11 @@ export class AnalyticsDataManager extends DataManager {
             // 422 on them; any lost term throws and leaves Untagged unknown
             // rather than computed from a 0 that is not one.
             const q = buildUntaggedTranslationQueries(`user:${normalizedName}`);
+            // Over the viewer's limit, none of the six is sent (T-408).
+            if (![q.t, q.a, q.b, q.c, q.ab, q.ac].every(fitsViewerTagLimit)) {
+              markLocked(results[item.idx]);
+              return;
+            }
             const [t, a, b, c, ab, ac] = await Promise.all([
               counts.lookup(q.t),
               counts.lookup(q.a),
@@ -3949,6 +4022,10 @@ export class AnalyticsDataManager extends DataManager {
                 /* monitoring only */
               });
           } else if (item.query) {
+            if (!fitsViewerTagLimit(item.query)) {
+              markLocked(results[item.idx]);
+              return;
+            }
             results[item.idx].count = await counts.lookup(item.query);
           }
         } catch (e: unknown) {
@@ -4240,12 +4317,15 @@ export class AnalyticsDataManager extends DataManager {
 
     await this.mapConcurrent(results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Length: ${obj.name}`);
+      const query = `user:${normalizedName} ${obj.originalTag}`;
+      // "Bald" is 3 terms: not sent for an anonymous viewer (T-408).
+      if (!fitsViewerTagLimit(query)) {
+        markLocked(obj);
+        return;
+      }
       try {
-        obj.count = await counts.lookup(
-          `user:${normalizedName} ${obj.originalTag}`,
-        );
+        obj.count = await counts.lookup(query);
       } catch (e: unknown) {
-        // "Bald" is 3 terms: a 422 for an anonymous viewer.
         obj.unknown = true;
         log.debug('Failed to fetch count', {error: e});
       }

@@ -254,6 +254,12 @@ export interface DistributionItem {
    */
   unknown?: boolean;
   /**
+   * With `unknown`: the count was not asked at all, because its search uses
+   * more tags than the viewer's limit allows (T-408; anonymous 2, Member 3).
+   * The legend shows a lock instead of "—".
+   */
+  locked?: boolean;
+  /**
    * Sub-tag breakdown for legend hover/tap (v9.6.0+). Populated for Copy /
    * Fav_Copy / Char distributions when the top-level tag has implications
    * (sub-tags) that the user actually uses. Empty/undefined = no tooltip.
