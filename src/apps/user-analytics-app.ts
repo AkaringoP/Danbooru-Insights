@@ -60,7 +60,7 @@ import {isTouchDevice} from '../ui/two-step-tap';
 import {showToast} from '../ui/toast';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
-import type {ProfileSummaryInput, SyncOutcome} from '../types';
+import type {ProfileSummaryInput, SyncOutcome, TargetUser} from '../types';
 
 const log = createLogger('UserAnalytics');
 
@@ -212,6 +212,58 @@ function scheduleRevalidateAll(
       });
     }, 0);
   }
+}
+
+/**
+ * After paint: brings the local rows up to date with the posts changed on
+ * Danbooru (T-407), then recounts the pies counted from them and live-patches
+ * the open dashboard (`DanbooruInsights:DataUpdated`, as the SWR revalidates
+ * do). Within the count TTL, or before the rows hold fields version 2, it
+ * sends nothing. The recount only runs while the pies are counted locally —
+ * otherwise a forced refresh would mean dozens of counts.
+ */
+function scheduleChangeCatchUp(
+  dataManager: AnalyticsDataManager,
+  user: TargetUser,
+): void {
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const {changed} = await dataManager.catchUpChanges(user);
+        if (changed === 0) return;
+        const uploaderId = parseInt(user.id || '0');
+        if (!(await dataManager.getLocalDistributions(uploaderId))) return;
+        const recount: Array<[string, () => Promise<unknown>]> = [
+          [
+            'status_dist',
+            () => dataManager.getStatusDistribution(user, null, true),
+          ],
+          [
+            'rating_dist',
+            () => dataManager.getRatingDistribution(user, null, true),
+          ],
+          [
+            'character_dist',
+            () => dataManager.getCharacterDistribution(user, true),
+          ],
+          [
+            'copyright_dist',
+            () => dataManager.getCopyrightDistribution(user, true),
+          ],
+        ];
+        for (const [contentType, run] of recount) {
+          const data = await run();
+          window.dispatchEvent(
+            new CustomEvent('DanbooruInsights:DataUpdated', {
+              detail: {contentType, data},
+            }),
+          );
+        }
+      } catch (e: unknown) {
+        log.warn('Change catch-up failed', {error: e});
+      }
+    })();
+  }, 0);
 }
 
 /** Same single-slot pattern as {@link lazyPieRevalidateListener}. */
@@ -2444,6 +2496,8 @@ export class UserAnalyticsApp {
         ['levelChanges', levelChangesStartRevalidate],
         ['tagCloudGeneral', tagCloudGeneralStartRevalidate],
       ]);
+      // Changed posts since the last catch-up, then the local pies (T-407).
+      scheduleChangeCatchUp(this.dataManager, this.context.targetUser);
     } finally {
       perfLogger.end('dbi:render:total', perfMeta);
       this.isRendering = false;

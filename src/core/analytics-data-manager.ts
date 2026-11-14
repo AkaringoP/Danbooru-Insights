@@ -1,5 +1,11 @@
 import {CountUnavailableError, DataManager} from './data-manager';
 import {
+  afterCatchUpPage,
+  startCatchUp,
+  type CatchUpCursor,
+  type CatchUpStep,
+} from './change-catch-up';
+import {
   createLocalDistributionCounter,
   type LocalDistributions,
 } from './local-distributions';
@@ -84,6 +90,7 @@ import {getTopLevelFlags} from './top-level-tags';
 import type {
   TargetUser,
   DistributionItem,
+  SyncMetaRecord,
   SyncProgress,
   ScatterDataPoint,
   TagCloudItem,
@@ -335,6 +342,29 @@ const LOCAL_TOP_LEVEL_BATCH = 50;
  * lookups (cached 180 days), not one per tag of a dispersed account.
  */
 const LOCAL_TOP_LEVEL_SCAN_LIMIT = 200;
+
+/** Posts per `order:change` page of the change catch-up (T-407). */
+const CATCH_UP_PAGE_LIMIT = 200;
+
+/**
+ * The watermark a change catch-up starts from, or null when it should not
+ * run now (T-407): rows below fields version 2 or without a watermark, a
+ * sync under way or failed, a walk already past the page limit, or one
+ * completed within `ttlMs`.
+ */
+export function catchUpWatermark(
+  meta: SyncMetaRecord | undefined,
+  now: number,
+  ttlMs: number,
+): number | null {
+  if (!meta || meta.changeWatermark === undefined) return null;
+  if ((meta.fieldsVersion ?? 0) < POST_FIELDS_VERSION) return null;
+  if (meta.syncStartedAt !== undefined || meta.needsFullSync) return null;
+  if (meta.caughtUpAt !== undefined && now - meta.caughtUpAt < ttlMs) {
+    return null;
+  }
+  return meta.changeWatermark;
+}
 
 /** Id ranges a fields backfill walks in parallel (T-403). */
 const BACKFILL_RANGES = 3;
@@ -2068,6 +2098,8 @@ export class AnalyticsDataManager extends DataManager {
       notUsed = 'fields version below 2';
     } else if (meta?.syncStartedAt !== undefined) {
       notUsed = 'a sync is under way or failed';
+    } else if (meta?.needsFullSync) {
+      notUsed = 'changes past the catch-up limit';
     } else if (
       !localStorage.getItem(`danbooru_grass_last_sync_${uploaderId}`)
     ) {
@@ -3181,6 +3213,8 @@ export class AnalyticsDataManager extends DataManager {
       changeWatermark: run.from ?? Date.now(),
       timeZone: viewerTimeZone(),
       backfill: undefined,
+      catchUp: undefined,
+      needsFullSync: undefined,
     });
     // Full success: any earlier failure history is stale.
     this.clearBackfillFailureState(uploaderId);
@@ -3274,6 +3308,139 @@ export class AnalyticsDataManager extends DataManager {
       this.recordBackfillFailure(uploaderId);
       return null;
     }
+  }
+
+  /**
+   * Brings the user's rows up to date with the posts changed on Danbooru
+   * since the last sync or catch-up (T-407, decision G-2): reads
+   * `user:X order:change` (2 search terms), 200 at a time with the sync's
+   * fields, and overwrites the rows it has, each under its own `no`. Posts
+   * the rows lack are left to the sync. The walk's decisions — where to
+   * stop, how to resume — are in `core/change-catch-up.ts`; progress is
+   * saved in `sync_meta.catchUp` after every tail page.
+   *
+   * Runs only for rows of fields version 2 with a watermark, outside a
+   * sync, and once per count TTL (`caughtUpAt`). Usually one request. A
+   * walk past the page limit marks `needsFullSync`: the pies count remotely
+   * and the next sync starts over.
+   *
+   * @return How many rows were overwritten (0 when it did not run).
+   */
+  async catchUpChanges(userInfo: TargetUser): Promise<{changed: number}> {
+    const uploaderId = parseInt(userInfo.id || '0');
+    if (!uploaderId || !userInfo.name) return {changed: 0};
+    if (AnalyticsDataManager.isGlobalSyncing) return {changed: 0};
+
+    const meta = await readSyncMeta(this.db, uploaderId);
+    const watermark = catchUpWatermark(meta, Date.now(), getCountCacheTtlMs());
+    if (watermark === null) return {changed: 0};
+
+    const name = userInfo.name.replace(/ /g, '_');
+    let cursor: CatchUpCursor | null = startCatchUp(watermark, meta?.catchUp);
+    let changed = 0;
+    while (cursor) {
+      const batch = await this.fetchChangePage(name, cursor.page);
+      if (!batch) break; // Saved progress stays: the next open resumes.
+      changed += await this.applyChangedPosts(uploaderId, batch);
+      const step = afterCatchUpPage(
+        cursor,
+        watermark,
+        batch.map(p => Date.parse(p.updated_at ?? '')).filter(t => !isNaN(t)),
+        CATCH_UP_PAGE_LIMIT,
+        SYNC_SEGMENT_PAGES,
+      );
+      cursor = await this.recordCatchUpStep(uploaderId, step, watermark);
+    }
+    if (changed > 0) this.invalidateLocalDistributions(uploaderId);
+    return {changed};
+  }
+
+  /**
+   * Saves what a catch-up step means in `sync_meta` and gives the next
+   * cursor, or null when the walk is over: done (new watermark, the time
+   * of completion), past the page limit (`needsFullSync`), or a tail page
+   * read (progress saved; the head phase saves nothing).
+   */
+  private async recordCatchUpStep(
+    uploaderId: number,
+    step: CatchUpStep,
+    watermark: number,
+  ): Promise<CatchUpCursor | null> {
+    if (step.kind === 'overflow') {
+      log.warn('Change catch-up past the page limit, full sync needed', {
+        uploaderId,
+      });
+      await patchSyncMeta(this.db, uploaderId, {
+        needsFullSync: true,
+        catchUp: undefined,
+      });
+      return null;
+    }
+    if (step.kind === 'done') {
+      await patchSyncMeta(this.db, uploaderId, {
+        changeWatermark: step.watermark,
+        catchUp: undefined,
+        caughtUpAt: Date.now(),
+      });
+      return null;
+    }
+    const cursor = step.cursor;
+    if (cursor.phase === 'tail') {
+      await patchSyncMeta(this.db, uploaderId, {
+        catchUp: {page: cursor.page, headAt: cursor.headAt ?? watermark},
+      });
+    }
+    return cursor;
+  }
+
+  /** One `order:change` page of the user's posts, or null on a failure. */
+  private async fetchChangePage(
+    name: string,
+    page: number,
+  ): Promise<DanbooruPost[] | null> {
+    const params = new URLSearchParams({
+      tags: `user:${name} order:change`,
+      limit: String(CATCH_UP_PAGE_LIMIT),
+      page: String(page),
+      only: SYNC_POST_FIELDS,
+    });
+    try {
+      const resp = await this.rateLimiter.fetch(
+        `/posts.json?${params.toString()}`,
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const batch: unknown = await resp.json();
+      if (!Array.isArray(batch)) throw new Error('Change page is not a list');
+      return batch as DanbooruPost[];
+    } catch (e: unknown) {
+      log.warn('Change catch-up page failed', {page, error: e});
+      return null;
+    }
+  }
+
+  /**
+   * Overwrites the rows this page's posts already have, each under its own
+   * `no`; returns how many. A post the rows lack is the sync's to add.
+   */
+  private async applyChangedPosts(
+    uploaderId: number,
+    batch: DanbooruPost[],
+  ): Promise<number> {
+    if (batch.length === 0) return 0;
+    const existing = await this.db.posts.bulkGet(batch.map(p => p.id));
+    const rows: PostRecord[] = [];
+    batch.forEach((p, i) => {
+      const row = existing[i];
+      if (row && row.uploader_id === uploaderId) {
+        rows.push(toPostRecord(p, row.no));
+      }
+    });
+    if (rows.length > 0) {
+      await bulkPutSafe(this.db.posts, rows, () =>
+        evictOldestNonCurrentUser(this.db, uploaderId),
+      );
+    }
+    return rows.length;
   }
 
   /**
@@ -4682,11 +4849,18 @@ export class AnalyticsDataManager extends DataManager {
       .limit(1)
       .toArray();
     let startId = 0;
+    // A catch-up that ran past the page limit (T-407) left changes the rows
+    // cannot get any other way: start over too.
+    const overflowed =
+      newestArr.length > 0 &&
+      (await readSyncMeta(this.db, uploaderId))?.needsFullSync === true;
     const intact =
-      newestArr.length === 0 || (await this.rowNumberingIntact(uploaderId));
+      newestArr.length === 0 ||
+      (!overflowed && (await this.rowNumberingIntact(uploaderId)));
     if (!intact) {
-      log.warn('Rows have a numbering gap, syncing from the start', {
+      log.warn('Syncing from the start', {
         uploaderId,
+        reason: overflowed ? 'catch-up overflow' : 'numbering gap',
       });
     }
 
@@ -5133,6 +5307,9 @@ export class AnalyticsDataManager extends DataManager {
       changeWatermark: firstResponseAt,
       timeZone: viewerTimeZone(),
       syncStartedAt: undefined,
+      // A new watermark: catch-up progress against the old one is void.
+      catchUp: undefined,
+      needsFullSync: undefined,
     });
   }
 

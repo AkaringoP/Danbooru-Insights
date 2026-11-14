@@ -422,13 +422,23 @@ export interface SyncMetaRecord {
     /** Each id range: done up to `after`, ends at `to` (inclusive). */
     ranges: Array<{after: number; to: number}>;
   };
-  /** Where an interrupted change catch-up resumes (T-407). */
+  /**
+   * Where an interrupted change catch-up resumes (T-407,
+   * `core/change-catch-up.ts`).
+   */
   catchUp?: {
-    /** Last `order:change` page done. */
+    /** The next `order:change` page it would have read. */
     page: number;
-    /** Newest `updated_at` (ms) at the run's start. */
+    /** Newest `updated_at` (ms) on its first page. */
     headAt: number;
   };
+  /** When the last change catch-up completed (ms): one per count TTL. */
+  caughtUpAt?: number;
+  /**
+   * The catch-up ran past the page limit: the rows cannot be brought up to
+   * date by it. The pies count remotely and the next sync starts over.
+   */
+  needsFullSync?: boolean;
   /**
    * The viewer's Danbooru time zone during the sync
    * (`<body data-current-user-time-zone>`): Grass may reuse the rows'

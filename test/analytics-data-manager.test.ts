@@ -14,6 +14,7 @@ import {
   SYNC_SEGMENT_PAGES,
   splitIdRanges,
   isStaleUser,
+  catchUpWatermark,
 } from '../src/core/analytics-data-manager';
 import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
 
@@ -3449,6 +3450,7 @@ describe('fields backfill (T-403)', () => {
 
   beforeEach(() => {
     AnalyticsDataManager.isGlobalSyncing = false;
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
     vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
     storage = new Map();
     vi.stubGlobal('localStorage', {
@@ -3974,5 +3976,195 @@ describe('pies from the local rows (T-406)', () => {
     await adm.getRatingDistribution(user, null, true);
 
     expect(counted()).toHaveLength(4);
+  });
+});
+
+// T-407: the local rows catch up with posts changed on Danbooru.
+describe('catchUpWatermark', () => {
+  const ttl = 600_000;
+  const now = 10_000_000;
+  const meta = (fields: Record<string, unknown>) =>
+    ({userId: 42, fieldsVersion: 2, changeWatermark: 5000, ...fields}) as never;
+
+  it('starts from the watermark of rows at fields version 2', () => {
+    expect(catchUpWatermark(meta({}), now, ttl)).toBe(5000);
+  });
+
+  it.each([
+    ['no row', undefined],
+    ['no watermark', meta({changeWatermark: undefined})],
+    ['rows below version 2', meta({fieldsVersion: 1})],
+    ['a sync under way or failed', meta({syncStartedAt: 1})],
+    ['an earlier overflow', meta({needsFullSync: true})],
+    ['a catch-up within the TTL', meta({caughtUpAt: now - 1000})],
+  ])('does not run with %s', (_label, m) => {
+    expect(catchUpWatermark(m, now, ttl)).toBeNull();
+  });
+
+  it('runs again once the TTL has passed', () => {
+    expect(catchUpWatermark(meta({caughtUpAt: now - ttl - 1}), now, ttl)).toBe(
+      5000,
+    );
+  });
+});
+
+describe('catchUpChanges (T-407)', () => {
+  const W = Date.parse('2026-11-10T00:00:00Z');
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const post = (id: number, updatedAt: string, uploaderId = 42) => ({
+    id,
+    uploader_id: uploaderId,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: updatedAt,
+    rating: 'q',
+    tag_string_character: 'changed',
+  });
+
+  /** `pages[n - 1]` answers page n of `order:change`. */
+  function setUp(
+    meta: Record<string, unknown>,
+    pages: Array<ReturnType<typeof post>[] | number>,
+    localIds: number[],
+  ) {
+    const asked: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      asked.push(decodeURIComponent(url));
+      const page = Number(new URLSearchParams(url.split('?')[1]).get('page'));
+      const body = pages[page - 1] ?? [];
+      if (typeof body === 'number') {
+        return {ok: false, status: body, json: async () => ({})};
+      }
+      return {ok: true, status: 200, json: async () => body};
+    });
+    const rows = new Map<number, Record<string, unknown>>(
+      localIds.map((id, i) => [
+        id,
+        {id, uploader_id: 42, no: i + 1, rating: 's', chr: 'old'},
+      ]),
+    );
+    const posts = makePostsTable([...rows.values()]);
+    Object.assign(posts, {
+      bulkGet: vi.fn(async (ids: number[]) => ids.map(id => rows.get(id))),
+    });
+    const metaRows = new Map<number, Record<string, unknown>>([
+      [42, {userId: 42, ...meta}],
+    ]);
+    const syncMeta = {
+      get: vi.fn(async (k: number) => metaRows.get(k)),
+      put: vi.fn(async (r: Record<string, unknown>) => {
+        metaRows.set(r.userId as number, structuredClone(r));
+      }),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(posts, {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    const written = () =>
+      vi
+        .mocked(quotaManager.bulkPutSafe)
+        .mock.calls.flatMap(c => c[1] as Record<string, unknown>[]);
+    return {adm, asked, metaRows, written};
+  }
+
+  const user = makeSyncUser({id: '42'});
+  const v2 = {fieldsVersion: 2, changeWatermark: W};
+
+  it('overwrites the rows it has under their own number, and moves the watermark', async () => {
+    const page1 = [
+      post(7, '2026-11-12T00:00:00Z'),
+      post(99, '2026-11-11T00:00:00Z'), // not in the rows: the sync's
+      post(3, '2026-11-09T00:00:00Z'), // older than W: the walk ends
+    ];
+    const {adm, asked, metaRows, written} = setUp(v2, [page1], [3, 7]);
+
+    const {changed} = await adm.catchUpChanges(user);
+
+    expect(asked).toHaveLength(1);
+    expect(new URLSearchParams(asked[0].split('?')[1]).get('tags')).toBe(
+      'user:test_user order:change',
+    );
+    expect(changed).toBe(2);
+    expect(written().map(r => [r.id, r.no, r.chr])).toEqual([
+      [7, 2, 'changed'],
+      [3, 1, 'changed'],
+    ]);
+    expect(metaRows.get(42)).toMatchObject({
+      changeWatermark: Date.parse('2026-11-12T00:00:00Z'),
+      caughtUpAt: expect.any(Number),
+      catchUp: undefined,
+    });
+  });
+
+  it('walks on while every row is newer, saving its progress', async () => {
+    const full = (start: number) =>
+      Array.from({length: 200}, (_, i) =>
+        post(start + i, '2026-11-13T00:00:00Z'),
+      );
+    const {adm, asked, metaRows} = setUp(v2, [full(1000), full(2000), 503], []);
+
+    await adm.catchUpChanges(user);
+
+    // Page 3 failed: the walk stops, the watermark stays, page 3 is saved.
+    expect(asked).toHaveLength(3);
+    expect(metaRows.get(42)).toMatchObject({
+      changeWatermark: W,
+      catchUp: {page: 3, headAt: Date.parse('2026-11-13T00:00:00Z')},
+    });
+  });
+
+  it('resumes a saved walk: the new changes first, then back where it stopped', async () => {
+    const headAt = Date.parse('2026-11-13T00:00:00Z');
+    const newer = post(1, '2026-11-14T00:00:00Z');
+    const older = post(2, '2026-11-01T00:00:00Z');
+    const fullOld = Array.from({length: 200}, (_, i) =>
+      post(3000 + i, '2026-11-12T00:00:00Z'),
+    );
+    const {adm, asked} = setUp(
+      {...v2, catchUp: {page: 4, headAt}},
+      [[newer, ...fullOld.slice(0, 199)], fullOld, fullOld, [older]],
+      [],
+    );
+
+    await adm.catchUpChanges(user);
+
+    const pages = asked.map(u =>
+      Number(new URLSearchParams(u.split('?')[1]).get('page')),
+    );
+    // Page 1 reaches below the saved head; the tail goes back to page 3.
+    expect(pages).toEqual([1, 3, 4]);
+  });
+
+  it('sends nothing within the count TTL', async () => {
+    const {adm, asked} = setUp({...v2, caughtUpAt: Date.now()}, [[]], []);
+    expect(await adm.catchUpChanges(user)).toEqual({changed: 0});
+    expect(asked).toEqual([]);
+  });
+
+  it('a user marked for a full sync syncs from the start', async () => {
+    const {adm, asked} = setUp({...v2, needsFullSync: true}, [[]], [1, 2]);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+    vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+
+    await adm.syncAllPosts(user, vi.fn());
+
+    expect(asked.find(u => u.startsWith('/posts.json'))).toContain('id:>0');
   });
 });
