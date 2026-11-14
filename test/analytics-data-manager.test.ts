@@ -12,6 +12,7 @@ import {
   syncRetryDelayMs,
   SYNC_PAGE_MAX_ATTEMPTS,
   SYNC_SEGMENT_PAGES,
+  splitIdRanges,
 } from '../src/core/analytics-data-manager';
 import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
 
@@ -990,11 +991,12 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       c[0].startsWith('danbooru_grass_last_sync_'),
     );
     expect(syncKeySet).toBe(true);
-    // di_post_metadata_v2_42 set because startId=0 (full sync)
+    // A full sync's fields completion goes to sync_meta since T-403 (see
+    // "fields version 2 and sync_meta"); the old flag is no longer written.
     const metaKeySet = ls.mock.calls.some(
       (c: string[]) => c[0] === 'di_post_metadata_v2_42',
     );
-    expect(metaKeySet).toBe(true);
+    expect(metaKeySet).toBe(false);
 
     // cleanupStaleData and refreshCriticalStats were called
     expect(adm2.cleanupStaleData).toHaveBeenCalledWith('42');
@@ -3106,9 +3108,9 @@ describe('AnalyticsDataManager.quickSyncAllPosts', () => {
     const ls = vi.mocked(localStorage.setItem);
     const keys = ls.mock.calls.map((c: string[]) => c[0]);
     expect(keys).toContain('danbooru_grass_last_sync_42');
-    // quickSync writes every metadata field straight from the API, so the
-    // backfill is complete by definition.
-    expect(keys).toContain('di_post_metadata_v2_42');
+    // quickSync writes every field straight from the API; that completion is
+    // recorded in sync_meta (T-402 tests), not the old flag (T-403).
+    expect(keys).not.toContain('di_post_metadata_v2_42');
     expect(quotaManager.requestPersistence).toHaveBeenCalled();
   });
 
@@ -3396,5 +3398,239 @@ describe('getActivityDistribution — suspicious uploads', () => {
       'only=id,is_deleted,is_flagged,score,tag_string_meta',
     );
     expect(decodeURIComponent(lookups[0])).not.toContain('~');
+  });
+});
+
+// T-403: existing users' rows are brought to fields version 2 by fetching
+// every row again in id ranges, resumable, with the watermark of the first
+// response.
+describe('splitIdRanges', () => {
+  it('cuts sorted ids into contiguous ranges of about the same size', () => {
+    expect(splitIdRanges([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 3)).toEqual([
+      {after: 0, to: 4},
+      {after: 4, to: 7},
+      {after: 7, to: 10},
+    ]);
+  });
+
+  it('makes no more ranges than ids, and none without ids', () => {
+    expect(splitIdRanges([5, 9], 3)).toEqual([
+      {after: 4, to: 5},
+      {after: 5, to: 9},
+    ]);
+    expect(splitIdRanges([], 3)).toEqual([]);
+  });
+});
+
+describe('fields backfill (T-403)', () => {
+  const DATE = 'Sat, 14 Nov 2026 13:53:29 GMT';
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Asia/Seoul'}},
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Old rows: no tag fields, numbered 1..n. */
+  const oldRows = (ids: number[]) =>
+    ids.map((id, i) => ({
+      id,
+      uploader_id: 42,
+      no: i + 1,
+      created_at: '2020-01-01T00:00:00Z',
+      score: 1,
+      rating: 'g',
+    }));
+
+  /** The remote: these ids exist; `fail` answers a status for some ranges. */
+  function serveRemote(
+    ids: number[],
+    fail: (from: number) => number | null = () => null,
+  ) {
+    const asked: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      const tags = new URLSearchParams(url.split('?')[1]).get('tags') ?? '';
+      asked.push(tags);
+      const [, a, b] = /id:(\d+)\.\.(\d+)/.exec(tags) ?? [];
+      const status = fail(Number(a));
+      if (status) return {ok: false, status, json: async () => ({})};
+      const posts = ids
+        .filter(id => id >= Number(a) && id <= Number(b))
+        .map(id => ({
+          id,
+          uploader_id: 42,
+          created_at: '2020-01-01T09:00:00+09:00',
+          up_score: 2,
+          down_score: 0,
+          rating: 'g',
+          tag_count: 12,
+          tag_string_character: 'char_' + id,
+          tag_string_copyright: 'touhou',
+        }));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => posts,
+        headers: {get: (n: string) => (n === 'date' ? DATE : null)},
+      };
+    });
+    return {rl, asked};
+  }
+
+  function setUp(
+    rows: Record<string, unknown>[],
+    rl: ReturnType<typeof makeSyncRateLimiter>,
+    meta?: Record<string, unknown>,
+  ) {
+    const metaRows = new Map<number, Record<string, unknown>>();
+    if (meta) metaRows.set(42, {userId: 42, ...meta});
+    const syncMeta = {
+      get: vi.fn(async (k: number) => metaRows.get(k)),
+      put: vi.fn(async (r: Record<string, unknown>) => {
+        metaRows.set(r.userId as number, structuredClone(r));
+      }),
+      delete: vi.fn(async (k: number) => {
+        metaRows.delete(k);
+      }),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable(rows), {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    const written = () =>
+      vi
+        .mocked(quotaManager.bulkPutSafe)
+        .mock.calls.flatMap(c => c[1] as Record<string, unknown>[]);
+    return {adm, metaRows, written};
+  }
+
+  const user = makeSyncUser({id: '42'});
+
+  it('is needed for a user with rows and no fields version 2', async () => {
+    const {rl} = serveRemote([]);
+    expect(
+      await setUp(oldRows([1]), rl).adm.needsPostMetadataBackfill(user),
+    ).toBe(true);
+    expect(
+      await setUp(oldRows([1]), rl, {
+        fieldsVersion: 2,
+      }).adm.needsPostMetadataBackfill(user),
+    ).toBe(false);
+    expect(await setUp([], rl).adm.needsPostMetadataBackfill(user)).toBe(false);
+  });
+
+  it('is not needed while in failure cooldown', async () => {
+    storage.set(
+      backfillFailureStorageKey(42),
+      JSON.stringify({
+        lastAttemptAt: Date.now(),
+        failureCount: BACKFILL_FAILURE_THRESHOLD,
+      }),
+    );
+    const {rl} = serveRemote([]);
+    expect(
+      await setUp(oldRows([1]), rl).adm.needsPostMetadataBackfill(user),
+    ).toBe(false);
+  });
+
+  it('rebuilds every row under its own number and records version 2 with the first response time', async () => {
+    const {rl, asked} = serveRemote([10, 20, 25, 30]);
+    const {adm, metaRows, written} = setUp(oldRows([10, 20, 30]), rl);
+    const progress = vi.fn();
+
+    await adm.backfillPostMetadata(user, progress);
+
+    // Three ranges, each walked by id range in 2 search terms.
+    expect(asked.sort()).toEqual([
+      'user:test_user status:any id:10..10 order:id',
+      'user:test_user status:any id:11..20 order:id',
+      'user:test_user status:any id:21..30 order:id',
+    ]);
+    const rows = written().sort((a, b) => (a.id as number) - (b.id as number));
+    // 25 is a post the rows lack: the sync's to add.
+    expect(rows.map(r => [r.id, r.no, r.chr])).toEqual([
+      [10, 1, 'char_10'],
+      [20, 2, 'char_20'],
+      [30, 3, 'char_30'],
+    ]);
+    expect(metaRows.get(42)).toMatchObject({
+      fieldsVersion: 2,
+      changeWatermark: Date.parse(DATE),
+      timeZone: 'Asia/Seoul',
+      backfill: undefined,
+    });
+    expect(progress).toHaveBeenLastCalledWith(3, 3);
+  });
+
+  it('resumes a saved plan where it stopped, keeping its watermark', async () => {
+    const {rl, asked} = serveRemote([10, 20, 30]);
+    // The first range was done; the second had not started.
+    const {adm, metaRows} = setUp(oldRows([10, 20, 30]), rl, {
+      backfill: {
+        from: 1234,
+        ranges: [
+          {after: 20, to: 20},
+          {after: 20, to: 30},
+        ],
+      },
+    });
+
+    await adm.backfillPostMetadata(user);
+
+    expect(asked).toEqual(['user:test_user status:any id:21..30 order:id']);
+    expect(metaRows.get(42)).toMatchObject({
+      fieldsVersion: 2,
+      changeWatermark: 1234,
+    });
+  });
+
+  it('stops on an HTTP error, records the failure and keeps the progress', async () => {
+    const {rl} = serveRemote([10, 20, 30], from => (from === 21 ? 500 : null));
+    const {adm, metaRows} = setUp(oldRows([10, 20, 30]), rl);
+
+    await adm.backfillPostMetadata(user);
+
+    const meta = metaRows.get(42)!;
+    expect(meta.fieldsVersion).toBeUndefined();
+    const plan = meta.backfill as {
+      from: number;
+      ranges: Array<{after: number; to: number}>;
+    };
+    expect(plan.from).toBe(Date.parse(DATE));
+    // The failed range has not moved.
+    expect(plan.ranges.find(r => r.to === 30)?.after).toBe(20);
+    expect(storage.has(backfillFailureStorageKey(42))).toBe(true);
+  });
+
+  it('stops on a 429 without counting it as a failure', async () => {
+    const {rl} = serveRemote([10, 20, 30], () => 429);
+    const {adm, metaRows} = setUp(oldRows([10, 20, 30]), rl);
+
+    await adm.backfillPostMetadata(user);
+
+    expect(metaRows.get(42)?.fieldsVersion).toBeUndefined();
+    expect(storage.has(backfillFailureStorageKey(42))).toBe(false);
+  });
+
+  it('clearUserData drops the sync state with the rows', async () => {
+    const {rl} = serveRemote([]);
+    const {adm, metaRows} = setUp(oldRows([1]), rl, {fieldsVersion: 2});
+
+    await adm.clearUserData(user);
+
+    expect(metaRows.has(42)).toBe(false);
   });
 });

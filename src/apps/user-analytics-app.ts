@@ -885,6 +885,17 @@ async function renderDashboardWidgets(
     gated: totalUploads < SCATTER_MIN_UPLOADS,
   });
 
+  // The scatter runs the fields backfill and shows its progress. Without a
+  // scatter (under SCATTER_MIN_UPLOADS, a page or two of posts, or with no
+  // points) it still has to run for the local pies (T-403), unseen.
+  const scatterRanBackfill =
+    totalUploads >= SCATTER_MIN_UPLOADS && scatterData.length > 0;
+  if (needsBackfill && !scatterRanBackfill) {
+    void dataManager
+      .backfillPostMetadata(app.context.targetUser)
+      .catch((e: unknown) => log.warn('Fields backfill failed', {error: e}));
+  }
+
   // 8. Footer credit (always last)
   parent.insertAdjacentHTML('beforeend', dashboardFooterHtml());
 }

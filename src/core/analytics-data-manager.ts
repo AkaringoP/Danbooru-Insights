@@ -5,7 +5,12 @@ import {
   toPostRecord,
 } from './post-record';
 import {fitsViewerTagLimit} from './search-terms';
-import {patchSyncMeta, responseServerTime, viewerTimeZone} from './sync-meta';
+import {
+  patchSyncMeta,
+  readSyncMeta,
+  responseServerTime,
+  viewerTimeZone,
+} from './sync-meta';
 import type {ApiItem} from './data-manager';
 import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
@@ -290,6 +295,46 @@ export function recordFailure(
  */
 export function shouldCountHttpAsFailure(status: number): boolean {
   return status !== 429;
+}
+
+/** Id ranges a fields backfill walks in parallel (T-403). */
+const BACKFILL_RANGES = 3;
+
+/**
+ * Splits sorted ids into up to `parts` contiguous ranges of about the same
+ * number of ids, as `{after, to}`: a range holds the ids in (after, to].
+ * The first starts just below the smallest id.
+ */
+export function splitIdRanges(
+  sortedIds: number[],
+  parts: number,
+): Array<{after: number; to: number}> {
+  const n = sortedIds.length;
+  if (n === 0) return [];
+  const k = Math.max(1, Math.min(parts, n));
+  const ranges: Array<{after: number; to: number}> = [];
+  let after = sortedIds[0] - 1;
+  for (let i = 1; i <= k; i++) {
+    const to = sortedIds[Math.ceil((n * i) / k) - 1];
+    if (to > after) {
+      ranges.push({after, to});
+      after = to;
+    }
+  }
+  return ranges;
+}
+
+/** One run of the fields backfill, shared by its parallel ranges. */
+interface BackfillRun {
+  /** Server time of the first response (the watermark), once known. */
+  from: number | undefined;
+  /** The plan, with each range's progress; saved after every page. */
+  ranges: Array<{after: number; to: number}>;
+  failed: boolean;
+  done: number;
+  total: number;
+  /** The user's rows at the start, by id. */
+  byId: Map<number, PostRecord>;
 }
 
 /** Total fetch attempts per page in the full-sync worker pool. */
@@ -2761,18 +2806,13 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Checks whether any of the user's cached posts are missing metadata fields
-   * introduced after the initial schema (down_score / is_deleted / is_banned)
-   * AND whether a backfill should be attempted right now.
+   * Whether to run {@link backfillPostMetadata} now: the user has rows but
+   * `sync_meta` does not say they hold fields version 2 (T-403), and the
+   * backfill is not in failure cooldown.
    *
-   * Returns false if either:
-   * 1. The full-completion flag is set (backfill already finished for this
-   *    user, no missing fields).
-   * 2. The user is currently in failure cooldown (failed >=
-   *    {@link BACKFILL_FAILURE_THRESHOLD} times within the last
-   *    {@link BACKFILL_COOLDOWN_MS}). The next dashboard open after the
-   *    cooldown elapses will allow one retry.
-   * 3. A scan of the user's cached posts shows no missing fields.
+   * Version 2 includes the v9.x metadata (down_score / is_deleted /
+   * is_banned) this backfill was first written for, so the old
+   * `di_post_metadata_v2_*` flag and its row scan are no longer read.
    *
    * The cooldown gate lives here (rather than inside `backfillPostMetadata`)
    * so that the scatter widget never sees `needsBackfill: true` during
@@ -2783,54 +2823,46 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return false;
 
-    const flagKey = `di_post_metadata_v2_${uploaderId}`;
-    if (localStorage.getItem(flagKey) === '1') return false;
+    const meta = await readSyncMeta(this.db, uploaderId);
+    if ((meta?.fieldsVersion ?? 0) >= POST_FIELDS_VERSION) return false;
 
-    // Cooldown gate. If we've failed too many times recently, skip until the
-    // window elapses. Existing tests expect needsPostMetadataBackfill to
-    // semantically mean "should we attempt a backfill right now"; the
-    // function name reflects intent more than the literal "is data missing".
     if (isBackfillInCooldown(this.getBackfillFailureState(uploaderId))) {
       return false;
     }
 
-    // Walk all posts and stop on the first one lacking any required metadata.
-    // We cannot short-circuit on the first record by index order — a partial
-    // (interrupted) backfill may have populated the earliest posts while
-    // leaving later ones empty, so we must scan until we find a missing one.
-    const missing = await this.db.posts
+    const rows = await this.db.posts
       .where('uploader_id')
       .equals(uploaderId)
-      .filter(
-        (p: PostRecord) =>
-          p.up_score === undefined ||
-          p.down_score === undefined ||
-          p.is_deleted === undefined ||
-          p.is_banned === undefined,
-      )
-      .first();
-
-    if (missing === undefined) {
-      localStorage.setItem(flagKey, '1');
-      return false;
-    }
-
-    return true;
+      .count();
+    return rows > 0;
   }
 
   /**
-   * Backfills the `down_score`, `is_deleted`, and `is_banned` fields on
-   * existing post records for a user. Walks the user's posts in id-order
-   * (cursor pagination) using a minimal `only` parameter so the request is
-   * much lighter than a full re-sync. Updates the score field as well to
-   * keep it in sync with up_score + down_score.
+   * Brings a user's rows to fields version 2 (T-403). Every row the user
+   * had when the backfill started is fetched again — the tag fields and
+   * the metadata alike, with the sync's `only=` — and rebuilt by
+   * `toPostRecord` under its own `no`, so the numbering stays.
+   *
+   * Not only the rows that lack the fields: the change watermark recorded
+   * at the end is the server time of the backfill's first response, so
+   * every row must have been fetched after it (a row a resume sync wrote
+   * earlier would otherwise miss the changes in between).
+   *
+   * The rows' id span is cut into {@link BACKFILL_RANGES} ranges walked in
+   * parallel, each in id order (`id:a..b order:id`, 2 search terms: fine
+   * for a logged-out viewer). The plan and each range's progress are kept
+   * in `sync_meta.backfill`, so an interrupted run resumes where it stopped
+   * with the same watermark. Rows a sync adds meanwhile fall outside the
+   * ranges and need nothing: the sync wrote them with version 2, after it.
+   *
+   * Failures: an HTTP error (except 429) or a network error counts toward
+   * the cooldown; a 429 only stops this run (the rate limiter is already
+   * pausing). The dashboard keeps counting meanwhile (T-406 waits for
+   * version 2).
    *
    * @param userInfo Target user
    * @param onProgress Optional progress callback (current, total)
    */
-  // T-26 baseline: complexity 24. Page loop × stale-detect × retry × bulk
-  // commit + dual progress reporting. Decomposition candidate.
-  // eslint-disable-next-line complexity
   async backfillPostMetadata(
     userInfo: TargetUser,
     onProgress?: (current: number, total: number) => void,
@@ -2838,123 +2870,134 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return;
 
-    const flagKey = `di_post_metadata_v2_${uploaderId}`;
+    const meta = await readSyncMeta(this.db, uploaderId);
+    if ((meta?.fieldsVersion ?? 0) >= POST_FIELDS_VERSION) return;
 
-    // Pull all of this user's posts and find ones lacking any required field
-    const allPosts: PostRecord[] = await this.db.posts
+    const rows: PostRecord[] = await this.db.posts
       .where('uploader_id')
       .equals(uploaderId)
       .toArray();
-    const needsUpdate = allPosts.filter(
-      p =>
-        p.up_score === undefined ||
-        p.down_score === undefined ||
-        p.is_deleted === undefined ||
-        p.is_banned === undefined,
+    if (rows.length === 0) return;
+
+    const ids = rows.map(r => r.id).sort((a, b) => a - b);
+    const run: BackfillRun = {
+      from: meta?.backfill?.from,
+      ranges: (
+        meta?.backfill?.ranges ?? splitIdRanges(ids, BACKFILL_RANGES)
+      ).map(r => ({...r})),
+      failed: false,
+      done: 0,
+      byId: new Map(rows.map(r => [r.id, r])),
+      total: 0,
+    };
+    run.total = ids.filter(id =>
+      run.ranges.some(r => id > r.after && id <= r.to),
+    ).length;
+    if (onProgress) onProgress(0, run.total);
+
+    await Promise.all(
+      run.ranges.map(range =>
+        this.backfillRange(userInfo, uploaderId, range, run, onProgress),
+      ),
     );
-    if (needsUpdate.length === 0) {
-      localStorage.setItem(flagKey, '1');
-      return;
-    }
+    if (run.failed) return;
 
-    const total = needsUpdate.length;
-    let updated = 0;
-    if (onProgress) onProgress(0, total);
+    await patchSyncMeta(this.db, uploaderId, {
+      fieldsVersion: POST_FIELDS_VERSION,
+      changeWatermark: run.from ?? Date.now(),
+      timeZone: viewerTimeZone(),
+      backfill: undefined,
+    });
+    // Full success: any earlier failure history is stale.
+    this.clearBackfillFailureState(uploaderId);
+  }
 
-    // Index by id for O(1) lookup during merge. Use a loop for minId to
-    // avoid call-stack overflow on very large arrays (spread operator limit).
-    const byId = new Map<number, PostRecord>();
-    let minId = Infinity;
-    for (const p of needsUpdate) {
-      byId.set(p.id, p);
-      if (p.id < minId) minId = p.id;
-    }
-
-    const normalizedName = userInfo.name.replace(/ /g, '_');
+  /**
+   * Walks one id range of a {@link backfillPostMetadata} run to its end,
+   * saving the run's progress after every page. Stops when the run has
+   * failed elsewhere.
+   */
+  private async backfillRange(
+    userInfo: TargetUser,
+    uploaderId: number,
+    range: {after: number; to: number},
+    run: BackfillRun,
+    onProgress?: (current: number, total: number) => void,
+  ): Promise<void> {
+    const name = userInfo.name.replace(/ /g, '_');
     const limit = 200;
-    let lastId = minId - 1;
-    let hasMore = true;
-
-    while (hasMore && updated < total) {
+    while (!run.failed && range.after < range.to) {
       const params = new URLSearchParams({
-        tags: `user:${normalizedName} status:any id:>${lastId} order:id`,
+        tags: `user:${name} status:any id:${range.after + 1}..${range.to} order:id`,
         limit: String(limit),
-        only: 'id,up_score,down_score,is_deleted,is_banned',
+        only: SYNC_POST_FIELDS,
       });
-      const url = `/posts.json?${params.toString()}`;
-
-      let batch: DanbooruPost[];
-      try {
-        const resp = await this.rateLimiter.fetch(url);
-        if (!resp.ok) {
-          if (shouldCountHttpAsFailure(resp.status)) {
-            log.warn('Backfill HTTP error — pausing backfill', {
-              status: resp.status,
-            });
-            this.recordBackfillFailure(uploaderId);
-          } else {
-            // 429: rate-limiter already triggered global backoff. Pause this
-            // batch but do NOT increment our failure counter — the
-            // rate-limiter cooldown is the right place to throttle.
-            log.warn(
-              'Backfill HTTP 429 — pausing batch (rate-limiter cooldown active)',
-            );
-          }
-          return;
-        }
-        batch = await resp.json();
-      } catch (e) {
-        // Network/parse exceptions: count as a hard failure. They're rarely
-        // transient at the page-load granularity (a real wifi blip would
-        // affect the whole dashboard load), and the cooldown gives the
-        // user 24h to recover before we try again.
-        log.warn('Backfill fetch failed', {error: e});
-        this.recordBackfillFailure(uploaderId);
+      const batch = await this.fetchBackfillPage(
+        `/posts.json?${params.toString()}`,
+        uploaderId,
+        run,
+      );
+      if (!batch) {
+        run.failed = true;
         return;
-      }
-
-      if (!Array.isArray(batch) || batch.length === 0) {
-        hasMore = false;
-        break;
       }
 
       const updates: PostRecord[] = [];
       for (const p of batch) {
-        const existing = byId.get(p.id);
-        if (!existing) continue;
-
-        const ds = p.down_score ?? 0;
-        const us = p.up_score ?? 0;
-        updates.push({
-          ...existing,
-          score: us + ds,
-          up_score: us,
-          down_score: ds,
-          is_deleted: p.is_deleted ?? false,
-          is_banned: p.is_banned ?? false,
-        });
-        updated++;
+        const existing = run.byId.get(p.id);
+        // A post the rows lack is the sync's to add, not ours.
+        if (existing) updates.push(toPostRecord(p, existing.no));
       }
-
       if (updates.length > 0) {
         await bulkPutSafe(this.db.posts, updates, () =>
           evictOldestNonCurrentUser(this.db, uploaderId),
         );
-        if (onProgress) onProgress(updated, total);
+        run.done += updates.length;
+        if (onProgress) onProgress(run.done, run.total);
       }
 
-      lastId = batch[batch.length - 1].id;
-      if (batch.length < limit) {
-        hasMore = false;
-      }
+      range.after =
+        batch.length < limit ? range.to : batch[batch.length - 1].id;
+      await patchSyncMeta(this.db, uploaderId, {
+        backfill: {from: run.from ?? Date.now(), ranges: run.ranges},
+      });
     }
+  }
 
-    if (updated >= total) {
-      localStorage.setItem(flagKey, '1');
-      // Full success: clear any prior failure state. Reaching this branch
-      // means the loop completed without recording a failure (failure paths
-      // return early), so the previous failure history is now stale.
-      this.clearBackfillFailureState(uploaderId);
+  /**
+   * One backfill page, or null when the run must stop (the failure is
+   * recorded for the cooldown, except a 429). The first response fixes
+   * the run's watermark (`run.from`) if a resumed plan has none.
+   */
+  private async fetchBackfillPage(
+    url: string,
+    uploaderId: number,
+    run: BackfillRun,
+  ): Promise<DanbooruPost[] | null> {
+    try {
+      const resp = await this.rateLimiter.fetch(url);
+      if (!resp.ok) {
+        if (shouldCountHttpAsFailure(resp.status)) {
+          log.warn('Backfill HTTP error — pausing backfill', {
+            status: resp.status,
+          });
+          this.recordBackfillFailure(uploaderId);
+        } else {
+          // 429: the rate limiter is already pausing; not our failure.
+          log.warn('Backfill HTTP 429 — stopping this run');
+        }
+        return null;
+      }
+      run.from ??= responseServerTime(resp, Date.now());
+      const batch: unknown = await resp.json();
+      if (!Array.isArray(batch)) throw new Error('Backfill page is not a list');
+      return batch as DanbooruPost[];
+    } catch (e) {
+      // Network or parse failure: rarely transient at page-load scale, and
+      // the cooldown gives 24 h before the next try.
+      log.warn('Backfill fetch failed', {error: e});
+      this.recordBackfillFailure(uploaderId);
+      return null;
     }
   }
 
@@ -4707,11 +4750,10 @@ export class AnalyticsDataManager extends DataManager {
       const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
       localStorage.setItem(lastSyncKey, new Date().toISOString());
 
-      // Mark post metadata backfill complete for full (fresh) syncs.
-      // Incremental syncs only touch newer posts, so older posts may still
-      // lack the metadata — in that case the backfill mechanism handles them.
+      // A fresh (startId 0) run wrote every row with fields version 2. An
+      // incremental one touched only the last month: older rows may still
+      // lack the fields, and the backfill brings them up (T-403).
       if (startId === 0) {
-        localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
         await this.recordFullSyncMeta(uploaderId, firstResponseAt);
       }
     }
@@ -4876,11 +4918,8 @@ export class AnalyticsDataManager extends DataManager {
       const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
       localStorage.setItem(lastSyncKey, new Date().toISOString());
 
-      // 4b. Mark post metadata backfill complete — quickSync writes all
-      // fields directly from the API, so every post record now has the
-      // new metadata (down_score, is_deleted, is_banned).
-      localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
-      // Every row was rewritten from the first post on (T-402).
+      // 4b. Every row was rewritten from the first post on, with fields
+      // version 2 (T-402): no backfill needed.
       await this.recordFullSyncMeta(uploaderId, firstResponseAt ?? Date.now());
 
       // 5. Cleanup stale data for other users
@@ -5033,13 +5072,17 @@ export class AnalyticsDataManager extends DataManager {
     // 2. Delete Pie Stats (userId is INT in updatePieStats)
     await this.db.piestats.where('userId').equals(uploaderId).delete();
 
+    // 3. Sync state describes the rows just deleted (fields version,
+    // watermark, a backfill plan): left behind, it would vouch for whatever
+    // the next, possibly partial, sync writes.
+    await this.db.sync_meta?.delete(uploaderId);
+
     // Clear metadata (Last Sync Time)
     const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;
     localStorage.removeItem(lastSyncKey);
 
-    // The backfill-complete flag describes rows that no longer exist. Leaving
-    // it would vouch for whatever the next (possibly partial) sync writes;
-    // needsPostMetadataBackfill re-derives it from the rows on next check.
+    // The old backfill-complete flag (no longer read since T-403, which
+    // keys the backfill on sync_meta.fieldsVersion) is dropped with the rows.
     localStorage.removeItem(`di_post_metadata_v2_${uploaderId}`);
   }
 }

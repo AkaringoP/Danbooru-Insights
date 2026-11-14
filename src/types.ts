@@ -411,6 +411,17 @@ export interface SyncMetaRecord {
    * backfill that filled them, then the newest change the catch-up saw.
    */
   changeWatermark?: number;
+  /**
+   * A fields backfill under way (T-403): every row the user had when it
+   * started is fetched again, in id ranges walked in parallel. Cleared when
+   * it completes.
+   */
+  backfill?: {
+    /** Server time (ms) of its first response: the watermark once done. */
+    from: number;
+    /** Each id range: done up to `after`, ends at `to` (inclusive). */
+    ranges: Array<{after: number; to: number}>;
+  };
   /** Where an interrupted change catch-up resumes (T-407). */
   catchUp?: {
     /** Last `order:change` page done. */

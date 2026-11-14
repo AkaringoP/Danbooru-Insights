@@ -8,6 +8,20 @@ import type {SyncMetaRecord} from '../types';
 
 const log = createLogger('SyncMeta');
 
+/** The user's row, or undefined (also when it cannot be read). */
+export async function readSyncMeta(
+  db: Database,
+  userId: number,
+): Promise<SyncMetaRecord | undefined> {
+  if (!db.sync_meta) return undefined;
+  try {
+    return await db.sync_meta.get(userId);
+  } catch (e) {
+    log.warn('Failed to read sync_meta', {userId, error: e});
+    return undefined;
+  }
+}
+
 /**
  * Merges `patch` into the user's row (created if missing), read and written
  * in one transaction so two tabs cannot drop each other's fields. A failure
