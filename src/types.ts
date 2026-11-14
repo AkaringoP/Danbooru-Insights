@@ -371,6 +371,52 @@ export interface PostRecord {
   tag_string_character?: string;
 }
 
+/**
+ * Per-user sync state in the `sync_meta` table (schema v13). One row per
+ * synced uploader, filled in by the sync (T-402), the tag-field backfill
+ * (T-403), the row-count check (T-404) and the change catch-up (T-407).
+ * Every field but the key is optional: a row is written a piece at a time.
+ */
+export interface SyncMetaRecord {
+  /**
+   * Uploader id, as in `posts.uploader_id` — a number: IndexedDB keys `1`
+   * and `"1"` are different, so a string id would miss the row.
+   */
+  userId: number;
+  /**
+   * Which post fields the user's rows hold. 2: the tag fields T-402 adds
+   * (`updated_at`, pending / flagged, `tag_count`, character and copyright
+   * tag strings). Absent: rows from before, so the pies keep counting.
+   */
+  fieldsVersion?: number;
+  /**
+   * Latest `updated_at` (ms since epoch, server clock) the user's rows are
+   * known to reflect: the first response's `Date` of the full sync or
+   * backfill that filled them, then the newest change the catch-up saw.
+   */
+  changeWatermark?: number;
+  /** Where an interrupted change catch-up resumes (T-407). */
+  catchUp?: {
+    /** Last `order:change` page done. */
+    page: number;
+    /** Newest `updated_at` (ms) at the run's start. */
+    headAt: number;
+  };
+  /**
+   * The viewer's Danbooru time zone during the sync
+   * (`<body data-current-user-time-zone>`): Grass may reuse the rows'
+   * dates only under the same one.
+   */
+  timeZone?: string;
+  /**
+   * Set when a sync starts and cleared when it ends (ms since epoch).
+   * Cleanup keeps the rows of a user with one set (T-404).
+   */
+  syncStartedAt?: number;
+  /** Last time this user's dashboard was opened (ms since epoch). */
+  lastVisitedAt?: number;
+}
+
 /** User-level aggregate statistics stored in the `user_stats` table. */
 export interface UserStatsRecord {
   /** User ID (string form to match other user-keyed tables). */

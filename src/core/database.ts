@@ -12,6 +12,7 @@ import type {
   UserStatsRecord,
   MonthlyCountRecord,
   TagImplicationCacheRecord,
+  SyncMetaRecord,
 } from '../types';
 
 const log = createLogger('Database');
@@ -59,6 +60,7 @@ export class Database extends Dexie {
   user_stats!: Table<UserStatsRecord, string>;
   tag_monthly_counts!: Table<MonthlyCountRecord, [string, string]>;
   tag_implications_cache!: Table<TagImplicationCacheRecord, string>;
+  sync_meta!: Table<SyncMetaRecord, number>;
 
   /**
    * Initializes the database with defined schemas.
@@ -213,6 +215,21 @@ export class Database extends Dexie {
     this.version(12).stores({
       tag_monthly_counts: '[tag+yearMonth], tag, fetchedAt',
       tag_implications_cache: 'tagName, fetchedAt',
+    });
+
+    // [v13] (T-401, audit DA-02) `posts` keeps only the indexes something
+    // reads: the per-user key, `[uploader_id+no]` (milestones) and
+    // `[uploader_id+created_at]` (newest post). `no`, `created_at`, `score`,
+    // `rating`, `tag_count_general` and `[uploader_id+score]` had no reader
+    // left, and every one was rewritten on each bulkPut (audit measure, 50k
+    // rows: 7.0 → 4.7 s to write, 112 → 65 MB). The fields stay in the rows.
+    // - sync_meta: per-user sync state (`SyncMetaRecord`), keyed by the
+    //   numeric uploader id. Replaces nothing yet; the localStorage stamps
+    //   (`danbooru_grass_last_sync_*`, `di_post_metadata_v2_*`) stay.
+    // Other open tabs on v12 get `versionchange` and reload once.
+    this.version(13).stores({
+      posts: 'id, uploader_id, [uploader_id+no], [uploader_id+created_at]',
+      sync_meta: 'userId',
     });
 
     // Multi-tab coordination. Without these handlers, opening a newer
