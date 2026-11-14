@@ -926,6 +926,12 @@ export interface TagAnalyticsMeta {
   translationCounts?: Record<string, number>;
   copyrightCounts?: Record<string, number>;
   characterCounts?: Record<string, number>;
+  /**
+   * Which related-tag pies hold exact counts. A large tag's are related-tag
+   * approximations until the user opens that tab, which counts them
+   * (T-307); a small tag's are counted from its posts. Absent = approximate.
+   */
+  relatedCountsExact?: {copyright?: boolean; character?: boolean};
   latestPost?: DanbooruPost;
   trendingPost?: DanbooruPost;
   trendingPostNSFW?: DanbooruPost;

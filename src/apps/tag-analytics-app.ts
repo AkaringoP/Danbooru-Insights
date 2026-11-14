@@ -641,14 +641,15 @@ export class TagAnalyticsApp {
         characterMap2[name] = count;
       });
     meta.characterCounts = characterMap2;
+    // Counted from every post of the tag: nothing to refine on the tabs.
+    meta.relatedCountsExact = {copyright: true, character: true};
   }
 
   /**
    * Re-renders the pie chart if its currently-active tab matches `type`.
-   * Used by the related-tag SWR swap to replace approximate counts with
-   * the exact values once the background `/counts/posts.json` batch
-   * completes. No-ops when the user has navigated to a different tab —
-   * the updated `meta` will be consumed on their next tab switch.
+   * Used when the exact related-tag counts arrive. No-ops when the user has
+   * navigated to a different tab — the updated `meta` will be consumed on
+   * their next tab switch.
    */
   private _rerenderPieIfActive(
     meta: TagAnalyticsMeta,
@@ -1031,38 +1032,22 @@ export class TagAnalyticsApp {
     let characterPromise: Promise<Record<string, number> | null> =
       Promise.resolve(null);
 
-    // SWR swap: when the background exact-count fetch completes, replace
-    // the approximate counts on `meta` and re-render the pie chart if the
-    // user is currently viewing that category. Otherwise the update is
-    // invisible until the next tab switch reads fresh `meta` values.
-    const onExactCopyright = (exact: Record<string, number>) => {
-      meta.copyrightCounts = exact;
-      this._rerenderPieIfActive(meta, 'copyright');
-    };
-    const onExactCharacter = (exact: Record<string, number>) => {
-      meta.characterCounts = exact;
-      this._rerenderPieIfActive(meta, 'character');
-    };
-
+    // Approximations only: the exact counts are fetched when the user
+    // opens the Copy / Char tab (_refineRelatedCountsOnce, T-307).
+    meta.relatedCountsExact = {};
     if (meta.category === 1) {
       copyrightPromise = measure(
         'Related Copyrights',
-        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount, {
-          onExactCounts: onExactCopyright,
-        }),
+        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount),
       );
       characterPromise = measure(
         'Related Characters',
-        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount, {
-          onExactCounts: onExactCharacter,
-        }),
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
       );
     } else if (meta.category === 3) {
       characterPromise = measure(
         'Related Characters',
-        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount, {
-          onExactCounts: onExactCharacter,
-        }),
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
       );
     }
 
@@ -2171,8 +2156,52 @@ export class TagAnalyticsApp {
         });
         tab.classList.add('active');
         this.chartRenderer.renderPieChart(newType ?? 'status', tagData);
+        if (newType === 'copyright' || newType === 'character') {
+          void this._refineRelatedCountsOnce(tagData, newType);
+        }
       };
     });
+  }
+
+  /** Related-tag pies whose exact counts are being fetched right now. */
+  private readonly _refiningRelated = new Set<'copyright' | 'character'>();
+
+  /**
+   * Swaps a related-tag pie's approximations for exact counts the first
+   * time its tab is opened (T-307). They used to be counted in the
+   * background on every analysis, up to 10 counts per pie, whether or not
+   * the tab was ever looked at — the most count-hungry part of a tag page.
+   *
+   * Exact counts are kept on the cached report (`relatedCountsExact`), so
+   * opening the tab again, now or from the cache later, counts nothing. A
+   * run where some count failed is not marked exact and is tried again on
+   * the next open.
+   */
+  private async _refineRelatedCountsOnce(
+    meta: TagAnalyticsMeta,
+    type: 'copyright' | 'character',
+  ): Promise<void> {
+    const field = type === 'copyright' ? 'copyrightCounts' : 'characterCounts';
+    const approx = meta[field];
+    if (!approx || meta.relatedCountsExact?.[type]) return;
+    if (this._refiningRelated.has(type)) return;
+    this._refiningRelated.add(type);
+    try {
+      const {counts, complete} = await this.dataService.fetchExactRelatedCounts(
+        this.tagName,
+        approx,
+      );
+      meta[field] = counts;
+      this._rerenderPieIfActive(meta, type);
+      if (!complete) return;
+      meta.relatedCountsExact = {...meta.relatedCountsExact, [type]: true};
+      await this.dataService.patchCachedReport({
+        [field]: counts,
+        relatedCountsExact: meta.relatedCountsExact,
+      });
+    } finally {
+      this._refiningRelated.delete(type);
+    }
   }
 
   /** Binds click handlers to the uploader/approver rank tabs. */

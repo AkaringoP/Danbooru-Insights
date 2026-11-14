@@ -1137,19 +1137,16 @@ export class TagAnalyticsDataService {
     return results;
   }
 
+  /**
+   * The copyright or character distribution of a tag, approximated from
+   * `/related_tag.json` frequencies (× the tag's post count). No counts are
+   * sent here: the exact values are fetched by {@link fetchExactRelatedCounts}
+   * only when the user opens that pie's tab (T-307).
+   */
   async fetchRelatedTagDistribution(
     tagName: string,
     categoryId: number,
     totalTagCount: number,
-    opts: {
-      /**
-       * Optional SWR hook. When provided, initial approximate counts are
-       * returned immediately and exact `/counts/posts.json` lookups run
-       * in the background, invoking `onExactCounts` once complete. Omit
-       * to disable SWR (returns approximations only, no background fetch).
-       */
-      onExactCounts?: (counts: Record<string, number>) => void;
-    } = {},
   ): Promise<Record<string, number> | null> {
     const catName = categoryId === 3 ? 'Copyright' : 'Character';
 
@@ -1179,24 +1176,10 @@ export class TagAnalyticsDataService {
       );
 
       // 3. Build approximate distribution from frequency × totalCount.
-      //    No per-combination /counts/posts.json queries here — the SWR
-      //    background fetch below supplies exact values without blocking
-      //    the initial render.
-      const slices = buildDistributionApprox(filtered, totalTagCount);
-      const approxResult = distributionToCountMap(slices);
-
-      // 4. SWR: kick off exact per-combination count fetches in the
-      //    background. Fire-and-forget; callers that opted in via
-      //    `opts.onExactCounts` receive the refined map when ready.
-      if (opts.onExactCounts && slices.length > 0) {
-        void this.revalidateRelatedTagCounts(
-          tagName,
-          slices,
-          opts.onExactCounts,
-        );
-      }
-
-      return approxResult;
+      //    No per-combination /counts/posts.json queries here.
+      return distributionToCountMap(
+        buildDistributionApprox(filtered, totalTagCount),
+      );
     } catch (e) {
       log.warn(`Failed to fetch ${catName} distribution`, {error: e});
       return null;
@@ -1204,46 +1187,57 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Background refetch of exact per-combination counts (SWR swap-in).
-   *
-   * Runs 10 parallel `/counts/posts.json` queries through the rate-limited
-   * queue; per-slice failures keep the approximate count instead. Errors
-   * are logged at debug level so a noisy network doesn't spam the console.
+   * Exact counts for a related-tag pie, one `/counts/posts.json` per slice
+   * (`<tag> <related tag>`, up to 10). Run when the pie's tab is opened,
+   * not with every analysis (T-307). A slice whose count fails keeps its
+   * approximation and makes the result incomplete, so the caller can try
+   * again later. The "others" slice is an estimate by nature and passes
+   * through.
    */
-  private async revalidateRelatedTagCounts(
+  async fetchExactRelatedCounts(
     tagName: string,
-    slices: DistributionSlice[],
-    onExactCounts: (counts: Record<string, number>) => void,
-  ): Promise<void> {
-    try {
-      const fetchable = slices.filter(s => !s.isOther);
-      const resolved: Record<string, number> = {};
-
-      await Promise.all(
-        fetchable.map(async slice => {
+    approx: Record<string, number>,
+  ): Promise<{counts: Record<string, number>; complete: boolean}> {
+    const counts: Record<string, number> = {...approx};
+    let complete = true;
+    await Promise.all(
+      Object.keys(approx)
+        .filter(key => key !== 'others')
+        .map(async key => {
           try {
-            resolved[slice.key] = await fetchRemoteCount(
+            counts[key] = await fetchRemoteCount(
               this.rateLimiter,
-              `${tagName} ${slice.key}`,
+              `${tagName} ${key}`,
             );
           } catch (e) {
-            log.debug('SWR exact count fetch failed, keeping approx', {
-              tag: slice.key,
+            complete = false;
+            log.debug('Exact related count failed, keeping approx', {
+              tag: key,
               error: e,
             });
-            resolved[slice.key] = slice.count;
           }
         }),
-      );
+    );
+    return {counts, complete};
+  }
 
-      // Pass-through the "Others" slice — it's already an aggregate
-      // estimate from (1 - cumulative frequency) × totalCount.
-      const others = slices.find(s => s.isOther);
-      if (others) resolved[others.key] = others.count;
-
-      onExactCounts(resolved);
+  /**
+   * Merges `patch` into this tag's cached report without touching its age,
+   * so a later refinement (exact related counts, T-307) outlives the page.
+   * Nothing is written when there is no current (UTC-history) report: a
+   * run that was not saved, e.g. a partial history, stays unsaved.
+   */
+  async patchCachedReport(patch: Partial<TagAnalyticsMeta>): Promise<void> {
+    if (!this.db?.tag_analytics) return;
+    try {
+      const record = await this.db.tag_analytics.get(this.tagName);
+      if (!record || !hasUtcHistory(record.data)) return;
+      await this.db.tag_analytics.put({
+        ...record,
+        data: {...record.data, ...patch},
+      });
     } catch (e) {
-      log.debug('SWR revalidation aborted', {error: e});
+      log.warn('Cache patch failed', {error: e});
     }
   }
 
