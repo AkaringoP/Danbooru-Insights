@@ -420,21 +420,23 @@ function makeSyncUser(overrides: Partial<TargetUser> = {}): TargetUser {
   };
 }
 
+/** The fetch of {@link makeSyncRateLimiter}: one URL, a Response-like reply. */
+type SyncFetch = (url: string) => Promise<{
+  ok: boolean;
+  status: number;
+  json: () => Promise<unknown>;
+  headers?: {get(name: string): string | null};
+}>;
+
 /** Build a minimal rate-limiter mock for syncAllPosts tests. */
-function makeSyncRateLimiter(
-  fetchImpl?: (url: string) => Promise<{
-    ok: boolean;
-    status: number;
-    json: () => Promise<unknown>;
-  }>,
-) {
-  const defaultFetch = async () => ({
+function makeSyncRateLimiter(fetchImpl?: SyncFetch) {
+  const defaultFetch: SyncFetch = async () => ({
     ok: true,
     status: 200,
     json: async () => [],
   });
   return {
-    fetch: vi.fn(fetchImpl ?? defaultFetch),
+    fetch: vi.fn<SyncFetch>(fetchImpl ?? defaultFetch),
     getRequestCount: vi.fn(() => 0),
     backoffRemainingMs: vi.fn(() => 0),
     trafficSummary: vi.fn(() => ({
@@ -1306,6 +1308,170 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       // The full segment cannot tell it was the last: one more page says so.
       expect(asked).toContain(`${SYNC_SEGMENT_PAGES}/1`);
       expect(asked).not.toContain(`0/${SYNC_SEGMENT_PAGES + 1}`);
+    });
+  });
+
+  // T-402: the sync asks for the fields the local pies need, and a run that
+  // wrote all of a user's rows records that in sync_meta.
+  describe('fields version 2 and sync_meta (T-402)', () => {
+    const DATE = 'Sat, 14 Nov 2026 13:53:29 GMT';
+    const apiPost = {
+      id: 7,
+      uploader_id: 42,
+      created_at: '2026-11-01T10:00:00.000+09:00',
+      updated_at: '2026-11-10T12:00:00.000+09:00',
+      up_score: 3,
+      down_score: -1,
+      rating: 's',
+      is_pending: true,
+      is_flagged: false,
+      tag_count: 31,
+      tag_count_general: 20,
+      tag_string_character: 'hakurei_reimu',
+      tag_string_copyright: 'touhou',
+    };
+
+    function makeSyncMeta() {
+      const rows = new Map<number, Record<string, unknown>>();
+      return {
+        rows,
+        get: vi.fn(async (k: number) => rows.get(k)),
+        put: vi.fn(async (r: Record<string, unknown>) => {
+          rows.set(r.userId as number, r);
+        }),
+      };
+    }
+
+    /** One post on page 1, then an empty page; `failPage2` answers 400. */
+    function serve(failPage2 = false) {
+      const asked: string[] = [];
+      const rl = makeSyncRateLimiter(async (url: string) => {
+        if (url.includes('/counts/posts.json')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({counts: {posts: 1}}),
+          };
+        }
+        asked.push(url);
+        const q = new URLSearchParams(url.split('?')[1]);
+        const first = q.get('page') === '1' || q.get('page') === 'a0';
+        if (!first && failPage2) {
+          return {ok: false, status: 400, json: async () => ({})};
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => (first ? [apiPost] : []),
+          headers: {get: (n: string) => (n === 'date' ? DATE : null)},
+        };
+      });
+      return {rl, asked};
+    }
+
+    function setUp(
+      rows: Record<string, unknown>[],
+      rl: ReturnType<typeof makeSyncRateLimiter>,
+    ) {
+      vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+      vi.stubGlobal('document', {
+        body: {dataset: {currentUserTimeZone: 'Asia/Seoul'}},
+      });
+      const syncMeta = makeSyncMeta();
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable(rows), {sync_meta: syncMeta}) as never,
+        rl as never,
+      );
+      vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+      vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+      const written = () =>
+        vi
+          .mocked(quotaManager.bulkPutSafe)
+          .mock.calls.flatMap(c => c[1] as Record<string, unknown>[]);
+      return {adm, syncMeta, written};
+    }
+
+    it('asks for the tag fields, not variants, and stores them under short names', async () => {
+      const {rl, asked} = serve();
+      const {adm, written} = setUp([], rl);
+
+      await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      const only = new URLSearchParams(asked[0].split('?')[1]).get('only');
+      expect(only?.split(',')).toEqual(
+        expect.arrayContaining([
+          'updated_at',
+          'is_pending',
+          'is_flagged',
+          'tag_count',
+          'tag_string_character',
+          'tag_string_copyright',
+        ]),
+      );
+      expect(only).not.toContain('variants');
+      expect(written()[0]).toMatchObject({
+        id: 7,
+        no: 1,
+        score: 2,
+        upd: Date.parse('2026-11-10T12:00:00.000+09:00'),
+        pend: true,
+        flag: false,
+        tc: 31,
+        chr: 'hakurei_reimu',
+        cpy: 'touhou',
+      });
+    });
+
+    it('records fields version 2, the server time of the first page and the time zone after a sync from the start', async () => {
+      const {rl} = serve();
+      const {adm, syncMeta} = setUp([], rl);
+
+      await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      expect(syncMeta.rows.get(42)).toEqual({
+        userId: 42,
+        fieldsVersion: 2,
+        changeWatermark: Date.parse(DATE),
+        timeZone: 'Asia/Seoul',
+      });
+    });
+
+    it('records nothing after a run that failed', async () => {
+      const {rl} = serve(true);
+      const {adm, syncMeta} = setUp([], rl);
+
+      const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      expect(outcome.complete).toBe(false);
+      expect(syncMeta.put).not.toHaveBeenCalled();
+    });
+
+    it('records nothing after a resume sync, which re-fetches only the last month', async () => {
+      const {rl, asked} = serve();
+      const {adm, syncMeta} = setUp(
+        [
+          {id: 900, uploader_id: 42, created_at: '2025-03-01T00:00:00Z'},
+          {id: 100, uploader_id: 42, created_at: '2024-01-01T00:00:00Z'},
+        ],
+        rl,
+      );
+
+      await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      expect(asked[0]).toContain(encodeURIComponent('id:>100'));
+      expect(syncMeta.put).not.toHaveBeenCalled();
+    });
+
+    it('records it after a quick sync, which always rewrites every row', async () => {
+      const {rl} = serve();
+      const {adm, syncMeta} = setUp([], rl);
+
+      await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+      expect(syncMeta.rows.get(42)).toMatchObject({
+        fieldsVersion: 2,
+        changeWatermark: Date.parse(DATE),
+      });
     });
   });
 

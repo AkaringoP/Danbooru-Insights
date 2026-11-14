@@ -369,6 +369,22 @@ export interface PostRecord {
   file_url?: string;
   tag_string_copyright?: string;
   tag_string_character?: string;
+
+  // Fields version 2 (T-402), under short names: IndexedDB stores the key
+  // names in every row. Absent on rows from before; `sync_meta.fieldsVersion`
+  // says whether all of a user's rows hold them.
+  /** `updated_at`, ms since epoch (server clock). */
+  upd?: number;
+  /** `is_pending`. */
+  pend?: boolean;
+  /** `is_flagged`. */
+  flag?: boolean;
+  /** `tag_count` (tags of every category). */
+  tc?: number;
+  /** `tag_string_character` (space-separated). */
+  chr?: string;
+  /** `tag_string_copyright` (space-separated). */
+  cpy?: string;
 }
 
 /**
@@ -534,6 +550,8 @@ export interface CreatedTagItem {
 export interface DanbooruPost {
   id: number;
   created_at: string;
+  /** Last change to the post (tags, rating, status…), ISO with offset. */
+  updated_at?: string;
   uploader_id: number;
   rating: string;
 
@@ -543,6 +561,8 @@ export interface DanbooruPost {
   down_score?: number;
   fav_count?: number;
   tag_count_general?: number;
+  /** Tags of every category. */
+  tag_count?: number;
 
   // Status flags (modern post schema)
   is_deleted?: boolean;

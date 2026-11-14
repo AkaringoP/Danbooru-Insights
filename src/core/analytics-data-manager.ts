@@ -1,5 +1,11 @@
 import {CountUnavailableError, DataManager} from './data-manager';
+import {
+  POST_FIELDS_VERSION,
+  SYNC_POST_FIELDS,
+  toPostRecord,
+} from './post-record';
 import {fitsViewerTagLimit} from './search-terms';
+import {patchSyncMeta, responseServerTime, viewerTimeZone} from './sync-meta';
 import type {ApiItem} from './data-manager';
 import type {Database} from './database';
 import type {RateLimitedFetch} from './rate-limiter';
@@ -4204,6 +4210,9 @@ export class AnalyticsDataManager extends DataManager {
       const seenIds = new Set<number>();
       let lastSeenId = startId;
       let segmentStartId = startId;
+      // The server's clock at the first page: the rows reflect Danbooru as
+      // of then at the latest (T-402's change watermark).
+      let firstResponseAt: number | null = null;
       for (;;) {
         let pageOffset = 1;
         let hasMore = true;
@@ -4234,6 +4243,9 @@ export class AnalyticsDataManager extends DataManager {
               seenIds.add(id);
               if (id > lastSeenId) lastSeenId = id;
             }
+          },
+          noteResponse: resp => {
+            firstResponseAt ??= responseServerTime(resp, Date.now());
           },
           reportProgress,
           perfStats,
@@ -4276,6 +4288,7 @@ export class AnalyticsDataManager extends DataManager {
         committed: currentNo,
         reportProgress,
         succeeded: !pageFailed,
+        firstResponseAt: firstResponseAt ?? syncStartedAt,
       });
 
       perfStats.finalCurrentNo = currentNo;
@@ -4465,6 +4478,8 @@ export class AnalyticsDataManager extends DataManager {
     setHasMore: (v: boolean) => void;
     markFailed: () => void;
     markSeen: (ids: number[]) => void;
+    /** Called with every successful page response (its `Date` header). */
+    noteResponse: (resp: Response) => void;
     reportProgress: (c: number, t: number, msg?: string) => void;
     perfStats: {pagesCommitted: number};
   }): (workerId: number) => Promise<void> {
@@ -4483,6 +4498,7 @@ export class AnalyticsDataManager extends DataManager {
       setHasMore,
       markFailed,
       markSeen,
+      noteResponse,
       reportProgress,
       perfStats,
     } = args;
@@ -4519,7 +4535,7 @@ export class AnalyticsDataManager extends DataManager {
               limit: String(limit),
               page: String(currentPage),
               tags: `user:${userInfo.name.replace(/ /g, '_')} order:id id:>${startId}`,
-              only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
+              only: SYNC_POST_FIELDS,
             };
             const q = new URLSearchParams(params);
             const url = `/posts.json?${q.toString()}`;
@@ -4542,6 +4558,7 @@ export class AnalyticsDataManager extends DataManager {
                   signal: controller.signal,
                 });
                 if (!fetchResp.ok) throw new Error(`HTTP ${fetchResp.status}`);
+                noteResponse(fetchResp);
                 items = await fetchResp.json();
                 break; // Success
               } catch (err: unknown) {
@@ -4588,25 +4605,9 @@ export class AnalyticsDataManager extends DataManager {
 
               if (batchItems && batchItems.length > 0) {
                 // Assign Sequential Numbers
-                const bulkData = batchItems.map((p: DanbooruPost) => {
-                  const ds = p.down_score ?? 0;
-                  const us = p.up_score ?? 0;
-                  return {
-                    id: p.id,
-                    uploader_id: p.uploader_id,
-                    created_at: p.created_at,
-                    score: us + ds,
-                    up_score: us,
-                    down_score: ds,
-                    is_deleted: p.is_deleted ?? false,
-                    is_banned: p.is_banned ?? false,
-                    rating: p.rating,
-                    tag_count_general: p.tag_count_general ?? 0,
-                    variants: p.variants,
-                    preview_file_url: p.preview_file_url,
-                    no: bumpCurrentNo(),
-                  };
-                });
+                const bulkData = batchItems.map((p: DanbooruPost) =>
+                  toPostRecord(p, bumpCurrentNo()),
+                );
 
                 perfLogger.start(bulkPutLabel);
                 await bulkPutSafe(this.db.posts, bulkData, () =>
@@ -4682,6 +4683,8 @@ export class AnalyticsDataManager extends DataManager {
     committed: number;
     reportProgress: (c: number, t: number, msg?: string) => void;
     succeeded: boolean;
+    /** Server time of the run's first page response (ms). */
+    firstResponseAt: number;
   }): Promise<void> {
     const {
       userInfo,
@@ -4691,6 +4694,7 @@ export class AnalyticsDataManager extends DataManager {
       committed,
       reportProgress,
       succeeded,
+      firstResponseAt,
     } = args;
 
     // Completion claims are only written when every page landed. Stamping
@@ -4708,6 +4712,7 @@ export class AnalyticsDataManager extends DataManager {
       // lack the metadata — in that case the backfill mechanism handles them.
       if (startId === 0) {
         localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
+        await this.recordFullSyncMeta(uploaderId, firstResponseAt);
       }
     }
 
@@ -4734,6 +4739,24 @@ export class AnalyticsDataManager extends DataManager {
     // browser for persistent storage so this user's analytics survive
     // Safari ITP / Chrome eviction heuristics. Idempotent across calls.
     await requestPersistence();
+  }
+
+  /**
+   * After a sync that wrote every one of the user's rows from the first
+   * post on (T-402): the rows hold fields version 2, reflect Danbooru as of
+   * the run's first response, and carry `created_at` strings in the
+   * viewer's current time zone. A resume sync, which re-fetches only the
+   * last month, changes none of the three.
+   */
+  private async recordFullSyncMeta(
+    uploaderId: number,
+    firstResponseAt: number,
+  ): Promise<void> {
+    await patchSyncMeta(this.db, uploaderId, {
+      fieldsVersion: POST_FIELDS_VERSION,
+      changeWatermark: firstResponseAt,
+      timeZone: viewerTimeZone(),
+    });
   }
 
   /**
@@ -4787,6 +4810,7 @@ export class AnalyticsDataManager extends DataManager {
       let page = 'a0';
       let hasMore = true;
       let no = 0;
+      let firstResponseAt: number | null = null;
 
       while (hasMore) {
         perfLogger.start('dbi:db:sync:quick:page');
@@ -4796,15 +4820,15 @@ export class AnalyticsDataManager extends DataManager {
           tags: `user:${normalizedName}`,
           limit: String(limit),
           page,
-          only: 'id,uploader_id,created_at,up_score,down_score,is_deleted,is_banned,rating,tag_count_general,variants,preview_file_url',
+          only: SYNC_POST_FIELDS,
         });
         const url = `/posts.json?${params.toString()}`;
 
         reportProgress(no, total, `Fetching posts (${no}/${total})...`);
 
-        const batch: DanbooruPost[] = await this.rateLimiter
-          .fetch(url)
-          .then((r: Response) => r.json());
+        const resp = await this.rateLimiter.fetch(url);
+        firstResponseAt ??= responseServerTime(resp, Date.now());
+        const batch: DanbooruPost[] = await resp.json();
 
         if (!Array.isArray(batch) || batch.length === 0) {
           perfLogger.end('dbi:db:sync:quick:page', {
@@ -4823,25 +4847,7 @@ export class AnalyticsDataManager extends DataManager {
         }
 
         // Store batch with sequential no values
-        const bulkData = batch.map((p: DanbooruPost) => {
-          const ds = p.down_score ?? 0;
-          const us = p.up_score ?? 0;
-          return {
-            id: p.id,
-            uploader_id: p.uploader_id,
-            created_at: p.created_at,
-            score: us + ds,
-            up_score: us,
-            down_score: ds,
-            is_deleted: p.is_deleted ?? false,
-            is_banned: p.is_banned ?? false,
-            rating: p.rating,
-            tag_count_general: p.tag_count_general ?? 0,
-            variants: p.variants,
-            preview_file_url: p.preview_file_url,
-            no: ++no,
-          };
-        });
+        const bulkData = batch.map((p: DanbooruPost) => toPostRecord(p, ++no));
 
         perfLogger.start('dbi:db:sync:quick:bulkPut');
         await bulkPutSafe(this.db.posts, bulkData, () =>
@@ -4874,6 +4880,8 @@ export class AnalyticsDataManager extends DataManager {
       // fields directly from the API, so every post record now has the
       // new metadata (down_score, is_deleted, is_banned).
       localStorage.setItem(`di_post_metadata_v2_${uploaderId}`, '1');
+      // Every row was rewritten from the first post on (T-402).
+      await this.recordFullSyncMeta(uploaderId, firstResponseAt ?? Date.now());
 
       // 5. Cleanup stale data for other users
       await this.cleanupStaleData(userInfo.id);
