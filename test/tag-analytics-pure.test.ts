@@ -217,62 +217,6 @@ describe('calculateHistoryFromPosts', () => {
 });
 
 // ---------------------------------------------------------------------------
-// mergeHistory
-// ---------------------------------------------------------------------------
-describe('mergeHistory', () => {
-  it('returns newHistory when oldHistory is empty', () => {
-    const newH = [{date: '2024-01-01', count: 5, cumulative: 5}];
-    expect(dataService.mergeHistory([], newH)).toEqual(newH);
-    expect(dataService.mergeHistory(null, newH)).toEqual(newH);
-  });
-
-  it('returns oldHistory when newHistory is empty', () => {
-    const oldH = [{date: '2024-01-01', count: 5, cumulative: 5}];
-    expect(dataService.mergeHistory(oldH, [])).toEqual(oldH);
-    expect(dataService.mergeHistory(oldH, null)).toEqual(oldH);
-  });
-
-  it('merges without duplicating overlapping months', () => {
-    const oldH = [
-      {date: '2024-01-01', count: 10, cumulative: 10},
-      {date: '2024-02-01', count: 5, cumulative: 15},
-      {date: '2024-03-01', count: 8, cumulative: 23},
-    ];
-    const newH = [
-      {date: '2024-03-01', count: 12, cumulative: 0}, // overlap: updated count
-      {date: '2024-04-01', count: 3, cumulative: 0},
-    ];
-
-    const merged = dataService.mergeHistory(oldH, newH);
-    const dates = merged.map((h: HistoryEntry) => h.date);
-
-    // No duplicate months
-    expect(new Set(dates).size).toBe(dates.length);
-    // Old data preserved up to overlap point
-    expect(dates).toContain('2024-01-01');
-    expect(dates).toContain('2024-02-01');
-    // New data replaces from overlap point
-    expect(dates).toContain('2024-03-01');
-    expect(dates).toContain('2024-04-01');
-  });
-
-  it('recalculates cumulative from scratch', () => {
-    const oldH = [
-      {date: '2024-01-01', count: 10, cumulative: 10},
-      {date: '2024-02-01', count: 5, cumulative: 15},
-    ];
-    const newH = [
-      {date: '2024-03-01', count: 7, cumulative: 999}, // wrong cumulative
-    ];
-
-    const merged = dataService.mergeHistory(oldH, newH);
-    expect(merged[0].cumulative).toBe(10);
-    expect(merged[1].cumulative).toBe(15);
-    expect(merged[2].cumulative).toBe(22);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // mergeMilestones
 // ---------------------------------------------------------------------------
 describe('mergeMilestones', () => {

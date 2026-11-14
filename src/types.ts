@@ -821,6 +821,12 @@ export interface MonthlyCountRecord {
   count: number;
   /** Fetch timestamp in ms since epoch. */
   fetchedAt: number;
+  /**
+   * `'utc'` for counts of a UTC calendar month (written since T-303).
+   * Older rows counted the month in the viewer's time zone and are not
+   * read back. Not indexed, so adding it needed no schema version.
+   */
+  basis?: 'utc';
 }
 
 /**
@@ -875,6 +881,21 @@ export interface SyncOutcome {
   started: boolean;
 }
 
+/** One of the four report rankings of a tag page. */
+export type RankingSlot =
+  | 'uploaderAll'
+  | 'approverAll'
+  | 'uploaderYear'
+  | 'approverYear';
+
+/**
+ * Posts per slice of a tag-page count pie (status, rating, commentary,
+ * translation). `null` is a count that could not be had — lost after its
+ * retry, a `null` from Danbooru, or over the viewer's search tag limit and
+ * never asked. It shows as unknown and is never read as 0 (T-308).
+ */
+export type TagCountMap = Record<string, number | null>;
+
 /** Complete tag analytics metadata. */
 export interface TagAnalyticsMeta {
   name: string;
@@ -895,6 +916,12 @@ export interface TagAnalyticsMeta {
   hundredthPost?: DanbooruPost;
   timeToHundred?: number;
   historyData: HistoryEntry[];
+  /**
+   * `'utc'` when `historyData` counts UTC calendar months (reports and
+   * UTC-bounded counts, T-302). Records without it predate that and count
+   * months in the viewer's time zone; see `hasUtcHistory`.
+   */
+  historyBasis?: 'utc';
   precalculatedMilestones: MilestoneEntry[];
   rankings: {
     uploader: {
@@ -908,12 +935,24 @@ export interface TagAnalyticsMeta {
       first100: UserRanking[];
     };
   };
-  statusCounts: Record<string, number>;
-  ratingCounts: Record<string, number>;
-  commentaryCounts?: Record<string, number>;
-  translationCounts?: Record<string, number>;
+  /**
+   * Report rankings Danbooru did not return, with nothing cached in their
+   * place: their list is empty and shows as unavailable, not as "No Data"
+   * (a logged-out search of a large tag times out after 3 seconds).
+   */
+  rankingsFailed?: RankingSlot[];
+  statusCounts: TagCountMap;
+  ratingCounts: TagCountMap;
+  commentaryCounts?: TagCountMap;
+  translationCounts?: TagCountMap;
   copyrightCounts?: Record<string, number>;
   characterCounts?: Record<string, number>;
+  /**
+   * Which related-tag pies hold exact counts. A large tag's are related-tag
+   * approximations until the user opens that tab, which counts them
+   * (T-307); a small tag's are counted from its posts. Absent = approximate.
+   */
+  relatedCountsExact?: {copyright?: boolean; character?: boolean};
   latestPost?: DanbooruPost;
   trendingPost?: DanbooruPost;
   trendingPostNSFW?: DanbooruPost;

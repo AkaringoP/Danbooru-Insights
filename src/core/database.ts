@@ -200,12 +200,14 @@ export class Database extends Dexie {
     // - tag_monthly_counts: persist per-tag, per-month post counts so
     //   revisits only refetch the current + previous month (matches the
     //   existing Delta sync rescan window). Compound PK `[tag+yearMonth]`,
-    //   `tag` index for bulk per-tag reads, `fetchedAt` for distance-based
-    //   TTL eviction. See `MonthlyCountRecord` in types.ts.
+    //   `tag` index for bulk per-tag reads and deletes, `fetchedAt` for the
+    //   distance-based TTL (checked on read). Rows go with their tag's report
+    //   and in the tag page's daily sweep (T-309). See `MonthlyCountRecord`.
     // - tag_implications_cache: global cache for top-level flags (core/top-level-tags).
     //   `tag_implications` is effectively immutable; caching here lets
     //   `fetchRelatedTagDistribution` skip up to 20 API calls per session.
-    //   PK is `tagName` (global, not per-analytics-target).
+    //   PK is `tagName` (global, not per-analytics-target). `fetchedAt` is
+    //   the 180-day TTL, which `pruneImplicationCache` deletes by (T-309).
     // `tag_analytics.lastFullScanAt` is a new schemaless field (no index)
     // for the 90-day forced-rescan policy; added in types.ts only.
     this.version(12).stores({

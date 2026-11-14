@@ -1,8 +1,20 @@
 import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
+import {
+  monthPostsQuery,
+  utcDateString,
+  utcMonthStartOf,
+} from '../core/monthly-report';
+import {isAnonymousViewer} from '../core/search-terms';
 import {createBodyTooltip} from '../ui/popover-utils';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
 import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
+
+import {
+  commentaryCountQueries,
+  lockedCountKeys,
+  translationCountQueries,
+} from './tag-analytics-data';
 
 const log = createLogger('TagAnalyticsCharts');
 import type {
@@ -10,8 +22,180 @@ import type {
   TagAnalyticsMeta,
   MilestoneEntry,
   HistoryEntry,
+  RankingSlot,
   UserRanking,
 } from '../types';
+
+/** Slice keys double as the search suffix their click opens. */
+const COMMENTARY_UNTAGGED = 'has:commentary -commentary -commentary_request';
+const TRANSLATION_UNTAGGED =
+  '*_text -english_text -translation_request -translated';
+
+/** Legend tooltip of a slice whose count could not be had (T-308). */
+const UNKNOWN_COUNT_TITLE = 'Unknown: Danbooru did not return this count.';
+/** Legend tooltip of a slice the viewer's search tag limit keeps from being counted. */
+const LOCKED_COUNT_TITLE =
+  'Locked: this count needs a 3-tag search, over your search tag limit. ' +
+  'Log in to see it.';
+/** In place of a pie whose every slice is locked. */
+const LOCKED_PIE_MESSAGE =
+  '🔒 Locked: these counts need 3-tag searches, over your search tag ' +
+  'limit. Log in to see them.';
+
+const SLICE_NAMES: Record<string, Record<string, string>> = {
+  rating: {g: 'General', s: 'Sensitive', q: 'Questionable', e: 'Explicit'},
+  commentary: {
+    commentary: 'Commentary',
+    commentary_request: 'Requested',
+    [COMMENTARY_UNTAGGED]: 'Untagged',
+  },
+  translation: {
+    translated: 'Translated',
+    translation_request: 'Requested',
+    [TRANSLATION_UNTAGGED]: 'Untagged',
+  },
+};
+
+/**
+ * Which slices of the commentary / translation pie each key of
+ * `commentaryCounts` / `translationCounts` feeds.
+ */
+const SLICES_BY_COUNT: Record<string, Record<string, string[]>> = {
+  commentary: {
+    total: [COMMENTARY_UNTAGGED],
+    translated: ['commentary', COMMENTARY_UNTAGGED],
+    requested: ['commentary_request', COMMENTARY_UNTAGGED],
+  },
+  translation: {
+    translated: ['translated'],
+    requested: ['translation_request'],
+    untagged: [TRANSLATION_UNTAGGED],
+  },
+};
+
+/** One slice of a tag-page pie, before it is drawn. */
+export interface PieSlice {
+  key: string;
+  name: string;
+  /** `null`: the count could not be had (T-308) — listed, not drawn. */
+  count: number | null;
+  /** The viewer's search tag limit kept the count from being asked. */
+  locked: boolean;
+}
+
+const countOrNull = (v: number | null | undefined): number | null =>
+  typeof v === 'number' && !Number.isNaN(v) ? v : null;
+
+/** The counts a pie draws, by slice key; null when the report has none. */
+function pieCounts(
+  type: string,
+  tagData: TagAnalyticsMeta,
+): Record<string, number | null | undefined> | null {
+  if (type === 'status') return tagData.statusCounts;
+  if (type === 'rating') return tagData.ratingCounts;
+  if (type === 'copyright') return tagData.copyrightCounts ?? null;
+  if (type === 'character') return tagData.characterCounts ?? null;
+  if (type === 'commentary') {
+    const c = tagData.commentaryCounts ?? {};
+    const total = countOrNull(c.total);
+    const translated = countOrNull(c.translated);
+    const requested = countOrNull(c.requested);
+    const untagged =
+      total === null || translated === null || requested === null
+        ? null
+        : Math.max(0, total - translated - requested);
+    return {
+      commentary: translated,
+      commentary_request: requested,
+      [COMMENTARY_UNTAGGED]: untagged,
+    };
+  }
+  if (type === 'translation') {
+    // Keys mirror the search the click opens (as the user side's
+    // `untagged_translation`), so the click handler passes them through.
+    const tr = tagData.translationCounts ?? {};
+    return {
+      translated: tr.translated,
+      translation_request: tr.requested,
+      [TRANSLATION_UNTAGGED]: tr.untagged,
+    };
+  }
+  return null;
+}
+
+/** Slices of the commentary or translation pie the viewer cannot count. */
+function lockedSlices(type: string, tagName: string): Set<string> {
+  const feeds = SLICES_BY_COUNT[type];
+  if (!feeds) return new Set();
+  const queries =
+    type === 'commentary'
+      ? commentaryCountQueries(tagName)
+      : translationCountQueries(tagName);
+  return new Set([...lockedCountKeys(queries)].flatMap(k => feeds[k] ?? []));
+}
+
+function sliceName(type: string, key: string): string {
+  if (key === 'others') return 'Others';
+  if (type === 'status') return key.charAt(0).toUpperCase() + key.slice(1);
+  const names = SLICE_NAMES[type];
+  if (names) return names[key] ?? key;
+  return key.replace(/_/g, ' ');
+}
+
+/**
+ * The slices of a tag-page pie: known counts above 0 by size, then the
+ * unknown ones (T-308: listed with "—", or "🔒" when the viewer's tag limit
+ * kept them from being asked, and drawn with no share), then "others".
+ * Null when the report has no counts for this pie.
+ */
+export function buildPieSlices(
+  type: string,
+  tagData: TagAnalyticsMeta,
+): PieSlice[] | null {
+  const counts = pieCounts(type, tagData);
+  if (!counts) return null;
+  const locked = lockedSlices(type, tagData.name);
+  const rank = (s: PieSlice) =>
+    s.key === 'others' ? 2 : s.count === null ? 1 : 0;
+  return Object.entries(counts)
+    .map(([key, raw]): PieSlice => {
+      const count = countOrNull(raw);
+      return {
+        key,
+        name: sliceName(type, key),
+        count,
+        locked: count === null && locked.has(key),
+      };
+    })
+    .filter(s => s.count === null || s.count > 0)
+    .sort((a, b) => rank(a) - rank(b) || (b.count ?? 0) - (a.count ?? 0));
+}
+
+/** In place of a report ranking a logged-out viewer did not get. */
+const RANKING_FAILED_ANONYMOUS =
+  'Danbooru timed out on this ranking: logged-out searches stop after ' +
+  '3 seconds. Log in to see it.';
+/** In place of a report ranking a logged-in viewer did not get. */
+const RANKING_FAILED =
+  'Danbooru could not return this ranking. It is fetched again on the ' +
+  'next analysis.';
+
+/** Whether the `role` ranking for `period` came back failed. */
+export function rankingFailed(
+  tagData: TagAnalyticsMeta,
+  role: 'uploader' | 'approver',
+  period: 'All' | 'Year',
+): boolean {
+  const slot: RankingSlot = `${role}${period}`;
+  return !!tagData.rankingsFailed?.includes(slot);
+}
+
+/** What a pie with nothing to draw shows instead. */
+function emptyPieMessage(type: string, slices: PieSlice[]): string {
+  if (slices.some(s => s.locked)) return LOCKED_PIE_MESSAGE;
+  if (slices.length > 0) return `Could not load the ${type} counts.`;
+  return `No ${type} data available.`;
+}
 
 /**
  * Chart renderer for TagAnalyticsApp.
@@ -54,10 +238,11 @@ export class TagAnalyticsChartRenderer {
    * @param {string} type - The type of data to render ('status', 'rating', 'copyright', 'character', 'commentary').
    * @param {Object} tagData - The full tag data object containing counts and other metadata.
    */
-  // T-26 baseline: 258 LOC / complexity 22. D3 arc + label + tooltip +
-  // legend + click + percentile sub-flows in one method. Decomposition
-  // candidate; parallel to user-side renderPieWidget (T-23).
-  // eslint-disable-next-line max-lines-per-function, complexity
+  // T-26 baseline: 258 LOC. D3 arc + label + tooltip + legend + click
+  // sub-flows in one method (the count preparation moved out to
+  // `buildPieSlices`, T-308). Decomposition candidate; parallel to
+  // user-side renderPieWidget (T-23).
+  // eslint-disable-next-line max-lines-per-function
   renderPieChart(type: string, tagData: TagAnalyticsMeta): void {
     const container = document.getElementById('status-pie-chart');
     const legendContainer = document.getElementById('status-pie-legend');
@@ -66,87 +251,17 @@ export class TagAnalyticsChartRenderer {
 
     if (!container || !tagData) return;
 
-    let counts = null;
-    if (type === 'status') counts = tagData.statusCounts;
-    else if (type === 'rating') counts = tagData.ratingCounts;
-    else if (type === 'copyright') counts = tagData.copyrightCounts;
-    else if (type === 'character') counts = tagData.characterCounts;
-    else if (type === 'commentary') {
-      // Transform Commentary Counts
-      const c = tagData.commentaryCounts;
-      const translated = c?.translated || 0;
-      const requested = c?.requested || 0;
-      const total = c?.total || 0;
-      const untagged = Math.max(0, total - (translated + requested)); // Avoid negative
-
-      counts = {
-        commentary: translated,
-        commentary_request: requested,
-        'has:commentary -commentary -commentary_request': untagged,
-      };
-    } else if (type === 'translation') {
-      // Transform Translation Counts. Keys mirror the search query used on
-      // click (matches user-side `untagged_translation` pattern) so the
-      // chart click handler can pass them through unchanged.
-      const tr = tagData.translationCounts;
-      counts = {
-        translated: tr?.translated || 0,
-        translation_request: tr?.requested || 0,
-        '*_text -english_text -translation_request -translated':
-          tr?.untagged || 0,
-      };
-    }
-    if (!counts) return;
-
-    const ratingLabels: Record<string, string> = {
-      g: 'General',
-      s: 'Sensitive',
-      q: 'Questionable',
-      e: 'Explicit',
-    };
-
-    // Safe Data Mapping
-    const data = Object.entries(counts)
-      .map(([key, count]) => {
-        let name = key;
-        if (type === 'status')
-          name = key.charAt(0).toUpperCase() + key.slice(1);
-        else if (type === 'rating') name = ratingLabels[key] || key;
-        else if (type === 'commentary') {
-          if (key === 'commentary') name = 'Commentary';
-          else if (key === 'commentary_request') name = 'Requested';
-          else if (key === 'has:commentary -commentary -commentary_request')
-            name = 'Untagged';
-        } else if (type === 'translation') {
-          if (key === 'translated') name = 'Translated';
-          else if (key === 'translation_request') name = 'Requested';
-          else if (
-            key === '*_text -english_text -translation_request -translated'
-          )
-            name = 'Untagged';
-        } else name = key.replace(/_/g, ' ');
-
-        if (key === 'others') name = 'Others';
-
-        // Ensure count is a number and valid
-        const validCount = Number(count);
-        return {
-          name: name,
-          count: isNaN(validCount) ? 0 : validCount,
-          key: key,
-        };
-      })
-      .filter(d => d.count > 0)
-      .sort((a, b) => {
-        if (a.key === 'others') return 1;
-        if (b.key === 'others') return -1;
-        return b.count - a.count;
-      }); // Sort by count desc, but others last
+    const slices = buildPieSlices(type, tagData);
+    if (!slices) return;
+    // Only known counts are drawn; unknown ones are listed (T-308).
+    const data = slices.filter(
+      (s): s is PieSlice & {count: number} => s.count !== null,
+    );
 
     if (data.length === 0) {
       if (loading) {
         loading.style.display = 'block';
-        loading.textContent = `No ${type} data available.`;
+        loading.textContent = emptyPieMessage(type, slices);
       }
       if (wrapper) wrapper.style.opacity = '0';
       return;
@@ -338,7 +453,7 @@ export class TagAnalyticsChartRenderer {
     // Legend
     if (legendContainer) {
       legendContainer.innerHTML = '';
-      data.forEach(d => {
+      slices.forEach(d => {
         const item = document.createElement('div');
         item.style.display = 'flex';
         item.style.alignItems = 'center';
@@ -379,7 +494,12 @@ export class TagAnalyticsChartRenderer {
           label.style.cursor = 'default';
         }
 
-        label.textContent = `${d.name} (${d.count.toLocaleString()})`;
+        if (d.count === null) {
+          label.textContent = `${d.name} (${d.locked ? '🔒' : '—'})`;
+          label.title = d.locked ? LOCKED_COUNT_TITLE : UNKNOWN_COUNT_TITLE;
+        } else {
+          label.textContent = `${d.name} (${d.count.toLocaleString()})`;
+        }
         label.style.textDecoration = 'none';
         label.style.color = 'var(--di-text-secondary, #666)';
         label.style.transition = 'color 0.2s';
@@ -677,6 +797,17 @@ export class TagAnalyticsChartRenderer {
     titleEl.style.textAlign = 'left'; // Left aligned
     titleEl.style.borderLeft = '4px solid var(--di-link, #007bff)';
     titleEl.style.paddingLeft = '10px';
+    // The bars are UTC calendar months (T-305), which can differ from the
+    // viewer's own month near its edges.
+    const utcNote = document.createElement('span');
+    utcNote.textContent = 'UTC';
+    utcNote.title =
+      'Months are UTC calendar months. Clicking a month opens the posts of that UTC month.';
+    utcNote.style.marginLeft = '6px';
+    utcNote.style.fontSize = '11px';
+    utcNote.style.fontWeight = 'normal';
+    utcNote.style.color = 'var(--di-text-muted, #888)';
+    titleEl.appendChild(utcNote);
     container.appendChild(titleEl);
 
     // 2. Main Wrapper (Flexbox to separate Fixed Y and Scrollable Content)
@@ -771,16 +902,11 @@ export class TagAnalyticsChartRenderer {
     // 4. Clickable Monthly Overlays (Full height clickable area)
     const overlayGroups = svg.append('g').attr('class', 'monthly-overlays');
     data.forEach(d => {
-      // HistoryEntry.date is always a YYYY-MM-DD string
+      // HistoryEntry.date is always a YYYY-MM-01 string: a UTC month. The
+      // click opens exactly that UTC month (T-305), not the month in the
+      // viewer's Danbooru time zone that a bare date range would give.
       const dateStr = d.date;
-      const dateObj = new Date(dateStr);
-
-      const nextDate = new Date(dateObj);
-      nextDate.setMonth(nextDate.getMonth() + 1);
-      const nextDateStr = nextDate.toLocaleDateString('en-CA');
-
-      const dateRange = `${dateStr}...${nextDateStr}`;
-      const searchUrl = `/posts?tags=${encodeURIComponent(tagName)}+date:${dateRange}`;
+      const searchUrl = `/posts?tags=${encodeURIComponent(monthPostsQuery(tagName, dateStr))}`;
 
       const colWidth = x.step();
       // Use the string date key for x-scale lookup
@@ -811,7 +937,9 @@ export class TagAnalyticsChartRenderer {
           window.open(searchUrl, '_blank');
         })
         .append('title')
-        .text(`${dateStr}\nCount: ${d.count.toLocaleString()}`);
+        .text(
+          `${dateStr.slice(0, 7)} (UTC)\nCount: ${d.count.toLocaleString()}`,
+        );
     });
 
     // 4. Bars
@@ -858,9 +986,10 @@ export class TagAnalyticsChartRenderer {
         if (!m.post) return;
         if (m.milestone !== 1 && m.milestone % 1000 !== 0) return;
 
-        const pDate = new Date(m.post.created_at);
-        // Use local date methods to match fetchMonthlyCounts buckets
-        const mKey = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}-01`; // Match string format
+        // The UTC month, like the bars. The browser's month put a post
+        // from the first or last hours of a month on the neighbouring bar.
+        const mKey = utcMonthStartOf(m.post.created_at);
+        if (!mKey) return;
         if (!milestonesByMonth[mKey]) milestonesByMonth[mKey] = [];
         milestonesByMonth[mKey].push(m);
       });
@@ -914,10 +1043,12 @@ export class TagAnalyticsChartRenderer {
               .style('pointer-events', 'all')
               .text('★');
 
+            // The UTC date, like the star's bar and the milestone card;
+            // the browser's date could show the next or previous day.
             star
               .append('title')
               .text(
-                `Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})`,
+                `Milestone #${m.milestone} (${utcDateString(new Date(m.post.created_at))})`,
               );
           });
         }
@@ -925,10 +1056,12 @@ export class TagAnalyticsChartRenderer {
     }
 
     // X Axis
+    // Year ticks on January, read from the `YYYY-MM-01` keys themselves:
+    // parsing them as dates put the ticks on February west of UTC.
     const xAxis = d3
       .axisBottom(x)
-      .tickValues(x.domain().filter(d => new Date(d).getMonth() === 0)) // Parse string to Date for month check
-      .tickFormat(d => d3.timeFormat('%Y')(new Date(d))); // Parse string to Date for formatting
+      .tickValues(x.domain().filter((d: string) => d.slice(5, 7) === '01'))
+      .tickFormat((d: string) => d.slice(0, 4));
 
     svg
       .append('g')
@@ -1106,7 +1239,9 @@ export class TagAnalyticsChartRenderer {
           if (!d) return;
 
           const dateObj = new Date(d.date);
-          const dateStr = dateObj.toLocaleDateString('en-CA');
+          // The month key as is: a local date showed the previous month's
+          // last day west of UTC.
+          const dateStr = d.date;
 
           focus.attr(
             'transform',
@@ -1143,12 +1278,19 @@ export class TagAnalyticsChartRenderer {
       {name: string; level: string; id?: number | string}
     >,
     limitId: string | number | null = null,
+    failed = false,
   ): string {
     if (!data || data.length === 0) {
+      // A report Danbooru did not return is not "nobody" (T-205 follow-up).
+      const empty = failed
+        ? isAnonymousViewer()
+          ? RANKING_FAILED_ANONYMOUS
+          : RANKING_FAILED
+        : 'No Data';
       return `
           <div class="di-card-sm">
               <h4 style="margin: 0 0 10px 0; font-size: 0.9em; color: var(--di-text-secondary, #666); text-align: center; border-bottom: 1px solid var(--di-border-input, #ddd); padding-bottom: 5px;">${title}</h4>
-              <div style="text-align: center; color: var(--di-text-faint, #999); font-size: 0.8em; padding: 20px 0;">No Data</div>
+              <div class="di-ranking-empty" style="text-align: center; color: var(--di-text-faint, #999); font-size: 0.8em; padding: 20px 8px;">${empty}</div>
           </div>`;
     }
 
@@ -1227,8 +1369,8 @@ export class TagAnalyticsChartRenderer {
     const limitId = tagData.hundredthPost ? tagData.hundredthPost.id : null;
 
     container.innerHTML = `
-          ${this.renderRankingColumn('All-time', rData.allTime, role, tagData.name, userNames)}
-          ${this.renderRankingColumn('Last 1 Year', rData.year, role, tagData.name, userNames)}
+          ${this.renderRankingColumn('All-time', rData.allTime, role, tagData.name, userNames, null, rankingFailed(tagData, rankRole, 'All'))}
+          ${this.renderRankingColumn('Last 1 Year', rData.year, role, tagData.name, userNames, null, rankingFailed(tagData, rankRole, 'Year'))}
           ${this.renderRankingColumn('First 100 Post', rData.first100, role, tagData.name, userNames, limitId)}
 `;
   }

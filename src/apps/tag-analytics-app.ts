@@ -4,7 +4,6 @@ import {
   applyDashboardTheme,
   resolveEffectiveDashboardTheme,
 } from '../ui/theme-palette';
-import {fetchRemoteCount} from '../core/data-manager';
 import type {RateLimitedFetch} from '../core/rate-limiter';
 import {createModal, type ModalHandle} from '../ui/modal';
 import {
@@ -14,6 +13,7 @@ import {
   DASHBOARD_THEME_SELECT_HTML,
 } from '../ui/popover-utils';
 import {createLogger} from '../core/logger';
+import {firstPostsDateTerm, utcDayOf} from '../core/monthly-report';
 import {escapeHtml, getBestThumbnailUrl} from '../utils';
 import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
 import type {Database} from '../core/database';
@@ -28,18 +28,22 @@ import type {SettingsManager} from '../core/settings';
 import {
   TagAnalyticsDataService,
   cachedRankingResult,
+  hasUnknownCount,
   keepCachedOnFailure,
+  knownCounts,
 } from './tag-analytics-data';
 import type {
   InitialStats,
   LocalStats,
+  MonthlyHistory,
   RankingResult,
 } from './tag-analytics-data';
-import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
+import {TagAnalyticsChartRenderer, rankingFailed} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {showToast} from '../ui/toast';
 import type {
   TagAnalyticsMeta,
+  TagCountMap,
   DanbooruPost,
   UserRanking,
   HistoryEntry,
@@ -48,8 +52,17 @@ import type {
 
 const log = createLogger('TagAnalytics');
 
-/** fetchMonthlyCounts attaches historyCutoff to the returned array object. */
-type MonthlyHistoryData = HistoryEntry[] & {historyCutoff?: string};
+/**
+ * Posts the search for a renamed tag's older first posts must hold: twice
+ * the 100 a large tag's first page asks for, since the history counts every
+ * status and the post search can hide a few (banned posts).
+ */
+const OLDER_POSTS_RANGE = 200;
+
+/** Footer line of the tag dashboard: its dates and months are UTC. */
+const TAG_HISTORY_UTC_NOTE =
+  'Dates are in UTC, and the monthly history counts UTC calendar months; ' +
+  'clicking a month opens that UTC month.';
 
 /** Result from _checkCache(). null = served from cache (caller should return). */
 interface CacheCheckResult {
@@ -59,25 +72,25 @@ interface CacheCheckResult {
 
 /** Quick stats fetched in Phase 1 of the large-tag path. */
 interface QuickStatsResult {
-  statusCounts: Record<string, number>;
+  statusCounts: TagCountMap;
   latestPost: DanbooruPost | null;
   newPostCount: number;
   trendingPost: DanbooruPost | null;
   trendingPostNSFW: DanbooruPost | null;
   copyrightCounts: Record<string, number> | null;
   characterCounts: Record<string, number> | null;
-  commentaryCounts: Record<string, number>;
-  translationCounts: Record<string, number>;
+  commentaryCounts: TagCountMap;
+  translationCounts: TagCountMap;
 }
 
 /** Promise bundle built by _buildHeavyStatPromises(). */
 interface HeavyStatPromises {
-  historyPromise: Promise<HistoryEntry[]>;
+  historyPromise: Promise<MonthlyHistory>;
   milestonesPromise: Promise<MilestoneEntry[]>;
   first100StatsPromise: Promise<LocalStats | undefined>;
 }
 
-/** Mutable container for backward-scan first-100 stats override. */
+/** Mutable container for the older-posts first-100 stats override. */
 interface First100Override {
   value: LocalStats | null;
 }
@@ -168,7 +181,7 @@ export class TagAnalyticsApp {
       if (rawCache) {
         const age = Date.now() - rawCache.updatedAt;
         const isStale = age >= CONFIG.CACHE_EXPIRY_MS;
-        const date = new Date(rawCache.updatedAt).toLocaleDateString();
+        const date = utcDayOf(rawCache.updatedAt) ?? 'N/A';
 
         if (isStale) {
           statusLabel.textContent = `Updated: ${date} · Sync needed`;
@@ -195,7 +208,7 @@ export class TagAnalyticsApp {
   _showUpdatedStatus(updatedAt: number): void {
     const statusLabel = document.getElementById('tag-analytics-status');
     if (!statusLabel) return;
-    const date = new Date(updatedAt).toLocaleDateString();
+    const date = utcDayOf(updatedAt) ?? 'N/A';
     statusLabel.textContent = `Updated: ${date}`;
     statusLabel.style.color = '#28a745';
     statusLabel.style.display = 'inline';
@@ -288,10 +301,6 @@ export class TagAnalyticsApp {
    * Cache-first path: load cache, update volatile data if fresh, render.
    * @returns null if served from cache (caller should return), otherwise delta info.
    */
-  // T-26 baseline: complexity 16. Cache miss × time-expired × diff-threshold
-  // × volatile-refresh × v9.6 count TTL × cache-write branches all live in
-  // this orchestrator. Splitting risks dropping render order guarantees.
-  // eslint-disable-next-line complexity
   private async _checkCache(): Promise<CacheCheckResult | null> {
     const tagName = this.tagName;
     const cachedData = await this.dataService.loadFromCache();
@@ -341,37 +350,7 @@ export class TagAnalyticsApp {
       cachedData.trendingPostNSFW = trendingPostNSFW ?? undefined;
       cachedData.newPostCount = newPostCount24h;
 
-      // v9.6: refresh the deferred count overlays (statusCounts +
-      // ratingCounts) when the per-user count-cache TTL has elapsed
-      // since the last overlay refresh. Falls back to `updatedAt` for
-      // pre-v9.6 records that have no countsUpdatedAt stamp.
-      const countsTtlMs = getCountCacheTtlMs();
-      const countsAnchor =
-        cachedData.countsUpdatedAt ?? cachedData.updatedAt ?? 0;
-      const countsAge = Date.now() - countsAnchor;
-      if (countsAge > countsTtlMs) {
-        log.debug(
-          `Refreshing deferred counts: age ${(countsAge / 60000).toFixed(1)}m > ttl ${(countsTtlMs / 60000).toFixed(1)}m`,
-        );
-        this.injectAnalyticsButton(
-          null,
-          80,
-          'Refreshing status and rating counts...',
-        );
-        const startDate =
-          cachedData.historyData && cachedData.historyData.length > 0
-            ? new Date(cachedData.historyData[0].date)
-                .toISOString()
-                .split('T')[0]
-            : null;
-        const [freshStatus, freshRating] = await Promise.all([
-          this.dataService.fetchStatusCounts(tagName),
-          this.dataService.fetchRatingCounts(tagName, startDate),
-        ]);
-        cachedData.statusCounts = freshStatus;
-        cachedData.ratingCounts = freshRating;
-        this.dataService.markCountsRefreshed();
-      }
+      await this._refreshCountOverlays(cachedData);
 
       await this.dataService.saveToCache(cachedData);
     } catch (e) {
@@ -383,6 +362,61 @@ export class TagAnalyticsApp {
     this.toggleModal(true);
     this.renderDashboard(cachedData);
     return null; // Served from cache
+  }
+
+  /**
+   * v9.6: refreshes the deferred count overlays (statusCounts +
+   * ratingCounts) of a cached report when the per-user count-cache TTL has
+   * elapsed since their last refresh. Falls back to `updatedAt` for pre-v9.6
+   * records that have no countsUpdatedAt stamp.
+   *
+   * A fresh pie that lost a count does not replace a whole cached one, and
+   * the refresh is only stamped when both came back whole (T-308).
+   */
+  private async _refreshCountOverlays(
+    cachedData: TagAnalyticsMeta,
+  ): Promise<void> {
+    const countsTtlMs = getCountCacheTtlMs();
+    const countsAnchor =
+      cachedData.countsUpdatedAt ?? cachedData.updatedAt ?? 0;
+    const countsAge = Date.now() - countsAnchor;
+    if (countsAge <= countsTtlMs) return;
+    log.debug(
+      `Refreshing deferred counts: age ${(countsAge / 60000).toFixed(1)}m > ttl ${(countsTtlMs / 60000).toFixed(1)}m`,
+    );
+    this.injectAnalyticsButton(
+      null,
+      80,
+      'Refreshing status and rating counts...',
+    );
+    const startDate =
+      cachedData.historyData && cachedData.historyData.length > 0
+        ? new Date(cachedData.historyData[0].date).toISOString().split('T')[0]
+        : null;
+    const [freshStatus, freshRating] = await Promise.all([
+      this.dataService.fetchStatusCounts(this.tagName),
+      this.dataService.fetchRatingCounts(this.tagName, startDate),
+    ]);
+    cachedData.statusCounts = knownCounts(freshStatus, cachedData.statusCounts);
+    cachedData.ratingCounts = knownCounts(freshRating, cachedData.ratingCounts);
+    this._markCountsRefreshedIfWhole(freshStatus, freshRating);
+  }
+
+  /**
+   * Stamps the status and rating overlays as refreshed (`countsUpdatedAt`)
+   * only when neither lost a count, so what stands in for a lost one (the
+   * kept earlier pie, or `null`) is not taken as freshly counted: the
+   * earlier stamp stays and a later open asks again (T-308).
+   */
+  private _markCountsRefreshedIfWhole(
+    status: TagCountMap,
+    rating: TagCountMap,
+  ): void {
+    if (hasUnknownCount(status) || hasUnknownCount(rating)) {
+      log.debug('Status or rating counts incomplete, not stamped');
+      return;
+    }
+    this.dataService.markCountsRefreshed();
   }
 
   /**
@@ -527,6 +561,8 @@ export class TagAnalyticsApp {
 
     // Attach Data
     meta.historyData = historyData;
+    // calculateHistoryFromPosts buckets by UTC month.
+    meta.historyBasis = 'utc';
     meta.firstPost = firstPost ?? undefined;
     meta.hundredthPost = hundredthPost ?? undefined;
     meta.timeToHundred = timeToHundred ?? undefined;
@@ -534,9 +570,9 @@ export class TagAnalyticsApp {
     meta.commentaryCounts = commentaryCounts;
     meta.translationCounts = translationCounts;
     meta.ratingCounts = localStatsAllTime.ratingCounts;
-    // v9.6: small-tag path produces statusCounts + ratingCounts from
-    // local aggregation in this turn, so stamp the overlay as fresh.
-    this.dataService.markCountsRefreshed();
+    // v9.6: small-tag path produces statusCounts + ratingCounts in this
+    // turn, so stamp the overlay as fresh — unless a status count was lost.
+    this._markCountsRefreshedIfWhole(meta.statusCounts, meta.ratingCounts);
     meta.precalculatedMilestones = milestones;
     meta.latestPost = latestPost ?? undefined;
     meta.newPostCount = newPostCount;
@@ -638,14 +674,15 @@ export class TagAnalyticsApp {
         characterMap2[name] = count;
       });
     meta.characterCounts = characterMap2;
+    // Counted from every post of the tag: nothing to refine on the tabs.
+    meta.relatedCountsExact = {copyright: true, character: true};
   }
 
   /**
    * Re-renders the pie chart if its currently-active tab matches `type`.
-   * Used by the related-tag SWR swap to replace approximate counts with
-   * the exact values once the background `/counts/posts.json` batch
-   * completes. No-ops when the user has navigated to a different tab —
-   * the updated `meta` will be consumed on their next tab switch.
+   * Used when the exact related-tag counts arrive. No-ops when the user has
+   * navigated to a different tab — the updated `meta` will be consumed on
+   * their next tab switch.
    */
   private _rerenderPieIfActive(
     meta: TagAnalyticsMeta,
@@ -768,7 +805,6 @@ export class TagAnalyticsApp {
 
     const first100Override: First100Override = {value: null};
     const heavyPromises = this._buildHeavyStatPromises(
-      meta,
       initialStats,
       runDelta,
       baseData,
@@ -796,9 +832,9 @@ export class TagAnalyticsApp {
       {
         id: 'resolve_names',
         label: 'Resolving usernames...',
-        // first100StatsPromise is now self-contained: it returns either the
-        // backward-scan override (already name-resolved) or a fresh
-        // resolution of the initial first-100. No double-work.
+        // first100StatsPromise is self-contained: it returns the older-posts
+        // override, the cached rankings or a fresh resolution of the
+        // initial first-100 (already name-resolved). No double-work.
         promise: heavyPromises.first100StatsPromise,
       },
     ];
@@ -836,30 +872,25 @@ export class TagAnalyticsApp {
     log.debug('[Phase 2] Awaiting Heavy Stats...');
     const heavyResults = await heavyResultsPromise;
 
-    const [resolvedRankings, historyData, milestones, first100Stats] =
+    const [resolvedRankings, monthlyHistory, milestones, first100Stats] =
       heavyResults as [
-        {
-          uploaderAll: UserRanking[];
-          approverAll: UserRanking[];
-          uploaderYear: UserRanking[];
-          approverYear: UserRanking[];
-        },
-        HistoryEntry[],
+        RankingResult,
+        MonthlyHistory,
         MilestoneEntry[],
         (
           | {uploaderRanking: UserRanking[]; approverRanking: UserRanking[]}
           | undefined
         ),
       ];
+    const historyData = monthlyHistory.history;
 
-    // Backward-scan may have refined firstPost/hundredthPost on initialStats.
-    // Always re-read to pick up the latest (the correctness guard in the
-    // backward-scan block only mutates when fresh posts are available, so
-    // re-reading is safe even when no scan ran).
+    // The older-posts check may have refined firstPost/hundredthPost on
+    // initialStats. Always re-read to pick up the latest (it only mutates
+    // when fresh posts are available, so re-reading is safe either way).
     firstPost = initialStats.firstPost;
     hundredthPost = initialStats.hundredthPost;
     if (first100Override.value) {
-      log.debug('Applying updated First 100 Rankings from backward scan.');
+      log.debug('Applying First 100 Rankings from the older posts.');
     }
 
     const {uploaderAll, approverAll, uploaderYear, approverYear} =
@@ -867,6 +898,7 @@ export class TagAnalyticsApp {
 
     // Assembly (Phase 2 fields)
     meta.historyData = historyData;
+    meta.historyBasis = 'utc';
     meta.precalculatedMilestones = milestones;
     meta.firstPost = firstPost ?? undefined;
     meta.hundredthPost = hundredthPost ?? undefined;
@@ -882,6 +914,9 @@ export class TagAnalyticsApp {
         first100: first100Stats?.approverRanking ?? [],
       },
     };
+    // Shown as unavailable rather than "No Data", and saved so a cache hit
+    // shows the same; the next analysis asks again.
+    meta.rankingsFailed = resolvedRankings.failed;
 
     // --- Phase 3: Deferred Counts (Rating) ---
     const minDate =
@@ -902,8 +937,8 @@ export class TagAnalyticsApp {
     // v9.6: Phase 3 freshly populated both statusCounts (Phase 2) and
     // ratingCounts (this Phase) — mark the overlay so saveToCache stamps
     // countsUpdatedAt and the TTL refresh on the next open compares
-    // against this moment.
-    this.dataService.markCountsRefreshed();
+    // against this moment. Not when one lost a count (T-308).
+    this._markCountsRefreshedIfWhole(meta.statusCounts, ratingCounts);
 
     // --- Single render: all phases complete, fully-populated dashboard ---
     // (ranking SWR below may swap cached-for-fresh ranking entries later,
@@ -930,15 +965,18 @@ export class TagAnalyticsApp {
           aA: meta.rankings?.approver.allTime,
           uY: meta.rankings?.uploader.year,
           aY: meta.rankings?.approver.year,
+          f: meta.rankingsFailed ?? [],
         });
         const freshSignature = JSON.stringify({
           uA: fresh.uploaderAll,
           aA: fresh.approverAll,
           uY: fresh.uploaderYear,
           aY: fresh.approverYear,
+          f: fresh.failed ?? [],
         });
         if (currentSignature !== freshSignature && meta.rankings) {
           log.debug('Ranking SWR: applying fresh report');
+          meta.rankingsFailed = fresh.failed;
           meta.rankings = {
             uploader: {
               allTime: fresh.uploaderAll,
@@ -968,6 +1006,18 @@ export class TagAnalyticsApp {
 
     // --- Finalize ---
     this.injectAnalyticsButton(meta, 100, '');
+    if (monthlyHistory.partial) {
+      // Some month's count was lost and shows as 0. Keep the previous
+      // report instead of saving this one for a day (G-4); the next open
+      // fetches again.
+      showToast({
+        type: 'warn',
+        message:
+          'Some months of the history could not be loaded and show as 0. ' +
+          'This report was not saved; it will be fetched again next time.',
+      });
+      return;
+    }
     await this.dataService.saveToCache(meta);
   }
 
@@ -1016,38 +1066,22 @@ export class TagAnalyticsApp {
     let characterPromise: Promise<Record<string, number> | null> =
       Promise.resolve(null);
 
-    // SWR swap: when the background exact-count fetch completes, replace
-    // the approximate counts on `meta` and re-render the pie chart if the
-    // user is currently viewing that category. Otherwise the update is
-    // invisible until the next tab switch reads fresh `meta` values.
-    const onExactCopyright = (exact: Record<string, number>) => {
-      meta.copyrightCounts = exact;
-      this._rerenderPieIfActive(meta, 'copyright');
-    };
-    const onExactCharacter = (exact: Record<string, number>) => {
-      meta.characterCounts = exact;
-      this._rerenderPieIfActive(meta, 'character');
-    };
-
+    // Approximations only: the exact counts are fetched when the user
+    // opens the Copy / Char tab (_refineRelatedCountsOnce, T-307).
+    meta.relatedCountsExact = {};
     if (meta.category === 1) {
       copyrightPromise = measure(
         'Related Copyrights',
-        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount, {
-          onExactCounts: onExactCopyright,
-        }),
+        this.dataService.fetchRelatedTagDistribution(tagName, 3, totalCount),
       );
       characterPromise = measure(
         'Related Characters',
-        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount, {
-          onExactCounts: onExactCharacter,
-        }),
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
       );
     } else if (meta.category === 3) {
       characterPromise = measure(
         'Related Characters',
-        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount, {
-          onExactCounts: onExactCharacter,
-        }),
+        this.dataService.fetchRelatedTagDistribution(tagName, 4, totalCount),
       );
     }
 
@@ -1119,15 +1153,15 @@ export class TagAnalyticsApp {
       commentaryCounts,
       translationCounts,
     ] = quickResults as [
-      Record<string, number>,
+      TagCountMap,
       DanbooruPost | null,
       number,
       DanbooruPost | null,
       DanbooruPost | null,
       Record<string, number> | null,
       Record<string, number> | null,
-      Record<string, number>,
-      Record<string, number>,
+      TagCountMap,
+      TagCountMap,
     ];
 
     return {
@@ -1145,13 +1179,18 @@ export class TagAnalyticsApp {
 
   /**
    * Builds the heavy stat promise chain (history, milestones, first-100 stats).
-   * Handles delta-sync vs full-fetch branching and the backward history scan.
    *
-   * The backward scan may update `initialStats.firstPost/hundredthPost/timeToHundred`
-   * and `first100Override.value` as side effects.
+   * The history always comes whole from `fetchMonthlyHistory` — one report
+   * for most tags — on a revisit too. The incremental update, the merge
+   * with the cached history and the backward month-by-month scan are gone
+   * (T-303). Milestones still reuse the cached ones on a revisit.
+   *
+   * When the history starts before the first post `fetchInitialStats`
+   * found, {@link _refreshFirstPostsIfOlder} updates
+   * `initialStats.firstPost/hundredthPost/timeToHundred` and
+   * `first100Override.value` as side effects.
    */
   private _buildHeavyStatPromises(
-    meta: TagAnalyticsMeta,
     initialStats: InitialStats,
     runDelta: boolean,
     baseData: TagAnalyticsMeta | null,
@@ -1162,216 +1201,147 @@ export class TagAnalyticsApp {
   ): HeavyStatPromises {
     const tagName = this.tagName;
     const {totalCount} = initialStats;
-    const milestoneTargets = this.dataService.getMilestoneTargets(totalCount);
 
-    let historyPromise: Promise<HistoryEntry[]>;
-    let milestonesPromise: Promise<MilestoneEntry[]> | undefined;
-    let first100StatsPromise: Promise<LocalStats | undefined>;
-
-    if (runDelta && baseData) {
-      // --- Delta path ---
-      const lastHistory = baseData.historyData[baseData.historyData.length - 1];
-      const lastDate = lastHistory
-        ? new Date(lastHistory.date)
-        : (startDate ?? new Date());
-      const deltaStart = new Date(lastDate);
-      deltaStart.setDate(deltaStart.getDate() - 7);
-
-      historyPromise = this.dataService
-        .fetchHistoryDelta(tagName, deltaStart, startDate ?? new Date())
-        .then(delta =>
-          this.dataService.mergeHistory(baseData.historyData, delta),
-        );
-
-      milestonesPromise = historyPromise.then(fullHistory => {
-        return this.dataService
-          .fetchMilestonesDelta(
-            tagName,
-            totalCount,
-            baseData.precalculatedMilestones,
-            fullHistory,
-          )
-          .then(delta =>
-            this.dataService.mergeMilestones(
-              baseData.precalculatedMilestones,
-              delta,
-            ),
-          );
+    const historyPromise = measure(
+      'Monthly History',
+      this.dataService.fetchMonthlyHistory(tagName, {startDate, totalCount}),
+    ).then(async result => {
+      log.debug('Monthly history', {
+        layer: result.layer,
+        partial: result.partial,
+        months: result.history.length,
       });
-    } else {
-      // --- Full path ---
-      historyPromise = measure(
-        'Full History (Monthly)',
-        this.dataService.fetchMonthlyCounts(tagName, startDate ?? new Date(), {
-          isFullScan: true,
-          totalCount,
-        }),
+      await this._refreshFirstPostsIfOlder(
+        result.history,
+        startDate,
+        initialStats,
+        first100Override,
       );
-    }
+      return result;
+    });
 
-    // Chain backward scan onto history
-    historyPromise = historyPromise.then(
-      async (monthlyData: MonthlyHistoryData) => {
-        const forwardTotal =
-          monthlyData && monthlyData.length > 0
-            ? monthlyData[monthlyData.length - 1].cumulative
-            : 0;
-        let referenceTotal = meta.post_count;
-
-        if (monthlyData.historyCutoff) {
-          try {
-            referenceTotal = await fetchRemoteCount(
-              this.rateLimiter,
-              `${tagName} status:any date:<${monthlyData.historyCutoff}`,
-            );
-          } catch (e) {
-            log.warn(
-              'Failed to fetch cutoff total, falling back to meta.post_count',
-              {error: e},
-            );
-          }
-        }
-
-        log.debug(
-          `Reverse Scan Check: ForwardTotal=${forwardTotal}, ReferenceTotal=${referenceTotal}, NeedScan=${forwardTotal < referenceTotal}`,
-        );
-
-        if (forwardTotal < referenceTotal && !runDelta) {
-          this.injectAnalyticsButton(
-            null,
-            undefined,
-            'Scanning history backwards...',
-          );
-          // Phase 7 baseline instrumentation: isolates backward-scan duration
-          // in perf logs (namespace `sync.refreshStats.*`) so we can quantify
-          // the improvement before/after the planned parallelisation.
-          const backwardResult = await measure(
-            'Backward History Scan',
-            this.dataService.fetchHistoryBackwards(
+    const milestonesPromise: Promise<MilestoneEntry[]> =
+      runDelta && baseData
+        ? historyPromise.then(({history}) =>
+            this.dataService
+              .fetchMilestonesDelta(
+                tagName,
+                totalCount,
+                baseData.precalculatedMilestones,
+                history,
+              )
+              .then(delta =>
+                this.dataService.mergeMilestones(
+                  baseData.precalculatedMilestones,
+                  delta,
+                ),
+              ),
+          )
+        : historyPromise.then(({history}) =>
+            this.dataService.fetchMilestones(
               tagName,
-              (startDate ?? new Date()).toISOString().slice(0, 10),
-              referenceTotal,
-              forwardTotal,
+              history,
+              this.dataService.getMilestoneTargets(totalCount),
             ),
           );
 
-          if (backwardResult.length > 0) {
-            const backwardShift =
-              backwardResult[backwardResult.length - 1].cumulative;
-            const adjustedForward = monthlyData.map((h: HistoryEntry) => ({
-              ...h,
-              cumulative: h.cumulative + backwardShift,
-            }));
-            const fullHistory = [...backwardResult, ...adjustedForward];
+    // First-100 rankings are resolved once, after the history, from the
+    // right source: the older posts when the first posts were refreshed,
+    // else the cached rankings on a revisit, else the first 100 found at
+    // the start. Usernames are looked up only for what will be rendered.
+    const cachedRankings = runDelta ? baseData?.rankings : undefined;
+    const first100StatsPromise = historyPromise.then(async () => {
+      if (first100Override.value) return first100Override.value;
+      if (cachedRankings?.uploader?.first100) {
+        initialStats.first100Stats = {
+          uploaderRanking: cachedRankings.uploader.first100,
+          approverRanking: cachedRankings.approver.first100,
+          ratingCounts: {},
+        };
+        return initialStats.first100Stats;
+      }
+      const initial = this.dataService.calculateLocalStats(initialPosts || []);
+      try {
+        return await this.dataService.resolveFirst100Names(initial);
+      } catch (e) {
+        log.warn('Failed to resolve names for initial first-100', {error: e});
+        return initial;
+      }
+    });
 
-            const earliestDateFound = backwardResult[0].date;
-            const realInitialStats = await this.dataService.fetchInitialStats(
-              tagName,
-              null,
-              true,
-              earliestDateFound,
-            );
-            const hasFreshPosts = !!(
-              realInitialStats &&
-              realInitialStats.initialPosts &&
-              realInitialStats.initialPosts.length > 0
-            );
-            if (hasFreshPosts && realInitialStats) {
-              // Only overwrite when the retry fetch actually returned posts —
-              // the empty-fallback return shape of fetchInitialStats omits
-              // firstPost/hundredthPost, so mutating unconditionally would
-              // wipe the good initial values with undefined.
-              initialStats.firstPost = realInitialStats.firstPost;
-              initialStats.hundredthPost = realInitialStats.hundredthPost;
-              initialStats.timeToHundred = realInitialStats.timeToHundred;
-              log.debug('Recalculating First 100 Rankings for older posts...');
-              const newStats = this.dataService.calculateLocalStats(
-                realInitialStats.initialPosts!,
-              );
-              first100Override.value = await this.dataService
-                .resolveFirst100Names(newStats)
-                .catch(e => {
-                  log.warn('Failed to resolve names for older posts', {
-                    error: e,
-                  });
-                  return newStats;
-                });
-            } else {
-              // Silent-wrong-result guard: backward scan found older months,
-              // but the retry /posts.json call came back empty (typically a
-              // 5xx). Without this warning the dashboard displays first-100
-              // rankings from the *initial* fetch window, which excludes the
-              // older posts that backward scan just surfaced.
-              log.warn(
-                'Backward scan surfaced older posts, but the follow-up fetchInitialStats ' +
-                  'call returned no posts — first-100 rankings will reflect the initial ' +
-                  'fetch, not the older posts. Likely a transient server error; re-run ' +
-                  'analysis to recover.',
-                {
-                  tagName,
-                  earliestDateFound,
-                  backwardMonthsFound: backwardResult.length,
-                  retryResult: realInitialStats ? 'empty' : 'null',
-                },
-              );
-            }
-            return fullHistory;
-          }
-        }
-        return monthlyData;
-      },
+    return {historyPromise, milestonesPromise, first100StatsPromise};
+  }
+
+  /**
+   * `fetchInitialStats` looks for the first posts from the day the tag was
+   * created, so posts that carried it before then (a renamed or aliased
+   * tag) are missed. The history counts them, so when its first month is
+   * earlier than the first post found, the first posts are fetched again
+   * from that month: the first post, the 100th post and the first-100
+   * rankings then describe the real start of the tag.
+   *
+   * The condition used to be "the backward month-by-month scan found
+   * older months"; the scan is gone, the history now covers 2005 on.
+   *
+   * The search is the history's narrow UTC range that holds the first
+   * posts (`firstPostsDateTerm`), and a failure is retried once: the open
+   * `date:>=<first month>` over all of touhou (1.1M posts) answered 500 in
+   * a browser check (2026-11-14), leaving the later first posts in place.
+   */
+  private async _refreshFirstPostsIfOlder(
+    history: HistoryEntry[],
+    startDate: Date | undefined,
+    initialStats: InitialStats,
+    first100Override: First100Override,
+  ): Promise<void> {
+    const firstMonth = history[0]?.date.slice(0, 7);
+    const start =
+      startDate && !Number.isNaN(startDate.getTime()) ? startDate : new Date();
+    if (!firstMonth || firstMonth >= start.toISOString().slice(0, 7)) return;
+
+    this.injectAnalyticsButton(
+      null,
+      undefined,
+      'Looking at posts older than the tag...',
     );
-
-    // Milestones chain (full path only — delta path already set above)
-    if (!milestonesPromise) {
-      milestonesPromise = historyPromise.then(monthlyData => {
-        return this.dataService.fetchMilestones(
-          tagName,
-          monthlyData || [],
-          milestoneTargets,
-        );
-      });
+    const dateTerm = firstPostsDateTerm(history, OLDER_POSTS_RANGE);
+    let realInitialStats: InitialStats | null = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      realInitialStats = await this.dataService.fetchInitialStats(
+        this.tagName,
+        null,
+        true,
+        dateTerm,
+      );
+      if (realInitialStats?.initialPosts?.length) break;
     }
-
-    // First-100 rankings resolution is chained on historyPromise so that we
-    // resolve usernames exactly once with the correct source: the
-    // backward-scan override when one was set (rename case), otherwise the
-    // initial first-100 captured before analysis began. Previously the
-    // resolution kicked off in parallel on the initial first-100 and was
-    // discarded when backward-scan later produced an override — burning up
-    // to ~10 /users.json batches on data that would never be rendered.
-    // Dashboard renders atomically, so moving this off the parallel hot
-    // path costs no perceived latency (rankingPromise and historyPromise
-    // remain the long poles).
-    if (runDelta && baseData?.rankings?.uploader?.first100) {
-      initialStats.first100Stats = {
-        uploaderRanking: baseData.rankings.uploader.first100,
-        approverRanking: baseData.rankings.approver.first100,
-        ratingCounts: {},
-      };
-      first100StatsPromise = Promise.resolve(initialStats.first100Stats);
-    } else {
-      first100StatsPromise = historyPromise.then(async () => {
-        if (first100Override.value) return first100Override.value;
-        const initial = this.dataService.calculateLocalStats(
-          initialPosts || [],
-        );
-        try {
-          return await this.dataService.resolveFirst100Names(initial);
-        } catch (e) {
-          log.warn('Failed to resolve names for initial first-100', {
-            error: e,
-          });
-          return initial;
-        }
-      });
+    if (!realInitialStats?.initialPosts?.length) {
+      // The history shows older posts, but fetching them came back empty
+      // twice (typically a 5xx). Without this warning the dashboard shows
+      // the first-100 rankings of the later posts as if they were the first.
+      log.warn(
+        'History starts before the first post found, but fetching the ' +
+          'older posts returned none twice — first-100 rankings reflect ' +
+          'the later posts until the next analysis.',
+        {tagName: this.tagName, dateTerm},
+      );
+      return;
     }
-
-    return {
-      historyPromise,
-      milestonesPromise,
-      first100StatsPromise,
-    };
+    // Only overwrite when the fetch actually returned posts: its empty
+    // fallback omits firstPost/hundredthPost and would wipe the good values.
+    initialStats.firstPost = realInitialStats.firstPost;
+    initialStats.hundredthPost = realInitialStats.hundredthPost;
+    initialStats.timeToHundred = realInitialStats.timeToHundred;
+    log.debug('Recalculating First 100 Rankings for older posts...');
+    const newStats = this.dataService.calculateLocalStats(
+      realInitialStats.initialPosts!,
+    );
+    first100Override.value = await this.dataService
+      .resolveFirst100Names(newStats)
+      .catch(e => {
+        log.warn('Failed to resolve names for older posts', {error: e});
+        return newStats;
+      });
   }
 
   /**
@@ -1882,9 +1852,9 @@ export class TagAnalyticsApp {
               <h2 style="color: ${titleColor};">${escapeHtml(tagData.name.replace(/_/g, ' '))}</h2>
               <div class="di-tag-header-meta">
                   <span class="di-category-badge">${categoryLabel}</span>
-                  <span class="di-tag-header-date">Created: ${tagData.created_at ? new Date(tagData.created_at).toLocaleDateString('en-CA') : 'N/A'}</span>
+                  <span class="di-tag-header-date">Created: ${(tagData.created_at && utcDayOf(tagData.created_at)) || 'N/A'}</span>
                   <span class="di-tag-header-date di-tag-header-date-updated" id="tag-updated-at">
-                      Updated: ${tagData.updatedAt ? new Date(tagData.updatedAt).toLocaleDateString('en-CA') : 'N/A'}
+                      Updated: ${(tagData.updatedAt && utcDayOf(tagData.updatedAt)) || 'N/A'}
                       <span id="tag-settings-anchor"></span>
                   </span>
               </div>
@@ -1920,7 +1890,7 @@ export class TagAnalyticsApp {
             </a>
          </div>
          <div class="di-nsfw-monitor-label">Latest</div>
-         <div class="di-nsfw-monitor-sublabel">${tagData.latestPost.created_at.split('T')[0]}</div>
+         <div class="di-nsfw-monitor-sublabel">${utcDayOf(tagData.latestPost.created_at) ?? ''}</div>
       </div>
     `
       : '';
@@ -2041,8 +2011,8 @@ export class TagAnalyticsApp {
               </div>
            </div>
            <div id="ranking-container">
-              ${this.chartRenderer.renderRankingColumn('All-time', tagData.rankings.uploader.allTime, 'uploader', tagData.name, this.dataService.userNames)}
-              ${this.chartRenderer.renderRankingColumn('Last 1 Year', tagData.rankings.uploader.year, 'uploader', tagData.name, this.dataService.userNames)}
+              ${this.chartRenderer.renderRankingColumn('All-time', tagData.rankings.uploader.allTime, 'uploader', tagData.name, this.dataService.userNames, null, rankingFailed(tagData, 'uploader', 'All'))}
+              ${this.chartRenderer.renderRankingColumn('Last 1 Year', tagData.rankings.uploader.year, 'uploader', tagData.name, this.dataService.userNames, null, rankingFailed(tagData, 'uploader', 'Year'))}
               ${this.chartRenderer.renderRankingColumn('First 100 Post', tagData.rankings.uploader.first100, 'uploader', tagData.name, this.dataService.userNames, hundredthPostId)}
            </div>
       </div>
@@ -2115,7 +2085,7 @@ export class TagAnalyticsApp {
       ${this.buildMainGrid(tagData)}
       ${this.buildRankingsSection(tagData)}
       ${this.buildBottomSections()}
-      ${dashboardFooterHtml()}
+      ${dashboardFooterHtml(TAG_HISTORY_UTC_NOTE)}
     `;
 
     // Inject Header Controls (Settings, Reset)
@@ -2227,8 +2197,52 @@ export class TagAnalyticsApp {
         });
         tab.classList.add('active');
         this.chartRenderer.renderPieChart(newType ?? 'status', tagData);
+        if (newType === 'copyright' || newType === 'character') {
+          void this._refineRelatedCountsOnce(tagData, newType);
+        }
       };
     });
+  }
+
+  /** Related-tag pies whose exact counts are being fetched right now. */
+  private readonly _refiningRelated = new Set<'copyright' | 'character'>();
+
+  /**
+   * Swaps a related-tag pie's approximations for exact counts the first
+   * time its tab is opened (T-307). They used to be counted in the
+   * background on every analysis, up to 10 counts per pie, whether or not
+   * the tab was ever looked at — the most count-hungry part of a tag page.
+   *
+   * Exact counts are kept on the cached report (`relatedCountsExact`), so
+   * opening the tab again, now or from the cache later, counts nothing. A
+   * run where some count failed is not marked exact and is tried again on
+   * the next open.
+   */
+  private async _refineRelatedCountsOnce(
+    meta: TagAnalyticsMeta,
+    type: 'copyright' | 'character',
+  ): Promise<void> {
+    const field = type === 'copyright' ? 'copyrightCounts' : 'characterCounts';
+    const approx = meta[field];
+    if (!approx || meta.relatedCountsExact?.[type]) return;
+    if (this._refiningRelated.has(type)) return;
+    this._refiningRelated.add(type);
+    try {
+      const {counts, complete} = await this.dataService.fetchExactRelatedCounts(
+        this.tagName,
+        approx,
+      );
+      meta[field] = counts;
+      this._rerenderPieIfActive(meta, type);
+      if (!complete) return;
+      meta.relatedCountsExact = {...meta.relatedCountsExact, [type]: true};
+      await this.dataService.patchCachedReport({
+        [field]: counts,
+        relatedCountsExact: meta.relatedCountsExact,
+      });
+    } finally {
+      this._refiningRelated.delete(type);
+    }
   }
 
   /** Binds click handlers to the uploader/approver rank tabs. */
