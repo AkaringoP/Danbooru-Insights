@@ -27,7 +27,9 @@ import type {SettingsManager} from '../core/settings';
 import {
   TagAnalyticsDataService,
   cachedRankingResult,
+  hasUnknownCount,
   keepCachedOnFailure,
+  knownCounts,
 } from './tag-analytics-data';
 import type {
   InitialStats,
@@ -40,6 +42,7 @@ import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {showToast} from '../ui/toast';
 import type {
   TagAnalyticsMeta,
+  TagCountMap,
   DanbooruPost,
   UserRanking,
   HistoryEntry,
@@ -60,15 +63,15 @@ interface CacheCheckResult {
 
 /** Quick stats fetched in Phase 1 of the large-tag path. */
 interface QuickStatsResult {
-  statusCounts: Record<string, number>;
+  statusCounts: TagCountMap;
   latestPost: DanbooruPost | null;
   newPostCount: number;
   trendingPost: DanbooruPost | null;
   trendingPostNSFW: DanbooruPost | null;
   copyrightCounts: Record<string, number> | null;
   characterCounts: Record<string, number> | null;
-  commentaryCounts: Record<string, number>;
-  translationCounts: Record<string, number>;
+  commentaryCounts: TagCountMap;
+  translationCounts: TagCountMap;
 }
 
 /** Promise bundle built by _buildHeavyStatPromises(). */
@@ -289,10 +292,6 @@ export class TagAnalyticsApp {
    * Cache-first path: load cache, update volatile data if fresh, render.
    * @returns null if served from cache (caller should return), otherwise delta info.
    */
-  // T-26 baseline: complexity 16. Cache miss × time-expired × diff-threshold
-  // × volatile-refresh × v9.6 count TTL × cache-write branches all live in
-  // this orchestrator. Splitting risks dropping render order guarantees.
-  // eslint-disable-next-line complexity
   private async _checkCache(): Promise<CacheCheckResult | null> {
     const tagName = this.tagName;
     const cachedData = await this.dataService.loadFromCache();
@@ -342,37 +341,7 @@ export class TagAnalyticsApp {
       cachedData.trendingPostNSFW = trendingPostNSFW ?? undefined;
       cachedData.newPostCount = newPostCount24h;
 
-      // v9.6: refresh the deferred count overlays (statusCounts +
-      // ratingCounts) when the per-user count-cache TTL has elapsed
-      // since the last overlay refresh. Falls back to `updatedAt` for
-      // pre-v9.6 records that have no countsUpdatedAt stamp.
-      const countsTtlMs = getCountCacheTtlMs();
-      const countsAnchor =
-        cachedData.countsUpdatedAt ?? cachedData.updatedAt ?? 0;
-      const countsAge = Date.now() - countsAnchor;
-      if (countsAge > countsTtlMs) {
-        log.debug(
-          `Refreshing deferred counts: age ${(countsAge / 60000).toFixed(1)}m > ttl ${(countsTtlMs / 60000).toFixed(1)}m`,
-        );
-        this.injectAnalyticsButton(
-          null,
-          80,
-          'Refreshing status and rating counts...',
-        );
-        const startDate =
-          cachedData.historyData && cachedData.historyData.length > 0
-            ? new Date(cachedData.historyData[0].date)
-                .toISOString()
-                .split('T')[0]
-            : null;
-        const [freshStatus, freshRating] = await Promise.all([
-          this.dataService.fetchStatusCounts(tagName),
-          this.dataService.fetchRatingCounts(tagName, startDate),
-        ]);
-        cachedData.statusCounts = freshStatus;
-        cachedData.ratingCounts = freshRating;
-        this.dataService.markCountsRefreshed();
-      }
+      await this._refreshCountOverlays(cachedData);
 
       await this.dataService.saveToCache(cachedData);
     } catch (e) {
@@ -384,6 +353,61 @@ export class TagAnalyticsApp {
     this.toggleModal(true);
     this.renderDashboard(cachedData);
     return null; // Served from cache
+  }
+
+  /**
+   * v9.6: refreshes the deferred count overlays (statusCounts +
+   * ratingCounts) of a cached report when the per-user count-cache TTL has
+   * elapsed since their last refresh. Falls back to `updatedAt` for pre-v9.6
+   * records that have no countsUpdatedAt stamp.
+   *
+   * A fresh pie that lost a count does not replace a whole cached one, and
+   * the refresh is only stamped when both came back whole (T-308).
+   */
+  private async _refreshCountOverlays(
+    cachedData: TagAnalyticsMeta,
+  ): Promise<void> {
+    const countsTtlMs = getCountCacheTtlMs();
+    const countsAnchor =
+      cachedData.countsUpdatedAt ?? cachedData.updatedAt ?? 0;
+    const countsAge = Date.now() - countsAnchor;
+    if (countsAge <= countsTtlMs) return;
+    log.debug(
+      `Refreshing deferred counts: age ${(countsAge / 60000).toFixed(1)}m > ttl ${(countsTtlMs / 60000).toFixed(1)}m`,
+    );
+    this.injectAnalyticsButton(
+      null,
+      80,
+      'Refreshing status and rating counts...',
+    );
+    const startDate =
+      cachedData.historyData && cachedData.historyData.length > 0
+        ? new Date(cachedData.historyData[0].date).toISOString().split('T')[0]
+        : null;
+    const [freshStatus, freshRating] = await Promise.all([
+      this.dataService.fetchStatusCounts(this.tagName),
+      this.dataService.fetchRatingCounts(this.tagName, startDate),
+    ]);
+    cachedData.statusCounts = knownCounts(freshStatus, cachedData.statusCounts);
+    cachedData.ratingCounts = knownCounts(freshRating, cachedData.ratingCounts);
+    this._markCountsRefreshedIfWhole(freshStatus, freshRating);
+  }
+
+  /**
+   * Stamps the status and rating overlays as refreshed (`countsUpdatedAt`)
+   * only when neither lost a count, so what stands in for a lost one (the
+   * kept earlier pie, or `null`) is not taken as freshly counted: the
+   * earlier stamp stays and a later open asks again (T-308).
+   */
+  private _markCountsRefreshedIfWhole(
+    status: TagCountMap,
+    rating: TagCountMap,
+  ): void {
+    if (hasUnknownCount(status) || hasUnknownCount(rating)) {
+      log.debug('Status or rating counts incomplete, not stamped');
+      return;
+    }
+    this.dataService.markCountsRefreshed();
   }
 
   /**
@@ -537,9 +561,9 @@ export class TagAnalyticsApp {
     meta.commentaryCounts = commentaryCounts;
     meta.translationCounts = translationCounts;
     meta.ratingCounts = localStatsAllTime.ratingCounts;
-    // v9.6: small-tag path produces statusCounts + ratingCounts from
-    // local aggregation in this turn, so stamp the overlay as fresh.
-    this.dataService.markCountsRefreshed();
+    // v9.6: small-tag path produces statusCounts + ratingCounts in this
+    // turn, so stamp the overlay as fresh — unless a status count was lost.
+    this._markCountsRefreshedIfWhole(meta.statusCounts, meta.ratingCounts);
     meta.precalculatedMilestones = milestones;
     meta.latestPost = latestPost ?? undefined;
     meta.newPostCount = newPostCount;
@@ -906,8 +930,8 @@ export class TagAnalyticsApp {
     // v9.6: Phase 3 freshly populated both statusCounts (Phase 2) and
     // ratingCounts (this Phase) — mark the overlay so saveToCache stamps
     // countsUpdatedAt and the TTL refresh on the next open compares
-    // against this moment.
-    this.dataService.markCountsRefreshed();
+    // against this moment. Not when one lost a count (T-308).
+    this._markCountsRefreshedIfWhole(meta.statusCounts, ratingCounts);
 
     // --- Single render: all phases complete, fully-populated dashboard ---
     // (ranking SWR below may swap cached-for-fresh ranking entries later,
@@ -1119,15 +1143,15 @@ export class TagAnalyticsApp {
       commentaryCounts,
       translationCounts,
     ] = quickResults as [
-      Record<string, number>,
+      TagCountMap,
       DanbooruPost | null,
       number,
       DanbooruPost | null,
       DanbooruPost | null,
       Record<string, number> | null,
       Record<string, number> | null,
-      Record<string, number>,
-      Record<string, number>,
+      TagCountMap,
+      TagCountMap,
     ];
 
     return {

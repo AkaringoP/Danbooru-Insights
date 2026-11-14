@@ -881,6 +881,14 @@ export interface SyncOutcome {
   started: boolean;
 }
 
+/**
+ * Posts per slice of a tag-page count pie (status, rating, commentary,
+ * translation). `null` is a count that could not be had — lost after its
+ * retry, a `null` from Danbooru, or over the viewer's search tag limit and
+ * never asked. It shows as unknown and is never read as 0 (T-308).
+ */
+export type TagCountMap = Record<string, number | null>;
+
 /** Complete tag analytics metadata. */
 export interface TagAnalyticsMeta {
   name: string;
@@ -920,10 +928,10 @@ export interface TagAnalyticsMeta {
       first100: UserRanking[];
     };
   };
-  statusCounts: Record<string, number>;
-  ratingCounts: Record<string, number>;
-  commentaryCounts?: Record<string, number>;
-  translationCounts?: Record<string, number>;
+  statusCounts: TagCountMap;
+  ratingCounts: TagCountMap;
+  commentaryCounts?: TagCountMap;
+  translationCounts?: TagCountMap;
   copyrightCounts?: Record<string, number>;
   characterCounts?: Record<string, number>;
   /**

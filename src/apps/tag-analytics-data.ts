@@ -1,9 +1,10 @@
 import {CONFIG, DAY_MS} from '../config';
 import {
   buildUntaggedTranslationQueries,
+  classifySyncFetchError,
   computeUntaggedTranslation,
 } from '../core/analytics-data-manager';
-import {fetchRemoteCount} from '../core/data-manager';
+import {CountUnavailableError, fetchRemoteCount} from '../core/data-manager';
 import {createLogger} from '../core/logger';
 import {
   MONTHLY_REPORT_FROM,
@@ -19,6 +20,7 @@ import {
 } from '../core/monthly-report';
 import {bulkPutSafe, evictOldestNonCurrentUser} from '../core/quota-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
+import {fitsViewerTagLimit} from '../core/search-terms';
 import {getTopLevelFlags} from '../core/top-level-tags';
 import type {Database} from '../core/database';
 import type {
@@ -31,6 +33,7 @@ import type {
   MilestoneEntry,
   UserRanking,
   TagAnalyticsMeta,
+  TagCountMap,
   MonthlyCountRecord,
 } from '../types';
 
@@ -274,6 +277,108 @@ export function cachedRankingResult(
     uploaderYear: r.uploader?.year,
     approverYear: r.approver?.year,
   };
+}
+
+/**
+ * The count searches behind each key of a tag's `commentaryCounts`. The two
+ * breakdowns search three tags (`has:` counts as one).
+ */
+export function commentaryCountQueries(
+  tagName: string,
+): Record<string, string[]> {
+  return {
+    total: [`${tagName} has:commentary`],
+    translated: [`${tagName} has:commentary commentary`],
+    requested: [`${tagName} has:commentary commentary_request`],
+  };
+}
+
+/**
+ * The count searches behind each key of a tag's `translationCounts`.
+ * Untagged is the inclusion–exclusion of six (`computeUntaggedTranslation`),
+ * four of which search three tags.
+ */
+export function translationCountQueries(
+  tagName: string,
+): Record<string, string[]> {
+  const {t, a, b, c, ab, ac} = buildUntaggedTranslationQueries(tagName);
+  return {
+    translated: [`${tagName} translated`],
+    requested: [`${tagName} translation_request`],
+    untagged: [t, a, b, c, ab, ac],
+  };
+}
+
+/**
+ * Keys of `queries` the viewer cannot count: a search behind them uses more
+ * tags than the viewer's limit (anonymous 2), so Danbooru would answer 422.
+ * They are never asked and show locked (T-308).
+ */
+export function lockedCountKeys(
+  queries: Record<string, string[]>,
+): Set<string> {
+  return new Set(
+    Object.keys(queries).filter(k => !queries[k].every(fitsViewerTagLimit)),
+  );
+}
+
+/** Whether any slice of a count pie could not be had (`null`). */
+export function hasUnknownCount(counts: TagCountMap | undefined): boolean {
+  return !!counts && Object.values(counts).some(v => typeof v !== 'number');
+}
+
+/**
+ * One count pie to keep: `fresh`, unless it lost a count and `previous` has
+ * them all — then `previous`, so a count Danbooru did not return never
+ * replaces one it did (T-308). The pie is kept whole rather than mixed,
+ * since some slices derive from others (active = not deleted − pending −
+ * flagged).
+ */
+export function knownCounts(
+  fresh: TagCountMap,
+  previous: TagCountMap | undefined,
+): TagCountMap {
+  return hasUnknownCount(fresh) && previous && !hasUnknownCount(previous)
+    ? previous
+    : fresh;
+}
+
+/** The count pies of a tag report (T-308). */
+const COUNT_PIES = [
+  'statusCounts',
+  'ratingCounts',
+  'commentaryCounts',
+  'translationCounts',
+] as const;
+
+/**
+ * The report to save: each count pie that lost a count is replaced by the
+ * previous report's when that one is whole ({@link knownCounts}). Without a
+ * whole previous pie the new one is saved with its `null`s, which read as
+ * unknown, never 0. `data` itself is not changed: the open dashboard keeps
+ * showing what this run got.
+ */
+export function keepKnownCounts(
+  data: TagAnalyticsMeta,
+  previous: TagAnalyticsMeta | undefined,
+): TagAnalyticsMeta {
+  if (!previous) return data;
+  let kept: TagAnalyticsMeta | null = null;
+  for (const pie of COUNT_PIES) {
+    const fresh = data[pie];
+    if (!fresh) continue;
+    const counts = knownCounts(fresh, previous[pie]);
+    if (counts !== fresh) {
+      kept ??= {...data};
+      kept[pie] = counts;
+    }
+  }
+  return kept ?? data;
+}
+
+/** Whether `data` has a count pie that lost a count. */
+function hasUnknownPie(data: TagAnalyticsMeta): boolean {
+  return COUNT_PIES.some(pie => hasUnknownCount(data[pie]));
 }
 
 type UserEntry = {name: string; level: string};
@@ -530,6 +635,8 @@ export class TagAnalyticsDataService {
 
   /**
    * Saves the current tag analytics data to the cache with a timestamp.
+   * A count pie that lost a count keeps the saved report's pie when that
+   * one is whole ({@link keepKnownCounts}, T-308).
    * @param {!Object} data The analytics data to cache.
    * @return {Promise<void>}
    */
@@ -542,7 +649,8 @@ export class TagAnalyticsDataService {
       // volatile-data-only saves don't wipe these metadata fields.
       const needExisting =
         this._pendingLastFullScanAt === null ||
-        this._pendingCountsUpdatedAt === null;
+        this._pendingCountsUpdatedAt === null ||
+        hasUnknownPie(data);
       const existing = needExisting
         ? await this.db.tag_analytics.get(this.tagName)
         : null;
@@ -559,7 +667,7 @@ export class TagAnalyticsDataService {
       await this.db.tag_analytics.put({
         tagName: this.tagName,
         updatedAt: Date.now(),
-        data: data,
+        data: keepKnownCounts(data, existing?.data),
         lastFullScanAt,
         countsUpdatedAt,
       });
@@ -920,96 +1028,88 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Fetches `/counts/posts.json` for the given tag query with one bounded
-   * retry on transient failure. Returns 0 if both attempts fail.
+   * One `/counts/posts.json`, or `null` when the count cannot be had
+   * (T-308). Never 0 for "unknown": through v9.11 a failed count came back
+   * as 0 and was drawn and cached as a real one.
+   *
+   * - A search over the viewer's tag limit is not sent (it would be a 422).
+   * - A `null` from the server and any other 4xx are not retried: Danbooru
+   *   caches the `null` for 5 minutes, and a 4xx would come again.
+   * - A 429, 5xx, timeout or network failure is retried once. The retry
+   *   waits in the rate limiter's queue, behind its pause after a 429.
    *
    * @param tagQuery Unencoded tag query string (e.g. `"foo has:commentary"`).
-   * @param retries Number of retries after the first attempt (default 1).
    */
-  async fetchCountWithRetry(
-    tagQuery: string,
-    retries: number = 1,
-  ): Promise<number> {
-    for (let i = 0; i <= retries; i++) {
-      try {
-        return await fetchRemoteCount(this.rateLimiter, tagQuery);
-      } catch (e) {
-        if (i === retries) {
-          log.warn(`Failed to fetch count after ${retries + 1} attempts`, {
-            tagQuery,
-            error: e,
-          });
-          return 0;
-        }
-        await new Promise(r => setTimeout(r, 500));
+  async fetchCountWithRetry(tagQuery: string): Promise<number | null> {
+    if (!fitsViewerTagLimit(tagQuery)) {
+      log.debug('Count over the viewer tag limit, not asked', {tagQuery});
+      return null;
+    }
+    try {
+      return await fetchRemoteCount(this.rateLimiter, tagQuery);
+    } catch (first) {
+      if (
+        first instanceof CountUnavailableError ||
+        classifySyncFetchError(first) === 'fatal'
+      ) {
+        log.warn('Count lost', {tagQuery, error: first});
+        return null;
       }
     }
-    return 0;
+    try {
+      return await fetchRemoteCount(this.rateLimiter, tagQuery);
+    } catch (second) {
+      log.warn('Count lost after a retry', {tagQuery, error: second});
+      return null;
+    }
   }
 
   /**
-   * Fetches commentary-related counts for a tag (Total, Translated, Requested).
-   * @param {string} tagName - The tag to analyze.
-   * @return {Promise<Object>} - Object containing counts for 'total', 'translated', and 'requested'.
-   */
-  async fetchCommentaryCounts(
-    tagName: string,
-  ): Promise<Record<string, number>> {
-    const queries: Record<string, string> = {
-      total: `${tagName} has:commentary`,
-      translated: `${tagName} has:commentary commentary`,
-      requested: `${tagName} has:commentary commentary_request`,
-    };
-
-    const results: Record<string, number> = {};
-
-    const keys = Object.keys(queries);
-    await Promise.all(
-      keys.map(async key => {
-        results[key] = await this.fetchCountWithRetry(queries[key]);
-      }),
-    );
-
-    // [Integrity Check] Ensure all keys exist and are valid numbers
-    keys.forEach(key => {
-      if (results[key] === undefined) {
-        log.warn(`Missing commentary key: ${key}. Defaulting to 0.`);
-        results[key] = 0;
-      }
-    });
-
-    return results;
-  }
-
-  /**
-   * Fetches translation-related counts for a tag: Translated, Requested,
-   * and Untagged. Untagged is computed via the same inclusion-exclusion
-   * formula used on the user side (max(0, t − a − b − c + ab + ac)); the
-   * 6 subqueries each use ≤2 real tags so Member(Blue) accounts work.
+   * Commentary counts of a tag: `total` (has commentary), `translated` and
+   * `requested`; the chart's Untagged is total − translated − requested. A
+   * count that could not be had is `null` (T-308).
    *
-   * @return Object containing counts for 'translated', 'requested', 'untagged'.
+   * The two breakdowns search three tags, over an anonymous viewer's two.
+   * Without them `total` alone shows nothing, so for such a viewer none of
+   * the three is asked and the pie shows locked.
    */
-  async fetchTranslationCounts(
-    tagName: string,
-  ): Promise<Record<string, number>> {
-    const direct: Record<string, string> = {
-      translated: `${tagName} translated`,
-      requested: `${tagName} translation_request`,
-    };
-    const incl = buildUntaggedTranslationQueries(tagName);
+  async fetchCommentaryCounts(tagName: string): Promise<TagCountMap> {
+    const queries = commentaryCountQueries(tagName);
+    const keys = Object.keys(queries);
+    if (lockedCountKeys(queries).size > 0) {
+      return Object.fromEntries(keys.map(k => [k, null]));
+    }
+    const counts = await Promise.all(
+      keys.map(k => this.fetchCountWithRetry(queries[k][0])),
+    );
+    return Object.fromEntries(keys.map((k, i) => [k, counts[i]]));
+  }
 
-    const [translated, requested, t, a, b, c, ab, ac] = await Promise.all([
-      this.fetchCountWithRetry(direct.translated),
-      this.fetchCountWithRetry(direct.requested),
-      this.fetchCountWithRetry(incl.t),
-      this.fetchCountWithRetry(incl.a),
-      this.fetchCountWithRetry(incl.b),
-      this.fetchCountWithRetry(incl.c),
-      this.fetchCountWithRetry(incl.ab),
-      this.fetchCountWithRetry(incl.ac),
+  /**
+   * Translation counts of a tag: `translated`, `requested` and `untagged`,
+   * the last by the same inclusion–exclusion as the user side
+   * (max(0, t − a − b − c + ab + ac)). A count that could not be had is
+   * `null`, and so is `untagged` when any of its six terms is (T-308).
+   *
+   * Four of the six terms search three tags, over an anonymous viewer's
+   * two; for such a viewer none of the six is asked and Untagged shows
+   * locked, while Translated and Requested (two tags each) are counted.
+   */
+  async fetchTranslationCounts(tagName: string): Promise<TagCountMap> {
+    const queries = translationCountQueries(tagName);
+    const untaggedLocked = lockedCountKeys(queries).has('untagged');
+    const [translated, requested, terms] = await Promise.all([
+      this.fetchCountWithRetry(queries.translated[0]),
+      this.fetchCountWithRetry(queries.requested[0]),
+      untaggedLocked
+        ? null
+        : Promise.all(queries.untagged.map(q => this.fetchCountWithRetry(q))),
     ]);
-
-    const untagged = computeUntaggedTranslation({t, a, b, c, ab, ac});
+    let untagged: number | null = null;
+    if (terms && terms.every((n): n is number => n !== null)) {
+      const [t, a, b, c, ab, ac] = terms;
+      untagged = computeUntaggedTranslation({t, a, b, c, ab, ac});
+    }
     return {translated, requested, untagged};
   }
 
@@ -1046,12 +1146,14 @@ export class TagAnalyticsDataService {
    * (`Post.active`), and a post that is pending or flagged is never deleted
    * (deleting clears both) — so active = not deleted − pending − flagged.
    * Pending, flagged, appealed and banned stay counts. When the report
-   * fails, deleted and active are counted as before.
+   * fails, deleted and active are counted as before. A count that could
+   * not be had is `null`, and so is active when pending or flagged is
+   * (T-308).
    *
    * @param {string} tagName - The tag to analyze.
    * @return {Promise<Object>} - Map of status strings to counts.
    */
-  async fetchStatusCounts(tagName: string): Promise<Record<string, number>> {
+  async fetchStatusCounts(tagName: string): Promise<TagCountMap> {
     const deletedGroups = this.fetchReportGroups(
       tagName,
       'is_deleted',
@@ -1066,11 +1168,14 @@ export class TagAnalyticsDataService {
       ...counted.map(s => this.fetchCountWithRetry(`${tagName} status:${s}`)),
     ]);
     const [appealed, banned, flagged, pending] = counts;
-    let deleted: number;
-    let active: number;
+    let deleted: number | null;
+    let active: number | null;
     if (groups) {
       deleted = groups.get('true') ?? 0;
-      active = Math.max(0, (groups.get('false') ?? 0) - pending - flagged);
+      active =
+        pending === null || flagged === null
+          ? null
+          : Math.max(0, (groups.get('false') ?? 0) - pending - flagged);
     } else {
       // Only the two the report was for; the other four are in hand.
       [deleted, active] = await Promise.all([
@@ -1091,7 +1196,7 @@ export class TagAnalyticsDataService {
   async fetchRatingCounts(
     tagName: string,
     startDate: string | null = null,
-  ): Promise<Record<string, number>> {
+  ): Promise<TagCountMap> {
     try {
       const groups = await this.fetchReportGroups(
         tagName,
@@ -1108,33 +1213,25 @@ export class TagAnalyticsDataService {
     return this.countRatings(tagName, startDate);
   }
 
-  /** {@link fetchRatingCounts} with one count per rating (the fallback). */
+  /**
+   * {@link fetchRatingCounts} with one count per rating (the fallback). A
+   * rating that could not be counted is `null` (T-308).
+   */
   private async countRatings(
     tagName: string,
     startDate: string | null,
-  ): Promise<Record<string, number>> {
+  ): Promise<TagCountMap> {
     const ratings = ['g', 's', 'q', 'e'];
-    const results: Record<string, number> = {};
-
-    const tasks = ratings.map(async rating => {
-      let tagQuery = `${tagName} rating:${rating}`;
-      if (startDate) {
-        tagQuery += ` date:>=${startDate}`;
-      }
-      results[rating] = await this.fetchCountWithRetry(tagQuery);
-    });
-
-    await Promise.all(tasks);
-
-    // [Integrity Check] Ensure all keys exist and are valid numbers
-    ratings.forEach(rating => {
-      if (results[rating] === undefined) {
-        log.warn(`Missing rating key: ${rating}. Defaulting to 0.`);
-        results[rating] = 0;
-      }
-    });
-
-    return results;
+    const counts = await Promise.all(
+      ratings.map(rating => {
+        let tagQuery = `${tagName} rating:${rating}`;
+        if (startDate) {
+          tagQuery += ` date:>=${startDate}`;
+        }
+        return this.fetchCountWithRetry(tagQuery);
+      }),
+    );
+    return Object.fromEntries(ratings.map((r, i) => [r, counts[i]]));
   }
 
   /**
