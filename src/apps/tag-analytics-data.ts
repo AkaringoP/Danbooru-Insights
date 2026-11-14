@@ -31,6 +31,7 @@ import type {
   DanbooruRelatedTagResponse,
   HistoryEntry,
   MilestoneEntry,
+  RankingSlot,
   UserRanking,
   TagAnalyticsMeta,
   TagCountMap,
@@ -228,13 +229,6 @@ export type RankingResult = {
   failed?: RankingSlot[];
 };
 
-/** One of the four report rankings in a {@link RankingResult}. */
-type RankingSlot =
-  | 'uploaderAll'
-  | 'approverAll'
-  | 'uploaderYear'
-  | 'approverYear';
-
 const RANKING_SLOTS: readonly RankingSlot[] = [
   'uploaderAll',
   'approverAll',
@@ -246,18 +240,19 @@ const RANKING_SLOTS: readonly RankingSlot[] = [
  * `fresh` with each failed slot filled from `cached`, so a report that
  * failed never replaces a ranking that was there (the empty list would be
  * shown and then saved for a day). A failed slot with nothing cached stays
- * empty and stays listed in `failed`.
+ * empty and stays listed in `failed` — and so does one whose cached list
+ * is itself a failure (listed in the cache's `failed`).
  */
 export function keepCachedOnFailure(
   fresh: RankingResult,
-  cached: Omit<RankingResult, 'failed'> | null,
+  cached: RankingResult | null,
 ): RankingResult {
   if (!fresh.failed?.length) return fresh;
   const out: RankingResult = {...fresh};
   const stillFailed: RankingSlot[] = [];
   for (const slot of fresh.failed) {
     const previous = cached?.[slot];
-    if (previous) out[slot] = previous;
+    if (previous && !cached?.failed?.includes(slot)) out[slot] = previous;
     else stillFailed.push(slot);
   }
   if (stillFailed.length > 0) out.failed = stillFailed;
@@ -265,18 +260,27 @@ export function keepCachedOnFailure(
   return out;
 }
 
-/** The report rankings saved with a cached tag report, or null. */
+/**
+ * The report rankings saved with a cached tag report, or null. Slots the
+ * report saved as failed (`rankingsFailed`) come back in `failed`.
+ */
 export function cachedRankingResult(
-  meta: Pick<TagAnalyticsMeta, 'rankings'> | null | undefined,
+  meta:
+    | Pick<TagAnalyticsMeta, 'rankings' | 'rankingsFailed'>
+    | null
+    | undefined,
 ): RankingResult | null {
   const r = meta?.rankings;
   if (!r) return null;
-  return {
+  const result: RankingResult = {
     uploaderAll: r.uploader?.allTime,
     approverAll: r.approver?.allTime,
     uploaderYear: r.uploader?.year,
     approverYear: r.approver?.year,
   };
+  const failed = RANKING_SLOTS.filter(s => meta?.rankingsFailed?.includes(s));
+  if (failed.length > 0) result.failed = failed;
+  return result;
 }
 
 /**

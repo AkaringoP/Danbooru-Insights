@@ -65,14 +65,29 @@ export function countSearchTerms(query: string): number {
  * the server refuses costs one 422, a request skipped wrongly costs data.
  */
 export function viewerTagLimit(): number {
-  if (typeof document === 'undefined' || !document.body) return Infinity;
+  const level = viewerLevel();
+  if (level === null) return Infinity;
+  if (level >= 30) return Infinity;
+  return level <= 0 ? 2 : 3;
+}
+
+/** `<body data-current-user-level>`, or null when it cannot be read. */
+function viewerLevel(): number | null {
+  if (typeof document === 'undefined' || !document.body) return null;
   const level = Number.parseInt(
     document.body.dataset.currentUserLevel ?? '',
     10,
   );
-  if (!Number.isFinite(level)) return Infinity;
-  if (level >= 30) return Infinity;
-  return level <= 0 ? 2 : 3;
+  return Number.isFinite(level) ? level : null;
+}
+
+/**
+ * Whether the viewer is logged out (level 0). Danbooru gives a logged-out
+ * search 3 seconds before it cancels it (500), a logged-in one 10.
+ */
+export function isAnonymousViewer(): boolean {
+  const level = viewerLevel();
+  return level !== null && level <= 0;
 }
 
 /** Whether the viewer may run `query` without a 422. */

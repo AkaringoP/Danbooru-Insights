@@ -38,7 +38,7 @@ import type {
   MonthlyHistory,
   RankingResult,
 } from './tag-analytics-data';
-import {TagAnalyticsChartRenderer} from './tag-analytics-charts';
+import {TagAnalyticsChartRenderer, rankingFailed} from './tag-analytics-charts';
 import {dashboardFooterHtml} from '../ui/dashboard-footer';
 import {showToast} from '../ui/toast';
 import type {
@@ -874,12 +874,7 @@ export class TagAnalyticsApp {
 
     const [resolvedRankings, monthlyHistory, milestones, first100Stats] =
       heavyResults as [
-        {
-          uploaderAll: UserRanking[];
-          approverAll: UserRanking[];
-          uploaderYear: UserRanking[];
-          approverYear: UserRanking[];
-        },
+        RankingResult,
         MonthlyHistory,
         MilestoneEntry[],
         (
@@ -919,6 +914,9 @@ export class TagAnalyticsApp {
         first100: first100Stats?.approverRanking ?? [],
       },
     };
+    // Shown as unavailable rather than "No Data", and saved so a cache hit
+    // shows the same; the next analysis asks again.
+    meta.rankingsFailed = resolvedRankings.failed;
 
     // --- Phase 3: Deferred Counts (Rating) ---
     const minDate =
@@ -967,15 +965,18 @@ export class TagAnalyticsApp {
           aA: meta.rankings?.approver.allTime,
           uY: meta.rankings?.uploader.year,
           aY: meta.rankings?.approver.year,
+          f: meta.rankingsFailed ?? [],
         });
         const freshSignature = JSON.stringify({
           uA: fresh.uploaderAll,
           aA: fresh.approverAll,
           uY: fresh.uploaderYear,
           aY: fresh.approverYear,
+          f: fresh.failed ?? [],
         });
         if (currentSignature !== freshSignature && meta.rankings) {
           log.debug('Ranking SWR: applying fresh report');
+          meta.rankingsFailed = fresh.failed;
           meta.rankings = {
             uploader: {
               allTime: fresh.uploaderAll,
@@ -2010,8 +2011,8 @@ export class TagAnalyticsApp {
               </div>
            </div>
            <div id="ranking-container">
-              ${this.chartRenderer.renderRankingColumn('All-time', tagData.rankings.uploader.allTime, 'uploader', tagData.name, this.dataService.userNames)}
-              ${this.chartRenderer.renderRankingColumn('Last 1 Year', tagData.rankings.uploader.year, 'uploader', tagData.name, this.dataService.userNames)}
+              ${this.chartRenderer.renderRankingColumn('All-time', tagData.rankings.uploader.allTime, 'uploader', tagData.name, this.dataService.userNames, null, rankingFailed(tagData, 'uploader', 'All'))}
+              ${this.chartRenderer.renderRankingColumn('Last 1 Year', tagData.rankings.uploader.year, 'uploader', tagData.name, this.dataService.userNames, null, rankingFailed(tagData, 'uploader', 'Year'))}
               ${this.chartRenderer.renderRankingColumn('First 100 Post', tagData.rankings.uploader.first100, 'uploader', tagData.name, this.dataService.userNames, hundredthPostId)}
            </div>
       </div>

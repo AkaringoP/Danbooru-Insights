@@ -5,6 +5,7 @@ import {
   utcDateString,
   utcMonthStartOf,
 } from '../core/monthly-report';
+import {isAnonymousViewer} from '../core/search-terms';
 import {createBodyTooltip} from '../ui/popover-utils';
 import {escapeHtml, getLevelClass, getBestThumbnailUrl} from '../utils';
 import {THUMB_FALLBACK_CLASS, installThumbFallback} from '../ui/thumb-fallback';
@@ -21,6 +22,7 @@ import type {
   TagAnalyticsMeta,
   MilestoneEntry,
   HistoryEntry,
+  RankingSlot,
   UserRanking,
 } from '../types';
 
@@ -167,6 +169,25 @@ export function buildPieSlices(
     })
     .filter(s => s.count === null || s.count > 0)
     .sort((a, b) => rank(a) - rank(b) || (b.count ?? 0) - (a.count ?? 0));
+}
+
+/** In place of a report ranking a logged-out viewer did not get. */
+const RANKING_FAILED_ANONYMOUS =
+  'Danbooru timed out on this ranking: logged-out searches stop after ' +
+  '3 seconds. Log in to see it.';
+/** In place of a report ranking a logged-in viewer did not get. */
+const RANKING_FAILED =
+  'Danbooru could not return this ranking. It is fetched again on the ' +
+  'next analysis.';
+
+/** Whether the `role` ranking for `period` came back failed. */
+export function rankingFailed(
+  tagData: TagAnalyticsMeta,
+  role: 'uploader' | 'approver',
+  period: 'All' | 'Year',
+): boolean {
+  const slot: RankingSlot = `${role}${period}`;
+  return !!tagData.rankingsFailed?.includes(slot);
 }
 
 /** What a pie with nothing to draw shows instead. */
@@ -1257,12 +1278,19 @@ export class TagAnalyticsChartRenderer {
       {name: string; level: string; id?: number | string}
     >,
     limitId: string | number | null = null,
+    failed = false,
   ): string {
     if (!data || data.length === 0) {
+      // A report Danbooru did not return is not "nobody" (T-205 follow-up).
+      const empty = failed
+        ? isAnonymousViewer()
+          ? RANKING_FAILED_ANONYMOUS
+          : RANKING_FAILED
+        : 'No Data';
       return `
           <div class="di-card-sm">
               <h4 style="margin: 0 0 10px 0; font-size: 0.9em; color: var(--di-text-secondary, #666); text-align: center; border-bottom: 1px solid var(--di-border-input, #ddd); padding-bottom: 5px;">${title}</h4>
-              <div style="text-align: center; color: var(--di-text-faint, #999); font-size: 0.8em; padding: 20px 0;">No Data</div>
+              <div class="di-ranking-empty" style="text-align: center; color: var(--di-text-faint, #999); font-size: 0.8em; padding: 20px 8px;">${empty}</div>
           </div>`;
     }
 
@@ -1341,8 +1369,8 @@ export class TagAnalyticsChartRenderer {
     const limitId = tagData.hundredthPost ? tagData.hundredthPost.id : null;
 
     container.innerHTML = `
-          ${this.renderRankingColumn('All-time', rData.allTime, role, tagData.name, userNames)}
-          ${this.renderRankingColumn('Last 1 Year', rData.year, role, tagData.name, userNames)}
+          ${this.renderRankingColumn('All-time', rData.allTime, role, tagData.name, userNames, null, rankingFailed(tagData, rankRole, 'All'))}
+          ${this.renderRankingColumn('Last 1 Year', rData.year, role, tagData.name, userNames, null, rankingFailed(tagData, rankRole, 'Year'))}
           ${this.renderRankingColumn('First 100 Post', rData.first100, role, tagData.name, userNames, limitId)}
 `;
   }

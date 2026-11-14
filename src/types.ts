@@ -881,6 +881,13 @@ export interface SyncOutcome {
   started: boolean;
 }
 
+/** One of the four report rankings of a tag page. */
+export type RankingSlot =
+  | 'uploaderAll'
+  | 'approverAll'
+  | 'uploaderYear'
+  | 'approverYear';
+
 /**
  * Posts per slice of a tag-page count pie (status, rating, commentary,
  * translation). `null` is a count that could not be had — lost after its
@@ -928,6 +935,12 @@ export interface TagAnalyticsMeta {
       first100: UserRanking[];
     };
   };
+  /**
+   * Report rankings Danbooru did not return, with nothing cached in their
+   * place: their list is empty and shows as unavailable, not as "No Data"
+   * (a logged-out search of a large tag times out after 3 seconds).
+   */
+  rankingsFailed?: RankingSlot[];
   statusCounts: TagCountMap;
   ratingCounts: TagCountMap;
   commentaryCounts?: TagCountMap;

@@ -23,6 +23,7 @@ import {
   TagAnalyticsDataService,
   type InitialStats,
   type MonthlyHistory,
+  type RankingResult,
 } from '../src/apps/tag-analytics-data';
 
 afterEach(() => {
@@ -263,7 +264,10 @@ describe('fetchInitialStats search', () => {
 });
 
 describe('_fetchLargeTag history', () => {
-  function runLargeTag(history: MonthlyHistory) {
+  function runLargeTag(
+    history: MonthlyHistory,
+    rankingsFailed?: RankingResult['failed'],
+  ) {
     const {app, internals} = makeApp();
     const ds = app.dataService;
     const proto = TagAnalyticsApp.prototype as unknown as Record<
@@ -292,6 +296,7 @@ describe('_fetchLargeTag history', () => {
       approverAll: [],
       uploaderYear: [],
       approverYear: [],
+      ...(rankingsFailed ? {failed: rankingsFailed} : {}),
     });
     const fetchHistory = vi
       .spyOn(ds, 'fetchMonthlyHistory')
@@ -330,6 +335,17 @@ describe('_fetchLargeTag history', () => {
     });
     expect(meta.historyData).toEqual(fullHistory.history);
     expect(meta.historyBasis).toBe('utc');
+    expect(save).toHaveBeenCalledWith(meta);
+  });
+
+  it('saves which rankings Danbooru did not return, so a cache hit shows them as such', async () => {
+    const {done, meta, save} = runLargeTag(fullHistory, [
+      'uploaderAll',
+      'approverAll',
+    ]);
+    await done;
+
+    expect(meta.rankingsFailed).toEqual(['uploaderAll', 'approverAll']);
     expect(save).toHaveBeenCalledWith(meta);
   });
 

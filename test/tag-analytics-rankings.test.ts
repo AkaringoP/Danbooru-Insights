@@ -8,10 +8,14 @@
 import {describe, it, expect, vi, afterEach} from 'vitest';
 import type {Database} from '../src/core/database';
 import type {RateLimitedFetch} from '../src/core/rate-limiter';
-import type {UserRanking} from '../src/types';
+import type {TagAnalyticsMeta, UserRanking} from '../src/types';
 
 vi.mock('d3', () => ({}));
 
+import {
+  TagAnalyticsChartRenderer,
+  rankingFailed,
+} from '../src/apps/tag-analytics-charts';
 import {
   TagAnalyticsDataService,
   cachedRankingResult,
@@ -157,6 +161,26 @@ describe('keepCachedOnFailure', () => {
     expect(out.failed).toEqual(['uploaderAll']);
   });
 
+  it('does not take a cached list that was itself a failure', () => {
+    const fresh: RankingResult = {
+      uploaderAll: [],
+      approverAll: ranking('a', 1),
+      uploaderYear: ranking('b', 1),
+      approverYear: ranking('c', 1),
+      failed: ['uploaderAll'],
+    };
+    const failedBefore: RankingResult = {
+      ...cached,
+      uploaderAll: [],
+      failed: ['uploaderAll'],
+    };
+
+    const out = keepCachedOnFailure(fresh, failedBefore);
+
+    expect(out.uploaderAll).toEqual([]);
+    expect(out.failed).toEqual(['uploaderAll']);
+  });
+
   it('a successful empty ranking does replace the cache (nobody, really)', () => {
     const fresh: RankingResult = {
       uploaderAll: [],
@@ -189,5 +213,61 @@ describe('cachedRankingResult', () => {
   it('is null without a saved report', () => {
     expect(cachedRankingResult(null)).toBeNull();
     expect(cachedRankingResult({} as never)).toBeNull();
+  });
+
+  it('gives back the slots the report saved as failed', () => {
+    const result = cachedRankingResult({
+      rankings: {
+        uploader: {allTime: [], year: [], first100: []},
+        approver: {allTime: [], year: [], first100: []},
+      },
+      rankingsFailed: ['approverYear', 'uploaderAll'],
+    });
+    expect(result?.failed).toEqual(['uploaderAll', 'approverYear']);
+  });
+});
+
+describe('a ranking Danbooru did not return', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const viewer = (level: string) =>
+    vi.stubGlobal('document', {body: {dataset: {currentUserLevel: level}}});
+  const column = (failed: boolean) =>
+    new TagAnalyticsChartRenderer().renderRankingColumn(
+      'All-time',
+      [],
+      'uploader',
+      'touhou',
+      {},
+      null,
+      failed,
+    );
+
+  it('says a logged-out search timed out, instead of "No Data"', () => {
+    viewer('0');
+    const html = column(true);
+    expect(html).toContain('logged-out searches stop after 3 seconds');
+    expect(html).not.toContain('No Data');
+  });
+
+  it('says it is fetched again for a logged-in viewer', () => {
+    viewer('20');
+    expect(column(true)).toContain('could not return this ranking');
+  });
+
+  it('keeps "No Data" for a ranking that came back empty', () => {
+    viewer('0');
+    expect(column(false)).toContain('No Data');
+  });
+
+  it('reads the failed slots of a report by role and period', () => {
+    const meta = {rankingsFailed: ['approverYear']} as TagAnalyticsMeta;
+    expect(rankingFailed(meta, 'approver', 'Year')).toBe(true);
+    expect(rankingFailed(meta, 'approver', 'All')).toBe(false);
+    expect(rankingFailed({} as TagAnalyticsMeta, 'uploader', 'All')).toBe(
+      false,
+    );
   });
 });
