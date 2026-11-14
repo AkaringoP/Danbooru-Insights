@@ -297,6 +297,26 @@ export function shouldCountHttpAsFailure(status: number): boolean {
   return status !== 429;
 }
 
+/**
+ * Whether the stale-data cleanup may delete another user's rows (T-404):
+ * their last completed sync is missing or older than `threshold`, and no
+ * sync of theirs started within it. A first sync that failed leaves no
+ * completion stamp; without the started mark, the next cleanup (at the end
+ * of any other user's sync) deleted what it had committed.
+ */
+export function isStaleUser(
+  lastSyncAt: number | null,
+  syncStartedAt: number | undefined,
+  now: number,
+  threshold: number,
+): boolean {
+  if (syncStartedAt !== undefined && now - syncStartedAt <= threshold) {
+    return false;
+  }
+  if (lastSyncAt === null || Number.isNaN(lastSyncAt)) return true;
+  return now - lastSyncAt > threshold;
+}
+
 /** Id ranges a fields backfill walks in parallel (T-403). */
 const BACKFILL_RANGES = 3;
 
@@ -4228,6 +4248,10 @@ export class AnalyticsDataManager extends DataManager {
     const syncStartedAt = Date.now();
 
     try {
+      // Mid-sync until it completes: the stale-data cleanup keeps the rows
+      // of a run that fails (T-404).
+      await patchSyncMeta(this.db, uploaderId, {syncStartedAt});
+
       // 1. Get total count
       const total = await perfLogger.wrap('dbi:db:sync:full:countQuery', () =>
         this.getTotalPostCount(userInfo),
@@ -4366,6 +4390,11 @@ export class AnalyticsDataManager extends DataManager {
    * Resume sync (startId > 0): currentNo = "count of this user's posts
    * with id ≤ startId", which keeps the sequential post numbers monotonic.
    *
+   * Rows whose numbering has a gap ({@link rowNumberingIntact} false) sync
+   * from the start instead (T-404): a resume re-fetches only the last
+   * month and can never fill an older hole, so "Data Synchronization
+   * Required" came back after every resume.
+   *
    * Note: the original code had an unreachable `if (startId === 0 &&
    * total > 0 && currentNo >= total) return` early-return guard —
    * currentNo only becomes positive when startId > 0, so the guard
@@ -4382,8 +4411,15 @@ export class AnalyticsDataManager extends DataManager {
       .limit(1)
       .toArray();
     let startId = 0;
+    const intact =
+      newestArr.length === 0 || (await this.rowNumberingIntact(uploaderId));
+    if (!intact) {
+      log.warn('Rows have a numbering gap, syncing from the start', {
+        uploaderId,
+      });
+    }
 
-    if (newestArr.length > 0) {
+    if (newestArr.length > 0 && intact) {
       const newest = newestArr[0];
       const newestDate = new Date(newest.created_at);
       const cutOffDate = new Date(newestDate);
@@ -4423,8 +4459,30 @@ export class AnalyticsDataManager extends DataManager {
       startId,
       initialCurrentNo: currentNo,
       hasHistory: newestArr.length > 0,
+      intact,
     });
     return {startId, currentNo};
+  }
+
+  /**
+   * Whether a user's rows are numbered without a gap: their count equals
+   * the highest `no` (T-404, audit DA-07). Index reads only — a count on
+   * `uploader_id` and the last key of `[uploader_id+no]`. A user without
+   * rows is intact. A gap means rows went missing below the newest one
+   * (a ghost prune, an old bug): the local pies would undercount, and only
+   * a sync from the start can fill it.
+   */
+  async rowNumberingIntact(uploaderId: number): Promise<boolean> {
+    const count = await this.db.posts
+      .where('uploader_id')
+      .equals(uploaderId)
+      .count();
+    if (count === 0) return true;
+    const last = await this.db.posts
+      .where('[uploader_id+no]')
+      .between([uploaderId, -Infinity], [uploaderId, Infinity])
+      .last();
+    return last?.no === count;
   }
 
   /**
@@ -4755,6 +4813,8 @@ export class AnalyticsDataManager extends DataManager {
       // lack the fields, and the backfill brings them up (T-403).
       if (startId === 0) {
         await this.recordFullSyncMeta(uploaderId, firstResponseAt);
+      } else {
+        await patchSyncMeta(this.db, uploaderId, {syncStartedAt: undefined});
       }
     }
 
@@ -4788,7 +4848,8 @@ export class AnalyticsDataManager extends DataManager {
    * post on (T-402): the rows hold fields version 2, reflect Danbooru as of
    * the run's first response, and carry `created_at` strings in the
    * viewer's current time zone. A resume sync, which re-fetches only the
-   * last month, changes none of the three.
+   * last month, changes none of the three. The sync is over: its
+   * in-progress mark goes (T-404).
    */
   private async recordFullSyncMeta(
     uploaderId: number,
@@ -4798,6 +4859,7 @@ export class AnalyticsDataManager extends DataManager {
       fieldsVersion: POST_FIELDS_VERSION,
       changeWatermark: firstResponseAt,
       timeZone: viewerTimeZone(),
+      syncStartedAt: undefined,
     });
   }
 
@@ -4843,6 +4905,10 @@ export class AnalyticsDataManager extends DataManager {
       );
       perfStats.totalPosts = total;
       reportProgress(0, total, 'Fetching posts...');
+
+      // Mid-sync until it completes (T-404): a failed run's rows survive
+      // the stale-data cleanup. Cleared by recordFullSyncMeta.
+      await patchSyncMeta(this.db, uploaderId, {syncStartedAt: Date.now()});
 
       // 2. Clear existing posts for a clean re-fetch
       await this.db.posts.where('uploader_id').equals(uploaderId).delete();
@@ -4964,19 +5030,16 @@ export class AnalyticsDataManager extends DataManager {
 
         const syncKey = `danbooru_grass_last_sync_${uid}`;
         const lastSyncStr = localStorage.getItem(syncKey);
+        const meta = await readSyncMeta(this.db, uid as number);
 
-        let shouldDelete = false;
-        if (!lastSyncStr) {
-          // No record? Treat as stale (or maybe very old format). Delete to be safe/clean?
-          // Or maybe it's a new user not yet synced?
-          // If it's in DB but has no sync date, it's zombie data.
-          shouldDelete = true;
-        } else {
-          const lastDate = new Date(lastSyncStr).getTime();
-          if (now - lastDate > THRESHOLD) {
-            shouldDelete = true;
-          }
-        }
+        // No stamp and no recent sync start: zombie rows. A sync that
+        // started recently but did not complete keeps its rows (T-404).
+        const shouldDelete = isStaleUser(
+          lastSyncStr ? new Date(lastSyncStr).getTime() : null,
+          meta?.syncStartedAt,
+          now,
+          THRESHOLD,
+        );
 
         if (shouldDelete) {
           await this.db.posts.where('uploader_id').equals(uid).delete();

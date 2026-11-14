@@ -13,6 +13,7 @@ import {
   SYNC_PAGE_MAX_ATTEMPTS,
   SYNC_SEGMENT_PAGES,
   splitIdRanges,
+  isStaleUser,
 } from '../src/core/analytics-data-manager';
 import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
 
@@ -255,6 +256,18 @@ function makePostsChain(
     }),
     toArray: vi.fn(async () => [...rows]),
     count: vi.fn(async () => rows.length),
+    // [uploader_id+no] range read of the numbering check (T-404): the row
+    // with the highest `no`.
+    between: vi.fn(),
+    last: vi.fn(async () =>
+      rows.reduce<Record<string, unknown> | undefined>(
+        (best, r) =>
+          best === undefined || (r.no as number) > (best.no as number)
+            ? r
+            : best,
+        undefined,
+      ),
+    ),
     delete: vi.fn(async () => rows.length),
     uniqueKeys: vi.fn(async () => []),
     orderBy: vi.fn().mockReturnThis(),
@@ -281,6 +294,7 @@ function makePostsChain(
   (chain.until as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.equals as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.anyOf as ReturnType<typeof vi.fn>).mockReturnValue(chain);
+  (chain.between as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   return chain;
 }
 
@@ -1438,22 +1452,25 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       });
     });
 
-    it('records nothing after a run that failed', async () => {
+    it('records no fields version after a run that failed, and keeps it marked as started', async () => {
       const {rl} = serve(true);
       const {adm, syncMeta} = setUp([], rl);
 
       const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
 
       expect(outcome.complete).toBe(false);
-      expect(syncMeta.put).not.toHaveBeenCalled();
+      expect(syncMeta.rows.get(42)).toEqual({
+        userId: 42,
+        syncStartedAt: expect.any(Number),
+      });
     });
 
-    it('records nothing after a resume sync, which re-fetches only the last month', async () => {
+    it('records no fields version after a resume sync, which re-fetches only the last month', async () => {
       const {rl, asked} = serve();
       const {adm, syncMeta} = setUp(
         [
-          {id: 900, uploader_id: 42, created_at: '2025-03-01T00:00:00Z'},
-          {id: 100, uploader_id: 42, created_at: '2024-01-01T00:00:00Z'},
+          {id: 900, uploader_id: 42, no: 2, created_at: '2025-03-01T00:00:00Z'},
+          {id: 100, uploader_id: 42, no: 1, created_at: '2024-01-01T00:00:00Z'},
         ],
         rl,
       );
@@ -1461,7 +1478,11 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
 
       expect(asked[0]).toContain(encodeURIComponent('id:>100'));
-      expect(syncMeta.put).not.toHaveBeenCalled();
+      const meta = syncMeta.rows.get(42);
+      expect(meta?.fieldsVersion).toBeUndefined();
+      expect(meta?.changeWatermark).toBeUndefined();
+      // The run completed: no longer marked as under way (T-404).
+      expect(meta?.syncStartedAt).toBeUndefined();
     });
 
     it('records it after a quick sync, which always rewrites every row', async () => {
@@ -3632,5 +3653,138 @@ describe('fields backfill (T-403)', () => {
     await adm.clearUserData(user);
 
     expect(metaRows.has(42)).toBe(false);
+  });
+});
+
+// T-404: rows with a numbering gap sync from the start, and a sync that
+// started but did not complete keeps its rows through the cleanup.
+describe('isStaleUser', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = 100 * DAY;
+  const keep = 14 * DAY;
+
+  it('deletes rows without a completed sync or a recent start', () => {
+    expect(isStaleUser(null, undefined, now, keep)).toBe(true);
+    expect(isStaleUser(null, now - 20 * DAY, now, keep)).toBe(true);
+  });
+
+  it('keeps the rows of a sync started within the period, completed or not', () => {
+    expect(isStaleUser(null, now - DAY, now, keep)).toBe(false);
+    expect(isStaleUser(now - 30 * DAY, now - DAY, now, keep)).toBe(false);
+  });
+
+  it('follows the completed sync otherwise', () => {
+    expect(isStaleUser(now - DAY, undefined, now, keep)).toBe(false);
+    expect(isStaleUser(now - 20 * DAY, undefined, now, keep)).toBe(true);
+  });
+});
+
+describe('row numbering and the sync mark (T-404)', () => {
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+    vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const row = (id: number, no: number, createdAt: string) => ({
+    id,
+    uploader_id: 42,
+    no,
+    created_at: createdAt,
+  });
+
+  function makeAdm(rows: Record<string, unknown>[]) {
+    const asked: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: rows.length}}),
+        };
+      }
+      asked.push(decodeURIComponent(url));
+      return {ok: true, status: 200, json: async () => []};
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable(rows)) as never,
+      rl as never,
+    );
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+    return {adm, asked};
+  }
+
+  it('finds a gap: fewer rows than the highest number', async () => {
+    const intact = makeAdm([
+      row(1, 1, '2024-01-01T00:00:00Z'),
+      row(2, 2, '2025-03-01T00:00:00Z'),
+    ]).adm;
+    const holed = makeAdm([
+      row(1, 1, '2024-01-01T00:00:00Z'),
+      row(9, 5, '2025-03-01T00:00:00Z'),
+    ]).adm;
+    expect(await intact.rowNumberingIntact(42)).toBe(true);
+    expect(await holed.rowNumberingIntact(42)).toBe(false);
+    expect(await makeAdm([]).adm.rowNumberingIntact(42)).toBe(true);
+  });
+
+  it('syncs rows with a gap from the start instead of resuming', async () => {
+    // Without the gap this would resume after post 100 (older than a
+    // month before the newest).
+    const {adm, asked} = makeAdm([
+      row(900, 5, '2025-03-01T00:00:00Z'),
+      row(100, 1, '2024-01-01T00:00:00Z'),
+    ]);
+
+    await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(asked[0]).toContain('id:>0');
+  });
+
+  it('a cleanup keeps a user whose first sync started recently but failed', async () => {
+    const deleted: unknown[] = [];
+    const meta = new Map<number, Record<string, unknown>>([
+      [7, {userId: 7, syncStartedAt: Date.now() - 60_000}],
+      [8, {userId: 8}],
+    ]);
+    const db = {
+      posts: {
+        orderBy: () => ({uniqueKeys: async () => [7, 8, 42]}),
+        where: () => ({
+          equals: (uid: number) => ({
+            delete: async () => {
+              deleted.push(uid);
+            },
+          }),
+        }),
+      },
+      piestats: {
+        where: () => ({equals: () => ({delete: async () => 0})}),
+      },
+      sync_meta: {get: async (k: number) => meta.get(k)},
+    };
+    const adm = new AnalyticsDataManager(
+      db as never,
+      makeSyncRateLimiter() as never,
+    );
+
+    await adm.cleanupStaleData(42);
+
+    // 7: started a minute ago, no completion stamp — kept.
+    // 8: no stamp, no start — zombie rows, deleted. 42: the current user.
+    expect(deleted).toEqual([8]);
   });
 });
