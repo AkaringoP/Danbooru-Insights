@@ -9,7 +9,9 @@ import {
   _resetDismissedForTests,
   mostRecentBoundary,
   MIN_ACTIVE_DAYS,
+  fetchActiveDayCounts,
 } from '../src/core/threshold-tuner';
+import type {Database} from '../src/core/database';
 import type {Threshold4} from '../src/types';
 
 describe('computeAutoThresholds', () => {
@@ -260,5 +262,56 @@ describe('session dismiss memory', () => {
   it('isolates dismissals by userId', () => {
     dismissSuggestion('user_42');
     expect(wasDismissed('user_43')).toBe(false);
+  });
+});
+
+describe('fetchActiveDayCounts (T-605)', () => {
+  /** `YYYY-MM-DD` of `days` days ago (UTC), as the window computes it. */
+  const ago = (days: number) => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() - days);
+    return d.toISOString().slice(0, 10);
+  };
+
+  /** A table whose `where('id').between()` reads a real key range. */
+  function makeDb(rows: Array<{id: string; userId: string; count: number}>) {
+    const ranges: Array<[string, string]> = [];
+    const table = {
+      where: (index: string) => {
+        if (index !== 'id') throw new Error(`unexpected index ${index}`);
+        return {
+          between: (lo: string, hi: string) => {
+            ranges.push([lo, hi]);
+            let picked = rows.filter(r => r.id >= lo && r.id <= hi);
+            const collection = {
+              filter: (fn: (r: (typeof rows)[number]) => boolean) => {
+                picked = picked.filter(fn);
+                return collection;
+              },
+              toArray: async () => picked,
+            };
+            return collection;
+          },
+        };
+      },
+    };
+    return {db: {uploads: table} as unknown as Database, ranges};
+  }
+
+  it('reads only the window, by key range', async () => {
+    const {db, ranges} = makeDb([
+      {id: `42_${ago(400)}`, userId: '42', count: 9},
+      {id: `42_${ago(30)}`, userId: '42', count: 3},
+      {id: `42_${ago(10)}`, userId: '42', count: 0},
+      {id: `42_${ago(1)}`, userId: '42', count: 5},
+      // Another user whose id only begins like this one.
+      {id: `42_x_${ago(5)}`, userId: '42_x', count: 7},
+      {id: `420_${ago(5)}`, userId: '420', count: 8},
+    ]);
+
+    const counts = await fetchActiveDayCounts(db, '42', 'uploads', 180);
+
+    expect(ranges).toEqual([[`42_${ago(180)}`, '42_￿']]);
+    expect(counts.sort()).toEqual([3, 5]);
   });
 });
