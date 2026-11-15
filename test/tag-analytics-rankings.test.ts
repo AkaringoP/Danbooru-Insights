@@ -20,6 +20,7 @@ import {
   TagAnalyticsDataService,
   cachedRankingResult,
   keepCachedOnFailure,
+  keepKnownRankings,
   type RankingResult,
 } from '../src/apps/tag-analytics-data';
 
@@ -117,6 +118,55 @@ describe('fetchRankingsAndResolve', () => {
       passThrough,
     );
     expect(result.failed).toBeUndefined();
+  });
+});
+
+describe('keepKnownRankings (the report to save)', () => {
+  const report = (
+    name: string,
+    failed?: TagAnalyticsMeta['rankingsFailed'],
+  ): TagAnalyticsMeta =>
+    ({
+      rankings: {
+        uploader: {
+          allTime: failed?.includes('uploaderAll') ? [] : ranking(name, 9),
+          year: ranking(`${name}_year`, 3),
+          first100: ranking(`${name}_first`, 1),
+        },
+        approver: {
+          allTime: failed?.includes('approverAll') ? [] : ranking(name, 8),
+          year: ranking(`${name}_year`, 2),
+          first100: [],
+        },
+      },
+      rankingsFailed: failed,
+    }) as unknown as TagAnalyticsMeta;
+
+  it('a failed ranking keeps the saved one, with no delta run to do it', () => {
+    const fresh = report('new', ['uploaderAll', 'approverAll']);
+    const saved = keepKnownRankings(fresh, report('old'));
+
+    expect(saved.rankings.uploader.allTime).toEqual(ranking('old', 9));
+    expect(saved.rankings.approver.allTime).toEqual(ranking('old', 8));
+    // What did come back is this run's.
+    expect(saved.rankings.uploader.year).toEqual(ranking('new_year', 3));
+    expect(saved.rankings.uploader.first100).toEqual(ranking('new_first', 1));
+    expect(saved.rankingsFailed).toBeUndefined();
+    // The open dashboard keeps showing what the run got.
+    expect(fresh.rankingsFailed).toEqual(['uploaderAll', 'approverAll']);
+  });
+
+  it('keeps the failure when the saved ranking failed too, or there is none', () => {
+    const fresh = report('new', ['uploaderAll']);
+    expect(keepKnownRankings(fresh, report('old', ['uploaderAll']))).toBe(
+      fresh,
+    );
+    expect(keepKnownRankings(fresh, undefined)).toBe(fresh);
+  });
+
+  it('leaves a report without failures as it is', () => {
+    const fresh = report('new');
+    expect(keepKnownRankings(fresh, report('old'))).toBe(fresh);
   });
 });
 

@@ -77,7 +77,7 @@ If the choice is not obvious, note the reason briefly. This keeps the pipeline r
 - `npm run build` — `vitest run && tsc && vite build` → outputs `dist/danbooruinsights.user.js`
 - `npm run compile` — `tsc` alone (type check only, no bundle)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest unit tests (currently 1416 cases)
+- `npm run test` — Vitest unit tests (currently 1437 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e tests (`test/e2e/`, 7 visual-regression baselines)
 - `npm run test:e2e:update` — update the e2e snapshot baselines (only for an intended visual change)

@@ -79,7 +79,19 @@ describe('fetchExactRelatedCounts', () => {
       counts: {hakurei_reimu: 321, kirisame_marisa: 200, others: 50},
       complete: false,
     });
-    expect(urls()).toHaveLength(2);
+    // The failed count was asked again once (`fetchCountWithRetry`).
+    expect(urls()).toHaveLength(3);
+  });
+
+  it('a count that comes back on its retry completes the pie', async () => {
+    let failures = 1;
+    const {service} = makeService(() =>
+      failures-- > 0 ? reply(500, {}) : reply(200, {counts: {posts: 7}}),
+    );
+
+    expect(
+      await service.fetchExactRelatedCounts('touhou', {hakurei_reimu: 300}),
+    ).toEqual({counts: {hakurei_reimu: 7}, complete: true});
   });
 });
 

@@ -3319,6 +3319,51 @@ describe('AnalyticsDataManager.quickSyncAllPosts', () => {
     );
   });
 
+  it.each([
+    ['an error answer', {ok: false, status: 500, body: {success: false}}],
+    ['a 200 that is not a list', {ok: true, status: 200, body: {x: 1}}],
+  ])('fails on %s instead of reading it as the last page', async (_w, bad) => {
+    let page = 0;
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: PAGE_LIMIT + 5}}),
+        };
+      }
+      if (page++ === 0) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => makeApiPosts(PAGE_LIMIT),
+        };
+      }
+      return {ok: bad.ok, status: bad.status, json: async () => bad.body};
+    });
+    const syncMeta = {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async () => undefined),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([]), {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    quietTail(adm);
+
+    await expect(
+      adm.quickSyncAllPosts(makeSyncUser({id: '42'})),
+    ).rejects.toThrow('Quick sync page');
+
+    // No completion stamp and no fields version over the cut-off rows.
+    expect(localStorage.setItem).not.toHaveBeenCalled();
+    const patches = syncMeta.put.mock.calls.map(
+      c => (c as unknown[])[0] as Record<string, unknown>,
+    );
+    expect(patches.some(p => p.fieldsVersion !== undefined)).toBe(false);
+    expect(AnalyticsDataManager.isGlobalSyncing).toBe(false);
+  });
+
   it('walks the cursor from a0 and stops on a short page', async () => {
     const full = makeApiPosts(PAGE_LIMIT, 1000);
     const tail = makeApiPosts(5, 2000);
@@ -3880,6 +3925,8 @@ describe('fields backfill (T-403)', () => {
           {after: 20, to: 20},
           {after: 20, to: 30},
         ],
+        version: POST_FIELDS_VERSION,
+        timeZone: 'Seoul',
       },
     });
 
@@ -3890,6 +3937,41 @@ describe('fields backfill (T-403)', () => {
       fieldsVersion: POST_FIELDS_VERSION,
       changeWatermark: 1234,
     });
+  });
+
+  it.each([
+    ['another fields version', {version: 2, timeZone: 'Seoul'}],
+    ['another time zone', {version: POST_FIELDS_VERSION, timeZone: 'UTC'}],
+    ['neither on record', {}],
+  ])('starts over from a plan saved for %s', async (_what, saved) => {
+    const {rl, asked} = serveRemote([10, 20, 30]);
+    const {adm, metaRows} = setUp(oldRows([10, 20, 30]), rl, {
+      backfill: {from: 1234, ranges: [{after: 30, to: 30}], ...saved},
+    });
+
+    await adm.backfillPostMetadata(user);
+
+    // The done pages wrote other fields, or another zone's `created_at`.
+    expect(asked).toHaveLength(3);
+    expect(metaRows.get(42)).toMatchObject({
+      fieldsVersion: POST_FIELDS_VERSION,
+      changeWatermark: Date.parse(DATE),
+      timeZone: 'Seoul',
+    });
+  });
+
+  it('a second call during a run joins it instead of starting another', async () => {
+    const {rl, asked} = serveRemote([10, 20, 30]);
+    const {adm} = setUp(oldRows([10, 20, 30]), rl);
+    // As a reopened dashboard does: another manager over the same rows.
+    const other = setUp(oldRows([10, 20, 30]), rl).adm;
+
+    await Promise.all([
+      adm.backfillPostMetadata(user),
+      other.backfillPostMetadata(user),
+    ]);
+
+    expect(asked).toHaveLength(3);
   });
 
   it('stops on an HTTP error, records the failure and keeps the progress', async () => {
@@ -4446,6 +4528,7 @@ describe('catchUpChanges (T-407)', () => {
     meta: Record<string, unknown>,
     pages: Array<ReturnType<typeof post>[] | number>,
     localIds: number[],
+    localUpd: Record<number, number> = {},
   ) {
     const asked: string[] = [];
     const rl = makeSyncRateLimiter(async (url: string) => {
@@ -4460,7 +4543,14 @@ describe('catchUpChanges (T-407)', () => {
     const rows = new Map<number, Record<string, unknown>>(
       localIds.map((id, i) => [
         id,
-        {id, uploader_id: 42, no: i + 1, rating: 's', chr: 'old'},
+        {
+          id,
+          uploader_id: 42,
+          no: i + 1,
+          rating: 's',
+          chr: 'old',
+          upd: localUpd[id],
+        },
       ]),
     );
     const posts = makePostsTable([...rows.values()]);
@@ -4514,6 +4604,51 @@ describe('catchUpChanges (T-407)', () => {
       caughtUpAt: expect.any(Number),
       catchUp: undefined,
     });
+  });
+
+  it('leaves alone a row already as new as its post', async () => {
+    const page1 = [
+      post(7, '2026-11-12T00:00:00Z'),
+      post(3, '2026-11-09T00:00:00Z'),
+    ];
+    const {adm, written} = setUp(v2, [page1], [3, 7], {
+      3: Date.parse('2026-11-09T00:00:00Z'),
+      7: Date.parse('2026-11-11T00:00:00Z'),
+    });
+
+    // Only 7 changed since its row was written.
+    expect(await adm.catchUpChanges(user)).toEqual({changed: 1});
+    expect(written().map(r => r.id)).toEqual([7]);
+  });
+
+  it('reports nothing changed when the first page holds no news', async () => {
+    const at = '2026-11-09T00:00:00Z';
+    const {adm, written} = setUp(v2, [[post(3, at), post(7, at)]], [3, 7], {
+      3: Date.parse(at),
+      7: Date.parse(at),
+    });
+
+    expect(await adm.catchUpChanges(user)).toEqual({changed: 0});
+    expect(written()).toEqual([]);
+  });
+
+  it.each([
+    ['another zone', 'UTC', undefined],
+    ['the same zone', 'Seoul', 'Seoul'],
+  ])('rows written in %s than the record', async (_what, recorded, after) => {
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
+    });
+    const {adm, metaRows} = setUp(
+      {...v2, timeZone: recorded},
+      [[post(7, '2026-11-12T00:00:00Z')]],
+      [7],
+    );
+
+    await adm.catchUpChanges(user);
+
+    // Mixed zones: Grass no longer reads its days from these rows.
+    expect(metaRows.get(42)!.timeZone).toBe(after);
   });
 
   it('walks on while every row is newer, saving its progress', async () => {
