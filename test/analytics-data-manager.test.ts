@@ -8,9 +8,6 @@ import {
   BACKFILL_FAILURE_THRESHOLD,
   BACKFILL_COOLDOWN_MS,
   type BackfillFailureState,
-  classifySyncFetchError,
-  syncRetryDelayMs,
-  SYNC_PAGE_MAX_ATTEMPTS,
   SYNC_SEGMENT_PAGES,
   SYNC_WORKERS,
   SYNC_BUFFER_MAX_PAGES,
@@ -19,6 +16,11 @@ import {
   catchUpWatermark,
 } from '../src/core/analytics-data-manager';
 import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
+import {
+  classifySyncFetchError,
+  syncRetryDelayMs,
+  SYNC_PAGE_MAX_ATTEMPTS,
+} from '../src/core/fetch-retry';
 
 describe('getBestThumbnailUrl', () => {
   it('빈 post(null)이면 빈 문자열 반환', () => {

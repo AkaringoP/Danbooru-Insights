@@ -81,6 +81,7 @@ function makeRateLimiter(
   return {
     fetch: vi.fn(fetchImpl ?? defaultFetch),
     getRequestCount: vi.fn(() => 0),
+    backoffRemainingMs: vi.fn(() => 0),
   };
 }
 
@@ -1907,5 +1908,87 @@ describe('getMetricData — uploads from the synced posts (T-601)', () => {
     } finally {
       postRows.pop();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-603: Grass pages retry like the full sync's
+// ---------------------------------------------------------------------------
+
+describe('fetchAllPages — retries like the full sync (T-603)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** One page (a delta fetch asks one at a time). */
+  const fetchOnePage = (dm: DataManager) =>
+    dm.fetchAllPages(
+      '/posts.json',
+      {limit: 200},
+      null,
+      'created_at',
+      'desc',
+      null,
+      true,
+    );
+
+  it('keeps asking through a run of 429s that used to fail the year', async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const rl = makeRateLimiter(async () => {
+      attempts++;
+      return attempts <= 4
+        ? {ok: false, status: 429, json: async () => ({})}
+        : {ok: true, status: 200, json: async () => [{created_at: 'x'}]};
+    });
+
+    const promise = fetchOnePage(new DataManager(makeDb(), rl as never));
+    await vi.runAllTimersAsync();
+
+    expect(await promise).toHaveLength(1);
+    expect(attempts).toBe(5);
+  });
+
+  it("waits out the limiter's pause before asking again", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const rl = makeRateLimiter(async () => {
+      attempts++;
+      return attempts === 1
+        ? {ok: false, status: 429, json: async () => ({})}
+        : {ok: true, status: 200, json: async () => []};
+    });
+    rl.backoffRemainingMs.mockReturnValue(7000);
+
+    const promise = fetchOnePage(new DataManager(makeDb(), rl as never));
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(attempts).toBe(2);
+    await promise;
+  });
+
+  it('retries a network failure but not a 4xx', async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const flaky = makeRateLimiter(async () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('Failed to fetch');
+      return {ok: true, status: 200, json: async () => []};
+    });
+    const ok = fetchOnePage(new DataManager(makeDb(), flaky as never));
+    await vi.runAllTimersAsync();
+    await ok;
+    expect(attempts).toBe(2);
+
+    let asked404 = 0;
+    const missing = makeRateLimiter(async () => {
+      asked404++;
+      return {ok: false, status: 404, json: async () => ({})};
+    });
+    await expect(
+      fetchOnePage(new DataManager(makeDb(), missing as never)),
+    ).rejects.toThrow('HTTP 404');
+    expect(asked404).toBe(1);
   });
 });

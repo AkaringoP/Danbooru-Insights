@@ -1,10 +1,10 @@
 import {CONFIG, DAY_MS} from '../config';
 import {
   buildUntaggedTranslationQueries,
-  classifySyncFetchError,
   computeUntaggedTranslation,
 } from '../core/analytics-data-manager';
 import {CountUnavailableError, fetchRemoteCount} from '../core/data-manager';
+import {classifySyncFetchError} from '../core/fetch-retry';
 import {createLogger} from '../core/logger';
 import {
   MONTHLY_REPORT_FROM,

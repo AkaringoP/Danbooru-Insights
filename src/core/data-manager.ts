@@ -2,6 +2,11 @@ import {CONFIG} from '../config';
 import {createLogger} from './logger';
 import type {RateLimitedFetch} from './rate-limiter';
 import {readSyncMeta, viewerTimeZone} from './sync-meta';
+import {
+  classifySyncFetchError,
+  SYNC_PAGE_MAX_ATTEMPTS,
+  syncRetryDelayMs,
+} from './fetch-retry';
 import type {
   Metric,
   MetricData,
@@ -1066,6 +1071,45 @@ export class DataManager {
   }
 
   /**
+   * One page, retried like the full sync's (T-603, audit DA-22): a 429, a
+   * 5xx, a network failure or an unreadable body is asked again up to
+   * {@link SYNC_PAGE_MAX_ATTEMPTS} times, each wait covering what is left
+   * of the shared limiter's pause ({@link syncRetryDelayMs}). Before, four
+   * 429s in a row — 1, 2 and 4 s apart, shorter than a long pause — failed
+   * the year, and a network error failed it at once.
+   */
+  private async fetchPageWithRetry(
+    url: string,
+    page: number,
+  ): Promise<ApiItem[]> {
+    let failures = 0;
+    for (;;) {
+      try {
+        const resp = await this.rateLimiter.fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return await resp.json();
+      } catch (e: unknown) {
+        failures++;
+        const kind = classifySyncFetchError(e);
+        if (kind === 'fatal' || failures >= SYNC_PAGE_MAX_ATTEMPTS) throw e;
+        const waitMs = syncRetryDelayMs(
+          kind,
+          failures,
+          this.rateLimiter.backoffRemainingMs(),
+        );
+        log.warn(`Page ${page} failed, retrying`, {
+          page,
+          kind,
+          failures,
+          waitMs,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        await new Promise(r => setTimeout(r, waitMs));
+      }
+    }
+  }
+
+  /**
    * Fetches pages from an API endpoint until a stop condition is met.
    * Handles pagination and batching automatically.
    * @param {string} endpoint The API endpoint (e.g., '/posts.json').
@@ -1076,10 +1120,11 @@ export class DataManager {
    * @param {Function|null} [onProgress=null] Optional callback for reporting fetch progress (count).
    * @return {Promise<ApiItem[]>} List of all fetched items up to the stop condition.
    */
-  // T-26 baseline: complexity 30. Page loop × retry × stop-condition (date /
-  // cursor / empty) × ascending vs descending direction. Critical path used
-  // by every metric fetch. Depth-7 nesting in the stopDate inner loop has a
-  // separate per-line disable below.
+  // T-26 baseline: complexity 30. Page loop × stop-condition (date /
+  // cursor / empty) × ascending vs descending direction (the per-page retry
+  // is fetchPageWithRetry since T-603). Critical path used by every metric
+  // fetch. Depth-7 nesting in the stopDate inner loop has a separate
+  // per-line disable below.
   // eslint-disable-next-line complexity
   async fetchAllPages(
     endpoint: string,
@@ -1128,36 +1173,11 @@ export class DataManager {
             await new Promise(r => setTimeout(r, delay));
           }
 
-          // 2. Retry Logic
-          let attempt = 0;
-          const backoff = [1000, 2000, 4000];
-
-          while (true) {
-            const resp = await this.rateLimiter.fetch(url);
-
-            if (resp.status === 429 || resp.status >= 500) {
-              if (attempt < backoff.length) {
-                const waitMs = backoff[attempt];
-                log.warn(
-                  `HTTP ${resp.status} on page ${currentPage}, retrying`,
-                  {status: resp.status, page: currentPage, waitMs},
-                );
-                await new Promise(r => setTimeout(r, waitMs));
-                attempt++;
-                continue;
-              } else {
-                throw new Error(`HTTP ${resp.status} (Max Retries Exceeded)`);
-              }
-            }
-
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-            // Success
-            return {
-              page: currentPage,
-              data: await resp.json(),
-            };
-          }
+          // 2. Retries as the full sync's (T-603)
+          return {
+            page: currentPage,
+            data: await this.fetchPageWithRetry(url, currentPage),
+          };
         };
 
         promises.push(
