@@ -1,10 +1,14 @@
 import {CONFIG, DAY_MS} from '../config';
 import {
   buildUntaggedTranslationQueries,
-  classifySyncFetchError,
   computeUntaggedTranslation,
 } from '../core/analytics-data-manager';
-import {CountUnavailableError, fetchRemoteCount} from '../core/data-manager';
+import {
+  CountUnavailableError,
+  claimDailySweep,
+  fetchRemoteCount,
+} from '../core/data-manager';
+import {classifySyncFetchError} from '../core/fetch-retry';
 import {createLogger} from '../core/logger';
 import {
   MONTHLY_REPORT_FROM,
@@ -386,25 +390,8 @@ function hasUnknownPie(data: TagAnalyticsMeta): boolean {
 }
 
 /** localStorage key: when the tag page's daily cache sweep last ran (T-309). */
+/** localStorage: when the tag pages' daily cache sweep last ran (T-309). */
 const TAG_CACHE_SWEEP_KEY = 'di.tagCache.sweptAt';
-
-/**
- * Whether the daily cache sweep is due, claiming it if so. The stamp is
- * written before the sweep, so a sweep that fails does not run again on
- * every open, and a second tab opened at the same time usually skips it.
- * Due when the stamp cannot be read.
- */
-function claimDailyTagCacheSweep(now: number): boolean {
-  try {
-    const last = Number(localStorage.getItem(TAG_CACHE_SWEEP_KEY));
-    const age = now - last;
-    if (last > 0 && age >= 0 && age < DAY_MS) return false;
-    localStorage.setItem(TAG_CACHE_SWEEP_KEY, String(now));
-  } catch {
-    // Storage unavailable: sweep anyway.
-  }
-  return true;
-}
 
 type UserEntry = {name: string; level: string};
 type UserEntryWithId = {id: number; name: string; level: string};
@@ -881,7 +868,7 @@ export class TagAnalyticsDataService {
       log.warn('Cleanup failed', {error: e});
     }
 
-    if (!claimDailyTagCacheSweep(now)) return;
+    if (!claimDailySweep(TAG_CACHE_SWEEP_KEY, now)) return;
     try {
       const monthRows = await this.sweepMonthlyCounts(cutoff);
       log.debug('Daily tag cache sweep', {monthRows});

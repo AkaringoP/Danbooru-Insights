@@ -16,12 +16,12 @@
 import {describe, it, expect, vi, beforeAll, afterAll} from 'vitest';
 import {RateLimitedFetch} from '../src/core/rate-limiter';
 import {CONFIG} from '../src/config';
+import {SYNC_WORKERS} from '../src/core/analytics-data-manager';
 import {
   SYNC_PAGE_MAX_ATTEMPTS,
-  SYNC_WORKERS,
   classifySyncFetchError,
   syncRetryDelayMs,
-} from '../src/core/analytics-data-manager';
+} from '../src/core/fetch-retry';
 import {
   DanbooruBucket,
   SimServer,

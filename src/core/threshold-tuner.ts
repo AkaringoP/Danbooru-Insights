@@ -61,6 +61,12 @@ function nearestRank(sorted: number[], percentile: number): number {
 /**
  * Reads the user's active-day counts from IndexedDB for the last N days.
  * Returns only counts where `count > 0`.
+ *
+ * The rows' primary key is `${userId}_${YYYY-MM-DD}`, so the window is a
+ * key range (T-605, audit DA-14): before, every row the user ever had was
+ * read and filtered in JS. `￿` keeps a later-dated row in, as the old
+ * `date >= cutoff` did; the `userId` check drops another user whose id
+ * only begins like this one (a name with an underscore).
  */
 export async function fetchActiveDayCounts(
   db: Database,
@@ -70,9 +76,9 @@ export async function fetchActiveDayCounts(
 ): Promise<number[]> {
   const cutoff = isoDateDaysAgo(days);
   const rows = await db[metric]
-    .where('userId')
-    .equals(userId)
-    .and(r => r.date >= cutoff && r.count > 0)
+    .where('id')
+    .between(`${userId}_${cutoff}`, `${userId}_￿`, true, true)
+    .filter(r => r.userId === userId && r.count > 0)
     .toArray();
   return rows.map(r => r.count);
 }
