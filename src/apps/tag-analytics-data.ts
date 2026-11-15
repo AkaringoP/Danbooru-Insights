@@ -389,7 +389,6 @@ function hasUnknownPie(data: TagAnalyticsMeta): boolean {
   return COUNT_PIES.some(pie => hasUnknownCount(data[pie]));
 }
 
-/** localStorage key: when the tag page's daily cache sweep last ran (T-309). */
 /** localStorage: when the tag pages' daily cache sweep last ran (T-309). */
 const TAG_CACHE_SWEEP_KEY = 'di.tagCache.sweptAt';
 

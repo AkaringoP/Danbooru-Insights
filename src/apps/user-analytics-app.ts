@@ -1973,13 +1973,6 @@ export class UserAnalyticsApp {
     el.appendChild(row2);
   }
 
-  /**
-   * The touch-only 📋 mini-report button, sized to the ⚙️ sync-settings gear
-   * and placed right after it in the header status row. On touch the 📊 tap
-   * opens the full modal, leaving the hover-only preview unreachable — this
-   * opens the pinned preview directly. Returns null on desktop or before the
-   * preview popover has been created.
-   */
   /** The popover's newest-200 summary (see {@link buildRecentSummaryInput}). */
   private async buildRecentSummary() {
     const user = this.context.targetUser;
@@ -1989,6 +1982,13 @@ export class UserAnalyticsApp {
     return buildProfileSummary(input, Date.now(), 'recent');
   }
 
+  /**
+   * The touch-only 📋 mini-report button, sized to the ⚙️ sync-settings gear
+   * and placed right after it in the header status row. On touch the 📊 tap
+   * opens the full modal, leaving the hover-only preview unreachable — this
+   * opens the pinned preview directly. Returns null on desktop or before the
+   * preview popover has been created.
+   */
   private buildMiniReportButton(): HTMLSpanElement | null {
     if (!isTouchDevice() || !this.previewPopover) return null;
     const reportBtn = document.createElement('span');

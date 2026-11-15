@@ -81,6 +81,18 @@ export function claimDailySweep(key: string, now: number): boolean {
   return true;
 }
 
+/**
+ * The hour of a Danbooru timestamp as written (`YYYY-MM-DDTHH:MM:SS…±hh:mm`).
+ * Danbooru writes timestamps in the viewer's account time zone, the zone a
+ * Grass day is read in (the first ten characters), so a post's hour and its
+ * day agree; `Date#getHours` would read the hour in the browser's zone
+ * (T-702). NaN when the string has no hour.
+ */
+function timestampHour(timestamp: string): number {
+  const match = /^\d{4}-\d{2}-\d{2}T(\d{2})/.exec(timestamp);
+  return match ? Number(match[1]) : Number.NaN;
+}
+
 /** A raw API item with dynamic shape from Danbooru endpoints. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ApiItem = Record<string, any>;
@@ -233,8 +245,8 @@ export class DataManager {
         .each((p: {created_at: string}) => {
           const date = String(p.created_at).slice(0, 10);
           daily.set(date, (daily.get(date) ?? 0) + 1);
-          const hour = new Date(p.created_at).getHours();
-          if (!Number.isNaN(hour) && hour >= 0 && hour < 24) hourly[hour]++;
+          const hour = timestampHour(String(p.created_at));
+          if (hour >= 0 && hour < 24) hourly[hour]++;
         });
       if (daily.size === 0) return false;
 
@@ -959,9 +971,9 @@ export class DataManager {
       const isNewData =
         !lastEntry || String(rawDate).slice(0, 10) > lastEntry['date'];
 
-      const itemDate = new Date(rawDate);
-      const hour = itemDate.getHours();
-      if (isNewData && !isNaN(hour) && hour >= 0 && hour < 24) {
+      // The hour as written, in the zone the day above is read in (T-702).
+      const hour = timestampHour(String(rawDate));
+      if (isNewData && hour >= 0 && hour < 24) {
         hourlyCounts[hour]++;
       }
     });

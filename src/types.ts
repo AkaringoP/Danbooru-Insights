@@ -768,10 +768,10 @@ export interface ProfileSummaryInput {
   window: WindowPoint[];
 }
 
-/** Tone of a pane part: `good` praise, `info` neutral note, `warn`/`bad` concerns. */
 /** `recent`: newest-window view (popover). `lifetime`: all synced uploads (dashboard). */
 export type SummaryScope = 'recent' | 'lifetime';
 
+/** Tone of a pane part: `good` praise, `info` neutral note, `warn`/`bad` concerns. */
 export type SummarySeverity = 'good' | 'info' | 'warn' | 'bad';
 
 /** Danbooru tag category of a tag-name link (drives its colour). */

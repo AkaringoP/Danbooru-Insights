@@ -209,7 +209,7 @@ localStorage.removeItem('di.perf.enabled');
 
 ### "A pie tab only says Loading..."
 
-After a full reset (or on a first visit), only Copy / Char / Fav_Copy load with the dashboard. The other six tabs load the first time they are opened, so a short "Loading..." there is expected. A tab stuck on "No data available" when the user has matching uploads is a bug — check **Logs** for errors.
+After a full reset (or on a first visit), only Copy / Char load with the dashboard. The other seven tabs load the first time they are opened, so a "Loading..." there is expected — Fav_Copy's takes about as many seconds as it has candidate tags to count (around 37 for a large account), since T-704. A tab stuck on "No data available" when the user has matching uploads is a bug — check **Logs** for errors.
 
 ### "Tag data seems outdated"
 

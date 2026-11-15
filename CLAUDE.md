@@ -76,7 +76,7 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 - `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
 - `npm run compile` — `tsc` 단독 (타입 체크만, 번들 없음)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 1365 cases)
+- `npm run test` — Vitest 단위 테스트 (현재 1402 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 7 개)
 - `npm run test:e2e:update` — e2e 스냅샷 baseline 갱신 (의도한 시각 변경일 때만)
@@ -151,10 +151,10 @@ GitHub 저장소: `AkaringoP/Danbooru-Insights`
 
 한도에 걸린 상태에서 보낸 요청은 1 초 분씩 점수를 더 깎음 (최저 −30). Rails 한도는 성공 응답과 429 양쪽에 `X-Rate-Limit` 헤더를 붙임. 흔히 말하는 "전체 10 req/s" 는 저장소에 없음 (`config/nginx.conf` 에 `limit_req` 없음, rack-attack 류 미들웨어 없음 — 2026-11-13 확인).
 
-**앞단 (Cloudflare) 한도** — 규칙은 비공개. 2026-11-13 실측: 앞단 429 는 `server: cloudflare`, **`cf-mitigated: challenge`** 헤더에 본문이 "Just a moment..." 챌린지 페이지 (HTML), `X-Rate-Limit` · `Retry-After` 없음. 즉 Cloudflare 속도 제한 규칙이 차단 대신 챌린지를 거는 것이고, fetch 는 챌린지를 풀 수 없어 429 로만 보임. 속도가 내려가면 다시 통과 (5 초 정지 뒤 바로 받아 줌). 기준은 **10 초에 약 50 건** 으로 보임: 독립된 429 두 번의 직전 10 초 요청 수가 정확히 49 였고, 상한을 4.5 req/s (10 초 최대 47 건) 로 낮춘 뒤 46k 계정 전체 sync 3 회 연속 429 0 건 (그 전에는 매번 1~2 회). 한때의 다른 후보 "2 분에 약 240 건" 은 같은 실행에서 120 초에 305 건이 통과해 기각. 표본이 한 계정 · 하루치라 확정은 아님. 새 측정은 진단 로그 `429 received` 의 `sent*` · `peakOk*` 와 `Sync traffic` 으로 ([docs/debugging.md](docs/debugging.md)).
+**앞단 (Cloudflare) 한도** — 규칙은 비공개. 2026-11-13 실측: 앞단 429 는 `server: cloudflare`, **`cf-mitigated: challenge`** 헤더에 본문이 "Just a moment..." 챌린지 페이지 (HTML), `X-Rate-Limit` · `Retry-After` 없음. 즉 Cloudflare 속도 제한 규칙이 차단 대신 챌린지를 거는 것이고, fetch 는 챌린지를 풀 수 없어 429 로만 보임. 속도가 내려가면 다시 통과하는 일이 많음. 기준은 **1 분 단위 요청 수** 로 보임 (2026-11-15 실측, 확정은 아님): 거절된 요청의 직전 60 초 요청 수는 181 · 187 · 190 · 191 · 202 · 219 · 228 건이고, 5 초 정지로 10 초 창이 20 건까지 내려간 직후에도 거절됨 (60 초 창은 190 → 191 로 그대로). 경계는 실행마다 움직여 188~228 건이 통과한 적도 있고, 429 없는 실행의 60 초 최댓값은 모두 182 이하. 서버가 빠른 날 (페이지 약 0.8 초) 5 worker sync 가 1 분에 190~223 건까지 나가 경계에 닿음. 앞선 후보 둘은 기각: "10 초에 약 50 건" (2026-11-13 의 49 건 두 번에서 나왔지만 위의 20 건 거절), "2 분에 약 240 건" (120 초에 305 건 통과). 분 단위 예산 (T-215 후보) 은 사용자 결정으로 보류 (2026-11-15). 새 측정은 진단 로그 `429 received` 의 `sent*` · `peakOk*` 와 `Sync traffic` 으로 ([docs/debugging.md](docs/debugging.md)).
 
 **클라이언트** — 토큰 버킷 하나 + 서버 액션별 차선 (v9.12). 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
-- **General Queue**: 8 concurrent requests, **4.5 req/sec, 버스트 1**, 0-50ms jitter → 한 탭에서 임의의 1 초에 최대 6 건, 10 초에 최대 47 건 (T-213, v9.12 — 위 "10 초에 약 50 건" 후보 아래로). 그 전 결정 G-1 은 6 req/sec (1 초 7 건 · 10 초 61 건). v9.6 의 9 req/sec · 버스트 9 (버스트가 속도와 같았음) 는 Grass 와 sync 가 겹치면 1 초 16 건 · 10 초 98 건까지 나갔음. 큰 계정의 Full Sync 는 이 상한이 아니라 worker 수 (`SYNC_WORKERS` 5, 평균 약 3.5 req/s) 가 속도를 정하고, 상한은 응답이 빠른 순간의 몰림만 깎음 ([sync-strategies.md](.claude/rules/sync-strategies.md)). Grass · UserAnalytics · TagAnalytics 가 `main.ts` 가 만든 limiter 하나를 공유 (생성자 필수 인자, gate 4 규칙 11). `RateLimitedFetch` 의 4 번째 인자가 버스트 (생략하면 속도와 같음 — 테스트용)
+- **General Queue**: 8 concurrent requests, **4.5 req/sec, 버스트 1**, 0-50ms jitter → 한 탭에서 임의의 1 초에 최대 6 건, 10 초에 최대 47 건, 1 분에 최대 약 270 건 (T-213, v9.12 — 당시 후보였던 "10 초에 약 50 건" 아래로 맞춘 값. 그 후보는 기각됐지만 상한은 그대로 둠). 그 전 결정 G-1 은 6 req/sec (1 초 7 건 · 10 초 61 건). v9.6 의 9 req/sec · 버스트 9 (버스트가 속도와 같았음) 는 Grass 와 sync 가 겹치면 1 초 16 건 · 10 초 98 건까지 나갔음. 큰 계정의 Full Sync 는 이 상한이 아니라 worker 수 (`SYNC_WORKERS` 5, 평균 약 3.5 req/s) 가 속도를 정하고, 상한은 응답이 빠른 순간의 몰림만 깎음 ([sync-strategies.md](.claude/rules/sync-strategies.md)). Grass · UserAnalytics · TagAnalytics 가 `main.ts` 가 만든 limiter 하나를 공유 (생성자 필수 인자, gate 4 규칙 11). `RateLimitedFetch` 의 4 번째 인자가 버스트 (생략하면 속도와 같음 — 테스트용)
 - **차선** ([src/core/rate-lane.ts](src/core/rate-lane.ts)): counts · reports · related_tag 요청은 각자의 차선에서 기다림. 차선은 서버 버킷의 로컬 추정치 (처음엔 위 표의 수치, 이후 응답마다 오는 `X-Rate-Limit` 로 보정 — 다른 탭이 같은 버킷을 쓴 것도 반영) 가 2 점 이상 (1 점 여유) 이고 진행 중 요청이 2 건 미만일 때만 보냄. 차선 요청도 일반 버킷 토큰을 하나 씀 → count · report 를 합쳐도 위의 6 / 47 상한 안. 발송은 "차선이 준비된 요청 중 가장 먼저 온 것" 이라 기다리는 차선이 sync 를 막지 않음. 모르는 경로가 `X-Rate-Limit` 를 보내면 그 경로용 차선을 만듦. v9.11 까지의 report 전용 큐 (3 초 고정 대기) 는 없어짐
 - **429 의 범위**: `X-Rate-Limit` 이 붙은 429 (Rails 의 액션별 한도) 는 **그 차선만** 기다림 — 전체 정지 · 속도 절반 · 다른 탭 알림 없음. 헤더 없는 429 (앞단) 만 아래의 전체 정지로 감. `backoffRemainingMs()` 는 전체 정지만 뜻함
 - **깨움**: 큐 전체에 예약된 깨움 하나 (`scheduleWake`). 거절될 때마다 타이머를 걸던 방식은 250 건 대기에 타이머 수만 개를 만들었음 (감사 DA-13)
@@ -214,7 +214,7 @@ Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 �
 - [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
 
 ## 현재 릴리즈 상태
-현재 버전 **v9.11.3** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음.
+현재 버전 **v9.11.3** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음. `develop` 에는 2026-11-12 감사 후속 (Phase 1~7) 이 아직 릴리즈 안 된 채 쌓여 있음 — 문서의 "v9.12" 는 이 다음 릴리즈를 뜻하고, CHANGELOG 는 릴리즈 때 씀.
 
 최근 출시분 요약 (상세는 [CHANGELOG.md](CHANGELOG.md)):
 - **v9.11.3** (핫픽스) — 모바일에서 탭으로 연 "?" 툴팁 (Suspicious, Recent uploads 색상 범례) 이 다른 곳을 탭해도 안 닫히던 문제. 공용 `attachTapTooltip` (열려 있을 때만 document capture-phase click 으로 바깥 탭 감지), 팝오버 `hide()` 에서 `closeTapTooltips`, CSS hover/focus 공개는 `@media (hover: hover)` 로 한정 (폰의 sticky hover·탭 focus 가 툴팁을 붙잡던 문제)

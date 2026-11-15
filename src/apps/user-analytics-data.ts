@@ -162,16 +162,18 @@ type HeavyDistKey =
 
 /**
  * Heavy distributions fetched up front even on a cold cache: the pie opens on
- * copyright, and these three related-tag tabs are the ones users read most
- * and the ones that cost the most to fetch on a tab click. The other six
- * (gender, breasts, hair ×2, commentary, translation) are left out of the
- * blocking cold-cache load; the pie widget fetches a missing tab when it is
- * first opened (its "Loading..." path), and a tab never opened costs nothing.
+ * copyright, and the at-a-glance card reads copyright and character — both
+ * counted from the local rows when they qualify (T-406). The other seven
+ * (fav copyright, gender, breasts, hair ×2, commentary, translation) are left
+ * out of the blocking cold-cache load; the pie widget fetches a missing tab
+ * when it is first opened (its "Loading..." path), and a tab never opened
+ * costs nothing. Fav copyright was eager until T-704: its ~37 counts at
+ * 1 req/s (a large account) held a cold first open about 30 s for a tab
+ * that is not shown.
  */
 const EAGER_HEAVY_DISTS: ReadonlySet<HeavyDistKey> = new Set([
   'copyright',
   'character',
-  'fav_copyright',
 ]);
 
 /**

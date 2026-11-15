@@ -11,7 +11,10 @@
  *
  * The edge (Cloudflare) rule is not public; scenario C tries the audit's
  * "10 per second" assumption, B.max10s covers its "100 per 10 s" one, and
- * F tries the "50 per 10 s" that the live 429s of 2026-11-13 point at.
+ * F tries the "50 per 10 s" that the live 429s of 2026-11-13 pointed at.
+ * The 429s of 2026-11-15 ruled that one out too (refused after 20 in
+ * 10 s); they look per-minute, from about 181 in 60 s, which no scenario
+ * here models (CLAUDE.md "Rate Limiting").
  */
 import {describe, it, expect, vi, beforeAll, afterAll} from 'vitest';
 import {RateLimitedFetch} from '../src/core/rate-limiter';
@@ -358,7 +361,8 @@ describe('limiter simulation — harness', () => {
 describe('limiter simulation — the cap (4.5 req/s, burst 1)', () => {
   it('one tab never sends more than 6 per 1 s or 47 per 10 s', () => {
     // 1 stored token + 4.5 per second. The point of 4.5 (T-213): stay
-    // under the "about 50 per 10 s" the live 429s suggest. At 6 req/s
+    // under the "about 50 per 10 s" the live 429s suggested then (since
+    // ruled out; the cap stays). At 6 req/s
     // (G-1) the bounds were 7 and 61.
     for (const [name, r] of Object.entries(results)) {
       expect(r.max1s, name).toBeLessThanOrEqual(6);
@@ -384,8 +388,9 @@ describe('limiter simulation — the cap (4.5 req/s, burst 1)', () => {
   });
 
   it('F: a "50 per 10 s" edge rule draws no 429 either', () => {
-    // The rule the live 429s point at (two of them came with exactly 49
-    // requests in the 10 s before). 6 req/s could send 61 in 10 s.
+    // The rule the live 429s of 2026-11-13 pointed at (two of them came
+    // with exactly 49 requests in the 10 s before; ruled out on
+    // 2026-11-15). 6 req/s could send 61 in 10 s.
     expect(results.F.total429).toBe(0);
     expect(results.F.lost).toEqual({sync: 0, grass: 0});
     expect(results.F.durations).toEqual(results.B.durations);
