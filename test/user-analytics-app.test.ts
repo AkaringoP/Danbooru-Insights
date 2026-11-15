@@ -460,8 +460,9 @@ describe('UserAnalyticsApp report button — Grass first (G-7)', () => {
 
     expect(sync).not.toHaveBeenCalled();
     expect(app.toggleModal).not.toHaveBeenCalled();
+    // Keyed, so clicking again keeps one toast up instead of stacking more.
     expect(showToast).toHaveBeenCalledWith(
-      expect.objectContaining({type: 'info'}),
+      expect.objectContaining({type: 'info', key: 'grass-lock'}),
     );
   });
 
@@ -513,6 +514,59 @@ describe('UserAnalyticsApp report button — Grass first (G-7)', () => {
     await click(btn);
     expect(btn.classList.contains('di-grass-locked')).toBe(false);
     expect(sync).toHaveBeenCalled();
+  });
+
+  // The hover preview opens once the pointer rests on 📊 (desktop).
+  describe('hover preview', () => {
+    function mountHover() {
+      vi.useFakeTimers();
+      vi.mocked(isTouchDevice).mockReturnValue(false);
+      const {app, btn} = mount(new GrassLoadGate());
+      const popover = (
+        app as unknown as {previewPopover: {show: (o?: unknown) => void}}
+      ).previewPopover;
+      const show = vi.spyOn(popover, 'show').mockImplementation(() => {});
+      const fire = (type: string) =>
+        btn.dispatchEvent(new MouseEvent(type, {bubbles: true}));
+      return {show, fire};
+    }
+
+    it('opens 400 ms after the pointer stops, not on entering', () => {
+      const {show, fire} = mountHover();
+
+      fire('mouseenter');
+      vi.advanceTimersByTime(300);
+      fire('mousemove');
+      vi.advanceTimersByTime(300);
+      fire('mousemove');
+      vi.advanceTimersByTime(399);
+      expect(show).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+      expect(show).toHaveBeenCalledTimes(1);
+    });
+
+    it('a pointer crossing the icon opens nothing', () => {
+      const {show, fire} = mountHover();
+
+      fire('mouseenter');
+      vi.advanceTimersByTime(150);
+      fire('mouseleave');
+      vi.advanceTimersByTime(1000);
+
+      expect(show).not.toHaveBeenCalled();
+    });
+
+    it('moves after it opened do not open it again', () => {
+      const {show, fire} = mountHover();
+
+      fire('mouseenter');
+      vi.advanceTimersByTime(400);
+      fire('mousemove');
+      vi.advanceTimersByTime(1000);
+
+      expect(show).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

@@ -75,6 +75,14 @@ const GRASS_LOCK_CLASS = 'di-grass-locked';
 const GRASS_LOCK_MESSAGE =
   'The contribution graph is still loading; the report opens after it';
 
+/**
+ * How long the pointer must rest on 📊 before the preview popover opens
+ * (desktop). Every move over the icon restarts the wait, so a pointer
+ * crossing it on the way elsewhere opens nothing and fetches nothing. Was a
+ * fixed 200 ms from entering, which opened it on a mere graze.
+ */
+const PREVIEW_HOVER_REST_MS = 400;
+
 /** ProfileContext with a guaranteed non-null targetUser (post-validation). */
 type ValidatedProfileContext = ProfileContext & {
   targetUser: NonNullable<ProfileContext['targetUser']>;
@@ -1517,7 +1525,12 @@ export class UserAnalyticsApp {
    */
   private refuseWhileGrassLoads(): boolean {
     if (!this.grassGate.isLoading()) return false;
-    showToast({type: 'info', message: `${GRASS_LOCK_MESSAGE}.`});
+    // Keyed: clicking again while it shows keeps the one toast up.
+    showToast({
+      type: 'info',
+      message: `${GRASS_LOCK_MESSAGE}.`,
+      key: 'grass-lock',
+    });
     return true;
   }
 
@@ -1600,18 +1613,29 @@ export class UserAnalyticsApp {
       this.previewPopover = previewPopover;
 
       // Hover opens a transient popover (skipped on touch — unreachable
-      // there; the click path still works). A short dwell debounce avoids
-      // firing on an accidental graze. Gate unified to isTouchDevice() so the
-      // hover wiring and the touch-only paths (📋 button, legend two-step)
-      // agree on what counts as "touch" (R-08).
+      // there; the click path still works) once the pointer rests on the
+      // icon (PREVIEW_HOVER_REST_MS, debounced on movement). Gate unified to
+      // isTouchDevice() so the hover wiring and the touch-only paths (📋
+      // button, legend two-step) agree on what counts as "touch" (R-08).
       let hoverTimer: ReturnType<typeof setTimeout> | null = null;
       if (!isTouchDevice()) {
+        const waitForRest = () => {
+          if (hoverTimer !== null) clearTimeout(hoverTimer);
+          hoverTimer = setTimeout(() => {
+            hoverTimer = null;
+            previewPopover.show();
+          }, PREVIEW_HOVER_REST_MS);
+        };
         btn.addEventListener('mouseenter', () => {
           // Cursor back on the icon during the grace/fade window: keep the
           // open popover alive instead of letting it close and re-load (R-04).
           previewPopover.keepOpen();
-          if (hoverTimer !== null) clearTimeout(hoverTimer);
-          hoverTimer = setTimeout(() => previewPopover.show(), 200);
+          waitForRest();
+        });
+        // Moving restarts the wait, until it opens: moves after that leave
+        // the open popover alone.
+        btn.addEventListener('mousemove', () => {
+          if (hoverTimer !== null) waitForRest();
         });
         btn.addEventListener('mouseleave', () => {
           if (hoverTimer !== null) {
