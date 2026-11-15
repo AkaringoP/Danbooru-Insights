@@ -86,7 +86,7 @@ function distributionItemKey(item: DistributionItem): string {
   return item.tagName || item.originalTag || item.name || '';
 }
 import {getBestThumbnailUrl} from '../utils';
-import {getTopLevelFlags} from './top-level-tags';
+import {getTopLevelFlags, pruneImplicationCache} from './top-level-tags';
 import type {
   TargetUser,
   DistributionItem,
@@ -373,6 +373,116 @@ export function isStaleUser(
  */
 const LOCAL_DISTRIBUTIONS_MEMO_MS = 10_000;
 
+/**
+ * How long one scan of a user's rows serves the dashboard (T-501). An open
+ * reads it for the summary, the scatter, the monthly chart and the local
+ * pies within seconds; the limit bounds how long a write from elsewhere
+ * (another tab's sync) could go unseen, and how long the memory is held.
+ */
+const ROW_SNAPSHOT_MEMO_MS = 60_000;
+
+/** What the dashboard needs from one pass over a user's rows (T-501). */
+interface RowSnapshot {
+  /** One scatter point per row with a `created_at`, in the index's order. */
+  points: ScatterDataPoint[];
+  /**
+   * Each point's `created_at` date part as stored (`YYYY-MM-DD`, in the
+   * viewer's time zone at the sync), the summary's and monthly chart's key.
+   */
+  days: string[];
+  /** Every row counted for the local pies; used only when they qualify. */
+  local: LocalDistributions;
+}
+
+/**
+ * Uploads per day key, all time and since `oneYearAgo`, with the first and
+ * last upload — the summary's pass over a {@link RowSnapshot}.
+ */
+function tallyUploadDays(
+  points: ScatterDataPoint[],
+  days: string[],
+  oneYearAgo: Date,
+): {
+  historyAll: Record<string, number>;
+  history1Year: Record<string, number>;
+  first: Date | null;
+  last: Date | null;
+  count1Year: number;
+} {
+  const historyAll: Record<string, number> = {};
+  const history1Year: Record<string, number> = {};
+  let first: Date | null = null;
+  let last: Date | null = null;
+  let count1Year = 0;
+  for (let i = 0; i < points.length; i++) {
+    const day = days[i];
+    historyAll[day] = (historyAll[day] || 0) + 1;
+    const d = new Date(points[i].d);
+    if (!first || d < first) first = d;
+    if (!last || d > last) last = d;
+    if (d >= oneYearAgo) {
+      history1Year[day] = (history1Year[day] || 0) + 1;
+      count1Year++;
+    }
+  }
+  return {historyAll, history1Year, first, last, count1Year};
+}
+
+/** The day with the most uploads; on a tie, the first one met. */
+function busiestDay(history: Record<string, number>): {
+  count: number;
+  date: string;
+} {
+  let count = 0;
+  let date = 'N/A';
+  for (const [day, n] of Object.entries(history)) {
+    if (n > count) {
+      count = n;
+      date = day;
+    }
+  }
+  return {count, date};
+}
+
+/** The longest run of consecutive days among sorted `YYYY-MM-DD` keys. */
+function longestStreak(sortedDates: string[]): {
+  length: number;
+  start: string | null;
+  end: string | null;
+} {
+  let best = {
+    length: 0,
+    start: null as string | null,
+    end: null as string | null,
+  };
+  let current = 0;
+  let currentStart: string | null = null;
+  let previous: Date | null = null;
+  for (const dateStr of sortedDates) {
+    const d = new Date(dateStr);
+    d.setHours(0, 0, 0, 0);
+    if (!previous) {
+      current = 1;
+      currentStart = dateStr;
+    } else {
+      const diffDays = Math.round(
+        (d.getTime() - previous.getTime()) / (1000 * 60 * 60 * 24),
+      );
+      if (diffDays === 1) {
+        current++;
+      } else if (diffDays > 1) {
+        current = 1;
+        currentStart = dateStr;
+      }
+    }
+    if (current > best.length) {
+      best = {length: current, start: currentStart, end: dateStr};
+    }
+    previous = d;
+  }
+  return best;
+}
+
 /** Tags checked per top-level lookup on the local tag pies (T-406). */
 const LOCAL_TOP_LEVEL_BATCH = 50;
 
@@ -475,6 +585,46 @@ export const SYNC_WORKERS = 5;
  */
 export const SYNC_SEGMENT_PAGES = 1000;
 
+/** Posts per full-sync page: Danbooru's largest `limit`. */
+const SYNC_PAGE_LIMIT = 200;
+
+/**
+ * Pages the full sync's reorder buffer may hold before the workers stop
+ * claiming new ones (T-504). Pages commit in order, so one page stuck in
+ * its retries let the others pile up behind it without bound; this caps
+ * that at 5,000 posts in memory, and the requests sent meanwhile.
+ */
+export const SYNC_BUFFER_MAX_PAGES = 25;
+
+/** How often a worker held by a full buffer looks again (T-504). */
+const SYNC_BUFFER_POLL_MS = 250;
+
+/**
+ * `YYYY-MM-DD` of the day before `joinDate` (UTC), or null without a valid
+ * date: the lower bound of the first-post lookup (T-508). A day's margin
+ * covers the viewer's time zone, in which Danbooru reads a bare date.
+ */
+function dayBeforeJoin(joinDate: Date | undefined): string | null {
+  const t = joinDate?.getTime();
+  if (t === undefined || Number.isNaN(t)) return null;
+  return new Date(t - 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Resolves once the reorder buffer has room for another page — true — or
+ * false when the run ends meanwhile (T-504).
+ */
+async function waitForBufferRoom(
+  buffer: Map<number, unknown>,
+  running: () => boolean,
+): Promise<boolean> {
+  while (buffer.size >= SYNC_BUFFER_MAX_PAGES) {
+    if (!running()) return false;
+    await new Promise(r => setTimeout(r, SYNC_BUFFER_POLL_MS));
+  }
+  return running();
+}
+
 /** How the full-sync worker should react to a failed page fetch. */
 export type SyncFetchErrorKind = 'rate-limit' | 'transient' | 'fatal';
 
@@ -569,6 +719,12 @@ export class AnalyticsDataManager extends DataManager {
   private localDistributionsMemo = new Map<
     number,
     {at: number; value: Promise<LocalDistributions | null>}
+  >();
+
+  /** One scan of a user's rows per dashboard open ({@link getRowSnapshot}). */
+  private rowSnapshotMemo = new Map<
+    number,
+    {at: number; value: Promise<RowSnapshot>}
   >();
 
   /**
@@ -692,7 +848,9 @@ export class AnalyticsDataManager extends DataManager {
     retries: number = 3,
     delay: number = 2000,
   ): Promise<string> {
-    const url = `/posts.json?tags=${encodeURIComponent(tags)}&limit=1&only=preview_file_url,variants,rating`;
+    // The pie tooltip shows it at 80×80: the 180×180 preview is enough, so
+    // no `media_asset[variants]` here (T-506).
+    const url = `/posts.json?tags=${encodeURIComponent(tags)}&limit=1&only=preview_file_url,rating`;
     for (let i = 0; i < retries; i++) {
       try {
         const resp = await this.rateLimiter.fetch(url);
@@ -759,123 +917,41 @@ export class AnalyticsDataManager extends DataManager {
    * @return {Promise<{maxUploads: number, maxDate: string, firstUploadDate: ?Date, lastUploadDate: ?Date, count1Year: number, maxUploads1Year: number, maxDate1Year: string, maxStreak: number, maxStreakStart: ?string, maxStreakEnd: ?string, activeDays: number}>} Summary stats.
    */
   async getSummaryStats(userInfo: TargetUser): Promise<SummaryStats> {
-    const uploaderId = parseInt(userInfo.id ?? '0');
-    if (!uploaderId)
-      return {
+    const empty = () =>
+      ({
         maxUploads: 0,
         maxDate: 'N/A',
         firstUploadDate: null,
         lastUploadDate: null,
-      } as SummaryStats;
-
-    const historyAll: Record<string, number> = {};
-    const history1Year: Record<string, number> = {};
-    let firstUploadDate: Date | null = null;
-    let lastUploadDate: Date | null = null;
+      }) as SummaryStats;
+    const uploaderId = parseInt(userInfo.id ?? '0');
+    if (!uploaderId) return empty();
 
     const oneYearAgo = new Date();
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
-    let count1Year = 0;
-    let totalCount = 0;
+    // From the open's one scan of the rows (T-501), in the same row order.
+    const {points, days} = await this.getRowSnapshot(uploaderId);
+    if (points.length === 0) return empty();
 
-    // Cursor iteration: processes one record at a time to avoid loading all posts into memory
-    await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .each((p: ApiItem) => {
-        totalCount++;
-        const dStr = p['created_at'].split('T')[0];
-        historyAll[dStr] = (historyAll[dStr] || 0) + 1;
-
-        const d = new Date(p.created_at);
-        if (!firstUploadDate || d < firstUploadDate) {
-          firstUploadDate = d;
-        }
-        if (!lastUploadDate || d > lastUploadDate) {
-          lastUploadDate = d;
-        }
-
-        if (d >= oneYearAgo) {
-          history1Year[dStr] = (history1Year[dStr] || 0) + 1;
-          count1Year++;
-        }
-      });
-
-    if (totalCount === 0)
-      return {
-        maxUploads: 0,
-        maxDate: 'N/A',
-        firstUploadDate: null,
-        lastUploadDate: null,
-      } as SummaryStats;
-
-    let maxUploads = 0;
-    let maxDate = 'N/A';
-
-    const sortedDates = Object.keys(historyAll).sort();
-    const activeDays = sortedDates.length;
-
-    for (const [date, count] of Object.entries(historyAll)) {
-      if ((count as number) > maxUploads) {
-        maxUploads = count as number;
-        maxDate = date;
-      }
-    }
-
-    let maxStreak = 0;
-    let maxStreakStart: string | null = null;
-    let maxStreakEnd: string | null = null;
-
-    let currentStreak = 0;
-    let currentStreakStart: string | null = null;
-    let lastDateObj: Date | null = null;
-
-    for (const dateStr of sortedDates) {
-      const d = new Date(dateStr);
-      d.setHours(0, 0, 0, 0);
-      if (!lastDateObj) {
-        currentStreak = 1;
-        currentStreakStart = dateStr;
-      } else {
-        const diffTime = d.getTime() - lastDateObj.getTime();
-        const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
-        if (diffDays === 1) {
-          currentStreak++;
-        } else if (diffDays > 1) {
-          currentStreak = 1;
-          currentStreakStart = dateStr;
-        }
-      }
-      if (currentStreak > maxStreak) {
-        maxStreak = currentStreak;
-        maxStreakStart = currentStreakStart;
-        maxStreakEnd = dateStr;
-      }
-      lastDateObj = d;
-    }
-
-    let maxUploads1Year = 0;
-    let maxDate1Year = 'N/A';
-    for (const [date, count] of Object.entries(history1Year)) {
-      if ((count as number) > maxUploads1Year) {
-        maxUploads1Year = count as number;
-        maxDate1Year = date;
-      }
-    }
+    const tally = tallyUploadDays(points, days, oneYearAgo);
+    const sortedDates = Object.keys(tally.historyAll).sort();
+    const all = busiestDay(tally.historyAll);
+    const lastYear = busiestDay(tally.history1Year);
+    const streak = longestStreak(sortedDates);
 
     return {
-      maxUploads,
-      maxDate,
-      firstUploadDate,
-      lastUploadDate,
-      count1Year,
-      maxUploads1Year,
-      maxDate1Year,
-      maxStreak,
-      maxStreakStart,
-      maxStreakEnd,
-      activeDays,
+      maxUploads: all.count,
+      maxDate: all.date,
+      firstUploadDate: tally.first,
+      lastUploadDate: tally.last,
+      count1Year: tally.count1Year,
+      maxUploads1Year: lastYear.count,
+      maxDate1Year: lastYear.date,
+      maxStreak: streak.length,
+      maxStreakStart: streak.start,
+      maxStreakEnd: streak.end,
+      activeDays: sortedDates.length,
     };
   }
 
@@ -1010,6 +1086,43 @@ export class AnalyticsDataManager extends DataManager {
     return Math.floor(total / step) * step + step;
   }
 
+  /**
+   * Fetches milestone rows' thumbnails (`media_asset[variants]` and the
+   * preview), 100 ids a request, and stores them on the rows — `variants`
+   * an empty list for an id Danbooru answered without them or not at all,
+   * so the row is not asked again (T-506). A failed request stores nothing.
+   */
+  private async lookUpMilestoneThumbnails(
+    ids: number[],
+    rows: PostRecord[],
+  ): Promise<void> {
+    const chunkSize = 100;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const url = `${this.baseUrl}/posts.json?tags=id:${chunk.join(',')}&limit=${chunkSize}&only=id,media_asset[variants],rating,preview_file_url`;
+      const res = await this.rateLimiter.fetch(url);
+      if (!res.ok) continue;
+      const fetched: DanbooruPost[] = await res.json();
+      const byId = new Map(fetched.map(p => [p.id, p]));
+      for (const id of chunk) {
+        const local = rows.find(r => r.id === id);
+        if (!local) continue;
+        const item = byId.get(id);
+        const patch: Partial<PostRecord> = {
+          variants: item?.media_asset?.variants ?? [],
+          preview_file_url: item?.preview_file_url,
+          rating: item?.rating ?? local.rating,
+        };
+        Object.assign(local, patch);
+        this.db.posts
+          .update(id, patch)
+          .catch((e: unknown) =>
+            log.error('Failed to update post in DB', {postId: id, error: e}),
+          );
+      }
+    }
+  }
+
   async getMilestones(
     userInfo: TargetUser,
     isNsfwEnabled: boolean = false,
@@ -1063,57 +1176,20 @@ export class AnalyticsDataManager extends DataManager {
       .toArray();
 
     // Thumbnails are shown for Safe(s) / General(g) posts, or all when NSFW is
-    // on. A row normally has one already (the sync stores
-    // `preview_file_url`); only a row without any thumbnail URL is looked up.
-    // The test used to be "no `variants`", which a post search never returns,
-    // so every recompute — each sync and each dashboard open — sent a lookup
-    // that changed nothing (T-506; one of them drew an edge 429 right after
-    // a full sync, 2026-11-15).
-    const missingIds: number[] = [];
-    matches.forEach(p => {
-      const isSafe = p.rating === 's' || p.rating === 'g';
-      const shouldFetch = isNsfwEnabled || isSafe;
-      if (shouldFetch && !getBestThumbnailUrl(p)) missingIds.push(p.id);
-    });
-
+    // on, in the larger sizes (G-3) only a lookup brings: the sync stores no
+    // thumbnail (T-506). A row is looked up once — its `variants` keeps the
+    // answer, an empty list when Danbooru gave none (a banned post for a
+    // viewer below Approver) — until a sync or a catch-up rewrites it.
+    // Before, the test was "no thumbnail URL", and earlier still "no
+    // `variants`" read from a field Danbooru never sends, which sent a
+    // lookup on every recompute (one drew an edge 429 after a full sync).
+    const missingIds = matches
+      .filter(p => isNsfwEnabled || p.rating === 's' || p.rating === 'g')
+      .filter(p => p.variants === undefined)
+      .map(p => p.id);
     if (missingIds.length > 0) {
       try {
-        // Chunk requests if too many
-        const chunkSize = 100;
-        for (let i = 0; i < missingIds.length; i += chunkSize) {
-          const chunk = missingIds.slice(i, i + chunkSize);
-          const idsStr = chunk.join(',');
-          const url = `${this.baseUrl}/posts.json?tags=id:${idsStr}&limit=100&only=id,variants,rating,preview_file_url`;
-
-          const res = await this.rateLimiter.fetch(url);
-          if (res.ok) {
-            const fetchedItems = await res.json();
-            // Update local matches objects
-            fetchedItems.forEach((item: DanbooruPost) => {
-              const local = matches.find((m: PostRecord) => m.id === item.id);
-              if (local) {
-                local.variants = item.variants;
-                local.preview_file_url = item.preview_file_url;
-                // Ensure rating matches just in case
-                local.rating = item.rating;
-
-                // Update DB for persistence (no need for bulkPut if we do it here)
-                this.db.posts
-                  .update(local.id, {
-                    variants: item.variants,
-                    preview_file_url: item.preview_file_url,
-                    rating: item.rating,
-                  })
-                  .catch((e: unknown) =>
-                    log.error('Failed to update post in DB', {
-                      postId: local['id'],
-                      error: e,
-                    }),
-                  );
-              }
-            });
-          }
-        }
+        await this.lookUpMilestoneThumbnails(missingIds, matches);
       } catch (e: unknown) {
         log.warn('Failed to fetch missing milestone thumbnails', {error: e});
       }
@@ -1169,16 +1245,13 @@ export class AnalyticsDataManager extends DataManager {
 
     const counts: Record<string, number> = {}; // "2023-01": 5
 
-    // Streaming iteration to avoid memory spikes
-    await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .each((post: ApiItem) => {
-        if (!post['created_at']) return;
-        // created_at is likely ISO string "2023-01-01T..."
-        const month = post['created_at'].substring(0, 7); // "YYYY-MM"
-        counts[month] = (counts[month] || 0) + 1;
-      });
+    // From the open's one scan of the rows (T-501): a day key's first seven
+    // characters are `created_at`'s ("YYYY-MM").
+    const {days} = await this.getRowSnapshot(uploaderId);
+    for (const day of days) {
+      const month = day.substring(0, 7);
+      counts[month] = (counts[month] || 0) + 1;
+    }
 
     // Convert to array and Fill Gaps for Linear timeline
     let results: MonthlyStatEntry[] = [];
@@ -2108,10 +2181,11 @@ export class AnalyticsDataManager extends DataManager {
    *  - the rows' numbering is intact (T-404) and there is at least one.
    * Otherwise the pies keep counting with `/counts/posts.json`.
    *
-   * One scan serves the status, rating, character and copyright pies and
-   * the user stats of one dashboard load: the result is kept for
-   * {@link LOCAL_DISTRIBUTIONS_MEMO_MS} and dropped whenever the user's rows
-   * change (sync, backfill, reset).
+   * The counts come from the open's one scan of the rows (T-501), shared
+   * with the summary, the scatter and the monthly chart; the result serves
+   * the status, rating, character and copyright pies and the user stats
+   * for {@link LOCAL_DISTRIBUTIONS_MEMO_MS} and is dropped whenever the
+   * user's rows change (sync, backfill, catch-up, reset).
    */
   async getLocalDistributions(
     uploaderId: number,
@@ -2153,18 +2227,19 @@ export class AnalyticsDataManager extends DataManager {
       log.debug('Pies count remotely', {uploaderId, reason: notUsed});
       return null;
     }
-    const counter = createLocalDistributionCounter();
-    await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .each((row: PostRecord) => counter.add(row));
-    const result = counter.result();
-    return result.rows > 0 ? result : null;
+    // Counted in the open's one scan of the rows (T-501).
+    const {local} = await this.getRowSnapshot(uploaderId);
+    return local.rows > 0 ? local : null;
   }
 
-  /** Drops the local distributions memo after the user's rows changed. */
-  private invalidateLocalDistributions(uploaderId: number): void {
+  /**
+   * Drops what was read from the user's rows — the scan (T-501) and the
+   * local pies — after they changed: a sync, a backfill, a catch-up that
+   * changed rows, a reset.
+   */
+  private forgetLocalRows(uploaderId: number): void {
     this.localDistributionsMemo.delete(uploaderId);
+    this.rowSnapshotMemo.delete(uploaderId);
   }
 
   /**
@@ -2523,7 +2598,7 @@ export class AnalyticsDataManager extends DataManager {
         // blank thumbnail cell.
         const normalizedName = userInfo.name.replace(/ /g, '_');
         const query = `user:${normalizedName} order:score rating:${ratingTag} status:active ${extraQuery}`;
-        const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
+        const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,media_asset[variants],rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const r = await this.rateLimiter.fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const resp = await r.json();
@@ -2579,7 +2654,7 @@ export class AnalyticsDataManager extends DataManager {
         // status:active excludes banned/deleted posts that would render as a
         // blank thumbnail cell.
         const query = `user:${normalizedName} order:score ${ratingTag} age:<1w status:active`;
-        const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
+        const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,media_asset[variants],rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const r = await this.rateLimiter.fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const resp = await r.json();
@@ -3054,7 +3129,7 @@ export class AnalyticsDataManager extends DataManager {
         // status:active excludes banned/deleted posts — without it, random
         // could land on a banned post and render an empty card (user report).
         const query = `user:${normalizedName} ${ratingTag} status:active`;
-        const url = `/posts/random.json?tags=${encodeURIComponent(query)}&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
+        const url = `/posts/random.json?tags=${encodeURIComponent(query)}&only=id,preview_file_url,file_url,media_asset[variants],rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const resp = await this.rateLimiter.fetch(url).then(r => r.json());
         if (resp && resp.id) {
           return resp;
@@ -3082,28 +3157,62 @@ export class AnalyticsDataManager extends DataManager {
   async getScatterData(userInfo: TargetUser): Promise<ScatterDataPoint[]> {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return [];
+    // A copy of the open's one scan (T-501): the scatter replaces its own
+    // array in place after a backfill (replaceArrayContents).
+    return (await this.getRowSnapshot(uploaderId)).points.slice();
+  }
 
-    const result: ScatterDataPoint[] = [];
-    // Streaming iterate
+  /**
+   * The user's rows read once for the dashboard (T-501): the summary, the
+   * monthly chart, the scatter and the local pies all derive from it, so an
+   * open reads `posts` once instead of four times. Kept for
+   * {@link ROW_SNAPSHOT_MEMO_MS} and dropped when the rows change
+   * ({@link forgetLocalRows}); a failed read is not kept.
+   */
+  private getRowSnapshot(uploaderId: number): Promise<RowSnapshot> {
+    const hit = this.rowSnapshotMemo.get(uploaderId);
+    if (hit && Date.now() - hit.at < ROW_SNAPSHOT_MEMO_MS) return hit.value;
+    const entry = {at: Date.now(), value: this.scanRows(uploaderId)};
+    this.rowSnapshotMemo.set(uploaderId, entry);
+    const drop = () => {
+      if (this.rowSnapshotMemo.get(uploaderId) === entry) {
+        this.rowSnapshotMemo.delete(uploaderId);
+      }
+    };
+    void entry.value.catch(drop);
+    // Let the memory go once expired: the app's own manager lives as long
+    // as the page. (A timer that runs early, as test stubs do, keeps it.)
+    setTimeout(() => {
+      if (Date.now() - entry.at >= ROW_SNAPSHOT_MEMO_MS) drop();
+    }, ROW_SNAPSHOT_MEMO_MS);
+    return entry.value;
+  }
+
+  /** One pass over the user's rows: {@link RowSnapshot}. */
+  private async scanRows(uploaderId: number): Promise<RowSnapshot> {
+    const points: ScatterDataPoint[] = [];
+    const days: string[] = [];
+    const counter = createLocalDistributionCounter();
     await this.db.posts
       .where('uploader_id')
       .equals(uploaderId)
-      .each((post: ApiItem) => {
-        if (!post['created_at']) return;
-        // Use timestamps for faster plotting
-        const d = new Date(post['created_at']).getTime();
-        // Rating: g, s, q, e
-        const r = post['rating'];
-        const s = post['score'] || 0;
-        const t = post['tag_count_general'] || 0;
-        const dn = post['down_score'];
-        const del = post['is_deleted'];
-        const ban = post['is_banned'];
-
-        result.push({id: post['id'], d, s, t, r, dn, del, ban});
+      .each((row: PostRecord) => {
+        counter.add(row);
+        if (!row.created_at) return;
+        points.push({
+          id: row.id,
+          // Timestamps plot faster than date strings.
+          d: new Date(row.created_at).getTime(),
+          s: row.score || 0,
+          t: row.tag_count_general || 0,
+          r: row.rating,
+          dn: row.down_score,
+          del: row.is_deleted,
+          ban: row.is_banned,
+        });
+        days.push(row.created_at.split('T')[0]);
       });
-
-    return result;
+    return {points, days, local: counter.result()};
   }
 
   /**
@@ -3261,7 +3370,7 @@ export class AnalyticsDataManager extends DataManager {
     });
     // Full success: any earlier failure history is stale.
     this.clearBackfillFailureState(uploaderId);
-    this.invalidateLocalDistributions(uploaderId);
+    this.forgetLocalRows(uploaderId);
   }
 
   /**
@@ -3409,7 +3518,7 @@ export class AnalyticsDataManager extends DataManager {
       );
       cursor = await this.recordCatchUpStep(uploaderId, step, watermark);
     }
-    if (changed > 0) this.invalidateLocalDistributions(uploaderId);
+    if (changed > 0) this.forgetLocalRows(uploaderId);
     return {changed};
   }
 
@@ -4743,10 +4852,13 @@ export class AnalyticsDataManager extends DataManager {
    *   The two early returns below never fetched anything at all — they carry
    *   `started: false` so callers can tell "nothing changed" apart from
    *   "changed, but only partly".
+   * @param options.pageLimit Posts per page, {@link SYNC_PAGE_LIMIT} unless
+   *   a test serves smaller pages (a page shorter than this ends the run).
    */
   async syncAllPosts(
     userInfo: TargetUser,
     onProgress: (current: number, total: number, message?: string) => void,
+    options: {pageLimit?: number} = {},
   ): Promise<SyncOutcome> {
     if (!userInfo.id) {
       log.error('User ID required for sync');
@@ -4805,6 +4917,11 @@ export class AnalyticsDataManager extends DataManager {
       perfStats.startId = startId;
       perfStats.initialCurrentNo = currentNo;
 
+      // A run from the start searches from the user's first post, not
+      // `id:>0` (T-508). `startId` keeps meaning "from the start" for the
+      // ghost prune and the completion stamps.
+      const anchor = await this.syncAnchor(userInfo, startId);
+
       // 3. Worker pool — claim pages, fetch with retry, commit in order.
       // Danbooru refuses numbered pages past the viewer's page limit, so the
       // pool runs one segment of SYNC_SEGMENT_PAGES at a time: when a
@@ -4812,8 +4929,8 @@ export class AnalyticsDataManager extends DataManager {
       // one searches `id:>` the last post committed and counts from page 1.
       let pageFailed = false;
       const seenIds = new Set<number>();
-      let lastSeenId = startId;
-      let segmentStartId = startId;
+      let lastSeenId = anchor;
+      let segmentStartId = anchor;
       // The server's clock at the first page: the rows reflect Danbooru as
       // of then at the latest (T-402's change watermark).
       let firstResponseAt: number | null = null;
@@ -4827,6 +4944,7 @@ export class AnalyticsDataManager extends DataManager {
           userInfo,
           uploaderId,
           startId: segmentStartId,
+          limit: options.pageLimit ?? SYNC_PAGE_LIMIT,
           getCurrentNo: () => currentNo,
           bumpCurrentNo: () => ++currentNo,
           total,
@@ -4913,6 +5031,60 @@ export class AnalyticsDataManager extends DataManager {
     }
   }
 
+  /** The id the sync's search starts after: the resume's, or {@link findFirstPostAnchor}'s. */
+  private syncAnchor(userInfo: TargetUser, startId: number): Promise<number> {
+    return startId === 0
+      ? this.findFirstPostAnchor(userInfo)
+      : Promise.resolve(startId);
+  }
+
+  /**
+   * Where a sync from the start begins: one below the user's first post,
+   * or 0 (T-508). `user:X order:id id:>0` makes Danbooru walk the primary
+   * key from id 0 until the user's posts begin; for an account whose
+   * uploads start millions of ids in, its first pages took 7–8 s logged in
+   * and failed the 3 s logged-out limit with a 500 (browser check,
+   * 2026-11-16: 3.4 s and a 500 against 0.35–0.66 s for the same posts
+   * found by date or by `id:>` the first one). The first post is found with
+   * `date:>=` the day before the join date, and trusted only when a count
+   * finds none of the user's posts below it: a join date scraped wrong
+   * (the profile scrape falls back to "now") would otherwise skip the older
+   * posts. Any doubt or failure gives 0, the old search.
+   */
+  private async findFirstPostAnchor(userInfo: TargetUser): Promise<number> {
+    const since = dayBeforeJoin(userInfo.joinDate);
+    if (!since || !userInfo.name) return 0;
+    const name = userInfo.name.replace(/ /g, '_');
+    try {
+      const params = new URLSearchParams({
+        tags: `user:${name} order:id date:>=${since}`,
+        limit: '1',
+        only: 'id',
+      });
+      const resp = await this.rateLimiter.fetch(
+        `/posts.json?${params.toString()}`,
+      );
+      if (!resp.ok) return 0;
+      const body: unknown = await resp.json();
+      const firstId = Array.isArray(body)
+        ? (body[0] as {id?: unknown} | undefined)?.id
+        : undefined;
+      if (typeof firstId !== 'number' || firstId < 1) return 0;
+      const below = await this.fetchRemoteCount(`user:${name} id:<${firstId}`);
+      if (below !== 0) {
+        log.warn('Posts before the first one found; syncing from id 0', {
+          firstId,
+          below,
+        });
+        return 0;
+      }
+      return firstId - 1;
+    } catch (e: unknown) {
+      log.debug('First post lookup failed; syncing from id 0', {error: e});
+      return 0;
+    }
+  }
+
   /**
    * Find the resume cutoff for this user's posts and seed `currentNo` so
    * the worker's `no: ++currentNo` assignment continues from where the
@@ -4990,14 +5162,14 @@ export class AnalyticsDataManager extends DataManager {
 
     let currentNo = 0;
     if (startId > 0) {
-      // Count ONLY this user's posts at or below startId.
-      // Using .filter() on the collection because no composite index
-      // exists for (id, uploader_id).
-      currentNo = await this.db.posts
+      // This user's posts at or below startId, counted from the index's
+      // primary keys (T-502): a `.filter()` here read every row of the
+      // user only to look at its id (about 1 s for 50k rows).
+      const ids = await this.db.posts
         .where('uploader_id')
         .equals(uploaderId)
-        .filter((p: ApiItem) => p['id'] <= startId)
-        .count();
+        .primaryKeys();
+      for (const id of ids) if (id <= startId) currentNo++;
     }
     perfLogger.end('dbi:db:sync:full:resumeCheck', {
       startId,
@@ -5111,6 +5283,8 @@ export class AnalyticsDataManager extends DataManager {
     userInfo: TargetUser;
     uploaderId: number;
     startId: number;
+    /** Posts per page; a shorter page is the last. */
+    limit: number;
     getCurrentNo: () => number;
     bumpCurrentNo: () => number;
     total: number;
@@ -5132,6 +5306,7 @@ export class AnalyticsDataManager extends DataManager {
       userInfo,
       uploaderId,
       startId,
+      limit,
       getCurrentNo,
       bumpCurrentNo,
       total,
@@ -5147,7 +5322,6 @@ export class AnalyticsDataManager extends DataManager {
       reportProgress,
       perfStats,
     } = args;
-    const limit = 200; // API Limit
     const WORKER_DELAY = 400; // pause between pages, per worker
 
     // T-26 baseline: arrow complexity 20. Worker body — retry/backoff +
@@ -5168,7 +5342,10 @@ export class AnalyticsDataManager extends DataManager {
 
       try {
         while (getHasMore()) {
-          // 1. Claim a page
+          // 1. Claim a page — once the buffer has room (T-504): while an
+          // earlier page is stuck in its retries, the pages behind it wait
+          // in memory, and more requests would only add to them.
+          if (!(await waitForBufferRoom(buffer, getHasMore))) return;
           const currentPage = claimPage();
           if (currentPage === null) return;
           perfLogger.start(pageLabel);
@@ -5241,6 +5418,9 @@ export class AnalyticsDataManager extends DataManager {
 
             // 2. Buffer the result
             buffer.set(currentPage, items);
+            // A short page is the last (T-504): claim no more. Pages already
+            // in flight past it come back empty.
+            if (items.length < limit) setHasMore(false);
 
             // 3. Ordered Commit Loop (Check if we can save)
             while (buffer.has(getNextExpectedPage())) {
@@ -5362,10 +5542,8 @@ export class AnalyticsDataManager extends DataManager {
       }
     }
 
-    // Auto-cleanup other users' stale data (older than 14 days).
-    // userInfo.id is non-null by syncAllPosts's entry guard, but TS can't
-    // narrow across the method call.
-    await this.cleanupStaleData(userInfo.id!);
+    // Other users' stale data (cleanupStaleData) is no longer cleaned here:
+    // the app runs it once the dashboard after the sync is painted (T-503).
 
     // Signal UI: Processing Stats. A failed run reports what it actually
     // committed — painting total/total here showed "46,894 / 46,894 (100%)"
@@ -5380,7 +5558,7 @@ export class AnalyticsDataManager extends DataManager {
     // was 0, it was a Full Sync; otherwise it's a Partial Sync. Heavy tag
     // distributions freshen post-paint via fetchDashboardData's SWR revalidate.
     // The rows changed: count them again (T-406).
-    this.invalidateLocalDistributions(uploaderId);
+    this.forgetLocalRows(uploaderId);
     await this.refreshCriticalStats(userInfo, startId === 0);
 
     // First successful sync = meaningful engagement signal. Ask the
@@ -5459,12 +5637,15 @@ export class AnalyticsDataManager extends DataManager {
       // the stale-data cleanup. Cleared by recordFullSyncMeta.
       await patchSyncMeta(this.db, uploaderId, {syncStartedAt: Date.now()});
 
+      // From the user's first post rather than id 0 (T-508).
+      const anchor = await this.findFirstPostAnchor(userInfo);
+
       // 2. Clear existing posts for a clean re-fetch
       await this.db.posts.where('uploader_id').equals(uploaderId).delete();
 
       // 3. Sequential cursor-based fetch (ascending by ID, 200 per batch)
       const limit = 200;
-      let page = 'a0';
+      let page = `a${anchor}`;
       let hasMore = true;
       let no = 0;
       let firstResponseAt: number | null = null;
@@ -5537,15 +5718,15 @@ export class AnalyticsDataManager extends DataManager {
       // version 2 (T-402): no backfill needed.
       await this.recordFullSyncMeta(uploaderId, firstResponseAt ?? Date.now());
 
-      // 5. Cleanup stale data for other users
-      await this.cleanupStaleData(userInfo.id);
+      // 5. Other users' stale data: the app cleans it after the dashboard
+      // is painted (T-503).
 
       // 6. Signal UI: Processing Stats
       reportProgress(no, no, 'PREPARING');
 
       // 7. Refresh critical stats (full sync). Heavy tag distributions
       // freshen post-paint via fetchDashboardData's SWR revalidate.
-      this.invalidateLocalDistributions(uploaderId);
+      this.forgetLocalRows(uploaderId);
       await this.refreshCriticalStats(userInfo, true);
 
       // Engagement signal — see syncAllPosts for rationale.
@@ -5559,6 +5740,8 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Cleans up data for other users if they haven't been synced in 14 days.
+   * Run by the app after a sync, once its dashboard is painted (T-503):
+   * inside the sync it held the dashboard back while it deleted.
    * @param {number|string} currentUserId - The ID of the currently active user (to skip).
    */
   async cleanupStaleData(currentUserId: number | string): Promise<void> {
@@ -5592,8 +5775,18 @@ export class AnalyticsDataManager extends DataManager {
         );
 
         if (shouldDelete) {
-          await this.db.posts.where('uploader_id').equals(uid).delete();
+          // Keys from the index, then one bulk delete (T-503): a
+          // collection delete walks a cursor over every row.
+          const keys = await this.db.posts
+            .where('uploader_id')
+            .equals(uid)
+            .primaryKeys();
+          await this.db.posts.bulkDelete(keys);
           await this.db.piestats.where('userId').equals(uid).delete();
+          // The rest of what this user left (T-505): its sync state (keyed
+          // by the number) and its counters (keyed by the string).
+          await this.db.sync_meta?.delete(uid as number);
+          await this.db.user_stats?.delete(String(uid));
 
           localStorage.removeItem(syncKey);
         }
@@ -5601,6 +5794,9 @@ export class AnalyticsDataManager extends DataManager {
     } catch (e: unknown) {
       log.warn('Stale data cleanup failed', {error: e});
     }
+    // The user dashboard writes implication rows too; without this they were
+    // only pruned by a tag page's daily sweep (T-505, from T-309).
+    await pruneImplicationCache(this.db, now);
   }
 
   /**
@@ -5644,13 +5840,18 @@ export class AnalyticsDataManager extends DataManager {
           this.getLevelChangeHistory(userInfo, true),
         ),
         // Warm the milestones cache for the step=1000 view that renderDashboard
-        // always requests. Both NSFW values so toggling is a cache hit too.
-        perfLogger.wrap('dbi:db:refresh:milestonesSfw', () =>
-          this.getMilestones(userInfo, false, 1000, true),
-        ),
-        perfLogger.wrap('dbi:db:refresh:milestonesNsfw', () =>
-          this.getMilestones(userInfo, true, 1000, true),
-        ),
+        // always requests. Both NSFW values so toggling is a cache hit too —
+        // NSFW first: its thumbnail lookup covers every milestone row, so the
+        // SFW pass finds them filled instead of asking for the same posts
+        // (T-506).
+        (async () => {
+          await perfLogger.wrap('dbi:db:refresh:milestonesNsfw', () =>
+            this.getMilestones(userInfo, true, 1000, true),
+          );
+          await perfLogger.wrap('dbi:db:refresh:milestonesSfw', () =>
+            this.getMilestones(userInfo, false, 1000, true),
+          );
+        })(),
         // Popular posts are API-driven (order:score, age:<1w) and cached in
         // piestats. Refresh on EVERY sync — a partial (incremental) sync must
         // freshen them too, otherwise the post-sync dashboard render serves
@@ -5689,7 +5890,9 @@ export class AnalyticsDataManager extends DataManager {
     // watermark, a backfill plan): left behind, it would vouch for whatever
     // the next, possibly partial, sync writes.
     await this.db.sync_meta?.delete(uploaderId);
-    this.invalidateLocalDistributions(uploaderId);
+    // Its gentags / tagcount counters (T-505); keyed by the string id.
+    await this.db.user_stats?.delete(userInfo.id);
+    this.forgetLocalRows(uploaderId);
 
     // Clear metadata (Last Sync Time)
     const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;

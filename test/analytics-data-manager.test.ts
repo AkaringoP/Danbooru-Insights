@@ -12,6 +12,8 @@ import {
   syncRetryDelayMs,
   SYNC_PAGE_MAX_ATTEMPTS,
   SYNC_SEGMENT_PAGES,
+  SYNC_WORKERS,
+  SYNC_BUFFER_MAX_PAGES,
   splitIdRanges,
   isStaleUser,
   catchUpWatermark,
@@ -83,6 +85,29 @@ describe('getBestThumbnailUrl', () => {
 
   it('모든 fallback 없으면 빈 문자열', () => {
     expect(getBestThumbnailUrl({})).toBe('');
+  });
+
+  it('reads the sizes Danbooru sends under media_asset first (T-506)', () => {
+    // The shape `only=…,media_asset[variants]` returns (V-9, 2026-11-16).
+    const post = {
+      preview_file_url: 'http://x/180.jpg',
+      variants: [{type: '360x360', file_ext: 'jpg', url: 'http://x/old.jpg'}],
+      media_asset: {
+        variants: [
+          {type: '180x180', file_ext: 'jpg', url: 'http://x/180.jpg'},
+          {type: '360x360', file_ext: 'jpg', url: 'http://x/360.jpg'},
+          {type: '720x720', file_ext: 'webp', url: 'http://x/720.webp'},
+        ],
+      },
+    };
+    expect(getBestThumbnailUrl(post)).toBe('http://x/720.webp');
+    // Without them: a stored row's copy, then the preview.
+    expect(getBestThumbnailUrl({...post, media_asset: {}})).toBe(
+      'http://x/old.jpg',
+    );
+    expect(
+      getBestThumbnailUrl({preview_file_url: 'http://x/180.jpg', variants: []}),
+    ).toBe('http://x/180.jpg');
   });
 });
 
@@ -401,6 +426,7 @@ function makeSyncDb(
     user_stats: {
       get: vi.fn(async () => null),
       put: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
     },
     tag_monthly_counts: {
       where: vi.fn().mockReturnValue({
@@ -423,14 +449,18 @@ function makeSyncDb(
   };
 }
 
-/** A standard test user for sync tests. */
+/**
+ * A standard test user for sync tests. Its join date is unknown (an
+ * invalid Date), so a sync from the start searches `id:>0` without the
+ * first-post lookup (T-508); the T-508 tests give one.
+ */
 function makeSyncUser(overrides: Partial<TargetUser> = {}): TargetUser {
   return {
     name: 'test_user',
     normalizedName: 'test_user',
     id: '42',
     created_at: '2020-01-01T00:00:00Z',
-    joinDate: new Date('2020-01-01'),
+    joinDate: new Date(NaN),
     level_string: 'Member',
     ...overrides,
   };
@@ -1013,8 +1043,9 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     );
     expect(metaKeySet).toBe(false);
 
-    // cleanupStaleData and refreshCriticalStats were called
-    expect(adm2.cleanupStaleData).toHaveBeenCalledWith('42');
+    // refreshCriticalStats was called; other users' cleanup is the app's,
+    // after the dashboard is painted (T-503).
+    expect(adm2.cleanupStaleData).not.toHaveBeenCalled();
     expect(adm2.refreshCriticalStats).toHaveBeenCalledWith(
       expect.objectContaining({id: '42'}),
       true, // full sync
@@ -1294,7 +1325,12 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       );
       vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
       vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
-      const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+      // One post a page (T-504): a shorter page would end the run.
+      const outcome = await adm.syncAllPosts(
+        makeSyncUser({id: '42'}),
+        vi.fn(),
+        {pageLimit: 1},
+      );
       const written = vi
         .mocked(quotaManager.bulkPutSafe)
         .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
@@ -1486,6 +1522,28 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       expect(meta?.syncStartedAt).toBeUndefined();
     });
 
+    it('numbers a resume after the rows at or below its start (T-502)', async () => {
+      const {rl, asked} = serve();
+      // Newest first, as the reverse walk meets them: 500 is the first one
+      // older than a month before the newest, so the resume starts after it.
+      const {adm, written} = setUp(
+        [
+          {id: 950, uploader_id: 42, no: 4, created_at: '2025-03-10T00:00:00Z'},
+          {id: 30, uploader_id: 42, no: 1, created_at: '2025-03-05T00:00:00Z'},
+          {id: 60, uploader_id: 42, no: 2, created_at: '2025-03-02T00:00:00Z'},
+          {id: 500, uploader_id: 42, no: 3, created_at: '2025-01-15T00:00:00Z'},
+        ],
+        rl,
+      );
+      vi.mocked(quotaManager.bulkPutSafe).mockClear();
+
+      await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      expect(asked[0]).toContain(encodeURIComponent('id:>500'));
+      // 30, 60 and 500 are at or below the start: the next row is no 4.
+      expect(written()[0]).toMatchObject({id: 7, no: 4});
+    });
+
     it('records it after a quick sync, which always rewrites every row', async () => {
       const {rl} = serve();
       const {adm, syncMeta} = setUp([], rl);
@@ -1496,6 +1554,8 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
         fieldsVersion: 2,
         changeWatermark: Date.parse(DATE),
       });
+      // Other users' cleanup is the app's, after paint (T-503).
+      expect(adm.cleanupStaleData).not.toHaveBeenCalled();
     });
   });
 
@@ -2882,7 +2942,7 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
   });
 
   describe('thumbnail lookup (T-506)', () => {
-    /** A milestone row as the sync stores it: a preview URL, no variants. */
+    /** A milestone row as the sync stores it: no thumbnail at all. */
     const syncedRow = (no: number, extra: Record<string, unknown> = {}) => ({
       id: 1000 + no,
       uploader_id: 42,
@@ -2890,9 +2950,22 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
       rating: 'g',
       score: 5,
       created_at: '2025-01-01T00:00:00Z',
-      preview_file_url: `http://x/${no}.jpg`,
       ...extra,
     });
+    /** Danbooru's answer for a post: its sizes under `media_asset`. */
+    const answer = (id: number) => ({
+      id,
+      rating: 'g',
+      preview_file_url: `http://x/${id}.jpg`,
+      media_asset: {
+        variants: [
+          {type: '180x180', url: `http://x/${id}.jpg`, file_ext: 'jpg'},
+          {type: '720x720', url: `http://x/${id}.webp`, file_ext: 'webp'},
+        ],
+      },
+    });
+    const idsAsked = (url: string) =>
+      /tags=id:([\d,]+)&/.exec(url)?.[1].split(',').map(Number);
 
     /** Milestone rows for total=200 (targets 1, 100, 200) and a posts.update spy. */
     function makeDbWith(rows: Record<string, unknown>[]) {
@@ -2905,31 +2978,16 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
       return {db, update};
     }
 
-    it('sends nothing for rows that have a preview URL but no variants', async () => {
-      // The sync never gets `variants`; the old "no variants" test sent a
-      // lookup on every recompute (each sync, each dashboard open).
-      const {db} = makeDbWith([syncedRow(1), syncedRow(100), syncedRow(200)]);
-      const rl = makeSyncRateLimiter();
-      const adm = new AnalyticsDataManager(db as never, rl as never);
-
-      await adm.getMilestones(makeSyncUser(), false, 'auto');
-      await adm.getMilestones(makeSyncUser(), true, 'auto');
-
-      expect(rl.fetch).not.toHaveBeenCalled();
-    });
-
-    it('looks up only a row without any thumbnail URL and stores the answer', async () => {
+    it('looks rows up once for the large sizes and keeps them on the row', async () => {
       const {db, update} = makeDbWith([
         syncedRow(1),
-        syncedRow(100, {preview_file_url: undefined}),
+        syncedRow(100),
         syncedRow(200),
       ]);
       const rl = makeSyncRateLimiter(async () => ({
         ok: true,
         status: 200,
-        json: async () => [
-          {id: 1100, rating: 'g', preview_file_url: 'http://x/100-new.jpg'},
-        ],
+        json: async () => [answer(1001), answer(1100), answer(1200)],
       }));
       const adm = new AnalyticsDataManager(db as never, rl as never);
 
@@ -2937,37 +2995,90 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
 
       expect(rl.fetch).toHaveBeenCalledTimes(1);
       const url = rl.fetch.mock.calls[0][0];
-      expect(url).toContain('tags=id:1100&');
+      expect(idsAsked(url)).toEqual([1001, 1100, 1200]);
+      expect(url).toContain('media_asset[variants]');
       expect(update).toHaveBeenCalledWith(
         1100,
-        expect.objectContaining({preview_file_url: 'http://x/100-new.jpg'}),
+        expect.objectContaining({variants: answer(1100).media_asset.variants}),
       );
+      // The card picks the 720 webp (G-3).
       const m100 = result.find(m => m.milestone === 100);
-      expect(m100?.post.preview_file_url).toBe('http://x/100-new.jpg');
+      expect(getBestThumbnailUrl(m100?.post)).toBe('http://x/1100.webp');
+
+      // A recompute (as each dashboard open forces) asks nothing more.
+      await adm.getMilestones(makeSyncUser(), false, 'auto', true);
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves an explicit row without a URL alone unless NSFW is on', async () => {
+    it('does not ask again for a post Danbooru answered without sizes', async () => {
+      const {db, update} = makeDbWith([
+        syncedRow(1),
+        syncedRow(100),
+        syncedRow(200),
+      ]);
+      // 1100 comes back without sizes (banned, viewer below Approver);
+      // 1200 does not come back at all.
+      const rl = makeSyncRateLimiter(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [answer(1001), {id: 1100, rating: 'g'}],
+      }));
+      const adm = new AnalyticsDataManager(db as never, rl as never);
+
+      await adm.getMilestones(makeSyncUser(), false, 'auto');
+      await adm.getMilestones(makeSyncUser(), false, 'auto', true);
+
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith(
+        1100,
+        expect.objectContaining({variants: []}),
+      );
+      expect(update).toHaveBeenCalledWith(
+        1200,
+        expect.objectContaining({variants: []}),
+      );
+    });
+
+    it('stores nothing when the lookup fails, so it asks again', async () => {
+      const {db, update} = makeDbWith([syncedRow(1)]);
+      const rl = makeSyncRateLimiter(async () => ({
+        ok: false,
+        status: 429,
+        json: async () => ({}),
+      }));
+      const adm = new AnalyticsDataManager(db as never, rl as never);
+
+      await adm.getMilestones(makeSyncUser(), false, 'auto');
+      await adm.getMilestones(makeSyncUser(), false, 'auto', true);
+
+      expect(update).not.toHaveBeenCalled();
+      expect(rl.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks for an explicit post only when NSFW is on', async () => {
       const rows = [
         syncedRow(1),
-        syncedRow(100, {rating: 'e', preview_file_url: undefined}),
+        syncedRow(100, {rating: 'e'}),
         syncedRow(200),
       ];
-      const rl = makeSyncRateLimiter();
+      const rl = makeSyncRateLimiter(async (url: string) => ({
+        ok: true,
+        status: 200,
+        json: async () => (idsAsked(url) ?? []).map(answer),
+      }));
 
-      const sfw = makeDbWith(rows);
       await new AnalyticsDataManager(
-        sfw.db as never,
+        makeDbWith(rows).db as never,
         rl as never,
       ).getMilestones(makeSyncUser(), false, 'auto');
-      expect(rl.fetch).not.toHaveBeenCalled();
+      expect(idsAsked(rl.fetch.mock.calls[0][0])).toEqual([1001, 1200]);
 
-      const nsfw = makeDbWith(rows);
+      // The same rows, now holding the SFW answers: only 1100 is left.
       await new AnalyticsDataManager(
-        nsfw.db as never,
+        makeDbWith(rows).db as never,
         rl as never,
       ).getMilestones(makeSyncUser(), true, 'auto');
-      expect(rl.fetch).toHaveBeenCalledTimes(1);
-      expect(rl.fetch.mock.calls[0][0]).toContain('tags=id:1100&');
+      expect(idsAsked(rl.fetch.mock.calls[1][0])).toEqual([1100]);
     });
   });
 });
@@ -3818,6 +3929,11 @@ describe('fields backfill (T-403)', () => {
     await adm.clearUserData(user);
 
     expect(metaRows.has(42)).toBe(false);
+    // And the counters, under the string id they are stored by (T-505).
+    const userStats = (
+      adm as unknown as {db: {user_stats: {delete: ReturnType<typeof vi.fn>}}}
+    ).db.user_stats;
+    expect(userStats.delete).toHaveBeenCalledWith('42');
   });
 });
 
@@ -3928,18 +4044,30 @@ describe('row numbering and the sync mark (T-404)', () => {
     const db = {
       posts: {
         orderBy: () => ({uniqueKeys: async () => [7, 8, 42]}),
+        // Each user's rows: ids uid*100+1 and +2, read as index keys and
+        // deleted in one bulk call (T-503).
         where: () => ({
           equals: (uid: number) => ({
-            delete: async () => {
-              deleted.push(uid);
-            },
+            primaryKeys: async () => [uid * 100 + 1, uid * 100 + 2],
           }),
         }),
+        bulkDelete: async (keys: number[]) => {
+          deleted.push(...keys);
+        },
       },
       piestats: {
         where: () => ({equals: () => ({delete: async () => 0})}),
       },
-      sync_meta: {get: async (k: number) => meta.get(k)},
+      sync_meta: {
+        get: async (k: number) => meta.get(k),
+        delete: vi.fn(async (k: number) => {
+          meta.delete(k);
+        }),
+      },
+      user_stats: {delete: vi.fn(async () => undefined)},
+      tag_implications_cache: {
+        where: vi.fn(() => ({below: () => ({delete: async () => 0})})),
+      },
     };
     const adm = new AnalyticsDataManager(
       db as never,
@@ -3950,7 +4078,15 @@ describe('row numbering and the sync mark (T-404)', () => {
 
     // 7: started a minute ago, no completion stamp — kept.
     // 8: no stamp, no start — zombie rows, deleted. 42: the current user.
-    expect(deleted).toEqual([8]);
+    expect(deleted).toEqual([801, 802]);
+    // With its sync state (number key) and counters (string key) (T-505).
+    expect(db.sync_meta.delete).toHaveBeenCalledTimes(1);
+    expect(db.sync_meta.delete).toHaveBeenCalledWith(8);
+    expect(db.user_stats.delete).toHaveBeenCalledTimes(1);
+    expect(db.user_stats.delete).toHaveBeenCalledWith('8');
+    expect(meta.has(7)).toBe(true);
+    // Expired implication rows are pruned here too, not only on tag pages.
+    expect(db.tag_implications_cache.where).toHaveBeenCalledWith('fetchedAt');
   });
 });
 
@@ -4329,5 +4465,429 @@ describe('catchUpChanges (T-407)', () => {
     await adm.syncAllPosts(user, vi.fn());
 
     expect(asked.find(u => u.startsWith('/posts.json'))).toContain('id:>0');
+  });
+});
+
+describe('one row scan per dashboard open (T-501)', () => {
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map([['danbooru_grass_last_sync_42', '2026-11-14']]);
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** `YYYY-MM-DD` of `days` days ago (UTC). */
+  const dayAgo = (days: number) =>
+    new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+  const recent1 = dayAgo(3);
+  const recent2 = dayAgo(2);
+
+  /** Rows as the sync stores them, numbered 1..n in id order. */
+  const rows = [
+    ['2020-03-01T10:00:00.000+09:00', 'g', 5, 12, 0, false, false],
+    ['2020-03-02T23:59:00.000+09:00', 's', 3, 8, -1, true, false],
+    ['2020-03-03T00:10:00.000+09:00', 'q', 0, 20, 0, false, false],
+    ['2020-03-03T12:00:00.000+09:00', 'e', 10, 9, 0, false, true],
+    ['2020-05-10T08:00:00.000+09:00', 'g', 2, 15, 0, false, false],
+    [`${recent1}T12:00:00.000+09:00`, 'g', 1, 30, 0, false, false],
+    [`${recent1}T13:00:00.000+09:00`, 's', 4, 31, -2, false, false],
+    [`${recent2}T12:00:00.000+09:00`, 'g', 7, 32, 0, false, false],
+  ].map(([created_at, rating, score, tgc, dn, del, ban], i) => ({
+    id: i + 1,
+    no: i + 1,
+    uploader_id: 42,
+    created_at,
+    rating,
+    score,
+    tag_count_general: tgc,
+    down_score: dn,
+    is_deleted: del,
+    is_banned: ban,
+    pend: false,
+    flag: false,
+    tc: (tgc as number) + 5,
+    chr: i % 2 ? 'reimu' : 'marisa reimu',
+    cpy: 'touhou',
+  }));
+
+  function setUp() {
+    const posts = makePostsTable(rows);
+    const db = makeSyncDb(posts, {
+      sync_meta: {get: vi.fn(async () => ({userId: 42, fieldsVersion: 2}))},
+    });
+    const adm = new AnalyticsDataManager(
+      db as never,
+      makeSyncRateLimiter() as never,
+    );
+    return {adm, posts, user: makeSyncUser({id: '42'})};
+  }
+
+  it('keeps the summary stats', async () => {
+    const {adm, user} = setUp();
+
+    const s = await adm.getSummaryStats(user);
+
+    expect(s).toEqual({
+      maxUploads: 2,
+      maxDate: '2020-03-03',
+      firstUploadDate: new Date('2020-03-01T10:00:00.000+09:00'),
+      lastUploadDate: new Date(`${recent2}T12:00:00.000+09:00`),
+      count1Year: 3,
+      maxUploads1Year: 2,
+      maxDate1Year: recent1,
+      maxStreak: 3,
+      maxStreakStart: '2020-03-01',
+      maxStreakEnd: '2020-03-03',
+      activeDays: 6,
+    });
+  });
+
+  it('keeps the monthly stats, gaps filled', async () => {
+    const {adm, user} = setUp();
+
+    const m = await adm.getMonthlyStats(user, new Date(2020, 0, 15));
+
+    expect(m.slice(0, 5)).toEqual([
+      {date: '2020-01', count: 0, label: '2020-01'},
+      {date: '2020-02', count: 0, label: '2020-02'},
+      {date: '2020-03', count: 4, label: '2020-03'},
+      {date: '2020-04', count: 0, label: '2020-04'},
+      {date: '2020-05', count: 1, label: '2020-05'},
+    ]);
+    expect(m.reduce((n, e) => n + e.count, 0)).toBe(8);
+    expect(m[m.length - 1].date).toBe(recent2.slice(0, 7));
+  });
+
+  it('keeps the scatter points', async () => {
+    const {adm, user} = setUp();
+
+    const points = await adm.getScatterData(user);
+
+    expect(points).toHaveLength(8);
+    expect(points[1]).toEqual({
+      id: 2,
+      d: Date.parse('2020-03-02T23:59:00.000+09:00'),
+      s: 3,
+      t: 8,
+      r: 's',
+      dn: -1,
+      del: true,
+      ban: false,
+    });
+    expect(points.map(p => p.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it('keeps the local distributions', async () => {
+    const {adm} = setUp();
+
+    const local = await adm.getLocalDistributions(42);
+
+    expect(local).toMatchObject({
+      rows: 8,
+      rating: {g: 4, s: 2, q: 1, e: 1},
+      status: {active: 7, deleted: 1, banned: 1, pending: 0, flagged: 0},
+      gentagsUnder10: 2,
+      tagcountUnder10: 0,
+    });
+    expect(local?.characters.get('reimu')).toBe(8);
+    expect(local?.characters.get('marisa')).toBe(4);
+    expect(local?.copyrights.get('touhou')).toBe(8);
+  });
+
+  it('reads the rows once for all four', async () => {
+    const {adm, posts, user} = setUp();
+
+    await adm.getSummaryStats(user);
+    await Promise.all([
+      adm.getScatterData(user),
+      adm.getLocalDistributions(42),
+      adm.getMonthlyStats(user),
+    ]);
+    await adm.getUserStats(user);
+
+    expect(posts._chain.each).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads them again once they changed', async () => {
+    const {adm, posts, user} = setUp();
+
+    await adm.getScatterData(user);
+    (adm as unknown as {forgetLocalRows(id: number): void}).forgetLocalRows(42);
+    await adm.getScatterData(user);
+
+    expect(posts._chain.each).toHaveBeenCalledTimes(2);
+  });
+
+  it('hands out a copy of the points', async () => {
+    const {adm, user} = setUp();
+
+    const first = await adm.getScatterData(user);
+    first.length = 0;
+
+    expect(await adm.getScatterData(user)).toHaveLength(8);
+  });
+});
+
+// T-504: the full sync's page pool ends on a short page, and stops claiming
+// pages while an earlier one holds up the in-order commit.
+describe('full sync page pool (T-504)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** Page n holds sizes[n - 1] posts (none past the end); page 1 can wait. */
+  function servePages(sizes: number[], hold?: Promise<void>) {
+    const asked: number[] = [];
+    const total = sizes.reduce((a, b) => a + b, 0);
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: total}}),
+        };
+      }
+      const page = Number(new URLSearchParams(url.split('?')[1]).get('page'));
+      asked.push(page);
+      if (page === 1 && hold) await hold;
+      const posts = Array.from({length: sizes[page - 1] ?? 0}, (_, i) => ({
+        id: page * 1000 + i,
+        uploader_id: 42,
+        created_at: '2025-01-01T00:00:00Z',
+        up_score: 1,
+        down_score: 0,
+        rating: 'g',
+      }));
+      return {ok: true, status: 200, json: async () => posts};
+    });
+    return {rl, asked};
+  }
+
+  function makeAdm(rl: ReturnType<typeof makeSyncRateLimiter>) {
+    const syncMeta = {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async () => undefined),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([]), {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    return adm;
+  }
+
+  const numbers = () =>
+    vi
+      .mocked(quotaManager.bulkPutSafe)
+      .mock.calls.flatMap(c => (c[1] as Array<{no: number}>).map(r => r.no));
+
+  it('ends on a page shorter than the page size', async () => {
+    const {rl, asked} = servePages([200, 50]);
+    const adm = makeAdm(rl);
+
+    const run = adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+    await vi.advanceTimersByTimeAsync(10_000);
+    const outcome = await run;
+
+    expect(outcome).toEqual({complete: true, started: true});
+    // Page 2 held 50 posts: no page after it was asked for.
+    expect(asked).toEqual([1, 2]);
+    expect(numbers()).toEqual(Array.from({length: 250}, (_, i) => i + 1));
+  });
+
+  it('stops claiming pages while an earlier one holds up the commit', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>(r => {
+      release = r;
+    });
+    const {rl, asked} = servePages(Array(60).fill(200), hold);
+    const adm = makeAdm(rl);
+
+    const run = adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    // Page 1 is stuck: the other workers fill the buffer to its cap (each
+    // may have one more page in flight), then wait instead of claiming.
+    const heldAt = Math.max(...asked);
+    expect(heldAt).toBeGreaterThan(SYNC_BUFFER_MAX_PAGES);
+    expect(heldAt).toBeLessThanOrEqual(SYNC_BUFFER_MAX_PAGES + SYNC_WORKERS);
+
+    release();
+    await vi.advanceTimersByTimeAsync(120_000);
+    const outcome = await run;
+
+    expect(outcome.complete).toBe(true);
+    const nos = numbers();
+    expect(nos).toHaveLength(60 * 200);
+    expect(nos.every((n, i) => n === i + 1)).toBe(true);
+  });
+});
+
+// T-508: a sync from the start searches from the user's first post, found
+// by date and checked with a count, instead of `id:>0`.
+describe('sync from the first post (T-508)', () => {
+  const user = makeSyncUser({joinDate: new Date('2023-09-20T10:00:00Z')});
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
+    });
+    vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const post = {
+    id: 6730462,
+    uploader_id: 42,
+    created_at: '2023-09-20T12:00:00Z',
+    up_score: 1,
+    down_score: 0,
+    rating: 'g',
+  };
+
+  /** The lookup, the count below it, and pages (one post on the first). */
+  function serve(
+    opts: {lookup?: unknown; lookupStatus?: number; below?: number} = {},
+  ) {
+    const lookups: string[] = [];
+    const pages: string[] = [];
+    const counts: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      const tags = new URLSearchParams(url.split('?')[1]).get('tags') ?? '';
+      if (url.startsWith('/counts/posts.json')) {
+        counts.push(tags);
+        const n = tags.includes('id:<') ? (opts.below ?? 0) : 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: n}}),
+        };
+      }
+      if (tags.includes('date:>=')) {
+        lookups.push(tags);
+        const status = opts.lookupStatus ?? 200;
+        return {
+          ok: status === 200,
+          status,
+          json: async () => opts.lookup ?? [{id: post.id}],
+        };
+      }
+      pages.push(url);
+      const first = pages.length === 1;
+      return {ok: true, status: 200, json: async () => (first ? [post] : [])};
+    });
+    const pageParam = (i: number, key: string) =>
+      new URLSearchParams(pages[i].split('?')[1]).get(key);
+    return {rl, lookups, pages, counts, pageParam};
+  }
+
+  function makeAdm(
+    rl: ReturnType<typeof makeSyncRateLimiter>,
+    rows: Record<string, unknown>[] = [],
+  ) {
+    const syncMeta = {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async () => undefined),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable(rows), {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    return adm;
+  }
+
+  it('starts after the first post, found by date from the day before joining', async () => {
+    const {rl, lookups, counts, pageParam} = serve();
+
+    const outcome = await makeAdm(rl).syncAllPosts(user, vi.fn());
+
+    expect(lookups).toEqual(['user:test_user order:id date:>=2023-09-19']);
+    // Trusted only with none of the user's posts below it.
+    expect(counts).toContain('user:test_user id:<6730462');
+    expect(pageParam(0, 'tags')).toBe('user:test_user order:id id:>6730461');
+    expect(outcome).toEqual({complete: true, started: true});
+    const written = vi
+      .mocked(quotaManager.bulkPutSafe)
+      .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
+    expect(written.map(r => [r.id, r.no])).toEqual([[6730462, 1]]);
+  });
+
+  it('searches from id 0 when the user has posts below the one found', async () => {
+    const {rl, pageParam} = serve({below: 3});
+
+    await makeAdm(rl).syncAllPosts(user, vi.fn());
+
+    expect(pageParam(0, 'tags')).toBe('user:test_user order:id id:>0');
+  });
+
+  it('searches from id 0 when the lookup fails or finds nothing', async () => {
+    const failed = serve({lookupStatus: 500});
+    await makeAdm(failed.rl).syncAllPosts(user, vi.fn());
+    expect(failed.pageParam(0, 'tags')).toBe('user:test_user order:id id:>0');
+    expect(failed.counts.some(t => t.includes('id:<'))).toBe(false);
+
+    AnalyticsDataManager.isGlobalSyncing = false;
+    const empty = serve({lookup: []});
+    await makeAdm(empty.rl).syncAllPosts(user, vi.fn());
+    expect(empty.pageParam(0, 'tags')).toBe('user:test_user order:id id:>0');
+  });
+
+  it('does not look when resuming', async () => {
+    const {rl, lookups, pageParam} = serve();
+    const rows = [
+      {id: 900, uploader_id: 42, no: 2, created_at: '2025-03-01T00:00:00Z'},
+      {id: 100, uploader_id: 42, no: 1, created_at: '2024-01-01T00:00:00Z'},
+    ];
+
+    await makeAdm(rl, rows).syncAllPosts(user, vi.fn());
+
+    expect(lookups).toEqual([]);
+    expect(pageParam(0, 'tags')).toBe('user:test_user order:id id:>100');
+  });
+
+  it('starts a quick sync after the first post too', async () => {
+    const {rl, pageParam} = serve();
+
+    await makeAdm(rl).quickSyncAllPosts(user);
+
+    expect(pageParam(0, 'page')).toBe('a6730461');
   });
 });

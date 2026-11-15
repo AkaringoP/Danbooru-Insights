@@ -183,7 +183,10 @@ describe('buildPreviewPostUrls', () => {
     expect(postsUrl).toContain(`&limit=20&only=${PREVIEW_POST_FIELDS}`);
     expect(PREVIEW_POST_FIELDS).toContain('is_pending');
     expect(PREVIEW_POST_FIELDS).toContain('is_deleted');
-    expect(PREVIEW_POST_FIELDS).toContain('variants');
+    // 180px cells: the preview is the thumbnail; `variants` is not a post
+    // field (T-506).
+    expect(PREVIEW_POST_FIELDS).toContain('preview_file_url');
+    expect(PREVIEW_POST_FIELDS).not.toContain('variants');
     expect(PREVIEW_POST_FIELDS).toContain('rating');
   });
 

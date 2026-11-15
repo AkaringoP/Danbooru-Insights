@@ -46,7 +46,7 @@ describe('toPostRecord', () => {
       is_banned: false,
       rating: 'g',
       tag_count_general: 18,
-      preview_file_url: 'p.jpg',
+      // No thumbnail in the row (T-506): the milestone lookup fetches it.
       upd: Date.parse('2026-11-02T00:00:00.000Z'),
       pend: false,
       flag: true,
@@ -67,7 +67,7 @@ describe('toPostRecord', () => {
     expect('variants' in row).toBe(false);
   });
 
-  it('asks for every field the row reads, and not variants', () => {
+  it('asks for every field the row reads, and no thumbnail', () => {
     const fields = SYNC_POST_FIELDS.split(',');
     for (const f of [
       'updated_at',
@@ -81,6 +81,7 @@ describe('toPostRecord', () => {
       expect(fields).toContain(f);
     }
     expect(fields).not.toContain('variants');
+    expect(fields).not.toContain('preview_file_url');
   });
 });
 

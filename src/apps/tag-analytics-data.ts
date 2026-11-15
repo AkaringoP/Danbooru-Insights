@@ -1002,7 +1002,7 @@ export class TagAnalyticsDataService {
           tags: `${tagName} ${dateFilter}`,
           limit: String(fetchLimit),
           page: currentPage,
-          only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
+          only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,rating,score,tag_string_copyright,tag_string_character',
         });
         const url = `/posts.json?${params.toString()}`;
 
@@ -1048,7 +1048,7 @@ export class TagAnalyticsDataService {
             tags: `${tagName}`,
             limit: String(fetchLimit),
             page: currentPage,
-            only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
+            only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,rating,score,tag_string_copyright,tag_string_character',
           });
           const fbBatch = await this.rateLimiter
             .fetch(`/posts.json?${fbParams.toString()}`)
@@ -1447,7 +1447,7 @@ export class TagAnalyticsDataService {
 
   async fetchLatestPost(tagName: string): Promise<DanbooruPost | null> {
     // Query for the single latest post
-    const url = `/posts.json?tags=${encodeURIComponent(tagName)}&limit=1&only=id,created_at,variants,uploader_id,rating,preview_file_url`;
+    const url = `/posts.json?tags=${encodeURIComponent(tagName)}&limit=1&only=id,created_at,media_asset[variants],uploader_id,rating,preview_file_url`;
     try {
       const posts = await this.rateLimiter
         .fetch(url)
@@ -1475,7 +1475,7 @@ export class TagAnalyticsDataService {
     // Query for the most popular SFW (or NSFW) post in the last 3 days
     // age:..3d, order:score, rating:g (or is:nsfw)
     const ratingQuery = isNSFW ? 'is:nsfw' : 'is:sfw';
-    const url = `/posts.json?tags=${encodeURIComponent(tagName)}+age:..3d+order:score+${ratingQuery}&limit=1&only=id,created_at,variants,uploader_id,rating,score,preview_file_url`;
+    const url = `/posts.json?tags=${encodeURIComponent(tagName)}+age:..3d+order:score+${ratingQuery}&limit=1&only=id,created_at,media_asset[variants],uploader_id,rating,score,preview_file_url`;
     try {
       const posts = await this.rateLimiter
         .fetch(url)
@@ -2023,7 +2023,7 @@ export class TagAnalyticsDataService {
       tags: lookup.query,
       limit: String(lookup.limit),
       page: String(lookup.page),
-      only: 'id,created_at,uploader_id,uploader_name,variants,rating,preview_file_url',
+      only: 'id,created_at,uploader_id,uploader_name,media_asset[variants],rating,preview_file_url',
     });
     try {
       const resp = await this.rateLimiter.fetch(

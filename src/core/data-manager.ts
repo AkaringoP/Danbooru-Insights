@@ -108,7 +108,7 @@ export class DataManager {
    */
   async fetchPostDetails(postId: number): Promise<DanbooruPost | null> {
     try {
-      const url = `/posts/${postId}.json?only=id,created_at,score,fav_count,rating,variants,preview_file_url,tag_string_artist,tag_string_copyright,tag_string_character`;
+      const url = `/posts/${postId}.json?only=id,created_at,score,fav_count,rating,media_asset[variants],preview_file_url,tag_string_artist,tag_string_copyright,tag_string_character`;
       const resp = await this.rateLimiter.fetch(url);
       if (!resp.ok) return null;
       const data = await resp.json();
