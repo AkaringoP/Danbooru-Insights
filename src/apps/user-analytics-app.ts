@@ -266,6 +266,22 @@ function scheduleChangeCatchUp(
   }, 0);
 }
 
+/**
+ * Other users' stale rows (`cleanupStaleData`) after a sync, once its
+ * dashboard is painted (T-503). Inside the sync it held the dashboard back
+ * while it deleted, seconds for a large user.
+ */
+function scheduleStaleCleanup(
+  dataManager: AnalyticsDataManager,
+  user: TargetUser,
+): void {
+  if (!user.id) return;
+  const currentId = user.id;
+  setTimeout(() => {
+    void dataManager.cleanupStaleData(currentId);
+  }, 0);
+}
+
 /** Same single-slot pattern as {@link lazyPieRevalidateListener}. */
 let summaryCardListener: ((e: Event) => void) | null = null;
 
@@ -2500,6 +2516,13 @@ export class UserAnalyticsApp {
       // On this open's manager: the rows it changes must drop that
       // manager's scan of them (T-501), which the pies here read.
       scheduleChangeCatchUp(dashboardData.dataManager, this.context.targetUser);
+      // After a sync: other users' stale rows, now that this is painted.
+      if (forceDistRevalidate) {
+        scheduleStaleCleanup(
+          dashboardData.dataManager,
+          this.context.targetUser,
+        );
+      }
     } finally {
       perfLogger.end('dbi:render:total', perfMeta);
       this.isRendering = false;

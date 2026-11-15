@@ -5429,10 +5429,8 @@ export class AnalyticsDataManager extends DataManager {
       }
     }
 
-    // Auto-cleanup other users' stale data (older than 14 days).
-    // userInfo.id is non-null by syncAllPosts's entry guard, but TS can't
-    // narrow across the method call.
-    await this.cleanupStaleData(userInfo.id!);
+    // Other users' stale data (cleanupStaleData) is no longer cleaned here:
+    // the app runs it once the dashboard after the sync is painted (T-503).
 
     // Signal UI: Processing Stats. A failed run reports what it actually
     // committed — painting total/total here showed "46,894 / 46,894 (100%)"
@@ -5604,8 +5602,8 @@ export class AnalyticsDataManager extends DataManager {
       // version 2 (T-402): no backfill needed.
       await this.recordFullSyncMeta(uploaderId, firstResponseAt ?? Date.now());
 
-      // 5. Cleanup stale data for other users
-      await this.cleanupStaleData(userInfo.id);
+      // 5. Other users' stale data: the app cleans it after the dashboard
+      // is painted (T-503).
 
       // 6. Signal UI: Processing Stats
       reportProgress(no, no, 'PREPARING');
@@ -5626,6 +5624,8 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Cleans up data for other users if they haven't been synced in 14 days.
+   * Run by the app after a sync, once its dashboard is painted (T-503):
+   * inside the sync it held the dashboard back while it deleted.
    * @param {number|string} currentUserId - The ID of the currently active user (to skip).
    */
   async cleanupStaleData(currentUserId: number | string): Promise<void> {
@@ -5659,7 +5659,13 @@ export class AnalyticsDataManager extends DataManager {
         );
 
         if (shouldDelete) {
-          await this.db.posts.where('uploader_id').equals(uid).delete();
+          // Keys from the index, then one bulk delete (T-503): a
+          // collection delete walks a cursor over every row.
+          const keys = await this.db.posts
+            .where('uploader_id')
+            .equals(uid)
+            .primaryKeys();
+          await this.db.posts.bulkDelete(keys);
           await this.db.piestats.where('userId').equals(uid).delete();
 
           localStorage.removeItem(syncKey);

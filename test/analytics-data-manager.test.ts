@@ -1013,8 +1013,9 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
     );
     expect(metaKeySet).toBe(false);
 
-    // cleanupStaleData and refreshCriticalStats were called
-    expect(adm2.cleanupStaleData).toHaveBeenCalledWith('42');
+    // refreshCriticalStats was called; other users' cleanup is the app's,
+    // after the dashboard is painted (T-503).
+    expect(adm2.cleanupStaleData).not.toHaveBeenCalled();
     expect(adm2.refreshCriticalStats).toHaveBeenCalledWith(
       expect.objectContaining({id: '42'}),
       true, // full sync
@@ -1518,6 +1519,8 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
         fieldsVersion: 2,
         changeWatermark: Date.parse(DATE),
       });
+      // Other users' cleanup is the app's, after paint (T-503).
+      expect(adm.cleanupStaleData).not.toHaveBeenCalled();
     });
   });
 
@@ -3950,13 +3953,16 @@ describe('row numbering and the sync mark (T-404)', () => {
     const db = {
       posts: {
         orderBy: () => ({uniqueKeys: async () => [7, 8, 42]}),
+        // Each user's rows: ids uid*100+1 and +2, read as index keys and
+        // deleted in one bulk call (T-503).
         where: () => ({
           equals: (uid: number) => ({
-            delete: async () => {
-              deleted.push(uid);
-            },
+            primaryKeys: async () => [uid * 100 + 1, uid * 100 + 2],
           }),
         }),
+        bulkDelete: async (keys: number[]) => {
+          deleted.push(...keys);
+        },
       },
       piestats: {
         where: () => ({equals: () => ({delete: async () => 0})}),
@@ -3972,7 +3978,7 @@ describe('row numbering and the sync mark (T-404)', () => {
 
     // 7: started a minute ago, no completion stamp — kept.
     // 8: no stamp, no start — zombie rows, deleted. 42: the current user.
-    expect(deleted).toEqual([8]);
+    expect(deleted).toEqual([801, 802]);
   });
 });
 
