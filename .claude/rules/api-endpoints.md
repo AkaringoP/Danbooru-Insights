@@ -4,7 +4,7 @@ All API calls must go through `RateLimitedFetch`.
 
 | Endpoint | Purpose |
 |---|---|
-| `/posts.json` | Fetch uploads (tags, only, limit, page) |
+| `/posts.json` | Fetch uploads (tags, only, limit, page). The syncs, the fields backfill and the change catch-up all ask for `SYNC_POST_FIELDS` (`core/post-record.ts`). Fields backfill (T-403): `user:X status:any id:a..b order:id`. Change catch-up (T-407): `user:X order:change` (newest `updated_at` first; 2 terms, fine for a logged-out viewer), numbered pages within the page limit |
 | `/post_approvals.json` | Fetch approvals (search params) |
 | `/note_versions.json` | Fetch notes (search params) |
 | `/counts/posts.json` | Count queries (integrity checks, rating counts). Server rate limit 1 req/s, burst 15, and the search tag limit applies (both since 2026-11-05). A count the server cannot finish in time comes back as `{"counts":{"posts":null}}` with HTTP 200, and that `null` is cached server-side for 5 minutes; `fetchRemoteCount` throws `CountUnavailableError` for it (never 0), and `countBatch` does not retry it |
@@ -37,15 +37,17 @@ Verified live as anonymous (limit 2) in the 2026-11-12 audit: `user:X 1girl` →
 |---|---|---|---|---|
 | `user:X <tag>`, `user:X gentags:<10`, `user:X status:<s>`, `user:X rating:<r>`, `user:X order:score …` (free metatags only) | ≤ 2 | ok | ok | ok |
 | Gender pies: `~1girl ~2girls … ~6+girls` split into one `user:X <term>` count per term and summed (v8.0.3) | 2 | ok | ok | ok |
-| Translation "Untagged": inclusion-exclusion (`buildUntaggedTranslationQueries`); 4 of its 6 queries are `user:X <a> <b>` | 3 | **422** | ok | ok |
-| Hair "Bald": `user:X ~bald ~bald_female` | 3 | **422** | ok | ok |
-| Commentary "Untagged": `user:X has:commentary -commentary -commentary_request` | 4 | **422** | **422** | ok |
+| Translation "Untagged": inclusion-exclusion (`buildUntaggedTranslationQueries`); 4 of its 6 queries are `user:X <a> <b>` | 3 | not sent, 🔒 (T-408) | ok | ok |
+| Hair "Bald": `user:X ~bald ~bald_female` | 3 | not sent, 🔒 (T-408) | ok | ok |
+| Commentary "Untagged" (T-408, G-5): `user:X has:commentary` − `user:X has:commentary commentary` − `user:X has:commentary commentary_request` (`buildUntaggedCommentaryQueries`). Was one 4-term search, a 422 below Gold | 3 | not sent, 🔒 | ok | ok |
 | Pie slice thumbnails (`enrichThumbnails`): `user:X <tag> order:score rating:g` (`fav:X …` for fav-copyright) | 3 | **422** | ok | ok |
 | … the Hair "Bald" slice's thumbnail: `user:X ~bald ~bald_female order:score rating:g` | 4 | **422** | **422** | ok |
 | Tag page commentary: `<tag> has:commentary commentary` / `… commentary_request`; tag-side translation inclusion-exclusion | 3 | not sent, 🔒 (T-308) | ok | ok |
 | Suspicious upload tags: matched client-side on `tag_string_meta` inside the `id:<csv> status:any` lookup, never as a 4-term `~` search | 0 | ok | ok | ok |
 
-**How a lost count shows (v9.12, T-204).** In the user dashboard's Commentary, Translation and Hair length pies, a count that comes back 422, `null` or lost after its retry becomes an `unknown` slice (`DistributionItem.unknown`): the legend shows "—" with an explanation and the slice takes no share of the pie. Translation's "Untagged" is not computed when any of its six terms is missing. A 422 run is cached (it would 422 again); a `null` or lost count is not (`countBatch` → `cacheUnlessPartial`). T-408 stops sending the user side's over-limit queries at all.
+**How a lost count shows (v9.12, T-204).** In the user dashboard's Commentary, Translation and Hair length pies, a count that comes back 422, `null` or lost after its retry becomes an `unknown` slice (`DistributionItem.unknown`): the legend shows "—" with an explanation and the slice takes no share of the pie. Translation's "Untagged" is not computed when any of its six terms is missing. A 422 run is cached (it would 422 again); a `null` or lost count is not (`countBatch` → `cacheUnlessPartial`).
+
+**Locked slices (T-408).** Before sending, the user side's Commentary, Translation and Hair length pies check each slice's searches with `fitsViewerTagLimit`; a slice over the viewer's limit is not asked and becomes `unknown` + `locked` (`DistributionItem.locked`): the legend shows "🔒" with "Log in to see it", the slice takes no share. Only an anonymous viewer (limit 2) meets it today — Commentary and Translation "Untagged" and Hair "Bald"; a Member (3) runs them all. A locked run is cached like a 422 run (piestats TTL).
 
 **Tag page (v9.12, T-308).** `fetchCountWithRetry` gives `null`, never 0, for a count it cannot have: a 422 or other 4xx and a `null` count are not retried, a 429 / 5xx / network failure is retried once, and a search over the viewer's limit is not sent (`fitsViewerTagLimit`). The pies' counts are `TagCountMap` (`number | null`); an unknown slice is listed with "—", a locked one with "🔒" (`buildPieSlices`), neither takes a share. For an anonymous viewer the commentary pie asks nothing (its breakdowns are 3 tags; `total` alone shows nothing) and translation asks only Translated and Requested.
 
@@ -56,13 +58,21 @@ Pie slice thumbnails over the viewer's limit are not requested at all (`fitsView
 **Known over-limit click-through links (intentional since v8.0.3).** Some pie-slice links keep the full conceptual query (`buildSearchQuery` in `apps/user-analytics-pie-helpers.ts`), so a viewer below the limit lands on the Search Error page; Gold+ get the real search:
 - Gender slices: `user:X ~1girl ~2girls ~3girls ~4girls ~5girls ~6+girls` (7 terms; same for boys / others), via `DistributionItem.originalTag`.
 - Translation "Untagged" slice: `user:X *_text -english_text -translation_request -translated` (5 terms).
-- Commentary "Untagged" slice (4 terms) and the Hair "Bald" slice (3 terms) follow the counts in the table above.
+- Commentary "Untagged" slice: `user:X has:commentary -commentary -commentary_request` (4 terms) — the count now comes from three smaller searches (T-408), the link keeps the one search that shows those posts. The Hair "Bald" slice: 3 terms.
 
 **History:**
 - Before 2026-11-05 `/counts/posts.json` did not check the tag limit at all, which is why queries designed under the wrong rule below still returned numbers.
 - The v8.0.3 rule (from [forum #33823](https://danbooru.donmai.us/forum_topics/33823)) treated `user:`, `order:`, `has:`, `fav:`, `ordfav:`, `source:` and `gentags:`-style metatags as free. That list was wrong: only the `UNLIMITED_METATAGS` above are free.
 - On 2026-10-30 a Member-account test confirmed Meta-category tags count: `~off-topic ~third-party_edit ~ai-generated ~pixel-perfect_duplicate` → "Search Error — You cannot search for more than 2 tags at a time." Commit `480cab4` briefly stated the opposite in comments; `e0bbb0c` and the next docs commit corrected it.
 - 2026-11-10: Member limit raised 2 → 3, anonymous set to 2, Gold aligned with Platinum (unlimited).
+
+## Posts the viewer cannot see
+
+A banned post is hidden from viewers below Approver, and a post with a restricted tag from viewers below Gold (its uploader excepted); `Post#visible?` in `app/models/post.rb`. Such a post **stays in search results**, and `PostPolicy#api_attributes` drops only `md5`, `file_url`, `large_file_url` and `preview_file_url` from its JSON. An `only=` naming them just leaves them out. Every other field still comes back, including the tag strings, `rating`, `tag_count*` and the status flags.
+
+Verified live 2026-11-15: `user:X status:banned` with `only=id,is_banned,rating,tag_count_general,tag_string_character,tag_string_copyright,preview_file_url` returned the banned posts with their tags and rating, and without `preview_file_url`.
+
+So the sync stores these posts with full tags, and the local pies (T-406) count them the same way `/counts/posts.json` does. Only their thumbnail is missing: `getBestThumbnailUrl` returns `''`, and the milestone lookup (`getMilestones`) asks again for such a row each time it recomputes; the rest of T-506 is to stop that.
 
 ## Mintag / abandoned detection (v9.7.1 — preview popover section A)
 

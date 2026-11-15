@@ -156,6 +156,10 @@ const LEGEND_TITLES: Record<string, string> = {
 const UNKNOWN_COUNT_TITLE =
   'Unknown: Danbooru did not return this count. The search may be over ' +
   "your account's tag limit.";
+/** Legend tooltip of a slice not counted for the viewer's tag limit (T-408). */
+const LOCKED_COUNT_TITLE =
+  'Locked: this count needs more search tags than your account allows ' +
+  '(2 when logged out). Log in to see it.';
 /** Custom categorical order for the hair_length tab (count-based sort would
  *  reorder buckets in non-intuitive ways). */
 const HAIR_LENGTH_ORDER = [
@@ -219,6 +223,7 @@ export function processSlices(
       thumb?: string | null;
       count: number;
       unknown?: boolean;
+      locked?: boolean;
     };
 
     const tagDetails = (): PieDetails => ({
@@ -228,6 +233,7 @@ export function processSlices(
       isOther: item.isOther,
       count: item.count,
       unknown: item.unknown,
+      locked: item.locked,
       thumb: item.thumb,
       color: item.color,
       frequency: item.frequency,
@@ -1038,7 +1044,9 @@ export function renderPieLegend(args: {
   const listHtml = processedData
     .map((d, idx) => {
       const isUnknown = d.details.kind === 'tag' && !!d.details.unknown;
-      const pct = isUnknown ? '—' : pctFor(d.label);
+      const isLocked =
+        isUnknown && d.details.kind === 'tag' && !!d.details.locked;
+      const pct = isLocked ? '🔒' : isUnknown ? '—' : pctFor(d.label);
       const isOtherSlice = d.details.kind === 'tag' && !!d.details.isOther;
       let targetUrl = '#';
 
@@ -1057,11 +1065,13 @@ export function renderPieLegend(args: {
       const swatchColor = safeColor(d.color);
       const safeLabel = escapeHtml(d.label);
       const safeUrl = escapeHtml(targetUrl);
-      const countTitle = isUnknown
-        ? UNKNOWN_COUNT_TITLE
-        : d.details.count
-          ? escapeHtml(d.details.count.toLocaleString())
-          : '';
+      const countTitle = isLocked
+        ? LOCKED_COUNT_TITLE
+        : isUnknown
+          ? UNKNOWN_COUNT_TITLE
+          : d.details.count
+            ? escapeHtml(d.details.count.toLocaleString())
+            : '';
       // Mark every Copy/Fav_Copy/Char legend row for the post-render
       // wire-up — including Others, which needs its own mouseenter
       // handler to revert the sub-chart back to the main pie (v9.6.2+).

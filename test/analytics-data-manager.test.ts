@@ -12,6 +12,9 @@ import {
   syncRetryDelayMs,
   SYNC_PAGE_MAX_ATTEMPTS,
   SYNC_SEGMENT_PAGES,
+  splitIdRanges,
+  isStaleUser,
+  catchUpWatermark,
 } from '../src/core/analytics-data-manager';
 import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
 
@@ -254,6 +257,18 @@ function makePostsChain(
     }),
     toArray: vi.fn(async () => [...rows]),
     count: vi.fn(async () => rows.length),
+    // [uploader_id+no] range read of the numbering check (T-404): the row
+    // with the highest `no`.
+    between: vi.fn(),
+    last: vi.fn(async () =>
+      rows.reduce<Record<string, unknown> | undefined>(
+        (best, r) =>
+          best === undefined || (r.no as number) > (best.no as number)
+            ? r
+            : best,
+        undefined,
+      ),
+    ),
     delete: vi.fn(async () => rows.length),
     uniqueKeys: vi.fn(async () => []),
     orderBy: vi.fn().mockReturnThis(),
@@ -280,6 +295,7 @@ function makePostsChain(
   (chain.until as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.equals as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   (chain.anyOf as ReturnType<typeof vi.fn>).mockReturnValue(chain);
+  (chain.between as ReturnType<typeof vi.fn>).mockReturnValue(chain);
   return chain;
 }
 
@@ -420,21 +436,23 @@ function makeSyncUser(overrides: Partial<TargetUser> = {}): TargetUser {
   };
 }
 
+/** The fetch of {@link makeSyncRateLimiter}: one URL, a Response-like reply. */
+type SyncFetch = (url: string) => Promise<{
+  ok: boolean;
+  status: number;
+  json: () => Promise<unknown>;
+  headers?: {get(name: string): string | null};
+}>;
+
 /** Build a minimal rate-limiter mock for syncAllPosts tests. */
-function makeSyncRateLimiter(
-  fetchImpl?: (url: string) => Promise<{
-    ok: boolean;
-    status: number;
-    json: () => Promise<unknown>;
-  }>,
-) {
-  const defaultFetch = async () => ({
+function makeSyncRateLimiter(fetchImpl?: SyncFetch) {
+  const defaultFetch: SyncFetch = async () => ({
     ok: true,
     status: 200,
     json: async () => [],
   });
   return {
-    fetch: vi.fn(fetchImpl ?? defaultFetch),
+    fetch: vi.fn<SyncFetch>(fetchImpl ?? defaultFetch),
     getRequestCount: vi.fn(() => 0),
     backoffRemainingMs: vi.fn(() => 0),
     trafficSummary: vi.fn(() => ({
@@ -988,11 +1006,12 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       c[0].startsWith('danbooru_grass_last_sync_'),
     );
     expect(syncKeySet).toBe(true);
-    // di_post_metadata_v2_42 set because startId=0 (full sync)
+    // A full sync's fields completion goes to sync_meta since T-403 (see
+    // "fields version 2 and sync_meta"); the old flag is no longer written.
     const metaKeySet = ls.mock.calls.some(
       (c: string[]) => c[0] === 'di_post_metadata_v2_42',
     );
-    expect(metaKeySet).toBe(true);
+    expect(metaKeySet).toBe(false);
 
     // cleanupStaleData and refreshCriticalStats were called
     expect(adm2.cleanupStaleData).toHaveBeenCalledWith('42');
@@ -1306,6 +1325,177 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       // The full segment cannot tell it was the last: one more page says so.
       expect(asked).toContain(`${SYNC_SEGMENT_PAGES}/1`);
       expect(asked).not.toContain(`0/${SYNC_SEGMENT_PAGES + 1}`);
+    });
+  });
+
+  // T-402: the sync asks for the fields the local pies need, and a run that
+  // wrote all of a user's rows records that in sync_meta.
+  describe('fields version 2 and sync_meta (T-402)', () => {
+    const DATE = 'Sat, 14 Nov 2026 13:53:29 GMT';
+    const apiPost = {
+      id: 7,
+      uploader_id: 42,
+      created_at: '2026-11-01T10:00:00.000+09:00',
+      updated_at: '2026-11-10T12:00:00.000+09:00',
+      up_score: 3,
+      down_score: -1,
+      rating: 's',
+      is_pending: true,
+      is_flagged: false,
+      tag_count: 31,
+      tag_count_general: 20,
+      tag_string_character: 'hakurei_reimu',
+      tag_string_copyright: 'touhou',
+    };
+
+    function makeSyncMeta() {
+      const rows = new Map<number, Record<string, unknown>>();
+      return {
+        rows,
+        get: vi.fn(async (k: number) => rows.get(k)),
+        put: vi.fn(async (r: Record<string, unknown>) => {
+          rows.set(r.userId as number, r);
+        }),
+      };
+    }
+
+    /** One post on page 1, then an empty page; `failPage2` answers 400. */
+    function serve(failPage2 = false) {
+      const asked: string[] = [];
+      const rl = makeSyncRateLimiter(async (url: string) => {
+        if (url.includes('/counts/posts.json')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({counts: {posts: 1}}),
+          };
+        }
+        asked.push(url);
+        const q = new URLSearchParams(url.split('?')[1]);
+        const first = q.get('page') === '1' || q.get('page') === 'a0';
+        if (!first && failPage2) {
+          return {ok: false, status: 400, json: async () => ({})};
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => (first ? [apiPost] : []),
+          headers: {get: (n: string) => (n === 'date' ? DATE : null)},
+        };
+      });
+      return {rl, asked};
+    }
+
+    function setUp(
+      rows: Record<string, unknown>[],
+      rl: ReturnType<typeof makeSyncRateLimiter>,
+    ) {
+      vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+      vi.stubGlobal('document', {
+        body: {dataset: {currentUserTimeZone: 'Seoul'}},
+      });
+      const syncMeta = makeSyncMeta();
+      const adm = new AnalyticsDataManager(
+        makeSyncDb(makePostsTable(rows), {sync_meta: syncMeta}) as never,
+        rl as never,
+      );
+      vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+      vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+      const written = () =>
+        vi
+          .mocked(quotaManager.bulkPutSafe)
+          .mock.calls.flatMap(c => c[1] as Record<string, unknown>[]);
+      return {adm, syncMeta, written};
+    }
+
+    it('asks for the tag fields, not variants, and stores them under short names', async () => {
+      const {rl, asked} = serve();
+      const {adm, written} = setUp([], rl);
+
+      await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      const only = new URLSearchParams(asked[0].split('?')[1]).get('only');
+      expect(only?.split(',')).toEqual(
+        expect.arrayContaining([
+          'updated_at',
+          'is_pending',
+          'is_flagged',
+          'tag_count',
+          'tag_string_character',
+          'tag_string_copyright',
+        ]),
+      );
+      expect(only).not.toContain('variants');
+      expect(written()[0]).toMatchObject({
+        id: 7,
+        no: 1,
+        score: 2,
+        upd: Date.parse('2026-11-10T12:00:00.000+09:00'),
+        pend: true,
+        flag: false,
+        tc: 31,
+        chr: 'hakurei_reimu',
+        cpy: 'touhou',
+      });
+    });
+
+    it('records fields version 2, the server time of the first page and the time zone after a sync from the start', async () => {
+      const {rl} = serve();
+      const {adm, syncMeta} = setUp([], rl);
+
+      await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      expect(syncMeta.rows.get(42)).toEqual({
+        userId: 42,
+        fieldsVersion: 2,
+        changeWatermark: Date.parse(DATE),
+        timeZone: 'Seoul',
+      });
+    });
+
+    it('records no fields version after a run that failed, and keeps it marked as started', async () => {
+      const {rl} = serve(true);
+      const {adm, syncMeta} = setUp([], rl);
+
+      const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      expect(outcome.complete).toBe(false);
+      expect(syncMeta.rows.get(42)).toEqual({
+        userId: 42,
+        syncStartedAt: expect.any(Number),
+      });
+    });
+
+    it('records no fields version after a resume sync, which re-fetches only the last month', async () => {
+      const {rl, asked} = serve();
+      const {adm, syncMeta} = setUp(
+        [
+          {id: 900, uploader_id: 42, no: 2, created_at: '2025-03-01T00:00:00Z'},
+          {id: 100, uploader_id: 42, no: 1, created_at: '2024-01-01T00:00:00Z'},
+        ],
+        rl,
+      );
+
+      await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      expect(asked[0]).toContain(encodeURIComponent('id:>100'));
+      const meta = syncMeta.rows.get(42);
+      expect(meta?.fieldsVersion).toBeUndefined();
+      expect(meta?.changeWatermark).toBeUndefined();
+      // The run completed: no longer marked as under way (T-404).
+      expect(meta?.syncStartedAt).toBeUndefined();
+    });
+
+    it('records it after a quick sync, which always rewrites every row', async () => {
+      const {rl} = serve();
+      const {adm, syncMeta} = setUp([], rl);
+
+      await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
+
+      expect(syncMeta.rows.get(42)).toMatchObject({
+        fieldsVersion: 2,
+        changeWatermark: Date.parse(DATE),
+      });
     });
   });
 
@@ -2050,7 +2240,8 @@ describe('count distributions — unknown slices (T-204)', () => {
     const {adm, save} = makeCountAdm({
       'user:tester commentary': 40,
       'user:tester commentary_request': 10,
-      'user:tester has:commentary -commentary -commentary_request': '422',
+      'user:tester has:commentary': 70,
+      'user:tester has:commentary commentary': '422',
     });
 
     const result = await adm.getCommentaryDistribution(user);
@@ -2061,6 +2252,66 @@ describe('count distributions — unknown slices (T-204)', () => {
     // 422 is deterministic: caching the unknown saves re-asking every open.
     expect(save).toHaveBeenCalledWith('commentary_dist', 42, result);
   });
+
+  // T-408: "Untagged" from three counts instead of one 4-term search, and
+  // a slice over the viewer's tag limit is not asked but shown locked.
+  it('commentary: Untagged is has:commentary minus its two tagged parts', async () => {
+    const {adm, rl} = makeCountAdm({
+      'user:tester commentary': 40,
+      'user:tester commentary_request': 10,
+      'user:tester has:commentary': 100,
+      'user:tester has:commentary commentary': 40,
+      'user:tester has:commentary commentary_request': 10,
+    });
+
+    const result = await adm.getCommentaryDistribution(user);
+
+    expect(result.find(r => r.name === 'Untagged')?.count).toBe(50);
+    const asked = rl.fetch.mock.calls.map(c =>
+      new URLSearchParams(c[0].split('?')[1]).get('tags'),
+    );
+    expect(asked).not.toContain(
+      'user:tester has:commentary -commentary -commentary_request',
+    );
+  });
+
+  it.each([
+    ['0', true],
+    ['20', false],
+  ])(
+    'viewer level %s: the 3-term slices are locked and not asked = %s',
+    async (level, locked) => {
+      vi.stubGlobal('document', {body: {dataset: {currentUserLevel: level}}});
+      const {adm, rl} = makeCountAdm({
+        'user:tester commentary': 40,
+        'user:tester has:commentary': 100,
+        'user:tester ~bald ~bald_female': 3,
+      });
+
+      const commentary = await adm.getCommentaryDistribution(user);
+      const translation = await adm.getTranslationDistribution(user);
+      const hair = await adm.getHairLengthDistribution(user);
+
+      const asked = rl.fetch.mock.calls.map(
+        c => new URLSearchParams(c[0].split('?')[1]).get('tags') ?? '',
+      );
+      const threeTerm = asked.filter(q => q.split(' ').length > 2);
+      if (locked) {
+        expect(threeTerm).toEqual([]);
+        for (const pie of [commentary, translation, hair]) {
+          const lockedSlice = pie.find(r => r.locked);
+          expect(lockedSlice).toMatchObject({unknown: true, locked: true});
+        }
+        // The 2-term slices are still counted.
+        expect(commentary.find(r => r.name === 'Commentary')?.count).toBe(40);
+      } else {
+        expect(threeTerm.length).toBeGreaterThan(0);
+        for (const pie of [commentary, translation, hair]) {
+          expect(pie.some(r => r.locked)).toBe(false);
+        }
+      }
+    },
+  );
 
   it('commentary: a null slice is unknown and the run is not cached', async () => {
     const {adm, save} = makeCountAdm({
@@ -2533,8 +2784,8 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
     vi.unstubAllGlobals();
   });
 
-  // Three milestone posts with modern metadata (non-empty variants → the
-  // getMilestones missing-thumbnail path never fires an API call). Their `no`
+  // Three milestone posts with a thumbnail URL (→ the getMilestones
+  // missing-thumbnail path never fires an API call). Their `no`
   // values line up with the auto-step targets for total=200 (1, 100, 200).
   const milestonePosts = [1, 100, 200].map(no => ({
     id: 1000 + no,
@@ -2628,6 +2879,96 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
     expect(db.piestats.put).toHaveBeenCalledWith(
       expect.objectContaining({key: 'milestones_auto_0__count', data: 200}),
     );
+  });
+
+  describe('thumbnail lookup (T-506)', () => {
+    /** A milestone row as the sync stores it: a preview URL, no variants. */
+    const syncedRow = (no: number, extra: Record<string, unknown> = {}) => ({
+      id: 1000 + no,
+      uploader_id: 42,
+      no,
+      rating: 'g',
+      score: 5,
+      created_at: '2025-01-01T00:00:00Z',
+      preview_file_url: `http://x/${no}.jpg`,
+      ...extra,
+    });
+
+    /** Milestone rows for total=200 (targets 1, 100, 200) and a posts.update spy. */
+    function makeDbWith(rows: Record<string, unknown>[]) {
+      const postsTable = makePostsTable(rows);
+      (postsTable._chain.count as ReturnType<typeof vi.fn>).mockResolvedValue(
+        200,
+      );
+      const update = vi.fn(async () => 1);
+      const db = makeSyncDb(Object.assign(postsTable, {update}));
+      return {db, update};
+    }
+
+    it('sends nothing for rows that have a preview URL but no variants', async () => {
+      // The sync never gets `variants`; the old "no variants" test sent a
+      // lookup on every recompute (each sync, each dashboard open).
+      const {db} = makeDbWith([syncedRow(1), syncedRow(100), syncedRow(200)]);
+      const rl = makeSyncRateLimiter();
+      const adm = new AnalyticsDataManager(db as never, rl as never);
+
+      await adm.getMilestones(makeSyncUser(), false, 'auto');
+      await adm.getMilestones(makeSyncUser(), true, 'auto');
+
+      expect(rl.fetch).not.toHaveBeenCalled();
+    });
+
+    it('looks up only a row without any thumbnail URL and stores the answer', async () => {
+      const {db, update} = makeDbWith([
+        syncedRow(1),
+        syncedRow(100, {preview_file_url: undefined}),
+        syncedRow(200),
+      ]);
+      const rl = makeSyncRateLimiter(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [
+          {id: 1100, rating: 'g', preview_file_url: 'http://x/100-new.jpg'},
+        ],
+      }));
+      const adm = new AnalyticsDataManager(db as never, rl as never);
+
+      const result = await adm.getMilestones(makeSyncUser(), false, 'auto');
+
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
+      const url = rl.fetch.mock.calls[0][0];
+      expect(url).toContain('tags=id:1100&');
+      expect(update).toHaveBeenCalledWith(
+        1100,
+        expect.objectContaining({preview_file_url: 'http://x/100-new.jpg'}),
+      );
+      const m100 = result.find(m => m.milestone === 100);
+      expect(m100?.post.preview_file_url).toBe('http://x/100-new.jpg');
+    });
+
+    it('leaves an explicit row without a URL alone unless NSFW is on', async () => {
+      const rows = [
+        syncedRow(1),
+        syncedRow(100, {rating: 'e', preview_file_url: undefined}),
+        syncedRow(200),
+      ];
+      const rl = makeSyncRateLimiter();
+
+      const sfw = makeDbWith(rows);
+      await new AnalyticsDataManager(
+        sfw.db as never,
+        rl as never,
+      ).getMilestones(makeSyncUser(), false, 'auto');
+      expect(rl.fetch).not.toHaveBeenCalled();
+
+      const nsfw = makeDbWith(rows);
+      await new AnalyticsDataManager(
+        nsfw.db as never,
+        rl as never,
+      ).getMilestones(makeSyncUser(), true, 'auto');
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
+      expect(rl.fetch.mock.calls[0][0]).toContain('tags=id:1100&');
+    });
   });
 });
 
@@ -2940,9 +3281,9 @@ describe('AnalyticsDataManager.quickSyncAllPosts', () => {
     const ls = vi.mocked(localStorage.setItem);
     const keys = ls.mock.calls.map((c: string[]) => c[0]);
     expect(keys).toContain('danbooru_grass_last_sync_42');
-    // quickSync writes every metadata field straight from the API, so the
-    // backfill is complete by definition.
-    expect(keys).toContain('di_post_metadata_v2_42');
+    // quickSync writes every field straight from the API; that completion is
+    // recorded in sync_meta (T-402 tests), not the old flag (T-403).
+    expect(keys).not.toContain('di_post_metadata_v2_42');
     expect(quotaManager.requestPersistence).toHaveBeenCalled();
   });
 
@@ -3230,5 +3571,763 @@ describe('getActivityDistribution — suspicious uploads', () => {
       'only=id,is_deleted,is_flagged,score,tag_string_meta',
     );
     expect(decodeURIComponent(lookups[0])).not.toContain('~');
+  });
+});
+
+// T-403: existing users' rows are brought to fields version 2 by fetching
+// every row again in id ranges, resumable, with the watermark of the first
+// response.
+describe('splitIdRanges', () => {
+  it('cuts sorted ids into contiguous ranges of about the same size', () => {
+    expect(splitIdRanges([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 3)).toEqual([
+      {after: 0, to: 4},
+      {after: 4, to: 7},
+      {after: 7, to: 10},
+    ]);
+  });
+
+  it('makes no more ranges than ids, and none without ids', () => {
+    expect(splitIdRanges([5, 9], 3)).toEqual([
+      {after: 4, to: 5},
+      {after: 5, to: 9},
+    ]);
+    expect(splitIdRanges([], 3)).toEqual([]);
+  });
+});
+
+describe('fields backfill (T-403)', () => {
+  const DATE = 'Sat, 14 Nov 2026 13:53:29 GMT';
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Old rows: no tag fields, numbered 1..n. */
+  const oldRows = (ids: number[]) =>
+    ids.map((id, i) => ({
+      id,
+      uploader_id: 42,
+      no: i + 1,
+      created_at: '2020-01-01T00:00:00Z',
+      score: 1,
+      rating: 'g',
+    }));
+
+  /** The remote: these ids exist; `fail` answers a status for some ranges. */
+  function serveRemote(
+    ids: number[],
+    fail: (from: number) => number | null = () => null,
+  ) {
+    const asked: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      const tags = new URLSearchParams(url.split('?')[1]).get('tags') ?? '';
+      asked.push(tags);
+      const [, a, b] = /id:(\d+)\.\.(\d+)/.exec(tags) ?? [];
+      const status = fail(Number(a));
+      if (status) return {ok: false, status, json: async () => ({})};
+      const posts = ids
+        .filter(id => id >= Number(a) && id <= Number(b))
+        .map(id => ({
+          id,
+          uploader_id: 42,
+          created_at: '2020-01-01T09:00:00+09:00',
+          up_score: 2,
+          down_score: 0,
+          rating: 'g',
+          tag_count: 12,
+          tag_string_character: 'char_' + id,
+          tag_string_copyright: 'touhou',
+        }));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => posts,
+        headers: {get: (n: string) => (n === 'date' ? DATE : null)},
+      };
+    });
+    return {rl, asked};
+  }
+
+  function setUp(
+    rows: Record<string, unknown>[],
+    rl: ReturnType<typeof makeSyncRateLimiter>,
+    meta?: Record<string, unknown>,
+  ) {
+    const metaRows = new Map<number, Record<string, unknown>>();
+    if (meta) metaRows.set(42, {userId: 42, ...meta});
+    const syncMeta = {
+      get: vi.fn(async (k: number) => metaRows.get(k)),
+      put: vi.fn(async (r: Record<string, unknown>) => {
+        metaRows.set(r.userId as number, structuredClone(r));
+      }),
+      delete: vi.fn(async (k: number) => {
+        metaRows.delete(k);
+      }),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable(rows), {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    const written = () =>
+      vi
+        .mocked(quotaManager.bulkPutSafe)
+        .mock.calls.flatMap(c => c[1] as Record<string, unknown>[]);
+    return {adm, metaRows, written};
+  }
+
+  const user = makeSyncUser({id: '42'});
+
+  it('is needed for a user with rows and no fields version 2', async () => {
+    const {rl} = serveRemote([]);
+    expect(
+      await setUp(oldRows([1]), rl).adm.needsPostMetadataBackfill(user),
+    ).toBe(true);
+    expect(
+      await setUp(oldRows([1]), rl, {
+        fieldsVersion: 2,
+      }).adm.needsPostMetadataBackfill(user),
+    ).toBe(false);
+    expect(await setUp([], rl).adm.needsPostMetadataBackfill(user)).toBe(false);
+  });
+
+  it('is not needed while in failure cooldown', async () => {
+    storage.set(
+      backfillFailureStorageKey(42),
+      JSON.stringify({
+        lastAttemptAt: Date.now(),
+        failureCount: BACKFILL_FAILURE_THRESHOLD,
+      }),
+    );
+    const {rl} = serveRemote([]);
+    expect(
+      await setUp(oldRows([1]), rl).adm.needsPostMetadataBackfill(user),
+    ).toBe(false);
+  });
+
+  it('rebuilds every row under its own number and records version 2 with the first response time', async () => {
+    const {rl, asked} = serveRemote([10, 20, 25, 30]);
+    const {adm, metaRows, written} = setUp(oldRows([10, 20, 30]), rl);
+    const progress = vi.fn();
+
+    await adm.backfillPostMetadata(user, progress);
+
+    // Three ranges, each walked by id range in 2 search terms.
+    expect(asked.sort()).toEqual([
+      'user:test_user status:any id:10..10 order:id',
+      'user:test_user status:any id:11..20 order:id',
+      'user:test_user status:any id:21..30 order:id',
+    ]);
+    const rows = written().sort((a, b) => (a.id as number) - (b.id as number));
+    // 25 is a post the rows lack: the sync's to add.
+    expect(rows.map(r => [r.id, r.no, r.chr])).toEqual([
+      [10, 1, 'char_10'],
+      [20, 2, 'char_20'],
+      [30, 3, 'char_30'],
+    ]);
+    expect(metaRows.get(42)).toMatchObject({
+      fieldsVersion: 2,
+      changeWatermark: Date.parse(DATE),
+      timeZone: 'Seoul',
+      backfill: undefined,
+    });
+    expect(progress).toHaveBeenLastCalledWith(3, 3);
+  });
+
+  it('resumes a saved plan where it stopped, keeping its watermark', async () => {
+    const {rl, asked} = serveRemote([10, 20, 30]);
+    // The first range was done; the second had not started.
+    const {adm, metaRows} = setUp(oldRows([10, 20, 30]), rl, {
+      backfill: {
+        from: 1234,
+        ranges: [
+          {after: 20, to: 20},
+          {after: 20, to: 30},
+        ],
+      },
+    });
+
+    await adm.backfillPostMetadata(user);
+
+    expect(asked).toEqual(['user:test_user status:any id:21..30 order:id']);
+    expect(metaRows.get(42)).toMatchObject({
+      fieldsVersion: 2,
+      changeWatermark: 1234,
+    });
+  });
+
+  it('stops on an HTTP error, records the failure and keeps the progress', async () => {
+    const {rl} = serveRemote([10, 20, 30], from => (from === 21 ? 500 : null));
+    const {adm, metaRows} = setUp(oldRows([10, 20, 30]), rl);
+
+    await adm.backfillPostMetadata(user);
+
+    const meta = metaRows.get(42)!;
+    expect(meta.fieldsVersion).toBeUndefined();
+    const plan = meta.backfill as {
+      from: number;
+      ranges: Array<{after: number; to: number}>;
+    };
+    expect(plan.from).toBe(Date.parse(DATE));
+    // The failed range has not moved.
+    expect(plan.ranges.find(r => r.to === 30)?.after).toBe(20);
+    expect(storage.has(backfillFailureStorageKey(42))).toBe(true);
+  });
+
+  it('counts a run whose parallel ranges all fail as one failure', async () => {
+    const {rl} = serveRemote([10, 20, 30], () => 500);
+    const {adm} = setUp(oldRows([10, 20, 30]), rl);
+
+    await adm.backfillPostMetadata(user);
+
+    // The three ranges were in flight together and all failed.
+    expect(rl.fetch).toHaveBeenCalledTimes(3);
+    const state = JSON.parse(storage.get(backfillFailureStorageKey(42))!);
+    expect(state.failureCount).toBe(1);
+  });
+
+  it('stops on a 429 without counting it as a failure', async () => {
+    const {rl} = serveRemote([10, 20, 30], () => 429);
+    const {adm, metaRows} = setUp(oldRows([10, 20, 30]), rl);
+
+    await adm.backfillPostMetadata(user);
+
+    expect(metaRows.get(42)?.fieldsVersion).toBeUndefined();
+    expect(storage.has(backfillFailureStorageKey(42))).toBe(false);
+  });
+
+  it('clearUserData drops the sync state with the rows', async () => {
+    const {rl} = serveRemote([]);
+    const {adm, metaRows} = setUp(oldRows([1]), rl, {fieldsVersion: 2});
+
+    await adm.clearUserData(user);
+
+    expect(metaRows.has(42)).toBe(false);
+  });
+});
+
+// T-404: rows with a numbering gap sync from the start, and a sync that
+// started but did not complete keeps its rows through the cleanup.
+describe('isStaleUser', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = 100 * DAY;
+  const keep = 14 * DAY;
+
+  it('deletes rows without a completed sync or a recent start', () => {
+    expect(isStaleUser(null, undefined, now, keep)).toBe(true);
+    expect(isStaleUser(null, now - 20 * DAY, now, keep)).toBe(true);
+  });
+
+  it('keeps the rows of a sync started within the period, completed or not', () => {
+    expect(isStaleUser(null, now - DAY, now, keep)).toBe(false);
+    expect(isStaleUser(now - 30 * DAY, now - DAY, now, keep)).toBe(false);
+  });
+
+  it('follows the completed sync otherwise', () => {
+    expect(isStaleUser(now - DAY, undefined, now, keep)).toBe(false);
+    expect(isStaleUser(now - 20 * DAY, undefined, now, keep)).toBe(true);
+  });
+});
+
+describe('row numbering and the sync mark (T-404)', () => {
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+    vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const row = (id: number, no: number, createdAt: string) => ({
+    id,
+    uploader_id: 42,
+    no,
+    created_at: createdAt,
+  });
+
+  function makeAdm(rows: Record<string, unknown>[]) {
+    const asked: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: rows.length}}),
+        };
+      }
+      asked.push(decodeURIComponent(url));
+      return {ok: true, status: 200, json: async () => []};
+    });
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable(rows)) as never,
+      rl as never,
+    );
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+    return {adm, asked};
+  }
+
+  it('finds a gap: fewer rows than the highest number', async () => {
+    const intact = makeAdm([
+      row(1, 1, '2024-01-01T00:00:00Z'),
+      row(2, 2, '2025-03-01T00:00:00Z'),
+    ]).adm;
+    const holed = makeAdm([
+      row(1, 1, '2024-01-01T00:00:00Z'),
+      row(9, 5, '2025-03-01T00:00:00Z'),
+    ]).adm;
+    expect(await intact.rowNumberingIntact(42)).toBe(true);
+    expect(await holed.rowNumberingIntact(42)).toBe(false);
+    expect(await makeAdm([]).adm.rowNumberingIntact(42)).toBe(true);
+  });
+
+  it('syncs rows with a gap from the start instead of resuming', async () => {
+    // Without the gap this would resume after post 100 (older than a
+    // month before the newest).
+    const {adm, asked} = makeAdm([
+      row(900, 5, '2025-03-01T00:00:00Z'),
+      row(100, 1, '2024-01-01T00:00:00Z'),
+    ]);
+
+    await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+    expect(asked[0]).toContain('id:>0');
+  });
+
+  it('a cleanup keeps a user whose first sync started recently but failed', async () => {
+    const deleted: unknown[] = [];
+    const meta = new Map<number, Record<string, unknown>>([
+      [7, {userId: 7, syncStartedAt: Date.now() - 60_000}],
+      [8, {userId: 8}],
+    ]);
+    const db = {
+      posts: {
+        orderBy: () => ({uniqueKeys: async () => [7, 8, 42]}),
+        where: () => ({
+          equals: (uid: number) => ({
+            delete: async () => {
+              deleted.push(uid);
+            },
+          }),
+        }),
+      },
+      piestats: {
+        where: () => ({equals: () => ({delete: async () => 0})}),
+      },
+      sync_meta: {get: async (k: number) => meta.get(k)},
+    };
+    const adm = new AnalyticsDataManager(
+      db as never,
+      makeSyncRateLimiter() as never,
+    );
+
+    await adm.cleanupStaleData(42);
+
+    // 7: started a minute ago, no completion stamp — kept.
+    // 8: no stamp, no start — zombie rows, deleted. 42: the current user.
+    expect(deleted).toEqual([8]);
+  });
+});
+
+// T-406: with every row at fields version 2, a completed sync and intact
+// numbering, the status, rating, character and copyright pies and the user
+// stats are counted from the local rows instead of /counts/posts.json.
+describe('pies from the local rows (T-406)', () => {
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    resetTopLevelSessionCache();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map([['danbooru_grass_last_sync_42', '2026-11-14']]);
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+    vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  let nextId = 1;
+  const v2 = (fields: Record<string, unknown>) => ({
+    id: nextId,
+    no: nextId++,
+    uploader_id: 42,
+    created_at: '2025-01-01T00:00:00Z',
+    score: 1,
+    rating: 'g',
+    tag_count_general: 20,
+    is_deleted: false,
+    is_banned: false,
+    pend: false,
+    flag: false,
+    tc: 30,
+    chr: '',
+    cpy: '',
+    ...fields,
+  });
+
+  function setUp(
+    meta: Record<string, unknown> | undefined,
+    rows?: Record<string, unknown>[],
+  ) {
+    nextId = 1;
+    const postRows = rows ?? [
+      v2({rating: 'e', chr: 'reimu marisa', cpy: 'touhou'}),
+      v2({is_deleted: true, chr: 'reimu', cpy: 'touhou'}),
+      v2({pend: true, rating: 's', cpy: 'fate'}),
+      v2({tag_count_general: 5, tc: 8}),
+    ];
+    const asked: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      asked.push(decodeURIComponent(url));
+      if (url.startsWith('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: 3}}),
+        };
+      }
+      // Implication lookups: nothing implies anything; thumbnails: none.
+      return {ok: true, status: 200, json: async () => []};
+    });
+    const posts = makePostsTable(postRows);
+    const db = makeSyncDb(posts, {
+      sync_meta: {get: vi.fn(async () => meta)},
+    });
+    const adm = new AnalyticsDataManager(db as never, rl as never);
+    const user = makeSyncUser({id: '42'});
+    const counted = () => asked.filter(u => u.startsWith('/counts/'));
+    return {adm, user, asked, counted, posts};
+  }
+
+  it('counts every status but appealed from the rows', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2});
+
+    const status = await adm.getStatusDistribution(user, null, true);
+
+    expect(counted()).toEqual([
+      '/counts/posts.json?tags=user:test_user status:appealed',
+    ]);
+    expect(Object.fromEntries(status.map(s => [s.name, s.count]))).toEqual({
+      active: 2,
+      appealed: 3,
+      banned: 0,
+      deleted: 1,
+      flagged: 0,
+      pending: 1,
+    });
+    expect(Object.keys(status[0]).sort()).toEqual(['count', 'label', 'name']);
+  });
+
+  it('counts the ratings with no request at all', async () => {
+    const {adm, user, asked} = setUp({fieldsVersion: 2});
+
+    const rating = await adm.getRatingDistribution(user, null, true);
+
+    expect(asked).toEqual([]);
+    expect(rating).toEqual([
+      {rating: 'g', count: 2, label: 'General'},
+      {rating: 's', count: 1, label: 'Sensitive'},
+      {rating: 'q', count: 0, label: 'Questionable'},
+      {rating: 'e', count: 1, label: 'Explicit'},
+    ]);
+  });
+
+  it('builds the character pie from the rows: no related tags, no counts', async () => {
+    const {adm, user, asked, counted} = setUp({fieldsVersion: 2});
+
+    const chars = await adm.getCharacterDistribution(user, true);
+
+    expect(asked.some(u => u.startsWith('/related_tag.json'))).toBe(false);
+    expect(counted()).toEqual([]);
+    expect(chars.map(c => [c.tagName, c.count, c.isOther])).toEqual([
+      ['reimu', 2, false],
+      ['marisa', 1, false],
+      // 4 posts − 3 tagged.
+      ['', 1, true],
+    ]);
+  });
+
+  it('builds the copyright pie the same way', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2});
+
+    const copy = await adm.getCopyrightDistribution(user, true);
+
+    expect(counted()).toEqual([]);
+    expect(copy.slice(0, 2).map(c => [c.tagName, c.count])).toEqual([
+      ['touhou', 2],
+      ['fate', 1],
+    ]);
+  });
+
+  it('gives the user stats from the rows', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2});
+
+    expect(await adm.getUserStats(user)).toEqual({
+      gentags_lt_10: 1,
+      tagcount_lt_10: 1,
+    });
+    expect(counted()).toEqual([]);
+  });
+
+  it('scans the rows once for one load', async () => {
+    const {adm, user, posts} = setUp({fieldsVersion: 2});
+
+    await adm.getStatusDistribution(user, null, true);
+    await adm.getRatingDistribution(user, null, true);
+    await adm.getUserStats(user);
+
+    expect(posts._chain.each).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['rows below fields version 2', undefined],
+    ['a sync under way or failed', {fieldsVersion: 2, syncStartedAt: 1}],
+  ])('keeps counting remotely with %s', async (_label, meta) => {
+    const {adm, user, counted} = setUp(meta);
+
+    await adm.getRatingDistribution(user, null, true);
+
+    expect(counted()).toHaveLength(4);
+  });
+
+  it('keeps counting remotely without a completed sync', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2});
+    storage.clear();
+
+    await adm.getRatingDistribution(user, null, true);
+
+    expect(counted()).toHaveLength(4);
+  });
+
+  it('keeps counting remotely when the numbering has a gap', async () => {
+    const {adm, user, counted} = setUp({fieldsVersion: 2}, [
+      {...v2({}), no: 1},
+      {...v2({}), no: 5},
+    ]);
+
+    await adm.getRatingDistribution(user, null, true);
+
+    expect(counted()).toHaveLength(4);
+  });
+});
+
+// T-407: the local rows catch up with posts changed on Danbooru.
+describe('catchUpWatermark', () => {
+  const ttl = 600_000;
+  const now = 10_000_000;
+  const meta = (fields: Record<string, unknown>) =>
+    ({userId: 42, fieldsVersion: 2, changeWatermark: 5000, ...fields}) as never;
+
+  it('starts from the watermark of rows at fields version 2', () => {
+    expect(catchUpWatermark(meta({}), now, ttl)).toBe(5000);
+  });
+
+  it.each([
+    ['no row', undefined],
+    ['no watermark', meta({changeWatermark: undefined})],
+    ['rows below version 2', meta({fieldsVersion: 1})],
+    ['a sync under way or failed', meta({syncStartedAt: 1})],
+    ['an earlier overflow', meta({needsFullSync: true})],
+    ['a catch-up within the TTL', meta({caughtUpAt: now - 1000})],
+  ])('does not run with %s', (_label, m) => {
+    expect(catchUpWatermark(m, now, ttl)).toBeNull();
+  });
+
+  it('runs again once the TTL has passed', () => {
+    expect(catchUpWatermark(meta({caughtUpAt: now - ttl - 1}), now, ttl)).toBe(
+      5000,
+    );
+  });
+});
+
+describe('catchUpChanges (T-407)', () => {
+  const W = Date.parse('2026-11-10T00:00:00Z');
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const post = (id: number, updatedAt: string, uploaderId = 42) => ({
+    id,
+    uploader_id: uploaderId,
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: updatedAt,
+    rating: 'q',
+    tag_string_character: 'changed',
+  });
+
+  /** `pages[n - 1]` answers page n of `order:change`. */
+  function setUp(
+    meta: Record<string, unknown>,
+    pages: Array<ReturnType<typeof post>[] | number>,
+    localIds: number[],
+  ) {
+    const asked: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      asked.push(decodeURIComponent(url));
+      const page = Number(new URLSearchParams(url.split('?')[1]).get('page'));
+      const body = pages[page - 1] ?? [];
+      if (typeof body === 'number') {
+        return {ok: false, status: body, json: async () => ({})};
+      }
+      return {ok: true, status: 200, json: async () => body};
+    });
+    const rows = new Map<number, Record<string, unknown>>(
+      localIds.map((id, i) => [
+        id,
+        {id, uploader_id: 42, no: i + 1, rating: 's', chr: 'old'},
+      ]),
+    );
+    const posts = makePostsTable([...rows.values()]);
+    Object.assign(posts, {
+      bulkGet: vi.fn(async (ids: number[]) => ids.map(id => rows.get(id))),
+    });
+    const metaRows = new Map<number, Record<string, unknown>>([
+      [42, {userId: 42, ...meta}],
+    ]);
+    const syncMeta = {
+      get: vi.fn(async (k: number) => metaRows.get(k)),
+      put: vi.fn(async (r: Record<string, unknown>) => {
+        metaRows.set(r.userId as number, structuredClone(r));
+      }),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(posts, {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    const written = () =>
+      vi
+        .mocked(quotaManager.bulkPutSafe)
+        .mock.calls.flatMap(c => c[1] as Record<string, unknown>[]);
+    return {adm, asked, metaRows, written};
+  }
+
+  const user = makeSyncUser({id: '42'});
+  const v2 = {fieldsVersion: 2, changeWatermark: W};
+
+  it('overwrites the rows it has under their own number, and moves the watermark', async () => {
+    const page1 = [
+      post(7, '2026-11-12T00:00:00Z'),
+      post(99, '2026-11-11T00:00:00Z'), // not in the rows: the sync's
+      post(3, '2026-11-09T00:00:00Z'), // older than W: the walk ends
+    ];
+    const {adm, asked, metaRows, written} = setUp(v2, [page1], [3, 7]);
+
+    const {changed} = await adm.catchUpChanges(user);
+
+    expect(asked).toHaveLength(1);
+    expect(new URLSearchParams(asked[0].split('?')[1]).get('tags')).toBe(
+      'user:test_user order:change',
+    );
+    expect(changed).toBe(2);
+    expect(written().map(r => [r.id, r.no, r.chr])).toEqual([
+      [7, 2, 'changed'],
+      [3, 1, 'changed'],
+    ]);
+    expect(metaRows.get(42)).toMatchObject({
+      changeWatermark: Date.parse('2026-11-12T00:00:00Z'),
+      caughtUpAt: expect.any(Number),
+      catchUp: undefined,
+    });
+  });
+
+  it('walks on while every row is newer, saving its progress', async () => {
+    const full = (start: number) =>
+      Array.from({length: 200}, (_, i) =>
+        post(start + i, '2026-11-13T00:00:00Z'),
+      );
+    const {adm, asked, metaRows} = setUp(v2, [full(1000), full(2000), 503], []);
+
+    await adm.catchUpChanges(user);
+
+    // Page 3 failed: the walk stops, the watermark stays, page 3 is saved.
+    expect(asked).toHaveLength(3);
+    expect(metaRows.get(42)).toMatchObject({
+      changeWatermark: W,
+      catchUp: {page: 3, headAt: Date.parse('2026-11-13T00:00:00Z')},
+    });
+  });
+
+  it('resumes a saved walk: the new changes first, then back where it stopped', async () => {
+    const headAt = Date.parse('2026-11-13T00:00:00Z');
+    const newer = post(1, '2026-11-14T00:00:00Z');
+    const older = post(2, '2026-11-01T00:00:00Z');
+    const fullOld = Array.from({length: 200}, (_, i) =>
+      post(3000 + i, '2026-11-12T00:00:00Z'),
+    );
+    const {adm, asked} = setUp(
+      {...v2, catchUp: {page: 4, headAt}},
+      [[newer, ...fullOld.slice(0, 199)], fullOld, fullOld, [older]],
+      [],
+    );
+
+    await adm.catchUpChanges(user);
+
+    const pages = asked.map(u =>
+      Number(new URLSearchParams(u.split('?')[1]).get('page')),
+    );
+    // Page 1 reaches below the saved head; the tail goes back to page 3.
+    expect(pages).toEqual([1, 3, 4]);
+  });
+
+  it('sends nothing within the count TTL', async () => {
+    const {adm, asked} = setUp({...v2, caughtUpAt: Date.now()}, [[]], []);
+    expect(await adm.catchUpChanges(user)).toEqual({changed: 0});
+    expect(asked).toEqual([]);
+  });
+
+  it('a user marked for a full sync syncs from the start', async () => {
+    const {adm, asked} = setUp({...v2, needsFullSync: true}, [[]], [1, 2]);
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
+    vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+
+    await adm.syncAllPosts(user, vi.fn());
+
+    expect(asked.find(u => u.startsWith('/posts.json'))).toContain('id:>0');
   });
 });

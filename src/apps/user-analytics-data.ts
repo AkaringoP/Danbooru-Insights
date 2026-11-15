@@ -374,6 +374,8 @@ export type PieDetails =
       name?: string;
       /** The count could not be had: legend "—" (`DistributionItem.unknown`). */
       unknown?: boolean;
+      /** Not asked, over the viewer's tag limit: legend "🔒" (T-408). */
+      locked?: boolean;
       /**
        * Sub-tag breakdown for legend hover/tap (Copy / Fav_Copy / Char,
        * v9.6.0+). Source: `DistributionItem.subTags` from the resolver.

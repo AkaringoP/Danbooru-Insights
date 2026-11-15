@@ -254,6 +254,12 @@ export interface DistributionItem {
    */
   unknown?: boolean;
   /**
+   * With `unknown`: the count was not asked at all, because its search uses
+   * more tags than the viewer's limit allows (T-408; anonymous 2, Member 3).
+   * The legend shows a lock instead of "—".
+   */
+  locked?: boolean;
+  /**
    * Sub-tag breakdown for legend hover/tap (v9.6.0+). Populated for Copy /
    * Fav_Copy / Char distributions when the top-level tag has implications
    * (sub-tags) that the user actually uses. Empty/undefined = no tooltip.
@@ -369,6 +375,91 @@ export interface PostRecord {
   file_url?: string;
   tag_string_copyright?: string;
   tag_string_character?: string;
+
+  // Fields version 2 (T-402), under short names: IndexedDB stores the key
+  // names in every row. Absent on rows from before; `sync_meta.fieldsVersion`
+  // says whether all of a user's rows hold them.
+  /** `updated_at`, ms since epoch (server clock). */
+  upd?: number;
+  /** `is_pending`. */
+  pend?: boolean;
+  /** `is_flagged`. */
+  flag?: boolean;
+  /** `tag_count` (tags of every category). */
+  tc?: number;
+  /** `tag_string_character` (space-separated). */
+  chr?: string;
+  /** `tag_string_copyright` (space-separated). */
+  cpy?: string;
+}
+
+/**
+ * Per-user sync state in the `sync_meta` table (schema v13). One row per
+ * synced uploader, filled in by the sync (T-402), the tag-field backfill
+ * (T-403), the row-count check (T-404) and the change catch-up (T-407).
+ * Every field but the key is optional: a row is written a piece at a time.
+ */
+export interface SyncMetaRecord {
+  /**
+   * Uploader id, as in `posts.uploader_id` — a number: IndexedDB keys `1`
+   * and `"1"` are different, so a string id would miss the row.
+   */
+  userId: number;
+  /**
+   * Which post fields the user's rows hold. 2: the tag fields T-402 adds
+   * (`updated_at`, pending / flagged, `tag_count`, character and copyright
+   * tag strings). Absent: rows from before, so the pies keep counting.
+   */
+  fieldsVersion?: number;
+  /**
+   * Latest `updated_at` (ms since epoch, server clock) the user's rows are
+   * known to reflect: the first response's `Date` of the full sync or
+   * backfill that filled them, then the newest change the catch-up saw.
+   */
+  changeWatermark?: number;
+  /**
+   * A fields backfill under way (T-403): every row the user had when it
+   * started is fetched again, in id ranges walked in parallel. Cleared when
+   * it completes.
+   */
+  backfill?: {
+    /** Server time (ms) of its first response: the watermark once done. */
+    from: number;
+    /** Each id range: done up to `after`, ends at `to` (inclusive). */
+    ranges: Array<{after: number; to: number}>;
+  };
+  /**
+   * Where an interrupted change catch-up resumes (T-407,
+   * `core/change-catch-up.ts`).
+   */
+  catchUp?: {
+    /** The next `order:change` page it would have read. */
+    page: number;
+    /** Newest `updated_at` (ms) on its first page. */
+    headAt: number;
+  };
+  /** When the last change catch-up completed (ms): one per count TTL. */
+  caughtUpAt?: number;
+  /**
+   * The catch-up ran past the page limit: the rows cannot be brought up to
+   * date by it. The pies count remotely and the next sync starts over.
+   */
+  needsFullSync?: boolean;
+  /**
+   * The viewer's Danbooru time zone during the sync
+   * (`<body data-current-user-time-zone>`): Grass may reuse the rows'
+   * dates only under the same one. A Rails zone name such as "Seoul"
+   * (seen 2026-11-15), not an IANA id: compare it, do not hand it to
+   * `Intl` (which throws on "Seoul").
+   */
+  timeZone?: string;
+  /**
+   * Set when a sync starts and cleared when it ends (ms since epoch).
+   * Cleanup keeps the rows of a user with one set (T-404).
+   */
+  syncStartedAt?: number;
+  /** Last time this user's dashboard was opened (ms since epoch). */
+  lastVisitedAt?: number;
 }
 
 /** User-level aggregate statistics stored in the `user_stats` table. */
@@ -488,6 +579,8 @@ export interface CreatedTagItem {
 export interface DanbooruPost {
   id: number;
   created_at: string;
+  /** Last change to the post (tags, rating, status…), ISO with offset. */
+  updated_at?: string;
   uploader_id: number;
   rating: string;
 
@@ -497,6 +590,8 @@ export interface DanbooruPost {
   down_score?: number;
   fav_count?: number;
   tag_count_general?: number;
+  /** Tags of every category. */
+  tag_count?: number;
 
   // Status flags (modern post schema)
   is_deleted?: boolean;
