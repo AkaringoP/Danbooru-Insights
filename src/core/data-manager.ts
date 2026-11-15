@@ -1,7 +1,7 @@
-import {CONFIG} from '../config';
+import {CONFIG, DAY_MS} from '../config';
 import {createLogger} from './logger';
 import type {RateLimitedFetch} from './rate-limiter';
-import {readSyncMeta, viewerTimeZone} from './sync-meta';
+import {patchSyncMeta, readSyncMeta, viewerTimeZone} from './sync-meta';
 import {
   classifySyncFetchError,
   SYNC_PAGE_MAX_ATTEMPTS,
@@ -40,6 +40,45 @@ interface HourlyStatEntry {
   year: number;
   hour: number;
   count: number;
+}
+
+/** The tables a user's Grass cache lives in (`clearCache`, T-606). */
+const GRASS_TABLES = [
+  'uploads',
+  'approvals',
+  'approvals_detail',
+  'notes',
+  'completed_years',
+  'hourly_stats',
+] as const;
+
+/**
+ * A Grass cache not opened for this long is dropped (decision G-6): 90
+ * days. Written out rather than from `DAY_MS`, which a module-load
+ * constant would read before a test's `config` mock could supply it.
+ */
+export const GRASS_CACHE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** localStorage: when the Grass cache sweep last ran (T-606). */
+const GRASS_SWEEP_KEY = 'di.grassCache.sweptAt';
+
+/**
+ * Whether a daily sweep stamped under `key` is due, claiming it if so. The
+ * stamp is written before the sweep, so a sweep that fails does not run
+ * again on every open, and a second tab opened at the same time usually
+ * skips it. Due when the stamp cannot be read. Shared by the tag pages'
+ * cache sweep (T-309) and Grass's (T-606).
+ */
+export function claimDailySweep(key: string, now: number): boolean {
+  try {
+    const last = Number(localStorage.getItem(key));
+    const age = now - last;
+    if (last > 0 && age >= 0 && age < DAY_MS) return false;
+    localStorage.setItem(key, String(now));
+  } catch {
+    // Storage unavailable: sweep anyway.
+  }
+  return true;
 }
 
 /** A raw API item with dynamic shape from Danbooru endpoints. */
@@ -1041,33 +1080,72 @@ export class DataManager {
    */
   async clearCache(_metric: Metric, userInfo: TargetUser): Promise<boolean> {
     try {
-      const userIdVal = userInfo.id || userInfo.name;
-      const tablesToClear = [
-        'uploads',
-        'approvals',
-        'approvals_detail',
-        'notes',
-        'completed_years',
-        'hourly_stats',
-      ];
-
-      for (const storeName of tablesToClear) {
-        const table = this.db[storeName];
-        // Delete all entries for this user in this store
-        const items = await table
-          .where('userId')
-          .equals(userIdVal)
-          .primaryKeys();
-        if (items.length > 0) {
-          await table.bulkDelete(items);
-        }
-      }
-
+      await this.deleteGrassRows(userInfo.id || userInfo.name);
       return true;
     } catch (e: unknown) {
       log.error('Clear cache failed', {error: e});
       return false;
     }
+  }
+
+  /** Deletes every row of `userIdVal` in {@link GRASS_TABLES}. */
+  private async deleteGrassRows(userIdVal: string): Promise<void> {
+    for (const storeName of GRASS_TABLES) {
+      const table = this.db[storeName];
+      const items = await table.where('userId').equals(userIdVal).primaryKeys();
+      if (items.length > 0) await table.bulkDelete(items);
+    }
+  }
+
+  /**
+   * Records that this user's Grass was opened (T-606): the cache sweep
+   * drops a Grass cache {@link GRASS_CACHE_RETENTION_MS} after the last
+   * visit. Kept in `sync_meta`, so only for a numeric id.
+   */
+  async noteGrassVisit(userInfo: TargetUser, now = Date.now()): Promise<void> {
+    const id = Number.parseInt(userInfo.id ?? '', 10);
+    if (id > 0) await patchSyncMeta(this.db, id, {lastVisitedAt: now});
+  }
+
+  /**
+   * Once a day, drops the Grass cache of users not opened for
+   * {@link GRASS_CACHE_RETENTION_MS} (T-606, decision G-6; audit DA-10's
+   * Grass part): the six tables {@link clearCache} empties, so their past
+   * years are fetched again on the next visit. Never `currentUserIdVal`. A
+   * user cached before visits were recorded gets one now, which starts
+   * their 90 days; a user known only by name (no numeric id, so no
+   * `sync_meta` row) is left alone. Failures are logged, never thrown.
+   * @return how many users' caches were dropped
+   */
+  async sweepGrassCache(
+    currentUserIdVal: string,
+    now = Date.now(),
+  ): Promise<number> {
+    if (!claimDailySweep(GRASS_SWEEP_KEY, now)) return 0;
+    let dropped = 0;
+    try {
+      const userIds = new Set<string>();
+      for (const name of ['uploads', 'approvals', 'notes']) {
+        const keys = await this.db[name].orderBy('userId').uniqueKeys();
+        for (const k of keys) userIds.add(String(k));
+      }
+      for (const uid of userIds) {
+        if (uid === currentUserIdVal) continue;
+        const numeric = Number(uid);
+        if (!Number.isInteger(numeric) || numeric <= 0) continue;
+        const visited = (await readSyncMeta(this.db, numeric))?.lastVisitedAt;
+        if (visited === undefined) {
+          await patchSyncMeta(this.db, numeric, {lastVisitedAt: now});
+        } else if (now - visited > GRASS_CACHE_RETENTION_MS) {
+          await this.deleteGrassRows(uid);
+          dropped++;
+        }
+      }
+      if (dropped > 0) log.info('Unused Grass caches dropped', {dropped});
+    } catch (e: unknown) {
+      log.warn('Grass cache sweep failed', {error: e});
+    }
+    return dropped;
   }
 
   /**

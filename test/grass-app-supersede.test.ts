@@ -66,6 +66,9 @@ describe('GrassApp updateView supersede (issue #4)', () => {
       }),
       fetchPromotionDate: vi.fn(async () => null),
       clearCache: vi.fn(async () => undefined),
+      // The visit record and the daily cache sweep (T-606).
+      noteGrassVisit: vi.fn(async () => undefined),
+      sweepGrassCache: vi.fn(async () => 0),
     };
   }
 

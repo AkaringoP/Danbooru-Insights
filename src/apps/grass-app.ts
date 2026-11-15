@@ -21,6 +21,9 @@ import type {Metric, Threshold4} from '../types';
 
 const log = createLogger('GrassApp');
 
+/** How long after opening a profile the daily Grass cache sweep waits. */
+const GRASS_SWEEP_DELAY_MS = 10_000;
+
 /**
  * GrassApp: Encapsulates the contribution graph visualization logic.
  * Manages data fetching, processing, and rendering of the GitHub-style grass graph.
@@ -75,6 +78,13 @@ export class GrassApp {
     if (!injected) {
       return;
     }
+
+    // This visit, then — once a day, after the first paint has had its
+    // turn — other users' Grass caches unopened for 90 days (T-606, G-6).
+    void dataManager.noteGrassVisit(targetUser);
+    setTimeout(() => {
+      void dataManager.sweepGrassCache(userId);
+    }, GRASS_SWEEP_DELAY_MS);
 
     let currentYear = new Date().getFullYear();
     let currentMetric: Metric = (this.settings.getLastMode(userId) ||
