@@ -12,6 +12,8 @@ import {
   syncRetryDelayMs,
   SYNC_PAGE_MAX_ATTEMPTS,
   SYNC_SEGMENT_PAGES,
+  SYNC_WORKERS,
+  SYNC_BUFFER_MAX_PAGES,
   splitIdRanges,
   isStaleUser,
   catchUpWatermark,
@@ -1296,7 +1298,12 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       );
       vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
       vi.spyOn(adm, 'cleanupStaleData').mockResolvedValue();
-      const outcome = await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+      // One post a page (T-504): a shorter page would end the run.
+      const outcome = await adm.syncAllPosts(
+        makeSyncUser({id: '42'}),
+        vi.fn(),
+        {pageLimit: 1},
+      );
       const written = vi
         .mocked(quotaManager.bulkPutSafe)
         .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
@@ -4550,5 +4557,116 @@ describe('one row scan per dashboard open (T-501)', () => {
     first.length = 0;
 
     expect(await adm.getScatterData(user)).toHaveLength(8);
+  });
+});
+
+// T-504: the full sync's page pool ends on a short page, and stops claiming
+// pages while an earlier one holds up the in-order commit.
+describe('full sync page pool (T-504)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** Page n holds sizes[n - 1] posts (none past the end); page 1 can wait. */
+  function servePages(sizes: number[], hold?: Promise<void>) {
+    const asked: number[] = [];
+    const total = sizes.reduce((a, b) => a + b, 0);
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: total}}),
+        };
+      }
+      const page = Number(new URLSearchParams(url.split('?')[1]).get('page'));
+      asked.push(page);
+      if (page === 1 && hold) await hold;
+      const posts = Array.from({length: sizes[page - 1] ?? 0}, (_, i) => ({
+        id: page * 1000 + i,
+        uploader_id: 42,
+        created_at: '2025-01-01T00:00:00Z',
+        up_score: 1,
+        down_score: 0,
+        rating: 'g',
+      }));
+      return {ok: true, status: 200, json: async () => posts};
+    });
+    return {rl, asked};
+  }
+
+  function makeAdm(rl: ReturnType<typeof makeSyncRateLimiter>) {
+    const syncMeta = {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async () => undefined),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable([]), {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    return adm;
+  }
+
+  const numbers = () =>
+    vi
+      .mocked(quotaManager.bulkPutSafe)
+      .mock.calls.flatMap(c => (c[1] as Array<{no: number}>).map(r => r.no));
+
+  it('ends on a page shorter than the page size', async () => {
+    const {rl, asked} = servePages([200, 50]);
+    const adm = makeAdm(rl);
+
+    const run = adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+    await vi.advanceTimersByTimeAsync(10_000);
+    const outcome = await run;
+
+    expect(outcome).toEqual({complete: true, started: true});
+    // Page 2 held 50 posts: no page after it was asked for.
+    expect(asked).toEqual([1, 2]);
+    expect(numbers()).toEqual(Array.from({length: 250}, (_, i) => i + 1));
+  });
+
+  it('stops claiming pages while an earlier one holds up the commit', async () => {
+    let release!: () => void;
+    const hold = new Promise<void>(r => {
+      release = r;
+    });
+    const {rl, asked} = servePages(Array(60).fill(200), hold);
+    const adm = makeAdm(rl);
+
+    const run = adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    // Page 1 is stuck: the other workers fill the buffer to its cap (each
+    // may have one more page in flight), then wait instead of claiming.
+    const heldAt = Math.max(...asked);
+    expect(heldAt).toBeGreaterThan(SYNC_BUFFER_MAX_PAGES);
+    expect(heldAt).toBeLessThanOrEqual(SYNC_BUFFER_MAX_PAGES + SYNC_WORKERS);
+
+    release();
+    await vi.advanceTimersByTimeAsync(120_000);
+    const outcome = await run;
+
+    expect(outcome.complete).toBe(true);
+    const nos = numbers();
+    expect(nos).toHaveLength(60 * 200);
+    expect(nos.every((n, i) => n === i + 1)).toBe(true);
   });
 });

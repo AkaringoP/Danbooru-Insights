@@ -585,6 +585,35 @@ export const SYNC_WORKERS = 5;
  */
 export const SYNC_SEGMENT_PAGES = 1000;
 
+/** Posts per full-sync page: Danbooru's largest `limit`. */
+const SYNC_PAGE_LIMIT = 200;
+
+/**
+ * Pages the full sync's reorder buffer may hold before the workers stop
+ * claiming new ones (T-504). Pages commit in order, so one page stuck in
+ * its retries let the others pile up behind it without bound; this caps
+ * that at 5,000 posts in memory, and the requests sent meanwhile.
+ */
+export const SYNC_BUFFER_MAX_PAGES = 25;
+
+/** How often a worker held by a full buffer looks again (T-504). */
+const SYNC_BUFFER_POLL_MS = 250;
+
+/**
+ * Resolves once the reorder buffer has room for another page — true — or
+ * false when the run ends meanwhile (T-504).
+ */
+async function waitForBufferRoom(
+  buffer: Map<number, unknown>,
+  running: () => boolean,
+): Promise<boolean> {
+  while (buffer.size >= SYNC_BUFFER_MAX_PAGES) {
+    if (!running()) return false;
+    await new Promise(r => setTimeout(r, SYNC_BUFFER_POLL_MS));
+  }
+  return running();
+}
+
 /** How the full-sync worker should react to a failed page fetch. */
 export type SyncFetchErrorKind = 'rate-limit' | 'transient' | 'fatal';
 
@@ -4810,10 +4839,13 @@ export class AnalyticsDataManager extends DataManager {
    *   The two early returns below never fetched anything at all — they carry
    *   `started: false` so callers can tell "nothing changed" apart from
    *   "changed, but only partly".
+   * @param options.pageLimit Posts per page, {@link SYNC_PAGE_LIMIT} unless
+   *   a test serves smaller pages (a page shorter than this ends the run).
    */
   async syncAllPosts(
     userInfo: TargetUser,
     onProgress: (current: number, total: number, message?: string) => void,
+    options: {pageLimit?: number} = {},
   ): Promise<SyncOutcome> {
     if (!userInfo.id) {
       log.error('User ID required for sync');
@@ -4894,6 +4926,7 @@ export class AnalyticsDataManager extends DataManager {
           userInfo,
           uploaderId,
           startId: segmentStartId,
+          limit: options.pageLimit ?? SYNC_PAGE_LIMIT,
           getCurrentNo: () => currentNo,
           bumpCurrentNo: () => ++currentNo,
           total,
@@ -5178,6 +5211,8 @@ export class AnalyticsDataManager extends DataManager {
     userInfo: TargetUser;
     uploaderId: number;
     startId: number;
+    /** Posts per page; a shorter page is the last. */
+    limit: number;
     getCurrentNo: () => number;
     bumpCurrentNo: () => number;
     total: number;
@@ -5199,6 +5234,7 @@ export class AnalyticsDataManager extends DataManager {
       userInfo,
       uploaderId,
       startId,
+      limit,
       getCurrentNo,
       bumpCurrentNo,
       total,
@@ -5214,7 +5250,6 @@ export class AnalyticsDataManager extends DataManager {
       reportProgress,
       perfStats,
     } = args;
-    const limit = 200; // API Limit
     const WORKER_DELAY = 400; // pause between pages, per worker
 
     // T-26 baseline: arrow complexity 20. Worker body — retry/backoff +
@@ -5235,7 +5270,10 @@ export class AnalyticsDataManager extends DataManager {
 
       try {
         while (getHasMore()) {
-          // 1. Claim a page
+          // 1. Claim a page — once the buffer has room (T-504): while an
+          // earlier page is stuck in its retries, the pages behind it wait
+          // in memory, and more requests would only add to them.
+          if (!(await waitForBufferRoom(buffer, getHasMore))) return;
           const currentPage = claimPage();
           if (currentPage === null) return;
           perfLogger.start(pageLabel);
@@ -5308,6 +5346,9 @@ export class AnalyticsDataManager extends DataManager {
 
             // 2. Buffer the result
             buffer.set(currentPage, items);
+            // A short page is the last (T-504): claim no more. Pages already
+            // in flight past it come back empty.
+            if (items.length < limit) setHasMore(false);
 
             // 3. Ordered Commit Loop (Check if we can save)
             while (buffer.has(getNextExpectedPage())) {
