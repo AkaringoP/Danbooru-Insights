@@ -5181,27 +5181,6 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Whether a user's rows are numbered without a gap: their count equals
-   * the highest `no` (T-404, audit DA-07). Index reads only — a count on
-   * `uploader_id` and the last key of `[uploader_id+no]`. A user without
-   * rows is intact. A gap means rows went missing below the newest one
-   * (a ghost prune, an old bug): the local pies would undercount, and only
-   * a sync from the start can fill it.
-   */
-  async rowNumberingIntact(uploaderId: number): Promise<boolean> {
-    const count = await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .count();
-    if (count === 0) return true;
-    const last = await this.db.posts
-      .where('[uploader_id+no]')
-      .between([uploaderId, -Infinity], [uploaderId, Infinity])
-      .last();
-    return last?.no === count;
-  }
-
-  /**
    * Drop this user's rows above `startId` that the just-completed sync did
    * not return — posts that vanished from Danbooru's search since the last
    * run: expunged (permanently destroyed), or no longer credited to this

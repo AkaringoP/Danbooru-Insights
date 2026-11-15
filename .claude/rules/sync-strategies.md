@@ -5,6 +5,7 @@
 - **Integrity check**: For past years, compare remote count vs local sum; force re-fetch on mismatch
 - **Completion cache**: Mark past years as complete to skip future fetches
 - **Batch**: 200 items/page, 5 concurrent pages, exponential backoff on 429/5xx
+- **Uploads from the synced posts (T-601, audit DA-25)**: a year with nothing cached in `uploads` is filled from the user's `posts` rows (`fillUploadsYearFromPosts`) when they can stand for it (`syncedPostsUsable`): a completion stamp (`danbooru_grass_last_sync_*`), no `syncStartedAt` or `needsFullSync`, `rowNumberingIntact`, and `sync_meta.timeZone` equal to the page's `<body data-current-user-time-zone>` — `created_at` carries that zone, and the day is its first ten characters and the hour `new Date(created_at).getHours()`, as with the API's items. Rows are read by `[uploader_id+created_at]` for [Jan 1, next Jan 1), the range `date:` asks for. Then the usual path: a past year's integrity count checks the sum (a match marks it complete with no page request; a mismatch deletes the year and pages it); the current year fetches from its last day − 3, as for any cached year. Any failed condition or error leaves the year to the API. Approvals and notes are untouched. A cached past year also no longer sends the empty `<next Jan 1>...<next Jan 1>` page request
 
 ## User Analytics Sync (AnalyticsDataManager)
 - **Quick Sync** (`quickSyncAllPosts`): For users with ≤1200 total posts. Sequential cursor-based pagination. Auto-triggered in `renderDashboard()`.

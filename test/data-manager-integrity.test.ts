@@ -1704,3 +1704,208 @@ describe('sumDailyCounts', () => {
     ).resolves.toBe(4);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-601: a year with nothing cached comes from the synced posts rows
+// ---------------------------------------------------------------------------
+
+describe('getMetricData — uploads from the synced posts (T-601)', () => {
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    storage = new Map([
+      ['danbooru_grass_last_sync_42', '2026-11-15T00:00:00.000Z'],
+    ]);
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
+    });
+  });
+
+  /** The user's synced rows: 2 uploads on 2023-03-15, 1 on 2023-07-01. */
+  const postRows = [
+    {
+      id: 1,
+      uploader_id: 42,
+      no: 1,
+      created_at: '2023-03-15T09:30:00.000+09:00',
+    },
+    {
+      id: 2,
+      uploader_id: 42,
+      no: 2,
+      created_at: '2023-03-15T23:10:00.000+09:00',
+    },
+    {
+      id: 3,
+      uploader_id: 42,
+      no: 3,
+      created_at: '2023-07-01T01:00:00.000+09:00',
+    },
+  ];
+
+  /** A table that keeps what is put into it, upserting by id. */
+  function makeKeyedTable() {
+    const rows: Record<string, unknown>[] = [];
+    const chain = makeChain(rows);
+    return {
+      where: vi.fn().mockReturnValue(chain),
+      get: vi.fn(async () => null),
+      put: vi.fn(async () => undefined),
+      bulkPut: vi.fn(async (added: Record<string, unknown>[]) => {
+        for (const r of added) {
+          const i = rows.findIndex(x => x.id === r.id);
+          if (i >= 0) rows[i] = r;
+          else rows.push(r);
+        }
+      }),
+      _chain: chain,
+      _rows: rows,
+    };
+  }
+
+  function setUp(meta: Record<string, unknown> | undefined) {
+    const uploads = makeKeyedTable();
+    const hourly = makeKeyedTable();
+    const completed = makeTable();
+    const db = makeDb({
+      uploads,
+      hourly_stats: hourly,
+      completed_years: completed,
+      posts: makeTable(postRows),
+      sync_meta: {get: vi.fn(async () => meta)},
+    });
+    let pageHit = 0;
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: postRows.length}}),
+        };
+      }
+      // The API path: the same posts on the first page only (numbered
+      // when asked: the pages are asked together, read later).
+      const hit = ++pageHit;
+      return {
+        ok: true,
+        status: 200,
+        json: async () =>
+          hit === 1
+            ? postRows.map(p => ({uploader_id: 42, created_at: p.created_at}))
+            : [],
+      };
+    });
+    const pages = () =>
+      (rl.fetch as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: string[]) => c[0])
+        .filter(u => !u.includes('/counts/'));
+    const counts = () =>
+      (rl.fetch as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: string[]) => c[0])
+        .filter(u => u.includes('/counts/'));
+    return {db, uploads, completed, rl, pages, counts};
+  }
+
+  const synced = {userId: 42, fieldsVersion: 2, timeZone: 'Seoul'};
+
+  it('fills a past year from the rows: one count, no page', async () => {
+    const {db, uploads, completed, rl, pages, counts} = setUp(synced);
+
+    const result = await new DataManager(db, rl as never).getMetricData(
+      'uploads',
+      makeUser(),
+      2023,
+    );
+
+    expect(pages()).toEqual([]);
+    expect(counts()).toHaveLength(1);
+    expect(result.daily).toEqual({'2023-03-15': 2, '2023-07-01': 1});
+    expect(uploads._rows).toHaveLength(2);
+    // Checked by the count, so the year is complete.
+    expect(completed.put).toHaveBeenCalledWith(
+      expect.objectContaining({id: '42_uploads_2023'}),
+    );
+  });
+
+  it('gives the same days and hours as the API', async () => {
+    const local = setUp(synced);
+    const fromRows = await new DataManager(
+      local.db,
+      local.rl as never,
+    ).getMetricData('uploads', makeUser(), 2023);
+
+    storage.clear(); // no completed sync: the API path
+    const api = setUp(synced);
+    const fromApi = await new DataManager(
+      api.db,
+      api.rl as never,
+    ).getMetricData('uploads', makeUser(), 2023);
+
+    expect(api.pages().length).toBeGreaterThan(0);
+    expect(local.pages()).toEqual([]);
+    expect(fromRows.daily).toEqual(fromApi.daily);
+    expect(fromRows.hourly).toEqual(fromApi.hourly);
+  });
+
+  it('pages the API when the rows were written in another time zone', async () => {
+    const {db, rl, pages} = setUp({...synced, timeZone: 'Tokyo'});
+
+    await new DataManager(db, rl as never).getMetricData(
+      'uploads',
+      makeUser(),
+      2023,
+    );
+
+    expect(pages().length).toBeGreaterThan(0);
+  });
+
+  it('pages the API while a sync is under way or without sync state', async () => {
+    const running = setUp({...synced, syncStartedAt: Date.now()});
+    await new DataManager(running.db, running.rl as never).getMetricData(
+      'uploads',
+      makeUser(),
+      2023,
+    );
+    expect(running.pages().length).toBeGreaterThan(0);
+
+    const none = setUp(undefined);
+    await new DataManager(none.db, none.rl as never).getMetricData(
+      'uploads',
+      makeUser(),
+      2023,
+    );
+    expect(none.pages().length).toBeGreaterThan(0);
+  });
+
+  it('fetches only what followed the rows in the current year', async () => {
+    const year = new Date().getFullYear();
+    const today = new Date().toISOString().slice(0, 10);
+    postRows.push({
+      id: 4,
+      uploader_id: 42,
+      no: 4,
+      created_at: `${today}T00:00:00.000Z`,
+    });
+    try {
+      const {db, rl, pages} = setUp(synced);
+
+      await new DataManager(db, rl as never).getMetricData(
+        'uploads',
+        makeUser(),
+        year,
+      );
+
+      // A delta from the last local day, not the whole year.
+      const tags = new URLSearchParams(pages()[0].split('?')[1]).get('tags');
+      expect(tags).toContain('date:');
+      expect(tags).not.toContain(`date:${year}-01-01...`);
+    } finally {
+      postRows.pop();
+    }
+  });
+});

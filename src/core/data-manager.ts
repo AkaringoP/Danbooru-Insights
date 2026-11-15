@@ -1,6 +1,7 @@
 import {CONFIG} from '../config';
 import {createLogger} from './logger';
 import type {RateLimitedFetch} from './rate-limiter';
+import {readSyncMeta, viewerTimeZone} from './sync-meta';
 import type {
   Metric,
   MetricData,
@@ -97,6 +98,133 @@ export class DataManager {
     // own would ignore the multi-tab split and the 429 pause, and double
     // the tab's rate alongside the shared one (G-1).
     this.rateLimiter = rateLimiter;
+  }
+
+  /**
+   * Whether a user's rows are numbered without a gap: their count equals
+   * the highest `no` (T-404, audit DA-07). Index reads only — a count on
+   * `uploader_id` and the last key of `[uploader_id+no]`. A user without
+   * rows is intact. A gap means rows went missing below the newest one
+   * (a ghost prune, an old bug): the local pies would undercount, the
+   * Grass would miss days (T-601), and only a sync from the start can
+   * fill it. Here rather than on AnalyticsDataManager so Grass can ask.
+   */
+  async rowNumberingIntact(uploaderId: number): Promise<boolean> {
+    const count = await this.db.posts
+      .where('uploader_id')
+      .equals(uploaderId)
+      .count();
+    if (count === 0) return true;
+    const last = await this.db.posts
+      .where('[uploader_id+no]')
+      .between([uploaderId, -Infinity], [uploaderId, Infinity])
+      .last();
+    return last?.no === count;
+  }
+
+  /**
+   * Whether this user's synced `posts` rows can stand for their uploads
+   * (T-601): a completed sync on record and none under way or marked for a
+   * full one, no gap in the numbering, and rows written in the time zone
+   * the page uses now — `created_at` carries the viewer's Danbooru zone,
+   * and Grass keys a day by its first ten characters. Throws when the page
+   * has no `localStorage` (the caller treats that as "no").
+   */
+  private async syncedPostsUsable(uploaderId: number): Promise<boolean> {
+    if (!this.db.posts || !this.db.sync_meta) return false;
+    const meta = await readSyncMeta(this.db, uploaderId);
+    if (!meta || meta.syncStartedAt !== undefined || meta.needsFullSync) {
+      return false;
+    }
+    if (!meta.timeZone || meta.timeZone !== viewerTimeZone()) return false;
+    if (!localStorage.getItem(`danbooru_grass_last_sync_${uploaderId}`)) {
+      return false;
+    }
+    return this.rowNumberingIntact(uploaderId);
+  }
+
+  /**
+   * Fills a year of the uploads Grass from the synced `posts` rows instead
+   * of paging `/posts.json` (T-601, audit DA-25): only for a year with
+   * nothing cached, and only when {@link syncedPostsUsable}. The rows are
+   * the user's with `created_at` in [startDate, endDate) by its date part —
+   * the posts `date:<startDate>...<endDate>` finds in the viewer's zone —
+   * keyed and hour-counted as {@link fetchAndPersistYear} does the API's
+   * items, and written to the same tables in one transaction. What follows
+   * is the usual path: a past year's integrity count checks the sum (a
+   * mismatch refetches the year), the current year fetches from its last
+   * day on. Any failure leaves the year to the API.
+   * @return true when it wrote the year
+   */
+  private async fillUploadsYearFromPosts(args: {
+    userInfo: TargetUser;
+    userIdVal: string;
+    year: number;
+    startDate: string;
+    endDate: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any;
+  }): Promise<boolean> {
+    const {userInfo, userIdVal, year, startDate, endDate, table} = args;
+    const uploaderId = Number.parseInt(userInfo.id ?? '', 10);
+    if (!uploaderId) return false;
+    try {
+      if (!(await this.syncedPostsUsable(uploaderId))) return false;
+      const cached = await table
+        .where('id')
+        .between(
+          `${userIdVal}_${startDate}`,
+          `${userIdVal}_${year}-12-31￿`,
+          true,
+          true,
+        )
+        .last();
+      if (cached) return false;
+
+      const daily = new Map<string, number>();
+      const hourly = new Array<number>(24).fill(0);
+      await this.db.posts
+        .where('[uploader_id+created_at]')
+        .between([uploaderId, startDate], [uploaderId, endDate], true, false)
+        .each((p: {created_at: string}) => {
+          const date = String(p.created_at).slice(0, 10);
+          daily.set(date, (daily.get(date) ?? 0) + 1);
+          const hour = new Date(p.created_at).getHours();
+          if (!Number.isNaN(hour) && hour >= 0 && hour < 24) hourly[hour]++;
+        });
+      if (daily.size === 0) return false;
+
+      const days: DailyEntry[] = [...daily].map(([date, count]) => ({
+        id: `${userIdVal}_${date}`,
+        userId: userIdVal,
+        date,
+        count,
+      }));
+      const hours: HourlyStatEntry[] = hourly.map((count, h) => ({
+        id: `${userIdVal}_uploads_${year}_${String(h).padStart(2, '0')}`,
+        userId: userIdVal,
+        metric: 'uploads',
+        year,
+        hour: h,
+        count,
+      }));
+      await this.db.transaction(
+        'rw',
+        [table, this.db.hourly_stats],
+        async () => {
+          await table.bulkPut(days);
+          await this.db.hourly_stats.bulkPut(hours);
+        },
+      );
+      log.debug('Uploads year filled from synced posts', {
+        year,
+        days: days.length,
+      });
+      return true;
+    } catch (e: unknown) {
+      log.debug('Uploads year left to the API', {year, error: e});
+      return false;
+    }
   }
 
   /**
@@ -332,6 +460,20 @@ export class DataManager {
         metric,
         year,
       );
+
+      // A year with nothing cached comes from the synced posts when they can
+      // stand for it (T-601); the integrity count below then checks a past
+      // year, and the current year fetches only what followed.
+      if (metric === 'uploads' && !isYearCompleteCache) {
+        await this.fillUploadsYearFromPosts({
+          userInfo,
+          userIdVal,
+          year,
+          startDate: cfg.startDate,
+          endDate: cfg.endDate,
+          table: cfg.table,
+        });
+      }
 
       const forceFullFetch = await this.runUploadsIntegrityCheck({
         metric,
@@ -719,15 +861,21 @@ export class DataManager {
     // range. Use batch size 1 to avoid wasted parallel requests that
     // return empty pages.
     const isDeltaFetch = !!lastEntry && !forceFullFetch;
-    const items = await this.fetchAllPages(
-      endpoint,
-      params,
-      null,
-      dateKey,
-      'desc',
-      onProgress,
-      isDeltaFetch,
-    );
+    // A cached past year asks from Jan 1 of the next year to that same day,
+    // an empty range (`a...b` excludes b): nothing to fetch (T-601 — a year
+    // filled from the synced posts lands here after its integrity count).
+    const items =
+      rangeStart >= effectiveEndDate
+        ? []
+        : await this.fetchAllPages(
+            endpoint,
+            params,
+            null,
+            dateKey,
+            'desc',
+            onProgress,
+            isDeltaFetch,
+          );
 
     const dailyCounts: Record<string, {count: number; postList: number[]}> = {};
 
