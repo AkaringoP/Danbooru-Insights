@@ -600,6 +600,17 @@ export const SYNC_BUFFER_MAX_PAGES = 25;
 const SYNC_BUFFER_POLL_MS = 250;
 
 /**
+ * `YYYY-MM-DD` of the day before `joinDate` (UTC), or null without a valid
+ * date: the lower bound of the first-post lookup (T-508). A day's margin
+ * covers the viewer's time zone, in which Danbooru reads a bare date.
+ */
+function dayBeforeJoin(joinDate: Date | undefined): string | null {
+  const t = joinDate?.getTime();
+  if (t === undefined || Number.isNaN(t)) return null;
+  return new Date(t - 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
  * Resolves once the reorder buffer has room for another page — true — or
  * false when the run ends meanwhile (T-504).
  */
@@ -4904,6 +4915,11 @@ export class AnalyticsDataManager extends DataManager {
       perfStats.startId = startId;
       perfStats.initialCurrentNo = currentNo;
 
+      // A run from the start searches from the user's first post, not
+      // `id:>0` (T-508). `startId` keeps meaning "from the start" for the
+      // ghost prune and the completion stamps.
+      const anchor = await this.syncAnchor(userInfo, startId);
+
       // 3. Worker pool — claim pages, fetch with retry, commit in order.
       // Danbooru refuses numbered pages past the viewer's page limit, so the
       // pool runs one segment of SYNC_SEGMENT_PAGES at a time: when a
@@ -4911,8 +4927,8 @@ export class AnalyticsDataManager extends DataManager {
       // one searches `id:>` the last post committed and counts from page 1.
       let pageFailed = false;
       const seenIds = new Set<number>();
-      let lastSeenId = startId;
-      let segmentStartId = startId;
+      let lastSeenId = anchor;
+      let segmentStartId = anchor;
       // The server's clock at the first page: the rows reflect Danbooru as
       // of then at the latest (T-402's change watermark).
       let firstResponseAt: number | null = null;
@@ -5010,6 +5026,60 @@ export class AnalyticsDataManager extends DataManager {
       });
       AnalyticsDataManager.isGlobalSyncing = false;
       AnalyticsDataManager.onProgressCallback = null;
+    }
+  }
+
+  /** The id the sync's search starts after: the resume's, or {@link findFirstPostAnchor}'s. */
+  private syncAnchor(userInfo: TargetUser, startId: number): Promise<number> {
+    return startId === 0
+      ? this.findFirstPostAnchor(userInfo)
+      : Promise.resolve(startId);
+  }
+
+  /**
+   * Where a sync from the start begins: one below the user's first post,
+   * or 0 (T-508). `user:X order:id id:>0` makes Danbooru walk the primary
+   * key from id 0 until the user's posts begin; for an account whose
+   * uploads start millions of ids in, its first pages took 7–8 s logged in
+   * and failed the 3 s logged-out limit with a 500 (browser check,
+   * 2026-11-16: 3.4 s and a 500 against 0.35–0.66 s for the same posts
+   * found by date or by `id:>` the first one). The first post is found with
+   * `date:>=` the day before the join date, and trusted only when a count
+   * finds none of the user's posts below it: a join date scraped wrong
+   * (the profile scrape falls back to "now") would otherwise skip the older
+   * posts. Any doubt or failure gives 0, the old search.
+   */
+  private async findFirstPostAnchor(userInfo: TargetUser): Promise<number> {
+    const since = dayBeforeJoin(userInfo.joinDate);
+    if (!since || !userInfo.name) return 0;
+    const name = userInfo.name.replace(/ /g, '_');
+    try {
+      const params = new URLSearchParams({
+        tags: `user:${name} order:id date:>=${since}`,
+        limit: '1',
+        only: 'id',
+      });
+      const resp = await this.rateLimiter.fetch(
+        `/posts.json?${params.toString()}`,
+      );
+      if (!resp.ok) return 0;
+      const body: unknown = await resp.json();
+      const firstId = Array.isArray(body)
+        ? (body[0] as {id?: unknown} | undefined)?.id
+        : undefined;
+      if (typeof firstId !== 'number' || firstId < 1) return 0;
+      const below = await this.fetchRemoteCount(`user:${name} id:<${firstId}`);
+      if (below !== 0) {
+        log.warn('Posts before the first one found; syncing from id 0', {
+          firstId,
+          below,
+        });
+        return 0;
+      }
+      return firstId - 1;
+    } catch (e: unknown) {
+      log.debug('First post lookup failed; syncing from id 0', {error: e});
+      return 0;
     }
   }
 
@@ -5565,12 +5635,15 @@ export class AnalyticsDataManager extends DataManager {
       // the stale-data cleanup. Cleared by recordFullSyncMeta.
       await patchSyncMeta(this.db, uploaderId, {syncStartedAt: Date.now()});
 
+      // From the user's first post rather than id 0 (T-508).
+      const anchor = await this.findFirstPostAnchor(userInfo);
+
       // 2. Clear existing posts for a clean re-fetch
       await this.db.posts.where('uploader_id').equals(uploaderId).delete();
 
       // 3. Sequential cursor-based fetch (ascending by ID, 200 per batch)
       const limit = 200;
-      let page = 'a0';
+      let page = `a${anchor}`;
       let hasMore = true;
       let no = 0;
       let firstResponseAt: number | null = null;

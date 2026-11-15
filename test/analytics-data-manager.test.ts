@@ -426,14 +426,18 @@ function makeSyncDb(
   };
 }
 
-/** A standard test user for sync tests. */
+/**
+ * A standard test user for sync tests. Its join date is unknown (an
+ * invalid Date), so a sync from the start searches `id:>0` without the
+ * first-post lookup (T-508); the T-508 tests give one.
+ */
 function makeSyncUser(overrides: Partial<TargetUser> = {}): TargetUser {
   return {
     name: 'test_user',
     normalizedName: 'test_user',
     id: '42',
     created_at: '2020-01-01T00:00:00Z',
-    joinDate: new Date('2020-01-01'),
+    joinDate: new Date(NaN),
     level_string: 'Member',
     ...overrides,
   };
@@ -4668,5 +4672,148 @@ describe('full sync page pool (T-504)', () => {
     const nos = numbers();
     expect(nos).toHaveLength(60 * 200);
     expect(nos.every((n, i) => n === i + 1)).toBe(true);
+  });
+});
+
+// T-508: a sync from the start searches from the user's first post, found
+// by date and checked with a count, instead of `id:>0`.
+describe('sync from the first post (T-508)', () => {
+  const user = makeSyncUser({joinDate: new Date('2023-09-20T10:00:00Z')});
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.mocked(quotaManager.bulkPutSafe).mockClear();
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
+    });
+    vi.stubGlobal('setTimeout', (fn: () => void) => fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const post = {
+    id: 6730462,
+    uploader_id: 42,
+    created_at: '2023-09-20T12:00:00Z',
+    up_score: 1,
+    down_score: 0,
+    rating: 'g',
+  };
+
+  /** The lookup, the count below it, and pages (one post on the first). */
+  function serve(
+    opts: {lookup?: unknown; lookupStatus?: number; below?: number} = {},
+  ) {
+    const lookups: string[] = [];
+    const pages: string[] = [];
+    const counts: string[] = [];
+    const rl = makeSyncRateLimiter(async (url: string) => {
+      const tags = new URLSearchParams(url.split('?')[1]).get('tags') ?? '';
+      if (url.startsWith('/counts/posts.json')) {
+        counts.push(tags);
+        const n = tags.includes('id:<') ? (opts.below ?? 0) : 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: n}}),
+        };
+      }
+      if (tags.includes('date:>=')) {
+        lookups.push(tags);
+        const status = opts.lookupStatus ?? 200;
+        return {
+          ok: status === 200,
+          status,
+          json: async () => opts.lookup ?? [{id: post.id}],
+        };
+      }
+      pages.push(url);
+      const first = pages.length === 1;
+      return {ok: true, status: 200, json: async () => (first ? [post] : [])};
+    });
+    const pageParam = (i: number, key: string) =>
+      new URLSearchParams(pages[i].split('?')[1]).get(key);
+    return {rl, lookups, pages, counts, pageParam};
+  }
+
+  function makeAdm(
+    rl: ReturnType<typeof makeSyncRateLimiter>,
+    rows: Record<string, unknown>[] = [],
+  ) {
+    const syncMeta = {
+      get: vi.fn(async () => undefined),
+      put: vi.fn(async () => undefined),
+    };
+    const adm = new AnalyticsDataManager(
+      makeSyncDb(makePostsTable(rows), {sync_meta: syncMeta}) as never,
+      rl as never,
+    );
+    vi.spyOn(adm, 'refreshCriticalStats').mockResolvedValue();
+    return adm;
+  }
+
+  it('starts after the first post, found by date from the day before joining', async () => {
+    const {rl, lookups, counts, pageParam} = serve();
+
+    const outcome = await makeAdm(rl).syncAllPosts(user, vi.fn());
+
+    expect(lookups).toEqual(['user:test_user order:id date:>=2023-09-19']);
+    // Trusted only with none of the user's posts below it.
+    expect(counts).toContain('user:test_user id:<6730462');
+    expect(pageParam(0, 'tags')).toBe('user:test_user order:id id:>6730461');
+    expect(outcome).toEqual({complete: true, started: true});
+    const written = vi
+      .mocked(quotaManager.bulkPutSafe)
+      .mock.calls.flatMap(c => c[1] as Array<{id: number; no: number}>);
+    expect(written.map(r => [r.id, r.no])).toEqual([[6730462, 1]]);
+  });
+
+  it('searches from id 0 when the user has posts below the one found', async () => {
+    const {rl, pageParam} = serve({below: 3});
+
+    await makeAdm(rl).syncAllPosts(user, vi.fn());
+
+    expect(pageParam(0, 'tags')).toBe('user:test_user order:id id:>0');
+  });
+
+  it('searches from id 0 when the lookup fails or finds nothing', async () => {
+    const failed = serve({lookupStatus: 500});
+    await makeAdm(failed.rl).syncAllPosts(user, vi.fn());
+    expect(failed.pageParam(0, 'tags')).toBe('user:test_user order:id id:>0');
+    expect(failed.counts.some(t => t.includes('id:<'))).toBe(false);
+
+    AnalyticsDataManager.isGlobalSyncing = false;
+    const empty = serve({lookup: []});
+    await makeAdm(empty.rl).syncAllPosts(user, vi.fn());
+    expect(empty.pageParam(0, 'tags')).toBe('user:test_user order:id id:>0');
+  });
+
+  it('does not look when resuming', async () => {
+    const {rl, lookups, pageParam} = serve();
+    const rows = [
+      {id: 900, uploader_id: 42, no: 2, created_at: '2025-03-01T00:00:00Z'},
+      {id: 100, uploader_id: 42, no: 1, created_at: '2024-01-01T00:00:00Z'},
+    ];
+
+    await makeAdm(rl, rows).syncAllPosts(user, vi.fn());
+
+    expect(lookups).toEqual([]);
+    expect(pageParam(0, 'tags')).toBe('user:test_user order:id id:>100');
+  });
+
+  it('starts a quick sync after the first post too', async () => {
+    const {rl, pageParam} = serve();
+
+    await makeAdm(rl).quickSyncAllPosts(user);
+
+    expect(pageParam(0, 'page')).toBe('a6730461');
   });
 });

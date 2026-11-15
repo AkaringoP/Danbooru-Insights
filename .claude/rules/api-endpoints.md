@@ -4,7 +4,7 @@ All API calls must go through `RateLimitedFetch`.
 
 | Endpoint | Purpose |
 |---|---|
-| `/posts.json` | Fetch uploads (tags, only, limit, page). The syncs, the fields backfill and the change catch-up all ask for `SYNC_POST_FIELDS` (`core/post-record.ts`). Fields backfill (T-403): `user:X status:any id:a..b order:id`. Change catch-up (T-407): `user:X order:change` (newest `updated_at` first; 2 terms, fine for a logged-out viewer), numbered pages within the page limit |
+| `/posts.json` | Fetch uploads (tags, only, limit, page). The syncs, the fields backfill and the change catch-up all ask for `SYNC_POST_FIELDS` (`core/post-record.ts`). Fields backfill (T-403): `user:X status:any id:a..b order:id`. Change catch-up (T-407): `user:X order:change` (newest `updated_at` first; 2 terms, fine for a logged-out viewer), numbered pages within the page limit. First-post lookup before a sync from the start (T-508): `user:X order:id date:>=<day before joining>&limit=1&only=id` — never `user:X order:id id:>0`, which times out for accounts whose posts start far into the id range |
 | `/post_approvals.json` | Fetch approvals (search params) |
 | `/note_versions.json` | Fetch notes (search params) |
 | `/counts/posts.json` | Count queries (integrity checks, rating counts). Server rate limit 1 req/s, burst 15, and the search tag limit applies (both since 2026-11-05). A count the server cannot finish in time comes back as `{"counts":{"posts":null}}` with HTTP 200, and that `null` is cached server-side for 5 minutes; `fetchRemoteCount` throws `CountUnavailableError` for it (never 0), and `countBatch` does not retry it |
