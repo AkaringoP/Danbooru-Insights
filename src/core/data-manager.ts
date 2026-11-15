@@ -1138,13 +1138,13 @@ export class DataManager {
     let allItems: ApiItem[] = [];
     let page = 1;
 
-    // Adaptive Batch Size
-    // - Full initial fetches: 5 pages in parallel
-    // - Delta fetches: start at 1 (narrow range, usually <1 page), then
-    //   scale up to 3 if the first page comes back full
+    // Adaptive Batch Size: page 1 alone, then — only when it came back
+    // full — 5 pages at a time for a full fetch, 3 for a delta (narrow
+    // range, usually under a page). A full fetch used to ask 5 at once, so
+    // a year under 200 uploads cost 4 empty answers (T-604, audit DA-12).
     const FULL_BATCH = 5;
     const DELTA_SCALE_UP = 3;
-    let batchSize = isDelta ? 1 : FULL_BATCH;
+    let batchSize = 1;
     const isApprovals = endpoint.includes('/post_approvals.json');
     const DELAY_BETWEEN_BATCHES = 150;
 
@@ -1255,14 +1255,13 @@ export class DataManager {
       // not the potentially updated one.
       const fetchedBatch = batchSize;
 
-      // Adaptive scale-up: if delta started with batchSize=1 and the
-      // first page was full, there's more data than expected — switch
-      // to moderate parallel batching for the remaining pages.
-      if (batchSize < DELTA_SCALE_UP && page === 1) {
+      // Adaptive scale-up: page 1 came back full, so there is more — ask
+      // the rest in parallel batches.
+      if (page === 1) {
         const limit = params['limit'] as number;
         const firstPageFull = batchResults[0]?.data?.length === limit;
         if (firstPageFull) {
-          batchSize = DELTA_SCALE_UP;
+          batchSize = isDelta ? DELTA_SCALE_UP : FULL_BATCH;
         }
       }
 

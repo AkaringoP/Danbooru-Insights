@@ -843,9 +843,34 @@ describe('fetchAllPages', () => {
     const dm = new DataManager(makeDb(), rl as never);
     const items = await dm.fetchAllPages('/posts.json', {limit: 200}, null);
 
-    // 2 items < limit 200 → stops after first batch
-    expect(items).toHaveLength(2 * 5); // 5 parallel pages, each returns 2
-    // Actually: first batch is 5 pages, each has 2 items < 200, so stops
+    // Page 1 alone first (T-604): 2 items < limit 200, so it was the last.
+    // A full fetch used to ask 5 pages at once here.
+    expect(items).toHaveLength(2);
+    expect(rl.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks 5 pages at a time after a full first page (T-604)', async () => {
+    const full = Array.from({length: 200}, () => ({created_at: 'x'}));
+    const rl = makeRateLimiter(async (url: string) => {
+      const page = Number(new URLSearchParams(url.split('?')[1]).get('page'));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (page === 1 ? full : page === 2 ? [{}] : []),
+      };
+    });
+    vi.useFakeTimers();
+    try {
+      const dm = new DataManager(makeDb(), rl as never);
+      const promise = dm.fetchAllPages('/posts.json', {limit: 200}, null);
+      await vi.runAllTimersAsync();
+
+      expect(await promise).toHaveLength(201);
+      // Page 1, then pages 2–6 together.
+      expect(rl.fetch).toHaveBeenCalledTimes(6);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('respects stopDate in desc direction', async () => {
