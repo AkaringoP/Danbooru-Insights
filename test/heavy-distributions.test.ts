@@ -36,8 +36,9 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('fetchHeavyDistributionsSwr — cold cache', () => {
-  it('fetches only copyright, character and fav copyright', async () => {
-    // A cold first open used to fire all nine (~250 requests for 46k posts).
+  it('fetches only copyright and character', async () => {
+    // A cold first open used to fire all nine (~250 requests for 46k posts);
+    // fav copyright waited too until T-704 (~37 counts for a hidden tab).
     const dm = makeDataManager([]);
 
     const {distributions, revalidators} = await fetchHeavyDistributionsSwr(
@@ -51,10 +52,9 @@ describe('fetchHeavyDistributionsSwr — cold cache', () => {
     expect(Object.keys(distributions).sort()).toEqual([
       'character',
       'copyright',
-      'fav_copyright',
     ]);
     for (const [key, method] of Object.entries(FETCHERS)) {
-      const eager = ['copyright', 'character', 'fav_copyright'].includes(key);
+      const eager = ['copyright', 'character'].includes(key);
       expect(dm[method]).toHaveBeenCalledTimes(eager ? 1 : 0);
     }
     // Lazy tabs carry no revalidator; the pie loads them on first view.
@@ -76,5 +76,19 @@ describe('fetchHeavyDistributionsSwr — cold cache', () => {
     expect(dm.getGenderDistribution).not.toHaveBeenCalled();
     const gender = revalidators.find(([k]) => k === 'gender_dist');
     expect(gender?.[1]).toBeTypeOf('function');
+  });
+
+  it('fav copyright with a cache shows it at once (T-704)', async () => {
+    const dm = makeDataManager(['fav_copyright_dist']);
+
+    const {distributions} = await fetchHeavyDistributionsSwr(
+      dm as never,
+      USER,
+      42,
+      () => {},
+      false,
+    );
+
+    expect(distributions.fav_copyright).toEqual(ROWS);
   });
 });
