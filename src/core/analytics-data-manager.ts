@@ -5057,14 +5057,14 @@ export class AnalyticsDataManager extends DataManager {
 
     let currentNo = 0;
     if (startId > 0) {
-      // Count ONLY this user's posts at or below startId.
-      // Using .filter() on the collection because no composite index
-      // exists for (id, uploader_id).
-      currentNo = await this.db.posts
+      // This user's posts at or below startId, counted from the index's
+      // primary keys (T-502): a `.filter()` here read every row of the
+      // user only to look at its id (about 1 s for 50k rows).
+      const ids = await this.db.posts
         .where('uploader_id')
         .equals(uploaderId)
-        .filter((p: ApiItem) => p['id'] <= startId)
-        .count();
+        .primaryKeys();
+      for (const id of ids) if (id <= startId) currentNo++;
     }
     perfLogger.end('dbi:db:sync:full:resumeCheck', {
       startId,

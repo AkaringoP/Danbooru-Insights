@@ -1486,6 +1486,28 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       expect(meta?.syncStartedAt).toBeUndefined();
     });
 
+    it('numbers a resume after the rows at or below its start (T-502)', async () => {
+      const {rl, asked} = serve();
+      // Newest first, as the reverse walk meets them: 500 is the first one
+      // older than a month before the newest, so the resume starts after it.
+      const {adm, written} = setUp(
+        [
+          {id: 950, uploader_id: 42, no: 4, created_at: '2025-03-10T00:00:00Z'},
+          {id: 30, uploader_id: 42, no: 1, created_at: '2025-03-05T00:00:00Z'},
+          {id: 60, uploader_id: 42, no: 2, created_at: '2025-03-02T00:00:00Z'},
+          {id: 500, uploader_id: 42, no: 3, created_at: '2025-01-15T00:00:00Z'},
+        ],
+        rl,
+      );
+      vi.mocked(quotaManager.bulkPutSafe).mockClear();
+
+      await adm.syncAllPosts(makeSyncUser({id: '42'}), vi.fn());
+
+      expect(asked[0]).toContain(encodeURIComponent('id:>500'));
+      // 30, 60 and 500 are at or below the start: the next row is no 4.
+      expect(written()[0]).toMatchObject({id: 7, no: 4});
+    });
+
     it('records it after a quick sync, which always rewrites every row', async () => {
       const {rl} = serve();
       const {adm, syncMeta} = setUp([], rl);
