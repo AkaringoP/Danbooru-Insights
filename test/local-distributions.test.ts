@@ -4,6 +4,7 @@
  */
 import {describe, expect, it} from 'vitest';
 import {createLocalDistributionCounter} from '../src/core/local-distributions';
+import {tagFlagsOf} from '../src/core/post-tag-flags';
 import type {PostRecord} from '../src/types';
 
 let nextId = 1;
@@ -137,4 +138,44 @@ it('counts the rows, and an empty set is all zeros', () => {
   expect(empty.rows).toBe(0);
   expect(empty.status.active).toBe(0);
   expect(empty.characters.size).toBe(0);
+});
+
+describe('tag flags (T-703)', () => {
+  const flagged = (general: string, meta = '') =>
+    row({tf: tagFlagsOf(general, meta)});
+
+  it('counts each flagged tag per post, and the rows that hold flags', () => {
+    const d = count([
+      flagged('1girl long_hair'),
+      flagged('1girl short_hair'),
+      flagged(''),
+      row({}), // fields version 2: no flags
+    ]);
+    expect(d.flaggedRows).toBe(3);
+    expect(d.tagFlags.get('1girl')).toBe(2);
+    expect(d.tagFlags.get('long_hair')).toBe(1);
+    expect(d.tagFlags.get('2girls')).toBe(0);
+  });
+
+  it('counts Bald as bald or bald_female, once a post', () => {
+    const d = count([
+      flagged('bald'),
+      flagged('bald_female'),
+      flagged('bald bald_female'),
+    ]);
+    expect(d.bald).toBe(3);
+  });
+
+  it('counts untranslated: some _text tag, none of the three', () => {
+    const d = count([
+      flagged('japanese_text'), // yes
+      flagged('chinese_text korean_text'), // yes, once
+      flagged('english_text'), // english
+      flagged('japanese_text', 'translated'),
+      flagged('japanese_text', 'translation_request'),
+      flagged('1girl'), // no text
+    ]);
+    expect(d.untranslated).toBe(2);
+    expect(d.tagFlags.get('*_text')).toBe(5);
+  });
 });

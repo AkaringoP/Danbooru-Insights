@@ -10,8 +10,10 @@ import {
   type LocalDistributions,
 } from './local-distributions';
 import {
+  LOCAL_PIES_FIELDS_VERSION,
   POST_FIELDS_VERSION,
   SYNC_POST_FIELDS,
+  TAG_FLAGS_FIELDS_VERSION,
   toPostRecord,
 } from './post-record';
 import {fitsViewerTagLimit} from './search-terms';
@@ -512,7 +514,7 @@ export function catchUpWatermark(
   ttlMs: number,
 ): number | null {
   if (!meta || meta.changeWatermark === undefined) return null;
-  if ((meta.fieldsVersion ?? 0) < POST_FIELDS_VERSION) return null;
+  if ((meta.fieldsVersion ?? 0) < LOCAL_PIES_FIELDS_VERSION) return null;
   if (meta.syncStartedAt !== undefined || meta.needsFullSync) return null;
   if (meta.caughtUpAt !== undefined && now - meta.caughtUpAt < ttlMs) {
     return null;
@@ -2147,7 +2149,9 @@ export class AnalyticsDataManager extends DataManager {
   ): Promise<LocalDistributions | null> {
     const meta = await readSyncMeta(this.db, uploaderId);
     let notUsed: string | null = null;
-    if ((meta?.fieldsVersion ?? 0) < POST_FIELDS_VERSION) {
+    // Version 2 is enough here: a user the backfill is taking to a later
+    // version keeps these pies local meanwhile.
+    if ((meta?.fieldsVersion ?? 0) < LOCAL_PIES_FIELDS_VERSION) {
       notUsed = 'fields version below 2';
     } else if (meta?.syncStartedAt !== undefined) {
       notUsed = 'a sync is under way or failed';
@@ -2167,6 +2171,48 @@ export class AnalyticsDataManager extends DataManager {
     // Counted in the open's one scan of the rows (T-501).
     const {local} = await this.getRowSnapshot(uploaderId);
     return local.rows > 0 ? local : null;
+  }
+
+  /**
+   * The local counts when they can serve the secondary pies too (T-703):
+   * {@link getLocalDistributions}' conditions, and every row holding the
+   * current tag flags — `sync_meta.fieldsVersion` at
+   * {@link TAG_FLAGS_FIELDS_VERSION}, and no row without them. Otherwise
+   * those pies count remotely (during the fields backfill, for one).
+   */
+  private async getLocalTagCounts(
+    uploaderId: number,
+  ): Promise<LocalDistributions | null> {
+    const local = await this.getLocalDistributions(uploaderId);
+    if (!local) return null;
+    const meta = await readSyncMeta(this.db, uploaderId);
+    if (
+      (meta?.fieldsVersion ?? 0) < TAG_FLAGS_FIELDS_VERSION ||
+      local.flaggedRows !== local.rows
+    ) {
+      log.debug('Secondary pies count remotely', {
+        uploaderId,
+        reason: 'tag flags not on every row (fields version below 3)',
+      });
+      return null;
+    }
+    return local;
+  }
+
+  /**
+   * Sets every slice's count from the local tag counts (T-703) when the rows
+   * can stand for them; true when it did, and the caller then sends none of
+   * its counts. Shapes, cache keys and thumbnails stay as on the counted path.
+   */
+  private async fillFromLocalTags<T extends {count: number}>(
+    uploaderId: number,
+    slices: T[],
+    countOf: (slice: T, local: LocalDistributions) => number,
+  ): Promise<boolean> {
+    const local = await this.getLocalTagCounts(uploaderId);
+    if (!local) return false;
+    for (const slice of slices) slice.count = countOf(slice, local);
+    return true;
   }
 
   /**
@@ -3201,8 +3247,9 @@ export class AnalyticsDataManager extends DataManager {
 
   /**
    * Whether to run {@link backfillPostMetadata} now: the user has rows but
-   * `sync_meta` does not say they hold fields version 2 (T-403), and the
-   * backfill is not in failure cooldown.
+   * `sync_meta` does not say they hold the current fields version
+   * (`POST_FIELDS_VERSION`: 2 from T-403, 3 from T-703), and the backfill is
+   * not in failure cooldown.
    *
    * Version 2 includes the v9.x metadata (down_score / is_deleted /
    * is_banned) this backfill was first written for, so the old
@@ -3232,7 +3279,8 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Brings a user's rows to fields version 2 (T-403). Every row the user
+   * Brings a user's rows to the current fields version (T-403; the tag
+   * flags of version 3, T-703). Every row the user
    * had when the backfill started is fetched again — the tag fields and
    * the metadata alike, with the sync's `only=` — and rebuilt by
    * `toPostRecord` under its own `no`, so the numbering stays.
@@ -3251,8 +3299,8 @@ export class AnalyticsDataManager extends DataManager {
    *
    * Failures: an HTTP error (except 429) or a network error counts toward
    * the cooldown; a 429 only stops this run (the rate limiter is already
-   * pausing). The dashboard keeps counting meanwhile (T-406 waits for
-   * version 2).
+   * pausing). Meanwhile the dashboard counts what the rows cannot give yet:
+   * every pie below version 2, the secondary pies below 3 (T-406, T-703).
    *
    * @param userInfo Target user
    * @param onProgress Optional progress callback (current, total)
@@ -3919,14 +3967,22 @@ export class AnalyticsDataManager extends DataManager {
       isOther: false,
       color: cat.color,
     }));
+    // The two tag slices from the rows (T-703). Untagged is `has:commentary`
+    // — whether the post has an artist commentary, not a tag — so it is
+    // always counted.
+    const local = await this.getLocalTagCounts(uploaderId);
 
     await this.mapConcurrent(
       categories.map((cat, i) => ({...cat, idx: i})),
       3,
       async item => {
+        const slice = results[item.idx];
+        if (local && !item.untagged) {
+          slice.count = local.tagFlags.get(item.tagName) ?? 0;
+          return;
+        }
         if (reportSubStatus)
           reportSubStatus(`Fetching Commentary: ${item.name}`);
-        const slice = results[item.idx];
         try {
           if (item.untagged) {
             const q = buildUntaggedCommentaryQueries(`user:${normalizedName}`);
@@ -4029,8 +4085,18 @@ export class AnalyticsDataManager extends DataManager {
       color: cat.color,
     }));
 
+    // From the rows (T-703): Untagged exactly, where the counts estimate it.
+    const fromRows = await this.fillFromLocalTags(
+      uploaderId,
+      results,
+      (slice, local) =>
+        slice.tagName === 'untagged_translation'
+          ? local.untranslated
+          : (local.tagFlags.get(slice.tagName ?? '') ?? 0),
+    );
+
     await this.mapConcurrent(
-      categories.map((cat, i) => ({...cat, idx: i})),
+      fromRows ? [] : categories.map((cat, i) => ({...cat, idx: i})),
       3,
       async item => {
         if (reportSubStatus)
@@ -4142,9 +4208,22 @@ export class AnalyticsDataManager extends DataManager {
     // the full union of girl/boy/other variants. On Member(Blue) accounts the
     // 6-tag query exceeds the 2-tag limit and Danbooru returns an error page —
     // consistent with Translation Untagged click behavior.
+    // A group's count is the sum of its tags' counts, on both paths.
+    const girls = ['1girl', '2girls', '3girls', '4girls', '5girls', '6+girls'];
+    const boys = ['1boy', '2boys', '3boys', '4boys', '5boys', '6+boys'];
+    const others = [
+      '1other',
+      '2others',
+      '3others',
+      '4others',
+      '5others',
+      '6+others',
+    ];
+    const userQuery = (tag: string) => `user:${normalizedName} ${tag}`;
     const genderCategories: Array<{
       name: string;
       tagName: string;
+      tags: string[];
       originalTag?: string;
       subQueries?: string[];
       query?: string;
@@ -4153,44 +4232,32 @@ export class AnalyticsDataManager extends DataManager {
       {
         name: 'Girl',
         tagName: 'girl',
+        tags: girls,
         originalTag: '~1girl ~2girls ~3girls ~4girls ~5girls ~6+girls',
-        subQueries: [
-          '1girl',
-          '2girls',
-          '3girls',
-          '4girls',
-          '5girls',
-          '6+girls',
-        ].map(tag => `user:${normalizedName} ${tag}`),
+        subQueries: girls.map(userQuery),
         color: '#e91e63',
       },
       {
         name: 'Boy',
         tagName: 'boy',
+        tags: boys,
         originalTag: '~1boy ~2boys ~3boys ~4boys ~5boys ~6+boys',
-        subQueries: ['1boy', '2boys', '3boys', '4boys', '5boys', '6+boys'].map(
-          tag => `user:${normalizedName} ${tag}`,
-        ),
+        subQueries: boys.map(userQuery),
         color: '#2196f3',
       },
       {
         name: 'Other',
         tagName: 'other',
+        tags: others,
         originalTag: '~1other ~2others ~3others ~4others ~5others ~6+others',
-        subQueries: [
-          '1other',
-          '2others',
-          '3others',
-          '4others',
-          '5others',
-          '6+others',
-        ].map(tag => `user:${normalizedName} ${tag}`),
+        subQueries: others.map(userQuery),
         color: '#9c27b0',
       },
       {
         name: 'No Humans',
         tagName: 'no_humans',
-        query: `user:${normalizedName} no_humans`,
+        tags: ['no_humans'],
+        query: userQuery('no_humans'),
         color: '#607d8b',
       },
     ];
@@ -4206,8 +4273,19 @@ export class AnalyticsDataManager extends DataManager {
       color: cat.color,
     }));
 
+    // From the rows (T-703).
+    const fromRows = await this.fillFromLocalTags(
+      uploaderId,
+      results,
+      (slice, local) =>
+        (
+          genderCategories.find(cat => cat.tagName === slice.tagName)?.tags ??
+          []
+        ).reduce((sum, tag) => sum + (local.tagFlags.get(tag) ?? 0), 0),
+    );
+
     await this.mapConcurrent(
-      genderCategories.map((cat, i) => ({...cat, idx: i})),
+      fromRows ? [] : genderCategories.map((cat, i) => ({...cat, idx: i})),
       3,
       async item => {
         if (reportSubStatus) reportSubStatus(`Fetching Gender: ${item.name}`);
@@ -4287,8 +4365,13 @@ export class AnalyticsDataManager extends DataManager {
       isOther: false,
     }));
 
-    // Calculate Counts
-    await this.mapConcurrent(results, 3, async obj => {
+    // Calculate Counts — from the rows when they can (T-703).
+    const fromRows = await this.fillFromLocalTags(
+      uploaderId,
+      results,
+      (slice, local) => local.tagFlags.get(slice.tagName) ?? 0,
+    );
+    await this.mapConcurrent(fromRows ? [] : results, 3, async obj => {
       const tag = obj.tagName;
       if (reportSubStatus) reportSubStatus(`Fetching Breasts: ${obj.name}`);
       try {
@@ -4380,7 +4463,17 @@ export class AnalyticsDataManager extends DataManager {
       };
     });
 
-    await this.mapConcurrent(results, 3, async obj => {
+    // From the rows when they can (T-703): "Bald" is `bald` or `bald_female`,
+    // with nothing to lock for a logged-out viewer.
+    const fromRows = await this.fillFromLocalTags(
+      uploaderId,
+      results,
+      (slice, local) =>
+        slice.originalTag?.includes('~bald')
+          ? local.bald
+          : (local.tagFlags.get(slice.originalTag ?? '') ?? 0),
+    );
+    await this.mapConcurrent(fromRows ? [] : results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Length: ${obj.name}`);
       const query = `user:${normalizedName} ${obj.originalTag}`;
       // "Bald" is 3 terms: not sent for an anonymous viewer (T-408).
@@ -4474,7 +4567,13 @@ export class AnalyticsDataManager extends DataManager {
       isOther: false,
     }));
 
-    await this.mapConcurrent(results, 3, async obj => {
+    // From the rows when they can (T-703).
+    const fromRows = await this.fillFromLocalTags(
+      uploaderId,
+      results,
+      (slice, local) => local.tagFlags.get(slice.originalTag) ?? 0,
+    );
+    await this.mapConcurrent(fromRows ? [] : results, 3, async obj => {
       if (reportSubStatus) reportSubStatus(`Fetching Hair Color: ${obj.name}`);
       try {
         obj.count = await counts.lookup(

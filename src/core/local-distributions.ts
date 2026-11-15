@@ -1,9 +1,21 @@
 /**
  * The user dashboard's count-based distributions, computed from the local
  * `posts` rows instead of `/counts/posts.json` (T-405, used by T-406).
- * Pure: one pass over a user's rows of fields version 2 (`core/post-record`).
+ * Pure: one pass over a user's rows of fields version 2 (`core/post-record`);
+ * the tag-flag counts (T-703) need version 3.
  */
 import type {PostRecord} from '../types';
+import {TAG_FLAG_NAMES} from './post-tag-flags';
+
+/** Stored indices of the flags the combined slices below read. */
+const FLAG = {
+  translated: TAG_FLAG_NAMES.indexOf('translated'),
+  translationRequest: TAG_FLAG_NAMES.indexOf('translation_request'),
+  englishText: TAG_FLAG_NAMES.indexOf('english_text'),
+  anyText: TAG_FLAG_NAMES.indexOf('*_text'),
+  bald: TAG_FLAG_NAMES.indexOf('bald'),
+  baldFemale: TAG_FLAG_NAMES.indexOf('bald_female'),
+};
 
 /** Post statuses as Danbooru's searches define them. */
 interface LocalStatusCounts {
@@ -33,6 +45,20 @@ export interface LocalDistributions {
   gentagsUnder10: number;
   /** Posts with fewer than 10 tags in all (`tagcount:<10`). */
   tagcountUnder10: number;
+
+  // From the tag flags (`PostRecord.tf`, fields version 3, T-703).
+  /** Rows holding tag flags; the flag counts stand only when it is `rows`. */
+  flaggedRows: number;
+  /** Posts per flagged tag, by name (`TAG_FLAG_NAMES`). */
+  tagFlags: Map<string, number>;
+  /** Posts tagged `bald` or `bald_female` (Hair length's `~bald ~bald_female`). */
+  bald: number;
+  /**
+   * Posts with a `*_text` tag and none of `english_text`,
+   * `translation_request`, `translated`: Translation's "Untagged", exactly
+   * (the counted path estimates it by inclusion-exclusion).
+   */
+  untranslated: number;
 }
 
 /** Collects {@link LocalDistributions} one row at a time. */
@@ -61,6 +87,7 @@ export function createLocalDistributionCounter(): LocalDistributionCounter {
   };
   const characters = new Map<string, number>();
   const copyrights = new Map<string, number>();
+  const flags = new TagFlagTally();
   let rows = 0;
   let gentagsUnder10 = 0;
   let tagcountUnder10 = 0;
@@ -68,6 +95,7 @@ export function createLocalDistributionCounter(): LocalDistributionCounter {
   return {
     add(row: PostRecord): void {
       rows++;
+      flags.add(row.tf);
       if (row.rating in rating) rating[row.rating]++;
 
       const deleted = row.is_deleted === true;
@@ -94,9 +122,50 @@ export function createLocalDistributionCounter(): LocalDistributionCounter {
         copyrights: new Map(copyrights),
         gentagsUnder10,
         tagcountUnder10,
+        ...flags.result(),
       };
     },
   };
+}
+
+/** Counts the tag flags of the rows ({@link LocalDistributions}' part). */
+class TagFlagTally {
+  private readonly perFlag = new Array<number>(TAG_FLAG_NAMES.length).fill(0);
+  private flaggedRows = 0;
+  private bald = 0;
+  private untranslated = 0;
+
+  add(tf: number[] | undefined): void {
+    if (!tf) return;
+    this.flaggedRows++;
+    const has = new Set(tf);
+    for (const i of has) {
+      if (i >= 0 && i < this.perFlag.length) this.perFlag[i]++;
+    }
+    if (has.has(FLAG.bald) || has.has(FLAG.baldFemale)) this.bald++;
+    if (
+      has.has(FLAG.anyText) &&
+      !has.has(FLAG.englishText) &&
+      !has.has(FLAG.translationRequest) &&
+      !has.has(FLAG.translated)
+    ) {
+      this.untranslated++;
+    }
+  }
+
+  result(): Pick<
+    LocalDistributions,
+    'flaggedRows' | 'tagFlags' | 'bald' | 'untranslated'
+  > {
+    return {
+      flaggedRows: this.flaggedRows,
+      tagFlags: new Map(
+        TAG_FLAG_NAMES.map((name, i) => [name, this.perFlag[i]]),
+      ),
+      bald: this.bald,
+      untranslated: this.untranslated,
+    };
+  }
 }
 
 /** Adds one to every distinct tag of a space-separated tag string. */

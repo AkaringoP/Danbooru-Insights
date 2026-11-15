@@ -1,241 +1,242 @@
-# DanbooruInsights - Claude 작업 지침
+# DanbooruInsights — working notes for Claude
 
-## 개요
-Danbooru 프로필/위키/아티스트 페이지에 GitHub 스타일 기여 그래프와 분석 대시보드를 삽입하는 Tampermonkey 유저스크립트.
-GitHub 저장소: `AkaringoP/Danbooru-Insights`
+## Overview
+A Tampermonkey userscript that adds a GitHub-style contribution graph and analytics dashboards to Danbooru's profile, wiki and artist pages.
+GitHub repository: `AkaringoP/Danbooru-Insights`
 
-## 코드 스타일
-- TypeScript: [GTS (Google TypeScript Style Guide)](https://google.github.io/styleguide/tsguide.html) 준수
-- `npm run lint` / `npm run fix` 로 강제
+## Code style
+- TypeScript: follow [GTS (Google TypeScript Style Guide)](https://google.github.io/styleguide/tsguide.html)
+- Enforced by `npm run lint` / `npm run fix`
 
-## 작업 원칙
-- **읽기 전에 검색**: 파일 통째로 읽지 말고 Grep/Glob 으로 대상부터 찾아. 타겟 검색이 가능하면 그걸 우선
-- **동작 변경 전 보고**: 사용자에게 보이는 기존 동작에 영향 주는 변경은 진행 전에 반드시 확인 받기
-- **편집 직후 self-verify** (left-shifted feedback): 변경한 파일에 대해 즉시 `npx vitest run <changed-file>` 실행. 작업 끝나서가 아니라 도중에. 회귀 누적 전에 잡힘.
-- **자체 판단 말고 harness 신뢰**: 아래 Evaluator Rubric 안 돌리고 "괜찮아 보임" 선언 금지. 기계적 체크가 직관보다 우선
-- **태스크마다 변경 파일 보고**: 어떤 파일이 어떻게 바뀌었는지 명확히
-- **한 번에 하나의 태스크**: 한 세션에서 여러 태스크 섞지 말기
-- **UserScript 헤더 보존**: `@version`, `@match`, `@grant` 같은 메타데이터 블록 임의로 수정 금지 (`vite.config.ts` 의 monkey 플러그인이 관리)
+## Working principles
+- **Search before reading**: do not read whole files; find the target with Grep/Glob first. Prefer a targeted search whenever one is possible
+- **Report before changing behaviour**: any change that affects existing behaviour a user can see needs the user's confirmation before it is made
+- **Self-verify right after editing** (left-shifted feedback): run `npx vitest run <changed-file>` on a changed file at once — during the work, not at the end. Regressions are caught before they pile up
+- **Trust the harness, not your own judgement**: never declare "looks fine" without running the Evaluator Rubric below. Mechanical checks come before intuition
+- **Report the changed files for every task**: say clearly which files changed and how
+- **One task at a time**: do not mix several tasks in one session
+- **Keep the UserScript header**: never edit the metadata block (`@version`, `@match`, `@grant`, …) by hand — the monkey plugin in `vite.config.ts` manages it
+- **Repository documents are in English**: everything written into tracked files (this file, `.claude/rules/`, `docs/`, CHANGELOG, code comments) is English
 
-## 핵심 규칙 (기계적 강제 X — agent 가 직접 적용)
-- DB 스키마 변경 시 → `database.ts` 의 version 번호 bump (Dexie.js 마이그레이션 요건)
-- 새 CSS 클래스는 `di-` prefix 사용 (Danbooru Insights 네임스페이스)
-- 기계적으로 강제되는 규칙들 (raw `fetch` 금지, `[key: string]: any` 금지, 의존성 방향, build/lint/test 통과, 함수 복잡도 cap, dead code) 은 아래 **Evaluator Rubric** 에 정리되어 있고 pre-commit gate 체인으로 자동 실행됨 — 코드 리뷰나 계획에서 중복 언급하지 말고 gate 를 믿어
+## Core rules (not mechanically enforced — the agent applies them)
+- A DB schema change → bump the version number in `database.ts` (a Dexie.js migration requirement)
+- New CSS classes use the `di-` prefix (the Danbooru Insights namespace)
+- The mechanically enforced rules (no raw `fetch`, no `[key: string]: any`, dependency direction, build/lint/test passing, the function complexity cap, dead code) are listed in the **Evaluator Rubric** below and run automatically in the pre-commit gate chain — do not repeat them in code reviews or plans; trust the gates
 
-## Multi-Model 워크플로우
+## Multi-model workflow
 
-**기본**: main 세션은 **Opus 5** 로 동작. Opus 가 오케스트레이션, 결정, 리뷰, 작은~중간 구현 직접 처리. **Sonnet 5** 는 아래 위임 기준에 맞을 때만 subagent 로 호출 (`Agent` 툴, `model="sonnet"`).
+**Default**: the main session runs on **Opus 5**. Opus handles orchestration, decisions, reviews and small-to-medium implementation itself. **Sonnet 5** is called as a subagent (`Agent` tool, `model="sonnet"`) only when the delegation criteria below are met.
 
-더 무거운 작업이 필요하면 **Fable 5** (Mythos-class, Opus 상위 티어) 를 main 으로 쓸 수 있음 — `/model claude-fable-5`. 아래 위임 기준은 main 이 Opus 든 Fable 이든 동일하게 적용.
+For heavier work, **Fable 5** (Mythos-class, the tier above Opus) can be the main model — `/model claude-fable-5`. The delegation criteria below apply the same whether the main model is Opus or Fable.
 
-근거: 이건 Claude Code 구독 환경이지 측정형 API 가 아님. Opus 토큰은 rate-limit quota 에서 빠짐 — per-token 과금이 아님. quota 위험이 없는 한 main loop 에 최강 모델 유지해도 비용 추가 없음. 위임의 목적은 **Opus quota 절약** 과 **main context 정리** 이지 비용 절감 아님.
+Rationale: this is a Claude Code subscription, not a metered API. Opus tokens come out of a rate-limit quota, not per-token billing, so keeping the strongest model in the main loop costs nothing extra as long as the quota is not at risk. Delegation is for **saving Opus quota** and **keeping the main context clean**, not for saving money.
 
-### main 세션 (Opus/Fable) 이 직접 처리하는 경우
-- 아키텍처, 알고리즘, 설계 결정
-- 디버깅 (가설 → 검증 → 수정 루프)
-- 어떤 변경이든 끝나면 코드 리뷰
-- 5 파일 미만의 편집 또는 도중에 판단이 필요한 작업
-- main context 에 남아있어야 후속 작업 가능한 것
-- 메타 문서 (`CLAUDE.md`, `TASK.md`, `PLAN.md`) 의 논의/계획/갱신
+### What the main session (Opus/Fable) does itself
+- Architecture, algorithms, design decisions
+- Debugging (hypothesis → check → fix loop)
+- Code review after any change
+- Edits to fewer than 5 files, or work that needs judgement along the way
+- Anything that must stay in the main context for follow-up work
+- Discussing, planning and updating the meta documents (`CLAUDE.md`, `TASK.md`, `PLAN.md`)
 
-### Sonnet subagent 에 위임하는 경우
-다음 조건을 **모두** 만족할 때만 위임 — 아니면 Opus 가 직접:
-- **기계적** 작업 (bulk find/replace, 알려진 패턴을 여러 파일에 적용, dead code 제거, 명확한 spec 으로 scaffolding)
-- spec 이 **명확** 해서 작업 도중 main 세션의 추가 판단이 필요 없음
-- 범위가 **5 파일 이상** OR main context 에 **100 줄 이상의 noisy output** 이 쌓일 작업 (예: 결과 요약만 필요한 광범위 코드 탐색)
-- 결과물이 Opus 가 한 번에 리뷰 가능한 **diff 또는 요약**
+### When to delegate to a Sonnet subagent
+Delegate only when **all** of these hold — otherwise Opus does it:
+- The work is **mechanical** (bulk find/replace, applying a known pattern to many files, removing dead code, scaffolding from a clear spec)
+- The spec is **clear** enough that no further judgement from the main session is needed during the work
+- The scope is **5 files or more** OR the work would pile **100+ lines of noisy output** into the main context (e.g. a broad code search where only the summary matters)
+- The result is a **diff or summary** Opus can review in one go
 
-위임 시 **self-contained 프롬프트** 작성: subagent 는 이 대화를 못 봄. 결정 사항/spec, 대상 파일·패턴, 제약, 보고할 내용을 다 적어 보내기
+When delegating, write a **self-contained prompt**: the subagent cannot see this conversation. Include the decisions/spec, the target files and patterns, the constraints and what to report
 
-### 태스크 처리 절차
-1. Opus 가 태스크 항목 읽고 위 기준으로 **direct** 인지 **delegate** 인지 결정
-2. **Direct path**: Opus 가 구현 → 해당 Evaluator Rubric gate 직접 실행 → 변경 파일 보고
-3. **Delegate path**: Opus 가 self-contained 프롬프트 작성 → `Agent(model="sonnet", ...)` 호출 → 반환된 diff 리뷰 → Evaluator Rubric gate 실행 → 변경 파일 보고
-4. 리뷰 통과 후 다음 태스크로
+### Task procedure
+1. Opus reads the task item and decides **direct** or **delegate** by the criteria above
+2. **Direct path**: Opus implements → runs the relevant Evaluator Rubric gates itself → reports the changed files
+3. **Delegate path**: Opus writes a self-contained prompt → calls `Agent(model="sonnet", ...)` → reviews the returned diff → runs the Evaluator Rubric gates → reports the changed files
+4. Move to the next task once the review passes
 
 ### Rate-limit fallback
-세션 중 Opus quota 가 소진 위험이면 `/model sonnet` 으로 main 세션 자체를 Sonnet 으로 전환하고 inverted 패턴으로 진행 (Sonnet main, 위임 없음). 기본이 아니라 복구 모드로 취급
+If the Opus quota is at risk of running out during a session, switch the main session itself to Sonnet with `/model sonnet` and continue in the inverted pattern (Sonnet main, no delegation). Treat it as a recovery mode, not the default
 
-### 태스크 문서 규칙
-`TASK.md`, `PLAN.md`, 기타 태스크 목록 문서 작성/갱신 시 **모든 태스크 항목은 실행 경로** 를 다음 중 하나로 표시 **필수**:
-- `Direct (Opus)` — Opus main 세션이 직접 구현
-- `Delegate (Sonnet)` — Opus 가 Sonnet subagent 에 위임 후 리뷰
+### Task document rule
+When writing or updating `TASK.md`, `PLAN.md` or any other task list, **every task item must state its execution path**, one of:
+- `Direct (Opus)` — implemented by the Opus main session itself
+- `Delegate (Sonnet)` — Opus delegates to a Sonnet subagent, then reviews
 
-선택이 자명하지 않으면 근거를 간단히 기록. 이래야 세션 간에 파이프라인 재현성 유지됨
+If the choice is not obvious, note the reason briefly. This keeps the pipeline reproducible across sessions
 
-## Git 브랜치 전략
-- `develop` — 통합 브랜치. `feature/*` 가 머지되는 곳. 배포 가능 상태 유지
-- `feature/*` — 새 기능/개선. `develop` 에서 분기, `develop` 으로 머지
-- `hotfix/*` — 긴급 수정. `develop` 에서 분기. 급하면 `main`+`develop` 동시 머지
-- `main` — 안정 릴리즈만. `develop` 에서 머지. 항상 배포 가능
-- `develop` 에 직접 커밋 금지
-- 브랜치 명: `feature/<short-description>` / `hotfix/<short-description>`
+## Git branch strategy
+- `develop` — the integration branch, where `feature/*` branches merge. Kept releasable
+- `feature/*` — new features and improvements. Branch from `develop`, merge into `develop`
+- `hotfix/*` — urgent fixes. Branch from `develop`; if urgent, merge into `main` and `develop` together
+- `main` — stable releases only. Merged from `develop`. Always releasable
+- No direct commits to `develop`
+- Branch names: `feature/<short-description>` / `hotfix/<short-description>`
 
 ## Build & Dev
-- `npm run dev` — Vite dev 서버 (HMR)
-- `npm run build` — `vitest run && tsc && vite build` → `dist/danbooruinsights.user.js` 출력
-- `npm run compile` — `tsc` 단독 (타입 체크만, 번들 없음)
+- `npm run dev` — Vite dev server (HMR)
+- `npm run build` — `vitest run && tsc && vite build` → outputs `dist/danbooruinsights.user.js`
+- `npm run compile` — `tsc` alone (type check only, no bundle)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest 단위 테스트 (현재 1402 cases)
+- `npm run test` — Vitest unit tests (currently 1416 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
-- `npm run test:e2e` — Playwright e2e 테스트 (test/e2e/, 시각 회귀 baseline 7 개)
-- `npm run test:e2e:update` — e2e 스냅샷 baseline 갱신 (의도한 시각 변경일 때만)
+- `npm run test:e2e` — Playwright e2e tests (`test/e2e/`, 7 visual-regression baselines)
+- `npm run test:e2e:update` — update the e2e snapshot baselines (only for an intended visual change)
 - `npm run clean` — gts clean
 
-`scripts/` 의 벤치 도구는 npm script 가 아니라 직접 실행: `node scripts/bench-collect.ts <log-file> > out.json` 으로 perf 로그를 집계하고 `bench-compare.ts` 로 두 결과를 비교 (perf-logger 출력이 입력 — [.claude/rules/perf-logging.md](.claude/rules/perf-logging.md) 참조)
+The bench tools in `scripts/` are run directly, not through npm scripts: `node scripts/bench-collect.ts <log-file> > out.json` aggregates a perf log and `bench-compare.ts` compares two results (their input is perf-logger output — see [.claude/rules/perf-logging.md](.claude/rules/perf-logging.md))
 
-## 도메인 용어집
-| 용어 | 의미 |
+## Domain glossary
+| Term | Meaning |
 |---|---|
-| Grass | GitHub 스타일 캘린더 히트맵 (기여 그래프) |
-| Quick Sync | ≤1200 포스트 유저용 빠른 경로 — 순차 cursor pagination |
-| Full Sync | 큰 유저용 표준 pagination + 재시도 |
-| Delta Sync | 태그 분석 증분 갱신 — 첫 100 포스트 받아서 diff ≥ 50 면 재집계 |
-| Piestats | 파이 차트용 캐시된 집계 통계 (24h 만료) |
-| At a glance | 유저 요약 2 줄. 대시보드 = 전체 업로드 (`lifetime`), 팝오버 = 최근 200 (`recent`) |
-| untagged / under-tagged | At a glance 의 **현재 상태** 기준: 업로드 15 분 후에도 일반 태그 ≤3 / <10. 팝오버 그리드의 **mintag / abandoned** (업로더가 v1 에 넣은 태그 수 기준) 와 다른 개념 — 섞어 쓰지 말 것 |
+| Grass | GitHub-style calendar heatmap (contribution graph) |
+| Quick Sync | Fast path for users with ≤1200 posts — sequential cursor pagination |
+| Full Sync | Standard pagination + retries for large users |
+| Delta Sync | Incremental tag-analytics update — fetch the first 100 posts and re-aggregate when the diff is ≥ 50 |
+| Piestats | Cached aggregate statistics for the pie charts (24h expiry) |
+| At a glance | Two-line user summary. Dashboard = all uploads (`lifetime`), popover = the latest 200 (`recent`) |
+| untagged / under-tagged | At a glance, by the **current state**: ≤3 / <10 general tags 15 minutes after upload. A different notion from the popover grid's **mintag / abandoned** (by the number of tags the uploader put in v1) — do not mix them |
 
-## 아키텍처
+## Architecture
 
-### Entry Point
-`src/main.ts` → `main()` → URL 경로 기반 라우팅:
-- **Profile 모드** (`/users/*`, `/profile`): `GrassApp` + `UserAnalyticsApp` 실행. Grass 가 받는 동안 📊 클릭은 sync 를 시작하지 않음 (`GrassLoadGate`, G-7 — [sync-strategies.md](.claude/rules/sync-strategies.md))
-- **Tag 모드** (`/wiki_pages/*`, `/artists/*`): `TagAnalyticsApp` 실행
+### Entry point
+`src/main.ts` → `main()` → routes by URL path:
+- **Profile mode** (`/users/*`, `/profile`): runs `GrassApp` + `UserAnalyticsApp`. While Grass is loading, a 📊 click does not start a sync (`GrassLoadGate`, G-7 — [sync-strategies.md](.claude/rules/sync-strategies.md))
+- **Tag mode** (`/wiki_pages/*`, `/artists/*`): runs `TagAnalyticsApp`
 
-### 데이터 흐름
-1. `ProfileContext` / `detectCurrentTag()` → 대상 (유저 or 태그) 식별
-2. `DataManager` / `AnalyticsDataManager` → Danbooru API 호출 + IndexedDB 캐싱
-3. `GraphRenderer` / App 클래스 → D3.js / CalHeatmap 으로 시각화 렌더링
+### Data flow
+1. `ProfileContext` / `detectCurrentTag()` → identify the target (a user or a tag)
+2. `DataManager` / `AnalyticsDataManager` → Danbooru API calls + IndexedDB caching
+3. `GraphRenderer` / the App classes → render with D3.js / CalHeatmap
 
-### 레이어 구조 (기계적 강제 — [test/architecture.test.ts](test/architecture.test.ts) 참조)
-의존 방향: `core/ → ui/ → apps/`. 하위 레이어가 상위 레이어를 import 하면 안 됨
+### Layers (mechanically enforced — see [test/architecture.test.ts](test/architecture.test.ts))
+Dependency direction: `core/ → ui/ → apps/`. A lower layer must not import a higher one
 
-| 레이어 | 역할 | 예시 |
+| Layer | Role | Examples |
 |---|---|---|
-| `src/core/` | 데이터 레이어 — API, DB, rate limiting, settings, quota, 도메인 유틸 | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `rate-lane.ts`, `fetch-retry.ts`, `search-terms.ts`, `grass-load-gate.ts`, `monthly-report.ts`, `post-record.ts`, `sync-meta.ts`, `local-distributions.ts`, `change-catch-up.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts`, `profile-summary.ts` |
-| `src/ui/` | 재사용 가능한 UI primitives — 앱 오케스트레이션 X | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts`, `dashboard-preview-popover.ts`, `grass-month-popover.ts`, `profile-summary-view.ts` |
-| `src/apps/` | 앱 오케스트레이션 — core + ui 조합 | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
-| `src/dev/` | 개발자 진단 도구 — 격리된 dev-only 모듈 | `diagnostic.ts`, `log-capture.ts` |
-| `src/` (루트) | Entry, 공유 types/utils/config | `main.ts`, `types.ts`, `utils.ts`, `config.ts`, `styles.ts`, `version.ts` |
+| `src/core/` | Data layer — API, DB, rate limiting, settings, quota, domain utilities | `data-manager.ts`, `analytics-data-manager.ts`, `database.ts`, `rate-limiter.ts`, `rate-lane.ts`, `fetch-retry.ts`, `search-terms.ts`, `grass-load-gate.ts`, `monthly-report.ts`, `post-record.ts`, `post-tag-flags.ts`, `sync-meta.ts`, `local-distributions.ts`, `change-catch-up.ts`, `profile-context.ts`, `settings.ts`, `tab-coordinator.ts`, `quota-manager.ts`, `global-tag-stats.ts`, `sub-tag-resolver.ts`, `threshold-tuner.ts`, `scroll-lock.ts`, `logger.ts`, `perf-logger.ts`, `dashboard-preview.ts`, `grass-month-stats.ts`, `grass-prev-month.ts`, `related-tag-rerank.ts`, `top-level-tags.ts`, `profile-summary.ts` |
+| `src/ui/` | Reusable UI primitives — no app orchestration | `graph-renderer.ts`, `settings-popover.ts`, `approval-detail-popover.ts`, `post-hover-card.ts`, `dashboard-footer.ts`, `modal.ts`, `popover-utils.ts`, `theme-palette.ts`, `tag-cloud-widget.ts`, `subtag-breakdown-tooltip.ts`, `widget-locked-placeholder.ts`, `threshold-preview-modal.ts`, `toast.ts`, `two-step-tap.ts`, `dashboard-preview-popover.ts`, `grass-month-popover.ts`, `profile-summary-view.ts` |
+| `src/apps/` | App orchestration — combines core + ui | `grass-app.ts`, `user-analytics-app.ts`, `user-analytics-data.ts`, `user-analytics-charts.ts`, `user-analytics-pie-helpers.ts`, `user-analytics-scatter.ts`, `tag-analytics-app.ts`, `tag-analytics-data.ts`, `tag-analytics-charts.ts`, `created-tags-widget.ts`, `progress-tracker.ts`, `widget-gates.ts` |
+| `src/dev/` | Developer diagnostics — isolated, dev-only modules | `diagnostic.ts`, `log-capture.ts` |
+| `src/` (root) | Entry, shared types/utils/config | `main.ts`, `types.ts`, `utils.ts`, `config.ts`, `styles.ts`, `version.ts` |
 
-## 주요 제약사항
-- `@grant none` — GM_* API 사용 불가
-- 브라우저 환경 한정 (Node.js API 사용 불가)
-- 외부 라이브러리는 `@require` / `externalGlobals` 로 로드 (Vite 빌드 프로젝트지만 — 번들러가 import 처리, 런타임 의존은 외부 유지)
-- `d3` 는 `any` 로 타입 지정 — `@types/d3` 추가 금지 (앱 파일 타이핑 깨짐). d3 호출 사이트에서 raw `any` 대신 `src/types.ts` 의 `D3Any` 타입 alias 사용. `@typescript-eslint/no-explicit-any` 가 disabled 되는 유일한 곳
-- `database.ts` 의 Dexie 테이블은 `src/types.ts` 에 정의된 실제 row 인터페이스 (`DailyCountRecord`, `PostRecord` 등) 사용 — **`Table<any>` 금지**. (이전 버전 문서에 `Table<any>` 라고 적혀있었는데 lint-CI initiative 이후로는 outdated)
-- App 클래스는 composition 사용 (dataService, chartRenderer) — index signature 금지
-- `dist/` 출력은 단일 번들 `.user.js` — 직접 수정 금지
+## Key constraints
+- `@grant none` — no GM_* APIs
+- Browser only (no Node.js APIs)
+- External libraries load through `@require` / `externalGlobals` (a Vite build project — the bundler handles imports, runtime dependencies stay external)
+- `d3` is typed as `any` — do not add `@types/d3` (it breaks the app files' typing). At d3 call sites use the `D3Any` alias from `src/types.ts` instead of a raw `any`. The only place `@typescript-eslint/no-explicit-any` is disabled
+- The Dexie tables in `database.ts` use the real row interfaces defined in `src/types.ts` (`DailyCountRecord`, `PostRecord`, …) — **no `Table<any>`**. (Older docs said `Table<any>`; outdated since the lint-CI initiative)
+- App classes use composition (dataService, chartRenderer) — no index signatures
+- The `dist/` output is a single bundled `.user.js` — never edit it by hand
 
-## 외부 의존성 (`@require` / `externalGlobals`)
-- **d3.v7** — 차트와 시각화 (전역: `d3`)
-- **d3-cloud** — Tag Cloud 워드 클라우드 레이아웃 (전역: `d3.layout.cloud`, `@require` only — externalGlobals 에는 없음)
-- **cal-heatmap** — 캘린더 히트맵 (전역: `CalHeatmap`)
-- **Dexie.js** — IndexedDB 래퍼 (전역: `Dexie`)
+## External dependencies (`@require` / `externalGlobals`)
+- **d3.v7** — charts and visualisation (global: `d3`)
+- **d3-cloud** — Tag Cloud word-cloud layout (global: `d3.layout.cloud`, `@require` only — not in externalGlobals)
+- **cal-heatmap** — calendar heatmap (global: `CalHeatmap`)
+- **Dexie.js** — IndexedDB wrapper (global: `Dexie`)
 
-## CSS 관리
-- 모든 스타일은 `src/styles.ts` 의 `GLOBAL_CSS` 에 중앙화
-- `injectGlobalStyles()` 로 `<style>` 태그 한 번 주입
-- CSS 클래스 prefix: `di-` (Danbooru Insights)
+## CSS
+- All styles are centralised in `GLOBAL_CSS` in `src/styles.ts`
+- `injectGlobalStyles()` injects one `<style>` tag
+- CSS class prefix: `di-` (Danbooru Insights)
 
 ## Rate Limiting (RateLimitedFetch)
 
-**서버 쪽 한도** (Danbooru `production` 소스 기준, 2026-11-11 확인). 한도는 전체 하나가 아니라 **액션별 토큰 버킷**이고, 키는 사용자·IP 대역·세션 각각:
+**Server-side limits** (Danbooru `production` source, checked 2026-11-11). There is no single global limit but **a token bucket per action**, keyed separately by user, IP range and session:
 
-| 액션 | 한도 | 소스 |
+| Action | Limit | Source |
 |---|---|---|
-| `/counts/posts.json` | 1 req/s, 버스트 15 (2026-11-05 부터) | `app/policies/post_query_policy.rb` |
-| `/reports/*` | 1 req / 3 s, 버스트 15 | `app/policies/report_policy.rb` |
-| `/related_tag.json` | 1 req/s, 버스트 30 | `app/policies/related_tag_query_policy.rb` |
-| 그 밖의 읽기 (`/posts.json` 등) | Rails 한도 없음 | `app/policies/application_policy.rb` 의 `rate_limit_for_read` |
+| `/counts/posts.json` | 1 req/s, burst 15 (since 2026-11-05) | `app/policies/post_query_policy.rb` |
+| `/reports/*` | 1 req / 3 s, burst 15 | `app/policies/report_policy.rb` |
+| `/related_tag.json` | 1 req/s, burst 30 | `app/policies/related_tag_query_policy.rb` |
+| Other reads (`/posts.json`, …) | no Rails limit | `rate_limit_for_read` in `app/policies/application_policy.rb` |
 
-한도에 걸린 상태에서 보낸 요청은 1 초 분씩 점수를 더 깎음 (최저 −30). Rails 한도는 성공 응답과 429 양쪽에 `X-Rate-Limit` 헤더를 붙임. 흔히 말하는 "전체 10 req/s" 는 저장소에 없음 (`config/nginx.conf` 에 `limit_req` 없음, rack-attack 류 미들웨어 없음 — 2026-11-13 확인).
+A request sent while over the limit costs another second's worth of points (floor −30). The Rails limits put an `X-Rate-Limit` header on both successful responses and 429s. The often-quoted "10 req/s overall" is not in the repository (no `limit_req` in `config/nginx.conf`, no rack-attack-style middleware — checked 2026-11-13).
 
-**앞단 (Cloudflare) 한도** — 규칙은 비공개. 2026-11-13 실측: 앞단 429 는 `server: cloudflare`, **`cf-mitigated: challenge`** 헤더에 본문이 "Just a moment..." 챌린지 페이지 (HTML), `X-Rate-Limit` · `Retry-After` 없음. 즉 Cloudflare 속도 제한 규칙이 차단 대신 챌린지를 거는 것이고, fetch 는 챌린지를 풀 수 없어 429 로만 보임. 속도가 내려가면 다시 통과하는 일이 많음. 기준은 **1 분 단위 요청 수** 로 보임 (2026-11-15 실측, 확정은 아님): 거절된 요청의 직전 60 초 요청 수는 181 · 187 · 190 · 191 · 202 · 219 · 228 건이고, 5 초 정지로 10 초 창이 20 건까지 내려간 직후에도 거절됨 (60 초 창은 190 → 191 로 그대로). 경계는 실행마다 움직여 188~228 건이 통과한 적도 있고, 429 없는 실행의 60 초 최댓값은 모두 182 이하. 서버가 빠른 날 (페이지 약 0.8 초) 5 worker sync 가 1 분에 190~223 건까지 나가 경계에 닿음. 앞선 후보 둘은 기각: "10 초에 약 50 건" (2026-11-13 의 49 건 두 번에서 나왔지만 위의 20 건 거절), "2 분에 약 240 건" (120 초에 305 건 통과). 분 단위 예산 (T-215 후보) 은 사용자 결정으로 보류 (2026-11-15). 새 측정은 진단 로그 `429 received` 의 `sent*` · `peakOk*` 와 `Sync traffic` 으로 ([docs/debugging.md](docs/debugging.md)).
+**Edge (Cloudflare) limit** — the rule is not public. Measured 2026-11-13: an edge 429 has `server: cloudflare`, a **`cf-mitigated: challenge`** header and a "Just a moment..." challenge page (HTML) as its body, with no `X-Rate-Limit` or `Retry-After`. So a Cloudflare rate-limiting rule issues a challenge instead of a block, and fetch, unable to solve it, sees only a 429. Requests often pass again once the rate drops. The criterion looks like **a count per minute** (measured 2026-11-15, not settled): the requests in the 60 s before a refused one were 181, 187, 190, 191, 202, 219 and 228, and a request was refused right after a 5 s pause had brought the 10 s window down to 20 (the 60 s window stayed at 190 → 191). The boundary moves between runs — 188–228 have also passed — and every run without a 429 peaked at 182 or below in 60 s. On a day the server is fast (about 0.8 s a page), a 5-worker sync reaches 190–223 a minute and meets the boundary. Two earlier candidates were ruled out: "about 50 per 10 s" (from two refusals at 49 on 2026-11-13, but see the refusal at 20 above) and "about 240 per 2 minutes" (305 passed in 120 s). A per-minute budget (T-215 candidate) is on hold by the user's decision (2026-11-15). Measure anew with `sent*` / `peakOk*` in the diagnostic log's `429 received` entries and with `Sync traffic` ([docs/debugging.md](docs/debugging.md)).
 
-**클라이언트** — 토큰 버킷 하나 + 서버 액션별 차선 (v9.12). 정확한 수치는 [src/config.ts](src/config.ts) 의 `CONFIG.RATE_LIMITER` 참조:
-- **General Queue**: 8 concurrent requests, **4.5 req/sec, 버스트 1**, 0-50ms jitter → 한 탭에서 임의의 1 초에 최대 6 건, 10 초에 최대 47 건, 1 분에 최대 약 270 건 (T-213, v9.12 — 당시 후보였던 "10 초에 약 50 건" 아래로 맞춘 값. 그 후보는 기각됐지만 상한은 그대로 둠). 그 전 결정 G-1 은 6 req/sec (1 초 7 건 · 10 초 61 건). v9.6 의 9 req/sec · 버스트 9 (버스트가 속도와 같았음) 는 Grass 와 sync 가 겹치면 1 초 16 건 · 10 초 98 건까지 나갔음. 큰 계정의 Full Sync 는 이 상한이 아니라 worker 수 (`SYNC_WORKERS` 5, 평균 약 3.5 req/s) 가 속도를 정하고, 상한은 응답이 빠른 순간의 몰림만 깎음 ([sync-strategies.md](.claude/rules/sync-strategies.md)). Grass · UserAnalytics · TagAnalytics 가 `main.ts` 가 만든 limiter 하나를 공유 (생성자 필수 인자, gate 4 규칙 11). `RateLimitedFetch` 의 4 번째 인자가 버스트 (생략하면 속도와 같음 — 테스트용)
-- **차선** ([src/core/rate-lane.ts](src/core/rate-lane.ts)): counts · reports · related_tag 요청은 각자의 차선에서 기다림. 차선은 서버 버킷의 로컬 추정치 (처음엔 위 표의 수치, 이후 응답마다 오는 `X-Rate-Limit` 로 보정 — 다른 탭이 같은 버킷을 쓴 것도 반영) 가 2 점 이상 (1 점 여유) 이고 진행 중 요청이 2 건 미만일 때만 보냄. 차선 요청도 일반 버킷 토큰을 하나 씀 → count · report 를 합쳐도 위의 6 / 47 상한 안. 발송은 "차선이 준비된 요청 중 가장 먼저 온 것" 이라 기다리는 차선이 sync 를 막지 않음. 모르는 경로가 `X-Rate-Limit` 를 보내면 그 경로용 차선을 만듦. v9.11 까지의 report 전용 큐 (3 초 고정 대기) 는 없어짐
-- **429 의 범위**: `X-Rate-Limit` 이 붙은 429 (Rails 의 액션별 한도) 는 **그 차선만** 기다림 — 전체 정지 · 속도 절반 · 다른 탭 알림 없음. 헤더 없는 429 (앞단) 만 아래의 전체 정지로 감. `backoffRemainingMs()` 는 전체 정지만 뜻함
-- **깨움**: 큐 전체에 예약된 깨움 하나 (`scheduleWake`). 거절될 때마다 타이머를 걸던 방식은 250 건 대기에 타이머 수만 개를 만들었음 (감사 DA-13)
-- **TabCoordinator**: 같은 IP 의 멀티탭 환경에서 rps/concurrency 를 탭 수로 분할 (나눈 값은 내림하지 않음 — 4.5 를 2 탭이 2.25 씩. 버스트 1 은 탭마다 유지 — N 탭이면 최악의 1 초가 약 5 + N 건)
-- **모의 실험**: [test/rate-limiter-sim.test.ts](test/rate-limiter-sim.test.ts) 가 실제 limiter 를 Danbooru 서버 한도 모델 (`test/helpers/server-bucket.ts`, `rate_limit.rb` 그대로) 에 돌려 1 초 · 10 초 상한, 429 수, 유실을 단언. limiter 를 바꾸면 여기 숫자부터 확인
-- **429 global backoff** (헤더 없는 429): `Retry-After` 가 있으면 그 값, 없으면 `CONFIG.BACKOFF_DURATION_MS` (5s) 동안 전체 큐 정지 (`backoffFromResponse`, `[1s, CONFIG.MAX_BACKOFF_MS]` 로 clamp) 하고 다른 탭에 알림. (`backoffFromResponse` 는 `X-Rate-Limit` 에서 `(cost − 최저 points) / rate` 초 + 0.5s 를 계산하는 경로도 가지고 있지만, 그런 429 는 이제 차선이 받음)
-- **Slow start + 적응형 rate**: 정지가 끝나면 5 초간 토큰 1 개 / 동시 2 개로만 재개 (정지 중 꽉 찬 버킷과 대기 타이머가 한꺼번에 터지며 다음 429 를 부르던 문제). 정지 밖에서 받은 429 마다 rate·동시성을 절반으로 (하한 25%), 429 없는 20 초마다 25%p 씩 복구. 복구 상한은 429 가 난 rate 보다 한 단계 (25%p) 아래 — 상한 없이는 0.5 에서 버티다 0.56~0.75 로 회복할 때마다 수 초 안에 429 가 나는 톱니가 생겼음. 상한은 429 없는 2 분마다 한 단계씩 올라감. 단, slow start 구간 (정지 직후) 에 난 429 는 "정지가 서버 페널티보다 짧았다" 로 보고 rate·상한은 그대로 두고 정지만 2 배로 늘림 (5→10→20s…, 최대 `MAX_BACKOFF_MS`, 서버가 대기시간을 주면 그 값) 실측상 Danbooru 앞단 429 는 `X-Rate-Limit` 없이 HTML 로 와서 서버 대기시간 추종이 작동 안 함 — 이 두 장치가 실질적인 방어선
+**Client** — one token bucket + a lane per server action (v9.12). Exact values in `CONFIG.RATE_LIMITER` in [src/config.ts](src/config.ts):
+- **General queue**: 8 concurrent requests, **4.5 req/sec, burst 1**, 0–50 ms jitter → from one tab at most 6 requests in any second, 47 in any 10 s and about 270 in any minute (T-213, v9.12 — set below the then-candidate "about 50 per 10 s"; that candidate was ruled out but the cap stays). The earlier decision G-1 was 6 req/sec (7 per second, 61 per 10 s). v9.6's 9 req/sec with a burst of 9 (burst equal to the rate) reached 16 per second and 98 per 10 s when Grass and a sync overlapped. A large account's Full Sync is paced by its worker count (`SYNC_WORKERS` 5, about 3.5 req/s on average), not by this cap; the cap only trims the bursts when responses come back fast ([sync-strategies.md](.claude/rules/sync-strategies.md)). Grass, UserAnalytics and TagAnalytics share the one limiter `main.ts` builds (a required constructor argument, gate 4 rule 11). The 4th argument of `RateLimitedFetch` is the burst (defaults to the rate — for tests)
+- **Lanes** ([src/core/rate-lane.ts](src/core/rate-lane.ts)): counts, reports and related_tag requests each wait in their own lane. A lane sends only while its local estimate of the server bucket (the table's values at first, then corrected by the `X-Rate-Limit` on every response — which also reflects other tabs using the same bucket) holds 2 points or more (1 point of slack) and fewer than 2 of its requests are in flight. A lane request also takes a general-bucket token → counts and reports together stay within the 6 / 47 caps above. Dispatch takes "the earliest request whose lane is ready", so a waiting lane never holds up a sync. An unknown path that sends `X-Rate-Limit` gets a lane of its own. The report-only queue of v9.11 (a fixed 3 s wait) is gone
+- **Scope of a 429**: a 429 with `X-Rate-Limit` (a Rails per-action limit) makes **only its lane** wait — no global pause, no halved rate, no notice to other tabs. Only a 429 without the header (the edge) leads to the global pause below. `backoffRemainingMs()` means the global pause only
+- **Wake-up**: one scheduled wake-up for the whole queue (`scheduleWake`). The old way, a timer per refusal, made tens of thousands of timers for 250 waiting requests (audit DA-13)
+- **TabCoordinator**: in multi-tab use on one IP, rps and concurrency are divided by the tab count (not rounded down — 2 tabs get 2.25 each of 4.5). The burst of 1 stays per tab — with N tabs the worst second is about 5 + N requests
+- **Simulation**: [test/rate-limiter-sim.test.ts](test/rate-limiter-sim.test.ts) runs the real limiter against a model of Danbooru's server limits (`test/helpers/server-bucket.ts`, `rate_limit.rb` as is) and asserts the 1 s and 10 s caps, the 429 count and losses. When changing the limiter, check these numbers first
+- **429 global backoff** (a 429 without the header): pause the whole queue for `Retry-After` if present, otherwise `CONFIG.BACKOFF_DURATION_MS` (5 s) (`backoffFromResponse`, clamped to `[1s, CONFIG.MAX_BACKOFF_MS]`), and notify the other tabs. (`backoffFromResponse` also has a path that computes `(cost − floor points) / rate` seconds + 0.5 s from `X-Rate-Limit`, but such 429s now go to the lanes)
+- **Slow start + adaptive rate**: after a pause, resume with 1 token / 2 concurrent for 5 s (a full bucket and the waiting timers firing at once used to cause the next 429). Every 429 outside a pause halves the rate and concurrency (floor 25%); every 20 s without a 429 restores 25 points. Recovery is capped one step (25 points) below the rate the 429 came at — without the cap, holding at 0.5 and recovering to 0.56–0.75 drew a 429 within seconds each time, a sawtooth. The cap rises one step per 2 minutes without a 429. A 429 during slow start (right after a pause) is read as "the pause was shorter than the server's penalty": rate and cap stay and only the pause doubles (5→10→20 s…, up to `MAX_BACKOFF_MS`, or the server's wait if it gives one). In practice Danbooru's edge 429s come as HTML without `X-Rate-Limit`, so following the server's wait never applies — these two mechanisms are the real defence
 
-## Evaluator Rubric (작업 완료 선언 전 self-evaluation 용)
-7 개 gate 모두 통과해야 태스크 완료 보고 가능. 직접 실행해 — 가정 금지
+## Evaluator Rubric (self-evaluation before declaring work done)
+All 7 gates must pass before a task can be reported done. Run them yourself — never assume
 
-pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), `prepare` 스크립트로 `npm install` 시 자동 wire-up) 이 gate 1–7 을 한 번에 체인: `npm run build && npm run lint && npm run check:dead`. 더 빠른 피드백을 위해 작업 중에 개별 실행해도 됨
+The pre-commit hook ([`.githooks/pre-commit`](.githooks/pre-commit), wired up on `npm install` by the `prepare` script) chains gates 1–7 in one go: `npm run build && npm run lint && npm run check:dead`. Running them one by one during the work gives faster feedback
 
-| # | Gate | 명령 | 강제 주체 |
+| # | Gate | Command | Enforced by |
 |---|---|---|---|
-| 1 | Type safety | `tsc --noEmit` (또는 `npm run build`) | TypeScript strict mode |
+| 1 | Type safety | `tsc --noEmit` (or `npm run build`) | TypeScript strict mode |
 | 2 | Lint/style | `npm run lint` | GTS (Google TS style) |
-| 3 | 테스트 통과 | `npx vitest run` | Vitest |
-| 4 | 아키텍처 invariant | (gate 3 가 커버) | [test/architecture.test.ts](test/architecture.test.ts) — 현재 14 개 규칙 (아래 목록) |
-| 5 | 빌드 성공 | `npm run build` | Pre-commit hook (gate 1+3 도 같이 실행) |
-| 6 | 복잡도 cap | `npm run lint` | T-26 ESLint 규칙 — `max-lines-per-function: 200` (skipBlankLines+skipComments), `max-depth: 6`, `complexity: 15`, `max-nested-callbacks: 4`. 기존 위반은 inline `// T-26 baseline:` disable; 신규 위반은 차단 |
-| 7 | Dead code 없음 | `npm run check:dead` | knip — entry points / project globs / `cal-heatmap` + `eslint` ignored. 미사용 파일/export/type/devDependency 잡음 |
+| 3 | Tests pass | `npx vitest run` | Vitest |
+| 4 | Architecture invariants | (covered by gate 3) | [test/architecture.test.ts](test/architecture.test.ts) — 14 rules today (list below) |
+| 5 | Build succeeds | `npm run build` | Pre-commit hook (also runs gates 1+3) |
+| 6 | Complexity cap | `npm run lint` | T-26 ESLint rules — `max-lines-per-function: 200` (skipBlankLines+skipComments), `max-depth: 6`, `complexity: 15`, `max-nested-callbacks: 4`. Existing violations carry an inline `// T-26 baseline:` disable; new ones are blocked |
+| 7 | No dead code | `npm run check:dead` | knip — entry points / project globs / `cal-heatmap` + `eslint` ignored. Catches unused files, exports, types and devDependencies |
 
-### Gate 4 상세 — architecture.test.ts 의 14 개 규칙
-1–4. 의존 방향: `core/ ↛ apps/`, `core/ ↛ ui/`, `ui/ ↚ apps/`, `apps/ ↛ main`
-5. `[key: string]: any` index signature 금지
-6. raw `fetch()` 금지 — `rateLimiter.fetch()` 사용 (예외: `rate-limiter.ts`, `dev/`)
-7. raw `console.*` 금지 — `createLogger()` 사용 (예외: `logger.ts`, `perf-logger.ts`, `dev/`)
-8. legacy NSFW localStorage 키는 `core/settings.ts` 마이그레이션 코드에만
-9. `/counts/posts.json` URL 은 `fetchRemoteCount()` 로만 — 인라인 재롤 금지
-10. `/wiki_pages/` href 는 태그명을 반드시 encode (태그에 `/` 포함 가능 — `fate/grand_order`)
-11. `new RateLimitedFetch(` 는 **`main.ts` 에서만** — 탭당 버킷 하나 (v9.12, G-1). `DataManager` · `AnalyticsDataManager` · 세 App · `UserAnalyticsDataService` 의 생성자는 limiter 가 필수 인자 (빠뜨리면 tsc 가 잡음). 예전의 `rateLimiter ?? new RateLimitedFetch(…)` fallback 처럼 다른 곳에서 버킷을 새로 만들면 멀티탭 분배와 429 정지를 무시하고 속도가 두 배가 됨 (v9.9.0 H-1). 검사 대상 파일 수와 `main.ts` 의 1 건을 같이 단언 (빈 통과 방지)
-12. popover 위치 공식 (`getBoundingClientRect` + `pageXOffset/pageYOffset`) 은 `ui/popover-utils.ts` 에만
-13. `dev/` 는 `core/`, `ui/`, `apps/` 를 import 하지 않음 (진단 모듈 격리)
-14. 마크업에 인라인 스크립트 금지 — HTML 문자열의 `on*="…"` 속성, `setAttribute`/d3 `.attr` 로 넣는 `on*` 속성, `javascript:` URL (v9.11.4 — Danbooru 가 2026-11-11 부터 `unsafe-inline` 없는 CSP 를 강제해서 조용히 동작하지 않음). 리스너로 붙이고, innerHTML 로 다시 그리는 곳은 바깥 컨테이너에 위임 리스너 (`ui/thumb-fallback.ts` 참고). 검출기 자체 검사 테스트가 같이 있음
+### Gate 4 in detail — the 14 rules of architecture.test.ts
+1–4. Dependency direction: `core/ ↛ apps/`, `core/ ↛ ui/`, `ui/ ↚ apps/`, `apps/ ↛ main`
+5. No `[key: string]: any` index signatures
+6. No raw `fetch()` — use `rateLimiter.fetch()` (exceptions: `rate-limiter.ts`, `dev/`)
+7. No raw `console.*` — use `createLogger()` (exceptions: `logger.ts`, `perf-logger.ts`, `dev/`)
+8. Legacy NSFW localStorage keys only in the migration code of `core/settings.ts`
+9. `/counts/posts.json` URLs only through `fetchRemoteCount()` — no inline re-rolls
+10. `/wiki_pages/` hrefs must encode the tag name (a tag can contain `/` — `fate/grand_order`)
+11. `new RateLimitedFetch(` **only in `main.ts`** — one bucket per tab (v9.12, G-1). The constructors of `DataManager`, `AnalyticsDataManager`, the three Apps and `UserAnalyticsDataService` take the limiter as a required argument (tsc catches an omission). A bucket made anywhere else, like the old `rateLimiter ?? new RateLimitedFetch(…)` fallback, ignores the multi-tab split and the 429 pause and doubles the rate (v9.9.0 H-1). The test asserts the number of files checked and the single hit in `main.ts` together (no vacuous pass)
+12. The popover position formula (`getBoundingClientRect` + `pageXOffset/pageYOffset`) only in `ui/popover-utils.ts`
+13. `dev/` does not import `core/`, `ui/` or `apps/` (isolated diagnostics)
+14. No inline script in markup — `on*="…"` attributes in HTML strings, `on*` attributes set with `setAttribute` / d3 `.attr`, `javascript:` URLs (v9.11.4 — Danbooru enforces a CSP without `unsafe-inline` since 2026-11-11, so they silently do nothing). Attach listeners; where innerHTML redraws, use a delegated listener on the outer container (see `ui/thumb-fallback.ts`). The detector comes with its own self-test
 
-**주의 — 빈 통과 (vacuous pass)**: 이 테스트들은 파일 경로를 문자열로 필터링한다. 필터가 0 건을 매칭해도 위반 0 건이라 **통과로 보인다**. 경로 비교는 반드시 `relFromSrc()` / forward-slash 정규화된 값으로 할 것 (Windows `path.relative` 는 백슬래시를 뱉어 `'apps/'` 매칭이 전부 빗나감 — 실제로 규칙 11 이 Windows 에서 0 개 파일만 검사하며 통과하고 있었음). 새 규칙 추가 시 검사 대상 건수가 0 이 아닌지 확인해라
+**Beware — vacuous passes**: these tests filter file paths as strings. A filter that matches 0 files finds 0 violations and **looks like a pass**. Always compare paths through `relFromSrc()` / forward-slash-normalised values (Windows `path.relative` returns backslashes, so `'apps/'` never matches — rule 11 really did pass on Windows checking 0 files). When adding a rule, check that it checks a non-zero number of files
 
-gate 실패 시 root cause 를 고쳐 — whitelist, suppress, work around 금지. 기계적 gate 의 존재 이유는 이런 체크에 LLM 판단을 못 믿어서임 ("Never send an LLM to do a linter's job").
+When a gate fails, fix the root cause — no whitelisting, suppressing or working around. The mechanical gates exist because LLM judgement cannot be trusted for these checks ("Never send an LLM to do a linter's job").
 
-Pre-commit hook 이 이제 authoritative — 예전의 "커밋 전 lint 수동 실행" 규칙은 자동화됨. 작업 도중에는 여전히 개별 gate 돌려가며 left-shifted feedback 유지하되, 최종 보증은 hook 이 함
+The pre-commit hook is now authoritative — the old "run lint by hand before committing" rule is automated. Keep the left-shifted feedback of running single gates during the work; the final guarantee is the hook
 
-### Gate 8 — e2e (머지 전 수동)
-`npm run test:e2e` (Playwright, ~8초). **pre-commit hook 에 없음** — dev 서버를 띄워야 해서 매 커밋마다 돌리기엔 무겁다. 대신 **브랜치 머지 직전에 반드시 1회 실행**. 안 그러면 시각 회귀 baseline 이 썩어도 아무도 모른다 (gate 밖에 있는 유일한 검증 구역)
+### Gate 8 — e2e (by hand, before merging)
+`npm run test:e2e` (Playwright, ~8 s). **Not in the pre-commit hook** — it needs the dev server, too heavy for every commit. Instead, **run it once right before merging a branch**. Otherwise a rotting visual-regression baseline goes unnoticed (the only verification area outside the gates)
 
-기준 이미지는 **플랫폼별** 파일이다 (`…-chromium-win32.png`, `…-chromium-darwin.png`). 그 플랫폼의 기준이 없으면 첫 실행이 "A snapshot doesn't exist … writing actual" 로 실패하면서 지금 코드로 기준을 만들어 버리고, 그 뒤의 통과는 방금 찍은 것과 비교한 것이라 의미가 없다 (2026-11-12 에 Windows 에서 실제로 겪음). 새 플랫폼의 기준은 반드시 `develop` 코드에서 만들어 커밋할 것. win32 기준은 `dadcbfc` (v9.11.3) 에서 만들었다
+The baseline images are **per platform** (`…-chromium-win32.png`, `…-chromium-darwin.png`). Without a baseline for the platform, the first run fails with "A snapshot doesn't exist … writing actual" and makes one from the current code, and every pass after that only compares against what was just taken (this happened on Windows on 2026-11-12). Make a new platform's baselines from `develop` code and commit them. The win32 baselines were made at `dadcbfc` (v9.11.3)
 
-## 참조 (Level-3 문서 — 필요 시 로드)
-- **Danbooru 서버 소스**: [danbooru/danbooru](https://github.com/danbooru/danbooru) 의 **`production` 브랜치** (사이트가 실제로 도는 것. `master` 와 다를 수 있음). 한도·검색 규칙은 자주 바뀌므로 문서의 숫자보다 소스를 먼저 볼 것 — `app/models/user.rb` (등급별 태그·페이지·timeout 한도), `app/logical/post_query.rb` (무료 메타태그, count 캐시), `app/policies/*_policy.rb` (`rate_limit_for_*`), `config/initializers/content_security_policy.rb`
-- [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) — Danbooru API 엔드포인트 카탈로그
-- [.claude/rules/database-schema.md](.claude/rules/database-schema.md) — Dexie.js 테이블 레이아웃 & compound index
-- [.claude/rules/sync-strategies.md](.claude/rules/sync-strategies.md) — Grass / User / Tag 동기화 알고리즘
-- [.claude/rules/perf-logging.md](.claude/rules/perf-logging.md) — perf-logger 사용법, enable/disable, label namespace
-- [docs/debugging.md](docs/debugging.md) — 진단 패널 (`#di_diag` 해시 또는 `di.diag.enabled` localStorage) 사용법, 데스크톱/모바일 이슈 진단 절차
-- [test/architecture.test.ts](test/architecture.test.ts) — 아키텍처 규칙의 canonical source
-- [docs/audit-remediation.md](docs/audit-remediation.md) — v9.6 audit 6-phase 회고록 (Phase 1-6 helper / guardrail 의 도입 근거)
-- [CHANGELOG.md](CHANGELOG.md) — 릴리즈 히스토리 & 버전 컨텍스트
+## References (level-3 documents — load when needed)
+- **Danbooru server source**: the **`production` branch** of [danbooru/danbooru](https://github.com/danbooru/danbooru) (what the site actually runs; may differ from `master`). Limits and search rules change often, so read the source before trusting numbers in the docs — `app/models/user.rb` (tag, page and timeout limits per level), `app/logical/post_query.rb` (free metatags, count cache), `app/policies/*_policy.rb` (`rate_limit_for_*`), `config/initializers/content_security_policy.rb`
+- [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) — catalogue of the Danbooru API endpoints
+- [.claude/rules/database-schema.md](.claude/rules/database-schema.md) — Dexie.js table layout & compound indexes
+- [.claude/rules/sync-strategies.md](.claude/rules/sync-strategies.md) — Grass / User / Tag sync algorithms
+- [.claude/rules/perf-logging.md](.claude/rules/perf-logging.md) — perf-logger usage, enable/disable, label namespaces
+- [docs/debugging.md](docs/debugging.md) — the diagnostic panel (`#di_diag` hash or `di.diag.enabled` in localStorage) and how to diagnose desktop/mobile issues
+- [test/architecture.test.ts](test/architecture.test.ts) — the canonical source of the architecture rules
+- [docs/audit-remediation.md](docs/audit-remediation.md) — retrospective of the v9.6 audit's 6 phases (why the Phase 1–6 helpers and guardrails exist)
+- [CHANGELOG.md](CHANGELOG.md) — release history & version context
 
-## 현재 릴리즈 상태
-현재 버전 **v9.11.3** ([src/version.ts](src/version.ts) 의 `APP_VERSION` 이 single source of truth — 릴리즈 시 여기만 bump). Active Issue 없음. `develop` 에는 2026-11-12 감사 후속 (Phase 1~7) 이 아직 릴리즈 안 된 채 쌓여 있음 — 문서의 "v9.12" 는 이 다음 릴리즈를 뜻하고, CHANGELOG 는 릴리즈 때 씀.
+## Current release state
+Current version **v9.11.3** (`APP_VERSION` in [src/version.ts](src/version.ts) is the single source of truth — bump only there on release). No active issue. `develop` holds the 2026-11-12 audit follow-up (Phases 1–7) unreleased — "v9.12" in the docs means that next release, and the CHANGELOG is written at release time.
 
-최근 출시분 요약 (상세는 [CHANGELOG.md](CHANGELOG.md)):
-- **v9.11.3** (핫픽스) — 모바일에서 탭으로 연 "?" 툴팁 (Suspicious, Recent uploads 색상 범례) 이 다른 곳을 탭해도 안 닫히던 문제. 공용 `attachTapTooltip` (열려 있을 때만 document capture-phase click 으로 바깥 탭 감지), 팝오버 `hide()` 에서 `closeTapTooltips`, CSS hover/focus 공개는 `@media (hover: hover)` 로 한정 (폰의 sticky hover·탭 focus 가 툴팁을 붙잡던 문제)
-- **v9.11.2** (핫픽스) — preview popover 가 폰에서 오른쪽이 잘리던 문제 (폭을 화면 −16px 로 clamp, `innerWidth` 대신 `documentElement.clientWidth` — 넘친 팝오버 때문에 모바일 Chrome 의 `innerWidth` 가 부풀던 문제), 열린 채 회전 시 재배치 (`resize` 리스너, 열려 있을 때만). Activity 범례 Suspicious 옆 "?" 설명 (PC hover / 모바일 탭, 범례 위 전체 폭). Suspicious 업로드 조건 재정비: banned 제외 (작가 요청 takedown), flagged 와 Meta 태그 4 개 (`SUSPICIOUS_UPLOAD_TAGS`) 추가 — 기존 조회에 `is_flagged,tag_string_meta` 만 추가, 클라이언트 매칭 (Meta 카테고리 태그도 Member 2 태그 한도에 포함 — 2026-10-30 재확인, api-endpoints.md "Search tag limit")
-- **v9.11.1** — "At a glance" 요약: 대시보드 상단 카드 (동기화된 전체 업로드 기준 — 주력 작품·캐릭터 비율, deleted/banned/pending 개수 + 전체 대비 %, 태깅 건전성, 30일 속도·연속일·연도 정점·반응 변화, **추가 요청 0**) + preview popover 상단 섹션 (최근 200 기준, 평소와 비교, `/posts.json` 1 요청 piestats `recent_window` 캐시). 순수 빌더 `core/profile-summary.ts` (`scope: 'lifetime' | 'recent'`), 렌더 `ui/profile-summary-view.ts` (DOM 노드 — HTML 문자열 금지). 업로드 카드 일시정지 버튼 다크모드 색, User History 스크롤바 (Chrome 이 표준 `scrollbar-width` 있으면 커스텀 스크롤바 무시) 수정
-- **v9.10.0** — 큰 계정 full sync 가 429 한 번에 멈추던 문제 (429·타임아웃·네트워크 재시도, 대기 끝난 뒤 재시도), rate limiter 재설계 (slow start, 적응형 rate + 회복 상한, 정지 직후 429 는 정지 2 배, `X-Rate-Limit`/`Retry-After` 추종 — 46k 계정 재 sync + 첫 대시보드 기준 페이지 재시도만 있을 때 429 약 45 → 이 장치들로 4), 실패한 카운트를 0 으로 캐시하던 문제 (`countBatch` 1 회 재시도 + `cacheUnlessPartial`), related-tag pie 3 개의 implication 조회를 일괄 + 캐시로 공유 (`core/top-level-tags.ts`, 119 → ≤4 건), cold open 시 부가 pie 탭 6 개는 열 때 로딩, rate-limit 대기 중 진행 표시 주황, 진단 패널 Logs 섹션 + Refresh. 테스트 896 → 954
-- **v9.9.2** — grass 에서 metric/year 를 빠르게 바꿀 때 늦게 끝난 fetch 가 새 라벨 아래 옛 데이터를 그리던 race (issue #4), threshold 안내 중복
-- **v9.9.1** (핫픽스) — 모달의 `backdrop-filter` 2 개 제거 (Windows 잔상/버벅임), architecture.test.ts 경로 정규화 (Windows 에서 규칙 1 개가 0 건 검사로 통과하던 문제)
-- **v9.9.0** — 대시보드 오픈 속도 개선 (무거운 태그 분포 9 개를 blocking path 에서 제거, 캐시 즉시 페인트 + 화면에 보이는 pie 탭만 lazy revalidate → ~46k 계정 기준 30s → 5s), 월 popover 차트 (일별 스파크라인 + 연간 추세선), `<`/`>` 포함 태그 이스케이프, 실패한 sync 가 성공으로 보고되던 문제, 삭제된 포스트의 로컬 ghost row 정리 (`pruneGhostPosts`), 모든 대시보드 트래픽을 공유 rate limiter 로 통일 (+ gate 4 규칙 11 신설). 테스트 782 → 893
-- **v9.8.0** — grass 월 라벨 hover popover (월 합계/MoM/활동일 비율/최다일, 연내 in-memory 데이터로 계산 — 추가 API 없음)
-- **v9.7.2** — 부분 sync 시 Recent/Most Popular/milestone 이 갱신 안 되던 staleness 수정, full-refresh 힌트 7 일 → 30 일
-- **v9.7.0 / v9.7.1** — 대시보드 preview popover (최근 업로드 그리드 + 활동 분포 스트립), mintag/abandoned 감지 + 색상 범례
+Recent releases (details in [CHANGELOG.md](CHANGELOG.md)):
+- **v9.11.3** (hotfix) — on mobile, a "?" tooltip opened by a tap (Suspicious, the Recent uploads colour legend) did not close on a tap elsewhere. A shared `attachTapTooltip` (detects an outside tap with a document capture-phase click, only while open), `closeTapTooltips` in the popover's `hide()`, and the CSS hover/focus reveal limited to `@media (hover: hover)` (a phone's sticky hover and tap focus held the tooltip)
+- **v9.11.2** (hotfix) — the preview popover was cut off on the right on phones (width clamped to the screen − 16 px, `documentElement.clientWidth` instead of `innerWidth` — the overflowing popover inflated mobile Chrome's `innerWidth`), repositioned on rotation while open (a `resize` listener, only while open). A "?" explanation beside Suspicious in the Activity legend (hover on PC / tap on mobile, full width above the legend). Suspicious-upload conditions reworked: banned excluded (an artist-requested takedown), flagged and four Meta tags (`SUSPICIOUS_UPLOAD_TAGS`) added — only `is_flagged,tag_string_meta` added to the existing lookup, matched client-side (Meta-category tags count toward a Member's 2-tag limit — rechecked 2026-10-30, api-endpoints.md "Search tag limit")
+- **v9.11.1** — "At a glance" summary: a card at the top of the dashboard (over all synced uploads — share of the main copyrights and characters, deleted/banned/pending counts + % of all, tagging health, 30-day pace, streaks, peak year, change in reception, **no extra requests**) + a section at the top of the preview popover (over the latest 200, compared with the usual, one `/posts.json` request cached in piestats `recent_window`). Pure builder `core/profile-summary.ts` (`scope: 'lifetime' | 'recent'`), rendering in `ui/profile-summary-view.ts` (DOM nodes — no HTML strings). Fixed: the dark-mode colour of the upload card's pause button, the User History scrollbar (Chrome ignores a custom scrollbar when the standard `scrollbar-width` is set)
+- **v9.10.0** — a large account's full sync stopped at a single 429 (retries for 429, timeouts and network errors, retried after the wait), a rate limiter redesign (slow start, adaptive rate + recovery cap, a doubled pause for a 429 right after a pause, following `X-Rate-Limit`/`Retry-After` — on a 46k account's re-sync + first dashboard, about 45 429s with page retries alone → 4 with these), failed counts cached as 0 (`countBatch` retries once + `cacheUnlessPartial`), the implication lookups of the three related-tag pies batched and cached together (`core/top-level-tags.ts`, 119 → ≤4 requests), the six secondary pie tabs load when opened on a cold open, orange progress while waiting on the rate limit, a Logs section + Refresh in the diagnostic panel. Tests 896 → 954
+- **v9.9.2** — a race where switching the Grass metric/year quickly let a late fetch draw old data under the new label (issue #4), a duplicated threshold notice
+- **v9.9.1** (hotfix) — two `backdrop-filter`s removed from the modals (ghosting/stutter on Windows), architecture.test.ts path normalisation (a rule passed on Windows checking 0 files)
+- **v9.9.0** — faster dashboard open (the nine heavy tag distributions off the blocking path, cached values painted at once + lazy revalidation of the visible pie tab only → ~46k account 30 s → 5 s), month popover charts (daily sparkline + yearly trend line), escaping of tags containing `<`/`>`, failed syncs reported as successful, local ghost rows of deleted posts cleaned up (`pruneGhostPosts`), all dashboard traffic through the shared rate limiter (+ new gate 4 rule 11). Tests 782 → 893
+- **v9.8.0** — Grass month-label hover popover (month total / MoM / share of active days / busiest day, computed from the year's in-memory data — no extra API)
+- **v9.7.2** — Recent / Most Popular / milestones not refreshed after a partial sync, full-refresh hint 7 days → 30 days
+- **v9.7.0 / v9.7.1** — dashboard preview popover (recent uploads grid + activity distribution strip), mintag/abandoned detection + colour legend
 
-preview popover 의 동작 카탈로그 (mintag/abandoned 판정 기준, 활동 분포 11 타입, suspicious 재분류, anchor prefix) 는 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Mintag / abandoned detection" 및 "Activity distribution feed" 섹션이 canonical — 여기 중복 기재하지 말 것
+The preview popover's behaviour catalogue (mintag/abandoned criteria, the 11 activity types, suspicious re-typing, anchor prefixes) lives in the "Mintag / abandoned detection" and "Activity distribution feed" sections of [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) — that is canonical, do not repeat it here
 
-## 메모
-- `CONFIG.THEMES` 에 테마 추가 시 light/dark 섹션 코멘트 유지 (현재 12 개 테마 — Light 6: Light/Solarized Light/Sakura/Lavender/Ice/Aurora, Dark 6: Midnight/Solarized Dark/Dracula/Ocean/Monokai/Ember)
-- `getBestThumbnailUrl()` 우선순위: 720x720 webp > 360x360 webp > 기타 변형 > preview > file. 변형은 `media_asset.variants` (Danbooru 는 top-level `variants` 를 안 줌) 또는 저장된 행의 `variants`. 고화질은 한 건씩 받는 카드 요청만 `only=…,media_asset[variants]` 로 받음 (단건, 마일스톤, top posts, recent popular, random, 태그 페이지 latest · trending · 마일스톤 — 결정 G-3, T-506). 목록 · sync · 파이 썸네일 (80px) · 미리보기 격자 (180px) 는 변형을 안 받고 `preview_file_url` (180×180 jpg). sync 행은 썸네일을 저장하지 않고, 마일스톤 조회가 해당 행에 한 번 채움 (없으면 `variants: []`)
-- `mapConcurrent()` 유틸은 병렬 API 호출 제어용 (count fetch, tag filtering 에서 사용)
-- `MAX_OPTIMIZED_POSTS = 1200` — Quick Sync / Small Tag 경로의 분기 임계값 ([src/config.ts](src/config.ts))
-- Count cache TTL (v9.6): `getCountCacheTtlMs()` 기본 10 분, 사용자가 settings popover 에서 조절 가능. `tryGetCachedStats<T>` 가 일관 사용
-- **검색 태그 한도** (2026-11-10 부터): 비로그인 2, Member 3, Gold 이상 무제한 (조회하는 **열람자** 등급 기준). 무료인 메타태그는 `status rating limit is id date age filesize filetype parent child md5 width height duration mpixels ratio score upvote downvotes favcount embedded tagcount pixiv_id pixiv` 뿐 — **`user:` `order:` `has:` `fav:` `ordfav:` `source:` `gentags:` 류는 1 개로 계산**되고, 태그 이름은 Meta 카테고리 포함 1 개씩. `/counts/posts.json` 도 2026-11-05 부터 같은 검사를 받아 넘으면 422. 새 쿼리는 비로그인 기준(2)에 맞추거나, 넘는 쿼리는 등급별 처리를 둘 것. 상세·현재 우회 방식은 [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md) 의 "Search tag limit"
-- Count 기반 통계 (status/rating/분포 9 개) 는 `countBatch()` 로 카운트를 받고 `cacheUnlessPartial()` 로 저장. 429·5xx·네트워크 실패는 1 회 재시도 (rate limiter 정지 뒤로 줄 섬), 그래도 잃은 카운트가 있으면 캐시 저장 안 함 → 이전 캐시를 보여주고 다음 열기에서 재시도. 결정적 4xx (예: Member 태그 한도 422) 는 재시도도 차단도 안 함. 서버가 `null` 을 준 카운트는 `fetchRemoteCount` 가 `CountUnavailableError` 를 던짐 (0 아님) — 재시도 안 하고 (서버가 5 분 캐시) 캐시도 안 함 (v9.12). Commentary · Translation · Hair length 에서 잃은 조각은 `unknown` (범례 "—", 파이 비율에서 제외). 새 분포 추가 시 `fetchRemoteCount` 직접 호출 대신 이 경로 사용. 열람자 태그 한도를 넘는 쿼리는 `core/search-terms.ts` 의 `fitsViewerTagLimit` 로 미리 걸러낼 수 있음. 태그 페이지는 `fetchCountWithRetry` 가 같은 규칙으로 잃은 값을 `null` 로 주고 (한도 초과는 안 보냄), 파이는 "—"/"🔒", 저장은 이전의 온전한 파이 유지 (T-308, [sync-strategies.md](.claude/rules/sync-strategies.md))
-- **로컬 파이 (T-406)**: User 대시보드의 Status (appealed 제외) · Rating · Character · Copyright 파이와 tag 수 &lt;10 두 값은 조건이 맞으면 count 대신 로컬 `posts` 행에서 셈 (`getLocalDistributions` → `core/local-distributions.ts`). 조건: `sync_meta.fieldsVersion ≥ 2`, sync 진행 중 · 실패 표시 없음 + 완료 스탬프, 순번에 구멍 없음 (T-404). 아니면 위의 count 경로. 반환 모양 · piestats 키는 같음. 새 분포를 로컬로 옮길 때는 필요한 필드를 `SYNC_POST_FIELDS` 에 넣고 `POST_FIELDS_VERSION` 을 올릴 것 (기존 사용자는 backfill 이 다시 채움)
+## Notes
+- When adding a theme to `CONFIG.THEMES`, keep the light/dark section comments (12 themes today — Light 6: Light/Solarized Light/Sakura/Lavender/Ice/Aurora, Dark 6: Midnight/Solarized Dark/Dracula/Ocean/Monokai/Ember)
+- `getBestThumbnailUrl()` priority: 720x720 webp > 360x360 webp > other variants > preview > file. Variants come from `media_asset.variants` (Danbooru gives no top-level `variants`) or a stored row's `variants`. Only the single-post card requests ask for the large sizes, as `only=…,media_asset[variants]` (single post, milestones, top posts, recent popular, random, the tag page's latest / trending / milestones — decision G-3, T-506). Lists, the syncs, pie thumbnails (80px) and the preview grid (180px) ask for no variants and use `preview_file_url` (the 180×180 jpg). Sync rows store no thumbnail; the milestone lookup fills it in on its rows once (`variants: []` when there is none)
+- The `mapConcurrent()` utility controls parallel API calls (used for count fetches and tag filtering)
+- `MAX_OPTIMIZED_POSTS = 1200` — the threshold for the Quick Sync / Small Tag paths ([src/config.ts](src/config.ts))
+- Count cache TTL (v9.6): `getCountCacheTtlMs()`, 10 minutes by default, adjustable in the settings popover. Used consistently by `tryGetCachedStats<T>`
+- **Search tag limit** (since 2026-11-10): anonymous 2, Member 3, Gold and above unlimited (by the level of the **viewer** running the script). The only free metatags are `status rating limit is id date age filesize filetype parent child md5 width height duration mpixels ratio score upvote downvotes favcount embedded tagcount pixiv_id pixiv` — **`user:` `order:` `has:` `fav:` `ordfav:` `source:` and the `gentags:` kind count as one each**, and tag names count one each, Meta category included. `/counts/posts.json` gets the same check since 2026-11-05 and answers 422 over it. Fit new queries to the anonymous limit (2), or handle the levels for queries that go over. Details and the current workarounds in "Search tag limit" in [.claude/rules/api-endpoints.md](.claude/rules/api-endpoints.md)
+- Count-based statistics (status / rating / the 9 distributions) get their counts through `countBatch()` and save through `cacheUnlessPartial()`. A 429, 5xx or network failure is retried once (queued behind the rate limiter's pause); if a count is still lost, nothing is cached → the previous cache is shown and the next open retries. A deterministic 4xx (e.g. a Member's 422 over the tag limit) is neither retried nor blocking. A count the server gave as `null` makes `fetchRemoteCount` throw `CountUnavailableError` (never 0) — not retried (the server caches it 5 minutes) and not cached (v9.12). A lost slice in Commentary, Translation or Hair length is `unknown` (legend "—", left out of the pie's shares). New distributions use this path rather than calling `fetchRemoteCount` directly. Queries over the viewer's tag limit can be filtered out up front with `fitsViewerTagLimit` in `core/search-terms.ts`. On tag pages `fetchCountWithRetry` follows the same rules and gives a lost value as `null` (never sending queries over the limit); the pies show "—"/"🔒" and saving keeps the previous whole pie (T-308, [sync-strategies.md](.claude/rules/sync-strategies.md))
+- **Local pies (T-406)**: the user dashboard's Status (except appealed), Rating, Character and Copyright pies and the two tag-count-below-10 values are counted from the local `posts` rows instead of counts when the conditions hold (`getLocalDistributions` → `core/local-distributions.ts`). Conditions: `sync_meta.fieldsVersion ≥ 2`, no sync under way or failed + a completion stamp, no gap in the numbering (T-404). Otherwise the count path above. Same return shapes and piestats keys. The secondary pies (Gender, Breasts, Hair length, Hair color, Translation, and Commentary's two tag slices) are counted from the same scan when `fieldsVersion ≥ 3` and every row holds the tag flags `tf` (T-703, `getLocalTagCounts`). The tag strings are not stored; a row keeps only indices into `TAG_FLAG_NAMES` (`core/post-tag-flags.ts`) — changing that list bumps `POST_FIELDS_VERSION` and moves `TAG_FLAGS_FIELDS_VERSION` with it. Commentary's Untagged is `has:commentary` (an artist commentary record, not a tag) and stays 3 counts. To move another distribution local, add the fields it needs to `SYNC_POST_FIELDS` and bump `POST_FIELDS_VERSION` (existing users get the backfill again); the first local pies check only `LOCAL_PIES_FIELDS_VERSION` (2) and stay local during it
