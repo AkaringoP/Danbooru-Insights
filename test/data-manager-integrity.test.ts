@@ -382,12 +382,12 @@ describe('getMetricData — hourly stats delta merge', () => {
   it('does not double-count hours for data in the overlap buffer period', async () => {
     const currentYear = new Date().getFullYear();
 
-    // Derive local hours from the same Date parsing the production code uses,
-    // so the test is correct regardless of the runner's timezone.
+    // The hour as written in the timestamp, whatever the runner's time zone
+    // (T-702).
     const overlapTimestamp = `${currentYear}-05-10T12:30:00Z`;
     const newTimestamp = `${currentYear}-05-11T14:00:00Z`;
-    const overlapLocalHour = new Date(overlapTimestamp).getHours();
-    const newLocalHour = new Date(newTimestamp).getHours();
+    const overlapLocalHour = 12;
+    const newLocalHour = 14;
 
     // Existing cached data: last entry is May 10
     const localRows = [
@@ -1398,14 +1398,14 @@ describe('getMetricData — hourly stats accumulation', () => {
       hourly_stats: hourlyStats,
     });
 
-    // All items at 10:xx → local hour computed from UTC (deterministic in test)
+    // All items at 10:xx (the hour as written, T-702)
     const ts1 = `${currentYear}-11-10T10:00:00Z`;
     const ts2 = `${currentYear}-11-10T10:30:00Z`;
     const ts3 = `${currentYear}-11-10T10:45:00Z`;
     // Different hour
     const ts4 = `${currentYear}-11-10T15:00:00Z`;
-    const hourOf10 = new Date(ts1).getHours();
-    const hourOf15 = new Date(ts4).getHours();
+    const hourOf10 = 10;
+    const hourOf15 = 15;
 
     let pageHit = 0;
     const rl = makeRateLimiter(async (url: string) => {
@@ -1443,6 +1443,50 @@ describe('getMetricData — hourly stats accumulation', () => {
     expect(slot10?.count).toBe(3);
     // 1 item at the other hour
     expect(slot15?.count).toBe(1);
+  });
+
+  it('counts the hour as written, not on the browser clock (T-702)', async () => {
+    const currentYear = new Date().getFullYear();
+    const hourlyStats = makeTable();
+    const db = makeDb({
+      uploads: makeTable(),
+      completed_years: makeTable(),
+      hourly_stats: hourlyStats,
+    });
+    // One instant written in two zones. On the browser clock both would land
+    // in the same hour, whatever the runner's zone.
+    let pageHit = 0;
+    const rl = makeRateLimiter(async () => {
+      pageHit++;
+      const items =
+        pageHit === 1
+          ? [
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-03-15T09:30:00+09:00`,
+              },
+              {uploader_id: 42, created_at: `${currentYear}-03-15T00:30:00Z`},
+            ]
+          : [];
+      return {ok: true, status: 200, json: async () => items};
+    });
+
+    await new DataManager(db, rl as never).getMetricData(
+      'uploads',
+      makeUser({id: '42'}),
+      currentYear,
+    );
+
+    const rows = (
+      hourlyStats.bulkPut.mock.calls as unknown[][]
+    )[0][0] as Array<{
+      hour: number;
+      count: number;
+    }>;
+    expect(rows.filter(r => r.count > 0)).toEqual([
+      expect.objectContaining({hour: 0, count: 1}),
+      expect.objectContaining({hour: 9, count: 1}),
+    ]);
   });
 
   it('loads existing hourly stats from DB when year is already complete', async () => {

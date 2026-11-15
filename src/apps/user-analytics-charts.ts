@@ -3012,11 +3012,11 @@ export async function renderHistoryChart(
 
   monthly.forEach((mo: MonthlyStatEntry, idx: number) => {
     const mKey = mo.date;
-    const stars = milestones1k.filter((m: MilestoneEntry) => {
-      const pDate = new Date(m.post.created_at);
-      const k = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}`;
-      return k === mKey;
-    });
+    // The month as written in `created_at` (the viewer's account time zone),
+    // as the bars count it — not the browser's calendar (T-702).
+    const stars = milestones1k.filter(
+      (m: MilestoneEntry) => String(m.post.created_at).slice(0, 7) === mKey,
+    );
 
     if (stars.length > 0) {
       const x = padLeftScroll + step * idx + step / 2;
@@ -3037,11 +3037,12 @@ export async function renderHistoryChart(
           animClass = 'star-shiny';
         }
 
+        const day = escapeHtml(String(m.post.created_at).slice(0, 10));
         if (isTouch2) {
           svg += `
                <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}; pointer-events: none;">
                    ★
-                   <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
+                   <title>Milestone #${m.milestone} (${day})</title>
                </text>
              `;
         } else {
@@ -3049,7 +3050,7 @@ export async function renderHistoryChart(
                <a href="/posts/${m.post.id}" target="_blank" style="cursor: pointer; pointer-events: all;">
                   <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}">
                      ★
-                     <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
+                     <title>Milestone #${m.milestone} (${day})</title>
                   </text>
                </a>
              `;
