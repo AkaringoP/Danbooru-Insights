@@ -4,6 +4,125 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.12.0 — Far fewer requests: pies from the synced posts, tag history from reports, pacing per Danbooru limit
+
+### Fixed
+- **Clicks and fallbacks that Danbooru's new security policy silenced.**
+  Since 2026-11-11 Danbooru blocks inline script in page markup. The monthly
+  upload bars in the user dashboard did nothing on click, and a failed
+  thumbnail on a tag page kept the broken-image icon. Both work again.
+- **Accounts past about 124,000 uploads lost the "At a glance" card, the
+  preview popover's summary and the scatter plot** to a browser limit on
+  argument counts. They load now.
+- **A count Danbooru could not finish was shown and saved as 0.** Danbooru
+  answers such a count with an empty value and keeps it for 5 minutes. Read
+  as 0, it could wipe a past year of the contribution graph or drop a slice
+  from a pie for a day. It is now treated as unknown: the previous value
+  stays, and a pie slice without a count shows "—" and takes no share. The
+  tag pages follow the same rule and no longer save a failed count as 0.
+- **Searches over the viewer's tag limit are no longer sent.** Danbooru
+  limits a search to 2 terms logged out and 3 for a Member, and now applies
+  that to counts too. A slice that would go over shows "🔒 Log in to see
+  it" instead of failing. Commentary "Untagged" used one 4-term search that
+  failed for everyone below Gold; it is now worked out from three smaller
+  ones.
+- **A Member's sync of an account above 200,000 uploads stopped at
+  Danbooru's page limit** and needed "Resume Sync" once per 200,000. It now
+  continues by itself.
+- **A sync of an account whose uploads start far into Danbooru's history
+  could fail on its first page**, most often logged out. It now starts at
+  the user's first post.
+- **"Data Synchronization Required" kept coming back** for accounts whose
+  saved posts had a gap. Such an account is synced again from the start.
+  A first sync that failed also no longer loses what it had saved.
+- **A small account's Quick Sync could save a cut-off set of posts as
+  complete** when Danbooru answered a page with an error.
+- **Tag page history could count a month in the wrong time zone.** Months
+  are now UTC everywhere on the tag dashboard: the chart, the search a bar
+  opens, the milestones and every date shown. The chart's title says so.
+- **A tag's milestone post could be off by the posts of one day**, and
+  milestones deep into a busy month were skipped past Danbooru's page limit.
+- **A tag ranking that Danbooru timed out on read "No Data".** It now says
+  the ranking could not be loaded (logged-out searches of very large tags
+  stop after 3 seconds), and a failed ranking never replaces a saved one.
+- **Contribution graph pages gave up too early.** A year's fetch failed
+  after four rate-limit answers in a row, or on one network error. Pages
+  are retried like the sync's.
+- **Hourly distribution and the day cells used two clocks.** For a viewer
+  whose browser time zone differs from their Danbooru account's, hours were
+  in browser time and days in account time. Both follow the account's now.
+  Years already cached keep their old hours until they are fetched again.
+- **Large thumbnails never loaded.** The single-post cards (milestones, top
+  posts, recent popular, random; latest, trending and milestones on tag
+  pages) asked Danbooru for image sizes under a name it does not use and
+  always showed the 180px preview. They show the 720px image now.
+
+### Performance
+- **Requests are paced per Danbooru limit.** Danbooru limits counts,
+  reports and related-tag lookups separately. Each now waits in its own
+  lane, kept in step with the limit Danbooru reports on every response, so
+  a slow lane no longer holds up a sync and a limit reached in one lane no
+  longer pauses everything. The contribution graph, the user dashboard and
+  the tag pages share one budget per tab: 4.5 requests per second with no
+  bursts. In test runs on a 46,000-upload account, a full sync often
+  finished without a single rate-limit answer, where every run drew one or
+  two before.
+- **Most pies of the user dashboard need no requests.** Status, Rating,
+  Character, Copyright, Gender, Boobs, Hair_L, Hair_C, Tran and most of
+  Cmnt are counted from the posts the sync already saved, instead of one
+  count request per slice. On a 46,000-upload account that is about 125 to
+  175 fewer counts on a first open. Changes made on Danbooru since the last sync are
+  picked up after the dashboard opens, usually with one request.
+  - Existing users get a one-time update of their saved posts the first
+    time the dashboard opens ("updating… %" on the scatter plot). The pies
+    count the old way until it finishes.
+  - These pies show the state as of the last sync or update, not a live
+    count. Uploads not yet synced are not in them.
+- **A first open of the dashboard is several times faster.** Fav_Copy now
+  loads when its tab is opened: a cold open on a 46,000-upload account went
+  from about 36 s to about 7 s. The saved posts are also read once instead
+  of four times, and cleaning up other users' old data waits until the
+  dashboard is on screen.
+- **Tag page history takes one request instead of one per month.** It comes
+  from Danbooru's reports, falls back to halves of the range when a report
+  times out, and only then to monthly counts. Ratings and deleted posts
+  come from two reports instead of ten counts, and the exact Copy / Char
+  counts are fetched only when that tab is opened.
+- **The contribution graph reuses synced posts.** A year of uploads not yet
+  cached is filled from the dashboard's saved posts when they are complete,
+  without fetching pages. A year with few uploads asks one page, not five.
+- **Six unused database indexes are gone**, which makes saving a sync's
+  pages faster.
+
+### Changed
+- **The report button waits for the contribution graph.** While the graph
+  is loading, a click on 📊 shows a short notice instead of starting a sync
+  that would slow both. The hover preview still works.
+- **The hover preview opens once the pointer rests on 📊** for 0.4 s, so
+  passing over the icon opens and loads nothing.
+- **Contribution graph caches of profiles not opened for 90 days are
+  deleted.** They are fetched again on the next visit.
+- **Old tag page data is cleaned up.** Monthly counts and tag lookups past
+  their lifetime used to stay forever.
+
+### Internal
+- The unit suite grew from 1040 to 1437 tests, with a standing simulation
+  of the rate limiter against a model of Danbooru's server limits.
+- Database schema v13: a `sync_meta` table (per-user sync state), six
+  `posts` indexes dropped. Post rows carry fields version 3
+  (`core/post-record.ts`, `core/post-tag-flags.ts`).
+- New core modules: `rate-lane.ts`, `monthly-report.ts`,
+  `local-distributions.ts`, `change-catch-up.ts`, `search-terms.ts`,
+  `fetch-retry.ts`, `sync-meta.ts`, `grass-load-gate.ts`.
+- The shared rate limiter is a required constructor argument everywhere;
+  architecture rule 14 forbids inline script in markup.
+- Known limits, left for a later release: an account with a saved post
+  that Danbooru has since expunged keeps counting its secondary pies with
+  requests, and a sync that failed after saving every post keeps the pies
+  on requests until the next sync.
+
+---
+
 ## v9.11.3 — "?" tooltips close on a tap elsewhere (mobile)
 
 ### Fixed
