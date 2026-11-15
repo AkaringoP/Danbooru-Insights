@@ -373,6 +373,116 @@ export function isStaleUser(
  */
 const LOCAL_DISTRIBUTIONS_MEMO_MS = 10_000;
 
+/**
+ * How long one scan of a user's rows serves the dashboard (T-501). An open
+ * reads it for the summary, the scatter, the monthly chart and the local
+ * pies within seconds; the limit bounds how long a write from elsewhere
+ * (another tab's sync) could go unseen, and how long the memory is held.
+ */
+const ROW_SNAPSHOT_MEMO_MS = 60_000;
+
+/** What the dashboard needs from one pass over a user's rows (T-501). */
+interface RowSnapshot {
+  /** One scatter point per row with a `created_at`, in the index's order. */
+  points: ScatterDataPoint[];
+  /**
+   * Each point's `created_at` date part as stored (`YYYY-MM-DD`, in the
+   * viewer's time zone at the sync), the summary's and monthly chart's key.
+   */
+  days: string[];
+  /** Every row counted for the local pies; used only when they qualify. */
+  local: LocalDistributions;
+}
+
+/**
+ * Uploads per day key, all time and since `oneYearAgo`, with the first and
+ * last upload — the summary's pass over a {@link RowSnapshot}.
+ */
+function tallyUploadDays(
+  points: ScatterDataPoint[],
+  days: string[],
+  oneYearAgo: Date,
+): {
+  historyAll: Record<string, number>;
+  history1Year: Record<string, number>;
+  first: Date | null;
+  last: Date | null;
+  count1Year: number;
+} {
+  const historyAll: Record<string, number> = {};
+  const history1Year: Record<string, number> = {};
+  let first: Date | null = null;
+  let last: Date | null = null;
+  let count1Year = 0;
+  for (let i = 0; i < points.length; i++) {
+    const day = days[i];
+    historyAll[day] = (historyAll[day] || 0) + 1;
+    const d = new Date(points[i].d);
+    if (!first || d < first) first = d;
+    if (!last || d > last) last = d;
+    if (d >= oneYearAgo) {
+      history1Year[day] = (history1Year[day] || 0) + 1;
+      count1Year++;
+    }
+  }
+  return {historyAll, history1Year, first, last, count1Year};
+}
+
+/** The day with the most uploads; on a tie, the first one met. */
+function busiestDay(history: Record<string, number>): {
+  count: number;
+  date: string;
+} {
+  let count = 0;
+  let date = 'N/A';
+  for (const [day, n] of Object.entries(history)) {
+    if (n > count) {
+      count = n;
+      date = day;
+    }
+  }
+  return {count, date};
+}
+
+/** The longest run of consecutive days among sorted `YYYY-MM-DD` keys. */
+function longestStreak(sortedDates: string[]): {
+  length: number;
+  start: string | null;
+  end: string | null;
+} {
+  let best = {
+    length: 0,
+    start: null as string | null,
+    end: null as string | null,
+  };
+  let current = 0;
+  let currentStart: string | null = null;
+  let previous: Date | null = null;
+  for (const dateStr of sortedDates) {
+    const d = new Date(dateStr);
+    d.setHours(0, 0, 0, 0);
+    if (!previous) {
+      current = 1;
+      currentStart = dateStr;
+    } else {
+      const diffDays = Math.round(
+        (d.getTime() - previous.getTime()) / (1000 * 60 * 60 * 24),
+      );
+      if (diffDays === 1) {
+        current++;
+      } else if (diffDays > 1) {
+        current = 1;
+        currentStart = dateStr;
+      }
+    }
+    if (current > best.length) {
+      best = {length: current, start: currentStart, end: dateStr};
+    }
+    previous = d;
+  }
+  return best;
+}
+
 /** Tags checked per top-level lookup on the local tag pies (T-406). */
 const LOCAL_TOP_LEVEL_BATCH = 50;
 
@@ -571,6 +681,12 @@ export class AnalyticsDataManager extends DataManager {
     {at: number; value: Promise<LocalDistributions | null>}
   >();
 
+  /** One scan of a user's rows per dashboard open ({@link getRowSnapshot}). */
+  private rowSnapshotMemo = new Map<
+    number,
+    {at: number; value: Promise<RowSnapshot>}
+  >();
+
   /**
    * @param {Database} db The Dexie database instance.
    * @param {RateLimitedFetch} rateLimiter The tab's shared rate limiter.
@@ -759,123 +875,41 @@ export class AnalyticsDataManager extends DataManager {
    * @return {Promise<{maxUploads: number, maxDate: string, firstUploadDate: ?Date, lastUploadDate: ?Date, count1Year: number, maxUploads1Year: number, maxDate1Year: string, maxStreak: number, maxStreakStart: ?string, maxStreakEnd: ?string, activeDays: number}>} Summary stats.
    */
   async getSummaryStats(userInfo: TargetUser): Promise<SummaryStats> {
-    const uploaderId = parseInt(userInfo.id ?? '0');
-    if (!uploaderId)
-      return {
+    const empty = () =>
+      ({
         maxUploads: 0,
         maxDate: 'N/A',
         firstUploadDate: null,
         lastUploadDate: null,
-      } as SummaryStats;
-
-    const historyAll: Record<string, number> = {};
-    const history1Year: Record<string, number> = {};
-    let firstUploadDate: Date | null = null;
-    let lastUploadDate: Date | null = null;
+      }) as SummaryStats;
+    const uploaderId = parseInt(userInfo.id ?? '0');
+    if (!uploaderId) return empty();
 
     const oneYearAgo = new Date();
     oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
-    let count1Year = 0;
-    let totalCount = 0;
+    // From the open's one scan of the rows (T-501), in the same row order.
+    const {points, days} = await this.getRowSnapshot(uploaderId);
+    if (points.length === 0) return empty();
 
-    // Cursor iteration: processes one record at a time to avoid loading all posts into memory
-    await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .each((p: ApiItem) => {
-        totalCount++;
-        const dStr = p['created_at'].split('T')[0];
-        historyAll[dStr] = (historyAll[dStr] || 0) + 1;
-
-        const d = new Date(p.created_at);
-        if (!firstUploadDate || d < firstUploadDate) {
-          firstUploadDate = d;
-        }
-        if (!lastUploadDate || d > lastUploadDate) {
-          lastUploadDate = d;
-        }
-
-        if (d >= oneYearAgo) {
-          history1Year[dStr] = (history1Year[dStr] || 0) + 1;
-          count1Year++;
-        }
-      });
-
-    if (totalCount === 0)
-      return {
-        maxUploads: 0,
-        maxDate: 'N/A',
-        firstUploadDate: null,
-        lastUploadDate: null,
-      } as SummaryStats;
-
-    let maxUploads = 0;
-    let maxDate = 'N/A';
-
-    const sortedDates = Object.keys(historyAll).sort();
-    const activeDays = sortedDates.length;
-
-    for (const [date, count] of Object.entries(historyAll)) {
-      if ((count as number) > maxUploads) {
-        maxUploads = count as number;
-        maxDate = date;
-      }
-    }
-
-    let maxStreak = 0;
-    let maxStreakStart: string | null = null;
-    let maxStreakEnd: string | null = null;
-
-    let currentStreak = 0;
-    let currentStreakStart: string | null = null;
-    let lastDateObj: Date | null = null;
-
-    for (const dateStr of sortedDates) {
-      const d = new Date(dateStr);
-      d.setHours(0, 0, 0, 0);
-      if (!lastDateObj) {
-        currentStreak = 1;
-        currentStreakStart = dateStr;
-      } else {
-        const diffTime = d.getTime() - lastDateObj.getTime();
-        const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
-        if (diffDays === 1) {
-          currentStreak++;
-        } else if (diffDays > 1) {
-          currentStreak = 1;
-          currentStreakStart = dateStr;
-        }
-      }
-      if (currentStreak > maxStreak) {
-        maxStreak = currentStreak;
-        maxStreakStart = currentStreakStart;
-        maxStreakEnd = dateStr;
-      }
-      lastDateObj = d;
-    }
-
-    let maxUploads1Year = 0;
-    let maxDate1Year = 'N/A';
-    for (const [date, count] of Object.entries(history1Year)) {
-      if ((count as number) > maxUploads1Year) {
-        maxUploads1Year = count as number;
-        maxDate1Year = date;
-      }
-    }
+    const tally = tallyUploadDays(points, days, oneYearAgo);
+    const sortedDates = Object.keys(tally.historyAll).sort();
+    const all = busiestDay(tally.historyAll);
+    const lastYear = busiestDay(tally.history1Year);
+    const streak = longestStreak(sortedDates);
 
     return {
-      maxUploads,
-      maxDate,
-      firstUploadDate,
-      lastUploadDate,
-      count1Year,
-      maxUploads1Year,
-      maxDate1Year,
-      maxStreak,
-      maxStreakStart,
-      maxStreakEnd,
-      activeDays,
+      maxUploads: all.count,
+      maxDate: all.date,
+      firstUploadDate: tally.first,
+      lastUploadDate: tally.last,
+      count1Year: tally.count1Year,
+      maxUploads1Year: lastYear.count,
+      maxDate1Year: lastYear.date,
+      maxStreak: streak.length,
+      maxStreakStart: streak.start,
+      maxStreakEnd: streak.end,
+      activeDays: sortedDates.length,
     };
   }
 
@@ -1169,16 +1203,13 @@ export class AnalyticsDataManager extends DataManager {
 
     const counts: Record<string, number> = {}; // "2023-01": 5
 
-    // Streaming iteration to avoid memory spikes
-    await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .each((post: ApiItem) => {
-        if (!post['created_at']) return;
-        // created_at is likely ISO string "2023-01-01T..."
-        const month = post['created_at'].substring(0, 7); // "YYYY-MM"
-        counts[month] = (counts[month] || 0) + 1;
-      });
+    // From the open's one scan of the rows (T-501): a day key's first seven
+    // characters are `created_at`'s ("YYYY-MM").
+    const {days} = await this.getRowSnapshot(uploaderId);
+    for (const day of days) {
+      const month = day.substring(0, 7);
+      counts[month] = (counts[month] || 0) + 1;
+    }
 
     // Convert to array and Fill Gaps for Linear timeline
     let results: MonthlyStatEntry[] = [];
@@ -2108,10 +2139,11 @@ export class AnalyticsDataManager extends DataManager {
    *  - the rows' numbering is intact (T-404) and there is at least one.
    * Otherwise the pies keep counting with `/counts/posts.json`.
    *
-   * One scan serves the status, rating, character and copyright pies and
-   * the user stats of one dashboard load: the result is kept for
-   * {@link LOCAL_DISTRIBUTIONS_MEMO_MS} and dropped whenever the user's rows
-   * change (sync, backfill, reset).
+   * The counts come from the open's one scan of the rows (T-501), shared
+   * with the summary, the scatter and the monthly chart; the result serves
+   * the status, rating, character and copyright pies and the user stats
+   * for {@link LOCAL_DISTRIBUTIONS_MEMO_MS} and is dropped whenever the
+   * user's rows change (sync, backfill, catch-up, reset).
    */
   async getLocalDistributions(
     uploaderId: number,
@@ -2153,18 +2185,19 @@ export class AnalyticsDataManager extends DataManager {
       log.debug('Pies count remotely', {uploaderId, reason: notUsed});
       return null;
     }
-    const counter = createLocalDistributionCounter();
-    await this.db.posts
-      .where('uploader_id')
-      .equals(uploaderId)
-      .each((row: PostRecord) => counter.add(row));
-    const result = counter.result();
-    return result.rows > 0 ? result : null;
+    // Counted in the open's one scan of the rows (T-501).
+    const {local} = await this.getRowSnapshot(uploaderId);
+    return local.rows > 0 ? local : null;
   }
 
-  /** Drops the local distributions memo after the user's rows changed. */
-  private invalidateLocalDistributions(uploaderId: number): void {
+  /**
+   * Drops what was read from the user's rows — the scan (T-501) and the
+   * local pies — after they changed: a sync, a backfill, a catch-up that
+   * changed rows, a reset.
+   */
+  private forgetLocalRows(uploaderId: number): void {
     this.localDistributionsMemo.delete(uploaderId);
+    this.rowSnapshotMemo.delete(uploaderId);
   }
 
   /**
@@ -3082,28 +3115,62 @@ export class AnalyticsDataManager extends DataManager {
   async getScatterData(userInfo: TargetUser): Promise<ScatterDataPoint[]> {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return [];
+    // A copy of the open's one scan (T-501): the scatter replaces its own
+    // array in place after a backfill (replaceArrayContents).
+    return (await this.getRowSnapshot(uploaderId)).points.slice();
+  }
 
-    const result: ScatterDataPoint[] = [];
-    // Streaming iterate
+  /**
+   * The user's rows read once for the dashboard (T-501): the summary, the
+   * monthly chart, the scatter and the local pies all derive from it, so an
+   * open reads `posts` once instead of four times. Kept for
+   * {@link ROW_SNAPSHOT_MEMO_MS} and dropped when the rows change
+   * ({@link forgetLocalRows}); a failed read is not kept.
+   */
+  private getRowSnapshot(uploaderId: number): Promise<RowSnapshot> {
+    const hit = this.rowSnapshotMemo.get(uploaderId);
+    if (hit && Date.now() - hit.at < ROW_SNAPSHOT_MEMO_MS) return hit.value;
+    const entry = {at: Date.now(), value: this.scanRows(uploaderId)};
+    this.rowSnapshotMemo.set(uploaderId, entry);
+    const drop = () => {
+      if (this.rowSnapshotMemo.get(uploaderId) === entry) {
+        this.rowSnapshotMemo.delete(uploaderId);
+      }
+    };
+    void entry.value.catch(drop);
+    // Let the memory go once expired: the app's own manager lives as long
+    // as the page. (A timer that runs early, as test stubs do, keeps it.)
+    setTimeout(() => {
+      if (Date.now() - entry.at >= ROW_SNAPSHOT_MEMO_MS) drop();
+    }, ROW_SNAPSHOT_MEMO_MS);
+    return entry.value;
+  }
+
+  /** One pass over the user's rows: {@link RowSnapshot}. */
+  private async scanRows(uploaderId: number): Promise<RowSnapshot> {
+    const points: ScatterDataPoint[] = [];
+    const days: string[] = [];
+    const counter = createLocalDistributionCounter();
     await this.db.posts
       .where('uploader_id')
       .equals(uploaderId)
-      .each((post: ApiItem) => {
-        if (!post['created_at']) return;
-        // Use timestamps for faster plotting
-        const d = new Date(post['created_at']).getTime();
-        // Rating: g, s, q, e
-        const r = post['rating'];
-        const s = post['score'] || 0;
-        const t = post['tag_count_general'] || 0;
-        const dn = post['down_score'];
-        const del = post['is_deleted'];
-        const ban = post['is_banned'];
-
-        result.push({id: post['id'], d, s, t, r, dn, del, ban});
+      .each((row: PostRecord) => {
+        counter.add(row);
+        if (!row.created_at) return;
+        points.push({
+          id: row.id,
+          // Timestamps plot faster than date strings.
+          d: new Date(row.created_at).getTime(),
+          s: row.score || 0,
+          t: row.tag_count_general || 0,
+          r: row.rating,
+          dn: row.down_score,
+          del: row.is_deleted,
+          ban: row.is_banned,
+        });
+        days.push(row.created_at.split('T')[0]);
       });
-
-    return result;
+    return {points, days, local: counter.result()};
   }
 
   /**
@@ -3261,7 +3328,7 @@ export class AnalyticsDataManager extends DataManager {
     });
     // Full success: any earlier failure history is stale.
     this.clearBackfillFailureState(uploaderId);
-    this.invalidateLocalDistributions(uploaderId);
+    this.forgetLocalRows(uploaderId);
   }
 
   /**
@@ -3409,7 +3476,7 @@ export class AnalyticsDataManager extends DataManager {
       );
       cursor = await this.recordCatchUpStep(uploaderId, step, watermark);
     }
-    if (changed > 0) this.invalidateLocalDistributions(uploaderId);
+    if (changed > 0) this.forgetLocalRows(uploaderId);
     return {changed};
   }
 
@@ -5380,7 +5447,7 @@ export class AnalyticsDataManager extends DataManager {
     // was 0, it was a Full Sync; otherwise it's a Partial Sync. Heavy tag
     // distributions freshen post-paint via fetchDashboardData's SWR revalidate.
     // The rows changed: count them again (T-406).
-    this.invalidateLocalDistributions(uploaderId);
+    this.forgetLocalRows(uploaderId);
     await this.refreshCriticalStats(userInfo, startId === 0);
 
     // First successful sync = meaningful engagement signal. Ask the
@@ -5545,7 +5612,7 @@ export class AnalyticsDataManager extends DataManager {
 
       // 7. Refresh critical stats (full sync). Heavy tag distributions
       // freshen post-paint via fetchDashboardData's SWR revalidate.
-      this.invalidateLocalDistributions(uploaderId);
+      this.forgetLocalRows(uploaderId);
       await this.refreshCriticalStats(userInfo, true);
 
       // Engagement signal — see syncAllPosts for rationale.
@@ -5689,7 +5756,7 @@ export class AnalyticsDataManager extends DataManager {
     // watermark, a backfill plan): left behind, it would vouch for whatever
     // the next, possibly partial, sync writes.
     await this.db.sync_meta?.delete(uploaderId);
-    this.invalidateLocalDistributions(uploaderId);
+    this.forgetLocalRows(uploaderId);
 
     // Clear metadata (Last Sync Time)
     const lastSyncKey = `danbooru_grass_last_sync_${userInfo.id}`;

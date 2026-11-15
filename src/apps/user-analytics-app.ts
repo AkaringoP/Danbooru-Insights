@@ -2497,7 +2497,9 @@ export class UserAnalyticsApp {
         ['tagCloudGeneral', tagCloudGeneralStartRevalidate],
       ]);
       // Changed posts since the last catch-up, then the local pies (T-407).
-      scheduleChangeCatchUp(this.dataManager, this.context.targetUser);
+      // On this open's manager: the rows it changes must drop that
+      // manager's scan of them (T-501), which the pies here read.
+      scheduleChangeCatchUp(dashboardData.dataManager, this.context.targetUser);
     } finally {
       perfLogger.end('dbi:render:total', perfMeta);
       this.isRendering = false;

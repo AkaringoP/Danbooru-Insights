@@ -4331,3 +4331,173 @@ describe('catchUpChanges (T-407)', () => {
     expect(asked.find(u => u.startsWith('/posts.json'))).toContain('id:>0');
   });
 });
+
+describe('one row scan per dashboard open (T-501)', () => {
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    AnalyticsDataManager.isGlobalSyncing = false;
+    vi.stubGlobal('window', {location: {origin: 'https://danbooru.donmai.us'}});
+    storage = new Map([['danbooru_grass_last_sync_42', '2026-11-14']]);
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((k: string) => storage.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => storage.set(k, v)),
+      removeItem: vi.fn((k: string) => storage.delete(k)),
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** `YYYY-MM-DD` of `days` days ago (UTC). */
+  const dayAgo = (days: number) =>
+    new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+  const recent1 = dayAgo(3);
+  const recent2 = dayAgo(2);
+
+  /** Rows as the sync stores them, numbered 1..n in id order. */
+  const rows = [
+    ['2020-03-01T10:00:00.000+09:00', 'g', 5, 12, 0, false, false],
+    ['2020-03-02T23:59:00.000+09:00', 's', 3, 8, -1, true, false],
+    ['2020-03-03T00:10:00.000+09:00', 'q', 0, 20, 0, false, false],
+    ['2020-03-03T12:00:00.000+09:00', 'e', 10, 9, 0, false, true],
+    ['2020-05-10T08:00:00.000+09:00', 'g', 2, 15, 0, false, false],
+    [`${recent1}T12:00:00.000+09:00`, 'g', 1, 30, 0, false, false],
+    [`${recent1}T13:00:00.000+09:00`, 's', 4, 31, -2, false, false],
+    [`${recent2}T12:00:00.000+09:00`, 'g', 7, 32, 0, false, false],
+  ].map(([created_at, rating, score, tgc, dn, del, ban], i) => ({
+    id: i + 1,
+    no: i + 1,
+    uploader_id: 42,
+    created_at,
+    rating,
+    score,
+    tag_count_general: tgc,
+    down_score: dn,
+    is_deleted: del,
+    is_banned: ban,
+    pend: false,
+    flag: false,
+    tc: (tgc as number) + 5,
+    chr: i % 2 ? 'reimu' : 'marisa reimu',
+    cpy: 'touhou',
+  }));
+
+  function setUp() {
+    const posts = makePostsTable(rows);
+    const db = makeSyncDb(posts, {
+      sync_meta: {get: vi.fn(async () => ({userId: 42, fieldsVersion: 2}))},
+    });
+    const adm = new AnalyticsDataManager(
+      db as never,
+      makeSyncRateLimiter() as never,
+    );
+    return {adm, posts, user: makeSyncUser({id: '42'})};
+  }
+
+  it('keeps the summary stats', async () => {
+    const {adm, user} = setUp();
+
+    const s = await adm.getSummaryStats(user);
+
+    expect(s).toEqual({
+      maxUploads: 2,
+      maxDate: '2020-03-03',
+      firstUploadDate: new Date('2020-03-01T10:00:00.000+09:00'),
+      lastUploadDate: new Date(`${recent2}T12:00:00.000+09:00`),
+      count1Year: 3,
+      maxUploads1Year: 2,
+      maxDate1Year: recent1,
+      maxStreak: 3,
+      maxStreakStart: '2020-03-01',
+      maxStreakEnd: '2020-03-03',
+      activeDays: 6,
+    });
+  });
+
+  it('keeps the monthly stats, gaps filled', async () => {
+    const {adm, user} = setUp();
+
+    const m = await adm.getMonthlyStats(user, new Date(2020, 0, 15));
+
+    expect(m.slice(0, 5)).toEqual([
+      {date: '2020-01', count: 0, label: '2020-01'},
+      {date: '2020-02', count: 0, label: '2020-02'},
+      {date: '2020-03', count: 4, label: '2020-03'},
+      {date: '2020-04', count: 0, label: '2020-04'},
+      {date: '2020-05', count: 1, label: '2020-05'},
+    ]);
+    expect(m.reduce((n, e) => n + e.count, 0)).toBe(8);
+    expect(m[m.length - 1].date).toBe(recent2.slice(0, 7));
+  });
+
+  it('keeps the scatter points', async () => {
+    const {adm, user} = setUp();
+
+    const points = await adm.getScatterData(user);
+
+    expect(points).toHaveLength(8);
+    expect(points[1]).toEqual({
+      id: 2,
+      d: Date.parse('2020-03-02T23:59:00.000+09:00'),
+      s: 3,
+      t: 8,
+      r: 's',
+      dn: -1,
+      del: true,
+      ban: false,
+    });
+    expect(points.map(p => p.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+
+  it('keeps the local distributions', async () => {
+    const {adm} = setUp();
+
+    const local = await adm.getLocalDistributions(42);
+
+    expect(local).toMatchObject({
+      rows: 8,
+      rating: {g: 4, s: 2, q: 1, e: 1},
+      status: {active: 7, deleted: 1, banned: 1, pending: 0, flagged: 0},
+      gentagsUnder10: 2,
+      tagcountUnder10: 0,
+    });
+    expect(local?.characters.get('reimu')).toBe(8);
+    expect(local?.characters.get('marisa')).toBe(4);
+    expect(local?.copyrights.get('touhou')).toBe(8);
+  });
+
+  it('reads the rows once for all four', async () => {
+    const {adm, posts, user} = setUp();
+
+    await adm.getSummaryStats(user);
+    await Promise.all([
+      adm.getScatterData(user),
+      adm.getLocalDistributions(42),
+      adm.getMonthlyStats(user),
+    ]);
+    await adm.getUserStats(user);
+
+    expect(posts._chain.each).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads them again once they changed', async () => {
+    const {adm, posts, user} = setUp();
+
+    await adm.getScatterData(user);
+    (adm as unknown as {forgetLocalRows(id: number): void}).forgetLocalRows(42);
+    await adm.getScatterData(user);
+
+    expect(posts._chain.each).toHaveBeenCalledTimes(2);
+  });
+
+  it('hands out a copy of the points', async () => {
+    const {adm, user} = setUp();
+
+    const first = await adm.getScatterData(user);
+    first.length = 0;
+
+    expect(await adm.getScatterData(user)).toHaveLength(8);
+  });
+});
