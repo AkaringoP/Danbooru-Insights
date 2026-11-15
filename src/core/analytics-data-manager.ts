@@ -86,7 +86,7 @@ function distributionItemKey(item: DistributionItem): string {
   return item.tagName || item.originalTag || item.name || '';
 }
 import {getBestThumbnailUrl} from '../utils';
-import {getTopLevelFlags} from './top-level-tags';
+import {getTopLevelFlags, pruneImplicationCache} from './top-level-tags';
 import type {
   TargetUser,
   DistributionItem,
@@ -5667,6 +5667,10 @@ export class AnalyticsDataManager extends DataManager {
             .primaryKeys();
           await this.db.posts.bulkDelete(keys);
           await this.db.piestats.where('userId').equals(uid).delete();
+          // The rest of what this user left (T-505): its sync state (keyed
+          // by the number) and its counters (keyed by the string).
+          await this.db.sync_meta?.delete(uid as number);
+          await this.db.user_stats?.delete(String(uid));
 
           localStorage.removeItem(syncKey);
         }
@@ -5674,6 +5678,9 @@ export class AnalyticsDataManager extends DataManager {
     } catch (e: unknown) {
       log.warn('Stale data cleanup failed', {error: e});
     }
+    // The user dashboard writes implication rows too; without this they were
+    // only pruned by a tag page's daily sweep (T-505, from T-309).
+    await pruneImplicationCache(this.db, now);
   }
 
   /**
@@ -5762,6 +5769,8 @@ export class AnalyticsDataManager extends DataManager {
     // watermark, a backfill plan): left behind, it would vouch for whatever
     // the next, possibly partial, sync writes.
     await this.db.sync_meta?.delete(uploaderId);
+    // Its gentags / tagcount counters (T-505); keyed by the string id.
+    await this.db.user_stats?.delete(userInfo.id);
     this.forgetLocalRows(uploaderId);
 
     // Clear metadata (Last Sync Time)

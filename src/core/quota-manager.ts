@@ -236,6 +236,10 @@ export async function evictOldestNonCurrentUser(
 
     await db.posts.where('uploader_id').equals(oldestUid).delete();
     await db.piestats.where('userId').equals(oldestUid).delete();
+    // The rest of what this user left (T-505): its sync state (keyed by the
+    // number, like the rows) and its counters (keyed by the string id).
+    await db.sync_meta?.delete(oldestUid);
+    await db.user_stats?.delete(String(oldestUid));
 
     try {
       localStorage.removeItem(`${SYNC_KEY_PREFIX}${oldestUid}`);

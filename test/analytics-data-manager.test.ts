@@ -401,6 +401,7 @@ function makeSyncDb(
     user_stats: {
       get: vi.fn(async () => null),
       put: vi.fn(async () => undefined),
+      delete: vi.fn(async () => undefined),
     },
     tag_monthly_counts: {
       where: vi.fn().mockReturnValue({
@@ -3843,6 +3844,11 @@ describe('fields backfill (T-403)', () => {
     await adm.clearUserData(user);
 
     expect(metaRows.has(42)).toBe(false);
+    // And the counters, under the string id they are stored by (T-505).
+    const userStats = (
+      adm as unknown as {db: {user_stats: {delete: ReturnType<typeof vi.fn>}}}
+    ).db.user_stats;
+    expect(userStats.delete).toHaveBeenCalledWith('42');
   });
 });
 
@@ -3967,7 +3973,16 @@ describe('row numbering and the sync mark (T-404)', () => {
       piestats: {
         where: () => ({equals: () => ({delete: async () => 0})}),
       },
-      sync_meta: {get: async (k: number) => meta.get(k)},
+      sync_meta: {
+        get: async (k: number) => meta.get(k),
+        delete: vi.fn(async (k: number) => {
+          meta.delete(k);
+        }),
+      },
+      user_stats: {delete: vi.fn(async () => undefined)},
+      tag_implications_cache: {
+        where: vi.fn(() => ({below: () => ({delete: async () => 0})})),
+      },
     };
     const adm = new AnalyticsDataManager(
       db as never,
@@ -3979,6 +3994,14 @@ describe('row numbering and the sync mark (T-404)', () => {
     // 7: started a minute ago, no completion stamp — kept.
     // 8: no stamp, no start — zombie rows, deleted. 42: the current user.
     expect(deleted).toEqual([801, 802]);
+    // With its sync state (number key) and counters (string key) (T-505).
+    expect(db.sync_meta.delete).toHaveBeenCalledTimes(1);
+    expect(db.sync_meta.delete).toHaveBeenCalledWith(8);
+    expect(db.user_stats.delete).toHaveBeenCalledTimes(1);
+    expect(db.user_stats.delete).toHaveBeenCalledWith('8');
+    expect(meta.has(7)).toBe(true);
+    // Expired implication rows are pruned here too, not only on tag pages.
+    expect(db.tag_implications_cache.where).toHaveBeenCalledWith('fetchedAt');
   });
 });
 
