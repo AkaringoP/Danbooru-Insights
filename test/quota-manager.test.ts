@@ -301,6 +301,27 @@ describe('evictOldestNonCurrentUser', () => {
     expect(storage.getItem('danbooru_grass_last_sync_200')).toBeNull();
   });
 
+  it('drops the evicted user’s sync state and counters under their key types (T-505)', async () => {
+    storage.setItem(
+      'danbooru_grass_last_sync_200',
+      new Date('2024-01-01').toISOString(),
+    );
+    const {db} = makeFakeDb([100, 200]);
+    const syncMetaDelete = vi.fn().mockResolvedValue(undefined);
+    const userStatsDelete = vi.fn().mockResolvedValue(undefined);
+    Object.assign(db, {
+      sync_meta: {delete: syncMetaDelete},
+      user_stats: {delete: userStatsDelete},
+    });
+
+    await evictOldestNonCurrentUser(db, 100);
+
+    // sync_meta is keyed by the number (as posts.uploader_id), user_stats
+    // by the string id: IndexedDB keys 200 and "200" differ.
+    expect(syncMetaDelete).toHaveBeenCalledWith(200);
+    expect(userStatsDelete).toHaveBeenCalledWith('200');
+  });
+
   it('accepts string currentUserId (parsed to number)', async () => {
     storage.setItem(
       'danbooru_grass_last_sync_200',

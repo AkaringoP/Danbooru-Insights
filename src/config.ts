@@ -8,13 +8,17 @@ export const CONFIG: {
   STORAGE_PREFIX: string;
   MAX_OPTIMIZED_POSTS: number;
   MAX_PREVIEW_ONLY_UPLOADS: number;
-  REPORT_COOLDOWN_MS: number;
   ANALYTICS_CLEANUP_THRESHOLD_MS: number;
   CACHE_EXPIRY_MS: number;
   FULL_REFRESH_HINT_DAYS: number;
   BACKOFF_DURATION_MS: number;
   MAX_BACKOFF_MS: number;
-  RATE_LIMITER: {concurrency: number; jitter: [number, number]; rps: number};
+  RATE_LIMITER: {
+    concurrency: number;
+    jitter: [number, number];
+    rps: number;
+    burst: number;
+  };
   TAB_COORDINATOR: {
     channelName: string;
     heartbeatInterval: number;
@@ -29,8 +33,6 @@ export const CONFIG: {
   /** Total-uploads cap below which the icon click shows the preview popover
    *  instead of the full dashboard (avoids loading a near-empty report). */
   MAX_PREVIEW_ONLY_UPLOADS: 30,
-  /** Cooldown between report queue requests (ms). */
-  REPORT_COOLDOWN_MS: 3000,
   /** Retention threshold for analytics-data-manager cleanup (14 days). */
   ANALYTICS_CLEANUP_THRESHOLD_MS: 14 * DAY_MS,
   /** Cache expiry for tag_analytics and piestats (24 hours). */
@@ -52,12 +54,24 @@ export const CONFIG: {
   BACKOFF_DURATION_MS: 5000,
   /** Upper bound (ms) on a server-derived 429 pause, against bogus headers. */
   MAX_BACKOFF_MS: 120_000,
-  // Danbooru enforces a server-side global cap of 10 read req/sec across
-  // all endpoints and accounts sharing an IP. We use 9 to leave a 1 req/sec
-  // safety margin; TabCoordinator divides this further when multiple tabs
-  // are open. Bumped from 6 → 9 in v9.6 to keep the new count-cache TTL
-  // refresh path (≈70 piestats requests) under ~10 s on stale-refresh.
-  RATE_LIMITER: {concurrency: 8, jitter: [0, 50], rps: 9},
+  // One token bucket shared by every app on the page — Grass, UserAnalytics
+  // and TagAnalytics all get the limiter main.ts builds. 4.5 req/s with a
+  // burst of 1: from one tab, at most 6 requests in any second and 47 in
+  // any 10 s. Danbooru's overall limit is a Cloudflare rule that is not
+  // public; it answers 429 with a challenge page (`cf-mitigated:
+  // challenge`). 4.5 was chosen when two 429s each came with exactly 49
+  // requests in the 10 s before, which suggested about 50 per 10 s (T-213,
+  // 2026-11-13). Later 429s came after only 20 in 10 s, and the requests in
+  // the 60 s before were 181–228 each time: the rule looks per-minute
+  // (2026-11-15). 4.5 req/s allows about 270 a minute; a per-minute budget
+  // is on hold (T-215 candidate). The per-action limits are lower still for counts
+  // (1/s) and reports (1 per 3 s) — see CLAUDE.md "Rate Limiting".
+  // TabCoordinator divides rps and concurrency between tabs; the burst
+  // stays 1 per tab.
+  // History: 9 req/s with a burst of 9 (v9.6), which let Grass + a sync
+  // reach 16 requests in one second; then 6 req/s with a burst of 1
+  // (decision G-1, 2026-11-12: at most 7 per second, 61 per 10 s).
+  RATE_LIMITER: {concurrency: 8, jitter: [0, 50], rps: 4.5, burst: 1},
   TAB_COORDINATOR: {
     channelName: 'di-rate-coord',
     heartbeatInterval: 5000,

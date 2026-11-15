@@ -12,6 +12,41 @@ export function escapeHtml(text: string): string {
   return el.innerHTML;
 }
 
+/* --- Helper: Large-array safe min / max / replace --- */
+/*
+ * Why loops instead of `Math.min(...xs)` / `xs.push(...ys)`: spreading an
+ * array into a call passes every element as an argument, which throws
+ * RangeError past roughly 124k elements in Chrome (and at 65,536 in Safari).
+ * Per-post arrays of big uploaders reach that, and the "At a glance" card
+ * silently vanished for them (audit DA-05).
+ */
+
+/**
+ * Smallest and largest of `values`. Empty input gives
+ * `{min: Infinity, max: -Infinity}`, the same as `Math.min()` / `Math.max()`.
+ */
+export function numericExtent(values: Iterable<number>): {
+  min: number;
+  max: number;
+} {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  return {min, max};
+}
+
+/** Replaces the contents of `target` with `source`, keeping its identity. */
+export function replaceArrayContents<T>(
+  target: T[],
+  source: readonly T[],
+): void {
+  target.length = 0;
+  for (const item of source) target.push(item);
+}
+
 /* --- Helper: Tag Utility --- */
 /**
  * Returns the CSS class name for a Danbooru user level string.
@@ -38,41 +73,54 @@ export function getLevelClass(level: string | null): string {
 /**
  * Returns the best available thumbnail URL from a Danbooru post object.
  * Priority: 720x720 webp > 360x360 webp > other variants > preview > file.
+ * The variants come from `media_asset.variants` (asked as
+ * `media_asset[variants]` on the few single-post requests, T-506) or a
+ * stored row's `variants`; without them it is the 180×180 preview.
  */
 export function getBestThumbnailUrl(
   post:
     | Pick<
         DanbooruPost,
-        'variants' | 'preview_file_url' | 'file_url' | 'large_file_url'
+        | 'media_asset'
+        | 'variants'
+        | 'preview_file_url'
+        | 'file_url'
+        | 'large_file_url'
       >
     | null
     | undefined,
 ): string {
   if (!post) return '';
 
-  // 1. Try modern variants
-  if (
-    post.variants &&
-    Array.isArray(post.variants) &&
-    post.variants.length > 0
-  ) {
-    const preferredTypes = ['720x720', '360x360'];
-    // 1a. Try preferred variants in WebP
-    for (const type of preferredTypes) {
-      const variant = post.variants.find(
-        (v: PostVariant) => v.type === type && v.file_ext === 'webp',
-      );
-      if (variant) return variant.url;
-    }
-    // 1b. Try preferred variants in any format
-    for (const type of preferredTypes) {
-      const variant = post.variants.find((v: PostVariant) => v.type === type);
-      if (variant) return variant.url;
-    }
-    // 1c. Last resort: any variant
-    if (post.variants[0] && post.variants[0].url) return post.variants[0].url;
-  }
+  // 1. Try the sizes Danbooru made
+  const variants = post.media_asset?.variants ?? post.variants;
+  const fromVariants =
+    Array.isArray(variants) && variants.length > 0
+      ? pickVariantUrl(variants)
+      : '';
 
   // 2. Fallback to legacy fields
-  return post.preview_file_url || post.file_url || post.large_file_url || '';
+  return (
+    fromVariants ||
+    post.preview_file_url ||
+    post.file_url ||
+    post.large_file_url ||
+    ''
+  );
+}
+
+/** 720 then 360 in webp, then in any format, then the first variant. */
+function pickVariantUrl(variants: PostVariant[]): string {
+  const preferredTypes = ['720x720', '360x360'];
+  for (const type of preferredTypes) {
+    const variant = variants.find(
+      v => v.type === type && v.file_ext === 'webp',
+    );
+    if (variant) return variant.url;
+  }
+  for (const type of preferredTypes) {
+    const variant = variants.find(v => v.type === type);
+    if (variant) return variant.url;
+  }
+  return variants[0]?.url ?? '';
 }

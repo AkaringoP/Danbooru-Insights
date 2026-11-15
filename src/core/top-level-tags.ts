@@ -8,7 +8,8 @@
  * every caller (tag pages and the user dashboard's character / copyright /
  * fav-copyright pies):
  *   1. module-level session cache,
- *   2. persistent `tag_implications_cache` rows (180-day TTL),
+ *   2. persistent `tag_implications_cache` rows (180-day TTL; expired rows
+ *      are deleted once a day by `pruneImplicationCache`),
  *   3. batched `/tag_implications.json?search[antecedent_name_comma]=…`
  *      for the rest, 50 names per request.
  *
@@ -165,6 +166,31 @@ async function writeImplicationCache(
     );
   } catch (e) {
     log.warn('Failed to write tag_implications cache', {error: e});
+  }
+}
+
+/**
+ * Deletes `tag_implications_cache` rows past the TTL by the `fetchedAt`
+ * index (T-309). Both key shapes share the TTL: `<tag>` rows from here and
+ * `consequent:<parent>` rows from `sub-tag-resolver`. Reads already skip
+ * such rows, but until now nothing removed them. Returns how many went (0
+ * on failure).
+ */
+export async function pruneImplicationCache(
+  db: Database | null | undefined,
+  now = Date.now(),
+): Promise<number> {
+  if (!db?.tag_implications_cache) return 0;
+  try {
+    const deleted = await db.tag_implications_cache
+      .where('fetchedAt')
+      .below(now - IMPLICATIONS_CACHE_TTL_MS)
+      .delete();
+    if (deleted > 0) log.debug('Expired implication rows deleted', {deleted});
+    return deleted;
+  } catch (e) {
+    log.warn('Failed to prune tag_implications cache', {error: e});
+    return 0;
   }
 }
 

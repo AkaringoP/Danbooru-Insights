@@ -6,7 +6,7 @@
  * hourly stats delta merge, and clearCache.
  */
 import {describe, it, expect, vi, beforeEach, afterEach} from 'vitest';
-import {DataManager} from '../src/core/data-manager';
+import {CountUnavailableError, DataManager} from '../src/core/data-manager';
 import type {Metric, TargetUser} from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -81,6 +81,7 @@ function makeRateLimiter(
   return {
     fetch: vi.fn(fetchImpl ?? defaultFetch),
     getRequestCount: vi.fn(() => 0),
+    backoffRemainingMs: vi.fn(() => 0),
   };
 }
 
@@ -287,6 +288,35 @@ describe('getMetricData — integrity check', () => {
       dm.getMetricData('uploads', makeUser(), 2023),
     ).resolves.toBeDefined();
   });
+
+  it('keeps the year when the remote count comes back null (DA-20)', async () => {
+    // A null count used to read as 0, differ from the local sum, and wipe
+    // the whole year's rows for a refetch. It means "unknown": skip.
+    const localRows = [
+      {id: '42_2023-03-15', userId: '42', date: '2023-03-15', count: 5},
+    ];
+    const uploadsTable = makeTable(localRows);
+    const db = makeDb({
+      uploads: uploadsTable,
+      completed_years: makeTable(),
+      hourly_stats: makeTable(),
+    });
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: null}}),
+        };
+      }
+      return {ok: true, status: 200, json: async () => []};
+    });
+    const dm = new DataManager(db, rl as never);
+
+    await dm.getMetricData('uploads', makeUser(), 2023);
+
+    expect(uploadsTable._chain.delete).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -352,12 +382,12 @@ describe('getMetricData — hourly stats delta merge', () => {
   it('does not double-count hours for data in the overlap buffer period', async () => {
     const currentYear = new Date().getFullYear();
 
-    // Derive local hours from the same Date parsing the production code uses,
-    // so the test is correct regardless of the runner's timezone.
+    // The hour as written in the timestamp, whatever the runner's time zone
+    // (T-702).
     const overlapTimestamp = `${currentYear}-05-10T12:30:00Z`;
     const newTimestamp = `${currentYear}-05-11T14:00:00Z`;
-    const overlapLocalHour = new Date(overlapTimestamp).getHours();
-    const newLocalHour = new Date(newTimestamp).getHours();
+    const overlapLocalHour = 12;
+    const newLocalHour = 14;
 
     // Existing cached data: last entry is May 10
     const localRows = [
@@ -724,11 +754,39 @@ describe('fetchRemoteCount', () => {
     ).toBe(123);
   });
 
-  it('returns 0 when response has no counts', async () => {
+  it('throws CountUnavailableError when the response has no counts', async () => {
     const rl = makeRateLimiter(async () => ({
       ok: true,
       status: 200,
       json: async () => ({}),
+    }));
+    const dm = new DataManager(makeDb(), rl as never);
+
+    await expect(dm.fetchRemoteCount('user:test')).rejects.toBeInstanceOf(
+      CountUnavailableError,
+    );
+  });
+
+  it('throws CountUnavailableError on a null count (server timed out), never 0', async () => {
+    // Danbooru answers HTTP 200 {"counts":{"posts":null}} when it cannot
+    // finish the count in time, and caches that null for 5 minutes.
+    const rl = makeRateLimiter(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({counts: {posts: null}}),
+    }));
+    const dm = new DataManager(makeDb(), rl as never);
+
+    await expect(dm.fetchRemoteCount('user:test')).rejects.toBeInstanceOf(
+      CountUnavailableError,
+    );
+  });
+
+  it('still returns a real 0', async () => {
+    const rl = makeRateLimiter(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({counts: {posts: 0}}),
     }));
     const dm = new DataManager(makeDb(), rl as never);
 
@@ -785,9 +843,34 @@ describe('fetchAllPages', () => {
     const dm = new DataManager(makeDb(), rl as never);
     const items = await dm.fetchAllPages('/posts.json', {limit: 200}, null);
 
-    // 2 items < limit 200 → stops after first batch
-    expect(items).toHaveLength(2 * 5); // 5 parallel pages, each returns 2
-    // Actually: first batch is 5 pages, each has 2 items < 200, so stops
+    // Page 1 alone first (T-604): 2 items < limit 200, so it was the last.
+    // A full fetch used to ask 5 pages at once here.
+    expect(items).toHaveLength(2);
+    expect(rl.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks 5 pages at a time after a full first page (T-604)', async () => {
+    const full = Array.from({length: 200}, () => ({created_at: 'x'}));
+    const rl = makeRateLimiter(async (url: string) => {
+      const page = Number(new URLSearchParams(url.split('?')[1]).get('page'));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (page === 1 ? full : page === 2 ? [{}] : []),
+      };
+    });
+    vi.useFakeTimers();
+    try {
+      const dm = new DataManager(makeDb(), rl as never);
+      const promise = dm.fetchAllPages('/posts.json', {limit: 200}, null);
+      await vi.runAllTimersAsync();
+
+      expect(await promise).toHaveLength(201);
+      // Page 1, then pages 2–6 together.
+      expect(rl.fetch).toHaveBeenCalledTimes(6);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('respects stopDate in desc direction', async () => {
@@ -1315,14 +1398,14 @@ describe('getMetricData — hourly stats accumulation', () => {
       hourly_stats: hourlyStats,
     });
 
-    // All items at 10:xx → local hour computed from UTC (deterministic in test)
+    // All items at 10:xx (the hour as written, T-702)
     const ts1 = `${currentYear}-11-10T10:00:00Z`;
     const ts2 = `${currentYear}-11-10T10:30:00Z`;
     const ts3 = `${currentYear}-11-10T10:45:00Z`;
     // Different hour
     const ts4 = `${currentYear}-11-10T15:00:00Z`;
-    const hourOf10 = new Date(ts1).getHours();
-    const hourOf15 = new Date(ts4).getHours();
+    const hourOf10 = 10;
+    const hourOf15 = 15;
 
     let pageHit = 0;
     const rl = makeRateLimiter(async (url: string) => {
@@ -1360,6 +1443,50 @@ describe('getMetricData — hourly stats accumulation', () => {
     expect(slot10?.count).toBe(3);
     // 1 item at the other hour
     expect(slot15?.count).toBe(1);
+  });
+
+  it('counts the hour as written, not on the browser clock (T-702)', async () => {
+    const currentYear = new Date().getFullYear();
+    const hourlyStats = makeTable();
+    const db = makeDb({
+      uploads: makeTable(),
+      completed_years: makeTable(),
+      hourly_stats: hourlyStats,
+    });
+    // One instant written in two zones. On the browser clock both would land
+    // in the same hour, whatever the runner's zone.
+    let pageHit = 0;
+    const rl = makeRateLimiter(async () => {
+      pageHit++;
+      const items =
+        pageHit === 1
+          ? [
+              {
+                uploader_id: 42,
+                created_at: `${currentYear}-03-15T09:30:00+09:00`,
+              },
+              {uploader_id: 42, created_at: `${currentYear}-03-15T00:30:00Z`},
+            ]
+          : [];
+      return {ok: true, status: 200, json: async () => items};
+    });
+
+    await new DataManager(db, rl as never).getMetricData(
+      'uploads',
+      makeUser({id: '42'}),
+      currentYear,
+    );
+
+    const rows = (
+      hourlyStats.bulkPut.mock.calls as unknown[][]
+    )[0][0] as Array<{
+      hour: number;
+      count: number;
+    }>;
+    expect(rows.filter(r => r.count > 0)).toEqual([
+      expect.objectContaining({hour: 0, count: 1}),
+      expect.objectContaining({hour: 9, count: 1}),
+    ]);
   });
 
   it('loads existing hourly stats from DB when year is already complete', async () => {
@@ -1519,7 +1646,10 @@ describe('sumDailyCounts', () => {
   }
 
   function managerFor(table: unknown): DataManager {
-    return new DataManager({uploads: table} as never);
+    return new DataManager(
+      {uploads: table} as never,
+      makeRateLimiter() as never,
+    );
   }
 
   it('sums the rows inside an inclusive date range', async () => {
@@ -1592,7 +1722,10 @@ describe('sumDailyCounts', () => {
   it('reads the table the metric names', async () => {
     const uploads = makeRangeTable([{id: '42_2025-12-05', count: 3}]);
     const notes = makeRangeTable([{id: '42_2025-12-05', count: 99}]);
-    const dm = new DataManager({uploads, notes} as never);
+    const dm = new DataManager(
+      {uploads, notes} as never,
+      makeRateLimiter() as never,
+    );
 
     expect(
       await dm.sumDailyCounts('notes', '42', '2025-12-01', '2025-12-31'),
@@ -1601,7 +1734,7 @@ describe('sumDailyCounts', () => {
   });
 
   it('returns 0 for an unknown metric instead of throwing', async () => {
-    const dm = new DataManager({} as never);
+    const dm = new DataManager({} as never, makeRateLimiter() as never);
     expect(
       await dm.sumDailyCounts(
         'uploads' as Metric,
@@ -1639,5 +1772,292 @@ describe('sumDailyCounts', () => {
         '2025-12-31',
       ),
     ).resolves.toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-601: a year with nothing cached comes from the synced posts rows
+// ---------------------------------------------------------------------------
+
+describe('getMetricData — uploads from the synced posts (T-601)', () => {
+  let storage: Map<string, string>;
+
+  beforeEach(() => {
+    storage = new Map([
+      ['danbooru_grass_last_sync_42', '2026-11-15T00:00:00.000Z'],
+    ]);
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      body: {dataset: {currentUserTimeZone: 'Seoul'}},
+    });
+  });
+
+  /** The user's synced rows: 2 uploads on 2023-03-15, 1 on 2023-07-01. */
+  const postRows = [
+    {
+      id: 1,
+      uploader_id: 42,
+      no: 1,
+      created_at: '2023-03-15T09:30:00.000+09:00',
+    },
+    {
+      id: 2,
+      uploader_id: 42,
+      no: 2,
+      created_at: '2023-03-15T23:10:00.000+09:00',
+    },
+    {
+      id: 3,
+      uploader_id: 42,
+      no: 3,
+      created_at: '2023-07-01T01:00:00.000+09:00',
+    },
+  ];
+
+  /** A table that keeps what is put into it, upserting by id. */
+  function makeKeyedTable() {
+    const rows: Record<string, unknown>[] = [];
+    const chain = makeChain(rows);
+    return {
+      where: vi.fn().mockReturnValue(chain),
+      get: vi.fn(async () => null),
+      put: vi.fn(async () => undefined),
+      bulkPut: vi.fn(async (added: Record<string, unknown>[]) => {
+        for (const r of added) {
+          const i = rows.findIndex(x => x.id === r.id);
+          if (i >= 0) rows[i] = r;
+          else rows.push(r);
+        }
+      }),
+      _chain: chain,
+      _rows: rows,
+    };
+  }
+
+  function setUp(meta: Record<string, unknown> | undefined) {
+    const uploads = makeKeyedTable();
+    const hourly = makeKeyedTable();
+    const completed = makeTable();
+    const db = makeDb({
+      uploads,
+      hourly_stats: hourly,
+      completed_years: completed,
+      posts: makeTable(postRows),
+      sync_meta: {get: vi.fn(async () => meta)},
+    });
+    let pageHit = 0;
+    const rl = makeRateLimiter(async (url: string) => {
+      if (url.includes('/counts/posts.json')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({counts: {posts: postRows.length}}),
+        };
+      }
+      // The API path: the same posts on the first page only (numbered
+      // when asked: the pages are asked together, read later).
+      const hit = ++pageHit;
+      return {
+        ok: true,
+        status: 200,
+        json: async () =>
+          hit === 1
+            ? postRows.map(p => ({uploader_id: 42, created_at: p.created_at}))
+            : [],
+      };
+    });
+    const pages = () =>
+      (rl.fetch as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: string[]) => c[0])
+        .filter(u => !u.includes('/counts/'));
+    const counts = () =>
+      (rl.fetch as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: string[]) => c[0])
+        .filter(u => u.includes('/counts/'));
+    return {db, uploads, completed, rl, pages, counts};
+  }
+
+  const synced = {userId: 42, fieldsVersion: 2, timeZone: 'Seoul'};
+
+  it('fills a past year from the rows: one count, no page', async () => {
+    const {db, uploads, completed, rl, pages, counts} = setUp(synced);
+
+    const result = await new DataManager(db, rl as never).getMetricData(
+      'uploads',
+      makeUser(),
+      2023,
+    );
+
+    expect(pages()).toEqual([]);
+    expect(counts()).toHaveLength(1);
+    expect(result.daily).toEqual({'2023-03-15': 2, '2023-07-01': 1});
+    expect(uploads._rows).toHaveLength(2);
+    // Checked by the count, so the year is complete.
+    expect(completed.put).toHaveBeenCalledWith(
+      expect.objectContaining({id: '42_uploads_2023'}),
+    );
+  });
+
+  it('gives the same days and hours as the API', async () => {
+    const local = setUp(synced);
+    const fromRows = await new DataManager(
+      local.db,
+      local.rl as never,
+    ).getMetricData('uploads', makeUser(), 2023);
+
+    storage.clear(); // no completed sync: the API path
+    const api = setUp(synced);
+    const fromApi = await new DataManager(
+      api.db,
+      api.rl as never,
+    ).getMetricData('uploads', makeUser(), 2023);
+
+    expect(api.pages().length).toBeGreaterThan(0);
+    expect(local.pages()).toEqual([]);
+    expect(fromRows.daily).toEqual(fromApi.daily);
+    expect(fromRows.hourly).toEqual(fromApi.hourly);
+  });
+
+  it('pages the API when the rows were written in another time zone', async () => {
+    const {db, rl, pages} = setUp({...synced, timeZone: 'Tokyo'});
+
+    await new DataManager(db, rl as never).getMetricData(
+      'uploads',
+      makeUser(),
+      2023,
+    );
+
+    expect(pages().length).toBeGreaterThan(0);
+  });
+
+  it('pages the API while a sync is under way or without sync state', async () => {
+    const running = setUp({...synced, syncStartedAt: Date.now()});
+    await new DataManager(running.db, running.rl as never).getMetricData(
+      'uploads',
+      makeUser(),
+      2023,
+    );
+    expect(running.pages().length).toBeGreaterThan(0);
+
+    const none = setUp(undefined);
+    await new DataManager(none.db, none.rl as never).getMetricData(
+      'uploads',
+      makeUser(),
+      2023,
+    );
+    expect(none.pages().length).toBeGreaterThan(0);
+  });
+
+  it('fetches only what followed the rows in the current year', async () => {
+    const year = new Date().getFullYear();
+    const today = new Date().toISOString().slice(0, 10);
+    postRows.push({
+      id: 4,
+      uploader_id: 42,
+      no: 4,
+      created_at: `${today}T00:00:00.000Z`,
+    });
+    try {
+      const {db, rl, pages} = setUp(synced);
+
+      await new DataManager(db, rl as never).getMetricData(
+        'uploads',
+        makeUser(),
+        year,
+      );
+
+      // A delta from the last local day, not the whole year.
+      const tags = new URLSearchParams(pages()[0].split('?')[1]).get('tags');
+      expect(tags).toContain('date:');
+      expect(tags).not.toContain(`date:${year}-01-01...`);
+    } finally {
+      postRows.pop();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-603: Grass pages retry like the full sync's
+// ---------------------------------------------------------------------------
+
+describe('fetchAllPages — retries like the full sync (T-603)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** One page (a delta fetch asks one at a time). */
+  const fetchOnePage = (dm: DataManager) =>
+    dm.fetchAllPages(
+      '/posts.json',
+      {limit: 200},
+      null,
+      'created_at',
+      'desc',
+      null,
+      true,
+    );
+
+  it('keeps asking through a run of 429s that used to fail the year', async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const rl = makeRateLimiter(async () => {
+      attempts++;
+      return attempts <= 4
+        ? {ok: false, status: 429, json: async () => ({})}
+        : {ok: true, status: 200, json: async () => [{created_at: 'x'}]};
+    });
+
+    const promise = fetchOnePage(new DataManager(makeDb(), rl as never));
+    await vi.runAllTimersAsync();
+
+    expect(await promise).toHaveLength(1);
+    expect(attempts).toBe(5);
+  });
+
+  it("waits out the limiter's pause before asking again", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const rl = makeRateLimiter(async () => {
+      attempts++;
+      return attempts === 1
+        ? {ok: false, status: 429, json: async () => ({})}
+        : {ok: true, status: 200, json: async () => []};
+    });
+    rl.backoffRemainingMs.mockReturnValue(7000);
+
+    const promise = fetchOnePage(new DataManager(makeDb(), rl as never));
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(attempts).toBe(2);
+    await promise;
+  });
+
+  it('retries a network failure but not a 4xx', async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const flaky = makeRateLimiter(async () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('Failed to fetch');
+      return {ok: true, status: 200, json: async () => []};
+    });
+    const ok = fetchOnePage(new DataManager(makeDb(), flaky as never));
+    await vi.runAllTimersAsync();
+    await ok;
+    expect(attempts).toBe(2);
+
+    let asked404 = 0;
+    const missing = makeRateLimiter(async () => {
+      asked404++;
+      return {ok: false, status: 404, json: async () => ({})};
+    });
+    await expect(
+      fetchOnePage(new DataManager(makeDb(), missing as never)),
+    ).rejects.toThrow('HTTP 404');
+    expect(asked404).toBe(1);
   });
 });

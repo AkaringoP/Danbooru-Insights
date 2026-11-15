@@ -45,6 +45,7 @@ import {showToast} from '../src/ui/toast';
 import {AnalyticsDataManager} from '../src/core/analytics-data-manager';
 import {SettingsManager} from '../src/core/settings';
 import {RateLimitedFetch} from '../src/core/rate-limiter';
+import {GrassLoadGate} from '../src/core/grass-load-gate';
 import type {ProfileContext} from '../src/core/profile-context';
 import type {ProfileSummaryInput, TargetUser, WindowPoint} from '../src/types';
 import type {Database} from '../src/core/database';
@@ -406,6 +407,166 @@ describe('UserAnalyticsApp.buildMiniReportButton', () => {
     const priv = app as unknown as PrivateApp;
     priv.previewPopover = null;
     expect(priv.buildMiniReportButton()).toBeNull();
+  });
+});
+
+// ============================================================
+// 📊 waits for the contribution graph (G-7)
+// ============================================================
+
+describe('UserAnalyticsApp report button — Grass first (G-7)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  /** Mounts the 📊 button under an h1 with the target user's name. */
+  function mount(gate: GrassLoadGate) {
+    const h1 = document.createElement('h1');
+    h1.textContent = TARGET_USER.name;
+    document.body.appendChild(h1);
+    vi.spyOn(
+      UserAnalyticsApp.prototype,
+      'updateHeaderStatus',
+    ).mockResolvedValue(undefined);
+    const app = new UserAnalyticsApp(
+      {} as Database,
+      new SettingsManager(),
+      {
+        targetUser: TARGET_USER,
+        isOwnProfile: false,
+      } as unknown as ProfileContext,
+      new RateLimitedFetch(1, [0, 0], 1),
+      gate,
+    );
+    app.toggleModal = vi.fn() as unknown as UserAnalyticsApp['toggleModal'];
+    const sync = vi.spyOn(app, 'performPartialSync').mockResolvedValue();
+    app.injectButton();
+    const btn = document.querySelector<HTMLElement>('.di-analytics-entry-btn')!;
+    return {app, btn, sync};
+  }
+
+  async function click(btn: HTMLElement) {
+    btn.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+    for (let i = 0; i < 3; i++) await Promise.resolve();
+  }
+
+  it('a click while Grass loads starts no sync and opens nothing', async () => {
+    const gate = new GrassLoadGate();
+    const {app, btn, sync} = mount(gate);
+    gate.set(true);
+
+    await click(btn);
+
+    expect(sync).not.toHaveBeenCalled();
+    expect(app.toggleModal).not.toHaveBeenCalled();
+    // Keyed, so clicking again keeps one toast up instead of stacking more.
+    expect(showToast).toHaveBeenCalledWith(
+      expect.objectContaining({type: 'info', key: 'grass-lock'}),
+    );
+  });
+
+  it('once Grass is done, the click syncs and opens the report', async () => {
+    const gate = new GrassLoadGate();
+    const {app, btn, sync} = mount(gate);
+    gate.set(true);
+    gate.set(false);
+
+    await click(btn);
+
+    expect(sync).toHaveBeenCalled();
+    expect(app.toggleModal).toHaveBeenCalledWith(true);
+  });
+
+  it('shows as waiting only after 400 ms of loading, and clears when done', () => {
+    vi.useFakeTimers();
+    const gate = new GrassLoadGate();
+    const {btn} = mount(gate);
+
+    gate.set(true);
+    vi.advanceTimersByTime(399);
+    expect(btn.classList.contains('di-grass-locked')).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(btn.classList.contains('di-grass-locked')).toBe(true);
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+
+    gate.set(false);
+    expect(btn.classList.contains('di-grass-locked')).toBe(false);
+    expect(btn.hasAttribute('aria-disabled')).toBe(false);
+    expect(btn.getAttribute('aria-label')).toBe('Open user analytics report');
+  });
+
+  it('a short load never shows the lock', () => {
+    vi.useFakeTimers();
+    const gate = new GrassLoadGate();
+    const {btn} = mount(gate);
+
+    gate.set(true);
+    vi.advanceTimersByTime(300);
+    gate.set(false);
+    vi.advanceTimersByTime(1000);
+
+    expect(btn.classList.contains('di-grass-locked')).toBe(false);
+  });
+
+  it('never locks when Grass never starts loading', async () => {
+    const {btn, sync} = mount(new GrassLoadGate());
+    await click(btn);
+    expect(btn.classList.contains('di-grass-locked')).toBe(false);
+    expect(sync).toHaveBeenCalled();
+  });
+
+  // The hover preview opens once the pointer rests on 📊 (desktop).
+  describe('hover preview', () => {
+    function mountHover() {
+      vi.useFakeTimers();
+      vi.mocked(isTouchDevice).mockReturnValue(false);
+      const {app, btn} = mount(new GrassLoadGate());
+      const popover = (
+        app as unknown as {previewPopover: {show: (o?: unknown) => void}}
+      ).previewPopover;
+      const show = vi.spyOn(popover, 'show').mockImplementation(() => {});
+      const fire = (type: string) =>
+        btn.dispatchEvent(new MouseEvent(type, {bubbles: true}));
+      return {show, fire};
+    }
+
+    it('opens 400 ms after the pointer stops, not on entering', () => {
+      const {show, fire} = mountHover();
+
+      fire('mouseenter');
+      vi.advanceTimersByTime(300);
+      fire('mousemove');
+      vi.advanceTimersByTime(300);
+      fire('mousemove');
+      vi.advanceTimersByTime(399);
+      expect(show).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+      expect(show).toHaveBeenCalledTimes(1);
+    });
+
+    it('a pointer crossing the icon opens nothing', () => {
+      const {show, fire} = mountHover();
+
+      fire('mouseenter');
+      vi.advanceTimersByTime(150);
+      fire('mouseleave');
+      vi.advanceTimersByTime(1000);
+
+      expect(show).not.toHaveBeenCalled();
+    });
+
+    it('moves after it opened do not open it again', () => {
+      const {show, fire} = mountHover();
+
+      fire('mouseenter');
+      vi.advanceTimersByTime(400);
+      fire('mousemove');
+      vi.advanceTimersByTime(1000);
+
+      expect(show).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

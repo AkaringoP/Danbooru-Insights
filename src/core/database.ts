@@ -12,6 +12,7 @@ import type {
   UserStatsRecord,
   MonthlyCountRecord,
   TagImplicationCacheRecord,
+  SyncMetaRecord,
 } from '../types';
 
 const log = createLogger('Database');
@@ -59,6 +60,7 @@ export class Database extends Dexie {
   user_stats!: Table<UserStatsRecord, string>;
   tag_monthly_counts!: Table<MonthlyCountRecord, [string, string]>;
   tag_implications_cache!: Table<TagImplicationCacheRecord, string>;
+  sync_meta!: Table<SyncMetaRecord, number>;
 
   /**
    * Initializes the database with defined schemas.
@@ -197,20 +199,41 @@ export class Database extends Dexie {
     });
 
     // [v12] Tag analytics caching layer for sync-time optimization.
-    // - tag_monthly_counts: persist per-tag, per-month post counts so
-    //   revisits only refetch the current + previous month (matches the
-    //   existing Delta sync rescan window). Compound PK `[tag+yearMonth]`,
-    //   `tag` index for bulk per-tag reads, `fetchedAt` for distance-based
-    //   TTL eviction. See `MonthlyCountRecord` in types.ts.
+    // - tag_monthly_counts: per-tag, per-month post counts. Since T-301–T-303
+    //   only the monthly history's fallback layers write them (summed
+    //   report halves, or one count per month), in UTC months (`basis:
+    //   'utc'`), so a later run asks only for what follows the closed months
+    //   (`fetchMonthlyHistory`). Compound PK `[tag+yearMonth]`,
+    //   `tag` index for bulk per-tag reads and deletes, `fetchedAt` for the
+    //   distance-based TTL (checked on read). Rows go with their tag's report
+    //   and in the tag page's daily sweep (T-309). See `MonthlyCountRecord`.
     // - tag_implications_cache: global cache for top-level flags (core/top-level-tags).
     //   `tag_implications` is effectively immutable; caching here lets
     //   `fetchRelatedTagDistribution` skip up to 20 API calls per session.
-    //   PK is `tagName` (global, not per-analytics-target).
+    //   PK is `tagName` (global, not per-analytics-target). `fetchedAt` is
+    //   the 180-day TTL, which `pruneImplicationCache` deletes by (T-309).
     // `tag_analytics.lastFullScanAt` is a new schemaless field (no index)
     // for the 90-day forced-rescan policy; added in types.ts only.
     this.version(12).stores({
       tag_monthly_counts: '[tag+yearMonth], tag, fetchedAt',
       tag_implications_cache: 'tagName, fetchedAt',
+    });
+
+    // [v13] (T-401, audit DA-02) `posts` keeps only the indexes something
+    // reads: the per-user key, `[uploader_id+no]` (milestones) and
+    // `[uploader_id+created_at]` (newest post). `no`, `created_at`, `score`,
+    // `rating`, `tag_count_general` and `[uploader_id+score]` had no reader
+    // left, and every one was rewritten on each bulkPut (audit measure, 50k
+    // rows: 7.0 → 4.7 s to write, 112 → 65 MB). The fields stay in the rows.
+    // - sync_meta: per-user sync state (`SyncMetaRecord`), keyed by the
+    //   numeric uploader id. The completion stamp
+    //   (`danbooru_grass_last_sync_*`) stays in localStorage; the
+    //   `di_post_metadata_v2_*` flag is no longer read or written, only
+    //   removed with a user's data (T-403: `fieldsVersion` 2 covers it).
+    // Other open tabs on v12 get `versionchange` and reload once.
+    this.version(13).stores({
+      posts: 'id, uploader_id, [uploader_id+no], [uploader_id+created_at]',
+      sync_meta: 'userId',
     });
 
     // Multi-tab coordination. Without these handlers, opening a newer

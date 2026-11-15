@@ -1,6 +1,12 @@
-import {CONFIG} from '../config';
+import {CONFIG, DAY_MS} from '../config';
 import {createLogger} from './logger';
-import {RateLimitedFetch} from './rate-limiter';
+import type {RateLimitedFetch} from './rate-limiter';
+import {patchSyncMeta, readSyncMeta, viewerTimeZone} from './sync-meta';
+import {
+  classifySyncFetchError,
+  SYNC_PAGE_MAX_ATTEMPTS,
+  syncRetryDelayMs,
+} from './fetch-retry';
 import type {
   Metric,
   MetricData,
@@ -36,14 +42,78 @@ interface HourlyStatEntry {
   count: number;
 }
 
+/** The tables a user's Grass cache lives in (`clearCache`, T-606). */
+const GRASS_TABLES = [
+  'uploads',
+  'approvals',
+  'approvals_detail',
+  'notes',
+  'completed_years',
+  'hourly_stats',
+] as const;
+
+/**
+ * A Grass cache not opened for this long is dropped (decision G-6): 90
+ * days. Written out rather than from `DAY_MS`, which a module-load
+ * constant would read before a test's `config` mock could supply it.
+ */
+export const GRASS_CACHE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** localStorage: when the Grass cache sweep last ran (T-606). */
+const GRASS_SWEEP_KEY = 'di.grassCache.sweptAt';
+
+/**
+ * Whether a daily sweep stamped under `key` is due, claiming it if so. The
+ * stamp is written before the sweep, so a sweep that fails does not run
+ * again on every open, and a second tab opened at the same time usually
+ * skips it. Due when the stamp cannot be read. Shared by the tag pages'
+ * cache sweep (T-309) and Grass's (T-606).
+ */
+export function claimDailySweep(key: string, now: number): boolean {
+  try {
+    const last = Number(localStorage.getItem(key));
+    const age = now - last;
+    if (last > 0 && age >= 0 && age < DAY_MS) return false;
+    localStorage.setItem(key, String(now));
+  } catch {
+    // Storage unavailable: sweep anyway.
+  }
+  return true;
+}
+
+/**
+ * The hour of a Danbooru timestamp as written (`YYYY-MM-DDTHH:MM:SS…±hh:mm`).
+ * Danbooru writes timestamps in the viewer's account time zone, the zone a
+ * Grass day is read in (the first ten characters), so a post's hour and its
+ * day agree; `Date#getHours` would read the hour in the browser's zone
+ * (T-702). NaN when the string has no hour.
+ */
+function timestampHour(timestamp: string): number {
+  const match = /^\d{4}-\d{2}-\d{2}T(\d{2})/.exec(timestamp);
+  return match ? Number(match[1]) : Number.NaN;
+}
+
 /** A raw API item with dynamic shape from Danbooru endpoints. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ApiItem = Record<string, any>;
 
 /**
+ * `/counts/posts.json` answered without a number — `{"counts":{"posts":null}}`
+ * with HTTP 200 when Danbooru could not finish the count in time. It is not
+ * a 0, and asking again soon does not help: the server caches that `null`
+ * for 5 minutes (`app/logical/post_query.rb`).
+ */
+export class CountUnavailableError extends Error {
+  constructor(readonly tags: string) {
+    super('Count unavailable: the server returned no number');
+    this.name = 'CountUnavailableError';
+  }
+}
+
+/**
  * Fetches the total post count for a given tag query via
- * `/counts/posts.json`. Throws on HTTP error; returns 0 when the response
- * shape is missing `counts.posts`.
+ * `/counts/posts.json`. Throws `Error('HTTP <status>')` on an HTTP error and
+ * {@link CountUnavailableError} when the reply holds no number.
  *
  * Standalone form for services that do not extend `DataManager` (e.g.
  * `TagAnalyticsDataService`). Subclasses of `DataManager` should prefer
@@ -57,9 +127,9 @@ export async function fetchRemoteCount(
   const resp = await rateLimiter.fetch(url);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const json: ApiItem = await resp.json();
-  return json['counts'] && typeof json['counts']['posts'] === 'number'
-    ? json['counts']['posts']
-    : 0;
+  const count: unknown = json?.['counts']?.['posts'];
+  if (typeof count !== 'number') throw new CountUnavailableError(tags);
+  return count;
 }
 
 /**
@@ -77,13 +147,140 @@ export class DataManager {
    * @param {Database} db The Dexie database instance.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(db: any, rateLimiter: RateLimitedFetch | null = null) {
+  constructor(db: any, rateLimiter: RateLimitedFetch) {
     this.baseUrl = window.location.origin;
     this.db = db;
-    // Allow passing shared rate limiter, fallback to default if missing (though app should pass it)
-    const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter =
-      rateLimiter || new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+    // Always the tab's one limiter (main.ts). A manager with a bucket of its
+    // own would ignore the multi-tab split and the 429 pause, and double
+    // the tab's rate alongside the shared one (G-1).
+    this.rateLimiter = rateLimiter;
+  }
+
+  /**
+   * Whether a user's rows are numbered without a gap: their count equals
+   * the highest `no` (T-404, audit DA-07). Index reads only — a count on
+   * `uploader_id` and the last key of `[uploader_id+no]`. A user without
+   * rows is intact. A gap means rows went missing below the newest one
+   * (a ghost prune, an old bug): the local pies would undercount, the
+   * Grass would miss days (T-601), and only a sync from the start can
+   * fill it. Here rather than on AnalyticsDataManager so Grass can ask.
+   */
+  async rowNumberingIntact(uploaderId: number): Promise<boolean> {
+    const count = await this.db.posts
+      .where('uploader_id')
+      .equals(uploaderId)
+      .count();
+    if (count === 0) return true;
+    const last = await this.db.posts
+      .where('[uploader_id+no]')
+      .between([uploaderId, -Infinity], [uploaderId, Infinity])
+      .last();
+    return last?.no === count;
+  }
+
+  /**
+   * Whether this user's synced `posts` rows can stand for their uploads
+   * (T-601): a completed sync on record and none under way or marked for a
+   * full one, no gap in the numbering, and rows written in the time zone
+   * the page uses now — `created_at` carries the viewer's Danbooru zone,
+   * and Grass keys a day by its first ten characters. Throws when the page
+   * has no `localStorage` (the caller treats that as "no").
+   */
+  private async syncedPostsUsable(uploaderId: number): Promise<boolean> {
+    if (!this.db.posts || !this.db.sync_meta) return false;
+    const meta = await readSyncMeta(this.db, uploaderId);
+    if (!meta || meta.syncStartedAt !== undefined || meta.needsFullSync) {
+      return false;
+    }
+    if (!meta.timeZone || meta.timeZone !== viewerTimeZone()) return false;
+    if (!localStorage.getItem(`danbooru_grass_last_sync_${uploaderId}`)) {
+      return false;
+    }
+    return this.rowNumberingIntact(uploaderId);
+  }
+
+  /**
+   * Fills a year of the uploads Grass from the synced `posts` rows instead
+   * of paging `/posts.json` (T-601, audit DA-25): only for a year with
+   * nothing cached, and only when {@link syncedPostsUsable}. The rows are
+   * the user's with `created_at` in [startDate, endDate) by its date part —
+   * the posts `date:<startDate>...<endDate>` finds in the viewer's zone —
+   * keyed and hour-counted as {@link fetchAndPersistYear} does the API's
+   * items, and written to the same tables in one transaction. What follows
+   * is the usual path: a past year's integrity count checks the sum (a
+   * mismatch refetches the year), the current year fetches from its last
+   * day on. Any failure leaves the year to the API.
+   * @return true when it wrote the year
+   */
+  private async fillUploadsYearFromPosts(args: {
+    userInfo: TargetUser;
+    userIdVal: string;
+    year: number;
+    startDate: string;
+    endDate: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    table: any;
+  }): Promise<boolean> {
+    const {userInfo, userIdVal, year, startDate, endDate, table} = args;
+    const uploaderId = Number.parseInt(userInfo.id ?? '', 10);
+    if (!uploaderId) return false;
+    try {
+      if (!(await this.syncedPostsUsable(uploaderId))) return false;
+      const cached = await table
+        .where('id')
+        .between(
+          `${userIdVal}_${startDate}`,
+          `${userIdVal}_${year}-12-31￿`,
+          true,
+          true,
+        )
+        .last();
+      if (cached) return false;
+
+      const daily = new Map<string, number>();
+      const hourly = new Array<number>(24).fill(0);
+      await this.db.posts
+        .where('[uploader_id+created_at]')
+        .between([uploaderId, startDate], [uploaderId, endDate], true, false)
+        .each((p: {created_at: string}) => {
+          const date = String(p.created_at).slice(0, 10);
+          daily.set(date, (daily.get(date) ?? 0) + 1);
+          const hour = timestampHour(String(p.created_at));
+          if (hour >= 0 && hour < 24) hourly[hour]++;
+        });
+      if (daily.size === 0) return false;
+
+      const days: DailyEntry[] = [...daily].map(([date, count]) => ({
+        id: `${userIdVal}_${date}`,
+        userId: userIdVal,
+        date,
+        count,
+      }));
+      const hours: HourlyStatEntry[] = hourly.map((count, h) => ({
+        id: `${userIdVal}_uploads_${year}_${String(h).padStart(2, '0')}`,
+        userId: userIdVal,
+        metric: 'uploads',
+        year,
+        hour: h,
+        count,
+      }));
+      await this.db.transaction(
+        'rw',
+        [table, this.db.hourly_stats],
+        async () => {
+          await table.bulkPut(days);
+          await this.db.hourly_stats.bulkPut(hours);
+        },
+      );
+      log.debug('Uploads year filled from synced posts', {
+        year,
+        days: days.length,
+      });
+      return true;
+    } catch (e: unknown) {
+      log.debug('Uploads year left to the API', {year, error: e});
+      return false;
+    }
   }
 
   /**
@@ -95,7 +292,7 @@ export class DataManager {
    */
   async fetchPostDetails(postId: number): Promise<DanbooruPost | null> {
     try {
-      const url = `/posts/${postId}.json?only=id,created_at,score,fav_count,rating,variants,preview_file_url,tag_string_artist,tag_string_copyright,tag_string_character`;
+      const url = `/posts/${postId}.json?only=id,created_at,score,fav_count,rating,media_asset[variants],preview_file_url,tag_string_artist,tag_string_copyright,tag_string_character`;
       const resp = await this.rateLimiter.fetch(url);
       if (!resp.ok) return null;
       const data = await resp.json();
@@ -320,6 +517,20 @@ export class DataManager {
         year,
       );
 
+      // A year with nothing cached comes from the synced posts when they can
+      // stand for it (T-601); the integrity count below then checks a past
+      // year, and the current year fetches only what followed.
+      if (metric === 'uploads' && !isYearCompleteCache) {
+        await this.fillUploadsYearFromPosts({
+          userInfo,
+          userIdVal,
+          year,
+          startDate: cfg.startDate,
+          endDate: cfg.endDate,
+          table: cfg.table,
+        });
+      }
+
       const forceFullFetch = await this.runUploadsIntegrityCheck({
         metric,
         year,
@@ -448,8 +659,10 @@ export class DataManager {
    * Past-year uploads-only integrity check: compare the remote count
    * (via `/counts/posts.json`) against the local Dexie sum. On mismatch,
    * delete this year's local rows and return `true` to force a full
-   * refetch downstream. Bail silently (return false) on network errors
-   * — the cache is still usable, just possibly stale.
+   * refetch downstream. Bail silently (return false) when the remote count
+   * cannot be had — a network error, or a `null` count
+   * ({@link CountUnavailableError}, which used to read as 0 and wipe the
+   * year) — the cache is still usable, just possibly stale.
    */
   private async runUploadsIntegrityCheck(args: {
     metric: Metric;
@@ -704,15 +917,21 @@ export class DataManager {
     // range. Use batch size 1 to avoid wasted parallel requests that
     // return empty pages.
     const isDeltaFetch = !!lastEntry && !forceFullFetch;
-    const items = await this.fetchAllPages(
-      endpoint,
-      params,
-      null,
-      dateKey,
-      'desc',
-      onProgress,
-      isDeltaFetch,
-    );
+    // A cached past year asks from Jan 1 of the next year to that same day,
+    // an empty range (`a...b` excludes b): nothing to fetch (T-601 — a year
+    // filled from the synced posts lands here after its integrity count).
+    const items =
+      rangeStart >= effectiveEndDate
+        ? []
+        : await this.fetchAllPages(
+            endpoint,
+            params,
+            null,
+            dateKey,
+            'desc',
+            onProgress,
+            isDeltaFetch,
+          );
 
     const dailyCounts: Record<string, {count: number; postList: number[]}> = {};
 
@@ -752,9 +971,9 @@ export class DataManager {
       const isNewData =
         !lastEntry || String(rawDate).slice(0, 10) > lastEntry['date'];
 
-      const itemDate = new Date(rawDate);
-      const hour = itemDate.getHours();
-      if (isNewData && !isNaN(hour) && hour >= 0 && hour < 24) {
+      // The hour as written, in the zone the day above is read in (T-702).
+      const hour = timestampHour(String(rawDate));
+      if (isNewData && hour >= 0 && hour < 24) {
         hourlyCounts[hour]++;
       }
     });
@@ -873,32 +1092,110 @@ export class DataManager {
    */
   async clearCache(_metric: Metric, userInfo: TargetUser): Promise<boolean> {
     try {
-      const userIdVal = userInfo.id || userInfo.name;
-      const tablesToClear = [
-        'uploads',
-        'approvals',
-        'approvals_detail',
-        'notes',
-        'completed_years',
-        'hourly_stats',
-      ];
-
-      for (const storeName of tablesToClear) {
-        const table = this.db[storeName];
-        // Delete all entries for this user in this store
-        const items = await table
-          .where('userId')
-          .equals(userIdVal)
-          .primaryKeys();
-        if (items.length > 0) {
-          await table.bulkDelete(items);
-        }
-      }
-
+      await this.deleteGrassRows(userInfo.id || userInfo.name);
       return true;
     } catch (e: unknown) {
       log.error('Clear cache failed', {error: e});
       return false;
+    }
+  }
+
+  /** Deletes every row of `userIdVal` in {@link GRASS_TABLES}. */
+  private async deleteGrassRows(userIdVal: string): Promise<void> {
+    for (const storeName of GRASS_TABLES) {
+      const table = this.db[storeName];
+      const items = await table.where('userId').equals(userIdVal).primaryKeys();
+      if (items.length > 0) await table.bulkDelete(items);
+    }
+  }
+
+  /**
+   * Records that this user's Grass was opened (T-606): the cache sweep
+   * drops a Grass cache {@link GRASS_CACHE_RETENTION_MS} after the last
+   * visit. Kept in `sync_meta`, so only for a numeric id.
+   */
+  async noteGrassVisit(userInfo: TargetUser, now = Date.now()): Promise<void> {
+    const id = Number.parseInt(userInfo.id ?? '', 10);
+    if (id > 0) await patchSyncMeta(this.db, id, {lastVisitedAt: now});
+  }
+
+  /**
+   * Once a day, drops the Grass cache of users not opened for
+   * {@link GRASS_CACHE_RETENTION_MS} (T-606, decision G-6; audit DA-10's
+   * Grass part): the six tables {@link clearCache} empties, so their past
+   * years are fetched again on the next visit. Never `currentUserIdVal`. A
+   * user cached before visits were recorded gets one now, which starts
+   * their 90 days; a user known only by name (no numeric id, so no
+   * `sync_meta` row) is left alone. Failures are logged, never thrown.
+   * @return how many users' caches were dropped
+   */
+  async sweepGrassCache(
+    currentUserIdVal: string,
+    now = Date.now(),
+  ): Promise<number> {
+    if (!claimDailySweep(GRASS_SWEEP_KEY, now)) return 0;
+    let dropped = 0;
+    try {
+      const userIds = new Set<string>();
+      for (const name of ['uploads', 'approvals', 'notes']) {
+        const keys = await this.db[name].orderBy('userId').uniqueKeys();
+        for (const k of keys) userIds.add(String(k));
+      }
+      for (const uid of userIds) {
+        if (uid === currentUserIdVal) continue;
+        const numeric = Number(uid);
+        if (!Number.isInteger(numeric) || numeric <= 0) continue;
+        const visited = (await readSyncMeta(this.db, numeric))?.lastVisitedAt;
+        if (visited === undefined) {
+          await patchSyncMeta(this.db, numeric, {lastVisitedAt: now});
+        } else if (now - visited > GRASS_CACHE_RETENTION_MS) {
+          await this.deleteGrassRows(uid);
+          dropped++;
+        }
+      }
+      if (dropped > 0) log.info('Unused Grass caches dropped', {dropped});
+    } catch (e: unknown) {
+      log.warn('Grass cache sweep failed', {error: e});
+    }
+    return dropped;
+  }
+
+  /**
+   * One page, retried like the full sync's (T-603, audit DA-22): a 429, a
+   * 5xx, a network failure or an unreadable body is asked again up to
+   * {@link SYNC_PAGE_MAX_ATTEMPTS} times, each wait covering what is left
+   * of the shared limiter's pause ({@link syncRetryDelayMs}). Before, four
+   * 429s in a row — 1, 2 and 4 s apart, shorter than a long pause — failed
+   * the year, and a network error failed it at once.
+   */
+  private async fetchPageWithRetry(
+    url: string,
+    page: number,
+  ): Promise<ApiItem[]> {
+    let failures = 0;
+    for (;;) {
+      try {
+        const resp = await this.rateLimiter.fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return await resp.json();
+      } catch (e: unknown) {
+        failures++;
+        const kind = classifySyncFetchError(e);
+        if (kind === 'fatal' || failures >= SYNC_PAGE_MAX_ATTEMPTS) throw e;
+        const waitMs = syncRetryDelayMs(
+          kind,
+          failures,
+          this.rateLimiter.backoffRemainingMs(),
+        );
+        log.warn(`Page ${page} failed, retrying`, {
+          page,
+          kind,
+          failures,
+          waitMs,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        await new Promise(r => setTimeout(r, waitMs));
+      }
     }
   }
 
@@ -913,10 +1210,11 @@ export class DataManager {
    * @param {Function|null} [onProgress=null] Optional callback for reporting fetch progress (count).
    * @return {Promise<ApiItem[]>} List of all fetched items up to the stop condition.
    */
-  // T-26 baseline: complexity 30. Page loop × retry × stop-condition (date /
-  // cursor / empty) × ascending vs descending direction. Critical path used
-  // by every metric fetch. Depth-7 nesting in the stopDate inner loop has a
-  // separate per-line disable below.
+  // T-26 baseline: complexity 30. Page loop × stop-condition (date /
+  // cursor / empty) × ascending vs descending direction (the per-page retry
+  // is fetchPageWithRetry since T-603). Critical path used by every metric
+  // fetch. Depth-7 nesting in the stopDate inner loop has a separate
+  // per-line disable below.
   // eslint-disable-next-line complexity
   async fetchAllPages(
     endpoint: string,
@@ -930,13 +1228,13 @@ export class DataManager {
     let allItems: ApiItem[] = [];
     let page = 1;
 
-    // Adaptive Batch Size
-    // - Full initial fetches: 5 pages in parallel
-    // - Delta fetches: start at 1 (narrow range, usually <1 page), then
-    //   scale up to 3 if the first page comes back full
+    // Adaptive Batch Size: page 1 alone, then — only when it came back
+    // full — 5 pages at a time for a full fetch, 3 for a delta (narrow
+    // range, usually under a page). A full fetch used to ask 5 at once, so
+    // a year under 200 uploads cost 4 empty answers (T-604, audit DA-12).
     const FULL_BATCH = 5;
     const DELTA_SCALE_UP = 3;
-    let batchSize = isDelta ? 1 : FULL_BATCH;
+    let batchSize = 1;
     const isApprovals = endpoint.includes('/post_approvals.json');
     const DELAY_BETWEEN_BATCHES = 150;
 
@@ -965,36 +1263,11 @@ export class DataManager {
             await new Promise(r => setTimeout(r, delay));
           }
 
-          // 2. Retry Logic
-          let attempt = 0;
-          const backoff = [1000, 2000, 4000];
-
-          while (true) {
-            const resp = await this.rateLimiter.fetch(url);
-
-            if (resp.status === 429 || resp.status >= 500) {
-              if (attempt < backoff.length) {
-                const waitMs = backoff[attempt];
-                log.warn(
-                  `HTTP ${resp.status} on page ${currentPage}, retrying`,
-                  {status: resp.status, page: currentPage, waitMs},
-                );
-                await new Promise(r => setTimeout(r, waitMs));
-                attempt++;
-                continue;
-              } else {
-                throw new Error(`HTTP ${resp.status} (Max Retries Exceeded)`);
-              }
-            }
-
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-            // Success
-            return {
-              page: currentPage,
-              data: await resp.json(),
-            };
-          }
+          // 2. Retries as the full sync's (T-603)
+          return {
+            page: currentPage,
+            data: await this.fetchPageWithRetry(url, currentPage),
+          };
         };
 
         promises.push(
@@ -1072,14 +1345,13 @@ export class DataManager {
       // not the potentially updated one.
       const fetchedBatch = batchSize;
 
-      // Adaptive scale-up: if delta started with batchSize=1 and the
-      // first page was full, there's more data than expected — switch
-      // to moderate parallel batching for the remaining pages.
-      if (batchSize < DELTA_SCALE_UP && page === 1) {
+      // Adaptive scale-up: page 1 came back full, so there is more — ask
+      // the rest in parallel batches.
+      if (page === 1) {
         const limit = params['limit'] as number;
         const firstPageFull = batchResults[0]?.data?.length === limit;
         if (firstPageFull) {
-          batchSize = DELTA_SCALE_UP;
+          batchSize = isDelta ? DELTA_SCALE_UP : FULL_BATCH;
         }
       }
 
@@ -1130,9 +1402,12 @@ export class DataManager {
   /**
    * Gets statistics about the cache usage across storage methods.
    * Calculates item counts and approximate byte sizes for IndexedDB and LocalStorage.
+   * Static: it makes no requests, so the settings popover can call it
+   * without a manager (which would need the tab's rate limiter).
    * @return {Promise<{indexedDB: {count: number, size: number}, localStorage: {count: number, size: number}}>} Object containing count and size stats.
    */
-  async getCacheStats(): Promise<{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  static async getCacheStats(db: any): Promise<{
     indexedDB: {count: number; size: number};
     localStorage: {count: number; size: number};
   }> {
@@ -1151,7 +1426,7 @@ export class DataManager {
     try {
       const tables = ['uploads', 'approvals', 'notes'];
       for (const t of tables) {
-        const c = await this.db[t].count();
+        const c = await db[t].count();
         stats.indexedDB.count += c;
       }
       // Approximate size: navigator.storage (Origin total)

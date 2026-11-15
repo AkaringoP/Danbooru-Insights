@@ -5,6 +5,7 @@ import {SettingsManager, migrateNsfwKey} from './core/settings';
 import {applyDashboardTheme} from './ui/theme-palette';
 import {RateLimitedFetch} from './core/rate-limiter';
 import {TabCoordinator} from './core/tab-coordinator';
+import {GrassLoadGate} from './core/grass-load-gate';
 import {ProfileContext} from './core/profile-context';
 import {GrassApp} from './apps/grass-app';
 import {UserAnalyticsApp} from './apps/user-analytics-app';
@@ -136,14 +137,21 @@ async function main(): Promise<void> {
 
   // Shared rate limiter — one per tab, coordinated across tabs
   const rl = CONFIG.RATE_LIMITER;
-  const rateLimiter = new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+  const rateLimiter = new RateLimitedFetch(
+    rl.concurrency,
+    rl.jitter,
+    rl.rps,
+    rl.burst,
+  );
 
   // Cross-tab coordination
   const coordinator = new TabCoordinator();
   coordinator.onTabCountChange = count => {
-    const rps = Math.max(1, Math.floor(rl.rps / count));
+    // Not floored: the rate may be fractional (4.5), and flooring a split
+    // would quietly drop the tabs' total below the configured rate.
+    const rps = Math.max(1, rl.rps / count);
     const conc = Math.max(1, Math.floor(rl.concurrency / count));
-    rateLimiter.updateLimits(rps, conc);
+    rateLimiter.updateLimits(rps, conc, count);
   };
   coordinator.onBackoffReceived = until => {
     rateLimiter.setBackoff(until);
@@ -173,12 +181,15 @@ async function main(): Promise<void> {
       return;
     }
 
-    const grass = new GrassApp(db, settings, context, rateLimiter);
+    // Grass first (G-7): the report button waits while the graph loads.
+    const grassGate = new GrassLoadGate();
+    const grass = new GrassApp(db, settings, context, rateLimiter, grassGate);
     const userAnalytics = new UserAnalyticsApp(
       db,
       settings,
       context,
       rateLimiter,
+      grassGate,
     );
 
     // Execution — fire-and-forget: top-level app entries.

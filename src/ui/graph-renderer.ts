@@ -1604,17 +1604,6 @@ export class GraphRenderer {
   }
 
   /**
-   * Renders the contribution graph.
-   * @param {Object} dataMap Map of date strings to counts.
-   * @param {number} year The year to render.
-   * @param {string} metric The metric being displayed.
-   * @param {Object} userInfo User info object.
-   * @param {Array<number>} availableYears List of available years.
-   * @param {Function} onYearChange Callback for year change.
-   * @param {Function} onRefresh Callback for refresh.
-   */
-
-  /**
    * Build the footer (settings button, details-toggle, settings popover,
    * and the legend swatches). Idempotent — guarded by the
    * `#danbooru-grass-footer` id check so re-renders don't stack chrome.
@@ -2634,6 +2623,17 @@ export class GraphRenderer {
     return handle;
   }
 
+  /**
+   * Renders the contribution graph.
+   * @param {Object} dataMap `{daily, hourly}`, or a legacy map of date strings to counts.
+   * @param {number} year The year to render.
+   * @param {string} metric The metric being displayed.
+   * @param {Object} userInfo User info object.
+   * @param {Array<number>} availableYears List of available years.
+   * @param {Function} onYearChange Callback for year change.
+   * @param {Function} onRefresh Callback for refresh.
+   * @param {boolean=} skipScroll Leave the scroll position alone (the skeleton render).
+   */
   // T-26 baseline: complexity 18. Year-pick × metric routing × footer
   // build × interaction wiring × auto-tune triggers. Already T-24 decomposed
   // into pipeline helpers; remaining branches live in renderGraph itself.

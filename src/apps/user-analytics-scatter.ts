@@ -6,6 +6,7 @@ import {createTwoStepTap, isTouchDevice} from '../ui/two-step-tap';
 import type {TwoStepTapController} from '../ui/two-step-tap';
 import {getPalette} from '../ui/theme-palette';
 import {createLogger} from '../core/logger';
+import {replaceArrayContents} from '../utils';
 
 const log = createLogger('Scatter');
 
@@ -1396,8 +1397,9 @@ function wireBackfillUi(
       if (options.refreshScatterData) {
         try {
           const fresh = await options.refreshScatterData();
-          scatterData.length = 0;
-          scatterData.push(...fresh);
+          // In place: the chart's closures hold this array. One entry per
+          // upload, so no push(...fresh) (see replaceArrayContents).
+          replaceArrayContents(scatterData, fresh);
           rerender();
         } catch (e) {
           log.warn('Refresh after backfill failed', {error: e});

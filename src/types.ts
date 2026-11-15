@@ -247,6 +247,19 @@ export interface DistributionItem {
   isOther: boolean;
   color?: string;
   /**
+   * The count could not be had — a 422 (the query is over the viewer's
+   * search tag limit), a `null` count, or a request lost after its retry.
+   * `count` is then 0 but means "unknown", not "none": the legend shows "—"
+   * and the slice is left out of the pie and its percentages (v9.12).
+   */
+  unknown?: boolean;
+  /**
+   * With `unknown`: the count was not asked at all, because its search uses
+   * more tags than the viewer's limit allows (T-408; anonymous 2, Member 3).
+   * The legend shows a lock instead of "—".
+   */
+  locked?: boolean;
+  /**
    * Sub-tag breakdown for legend hover/tap (v9.6.0+). Populated for Copy /
    * Fav_Copy / Char distributions when the top-level tag has implications
    * (sub-tags) that the user actually uses. Empty/undefined = no tooltip.
@@ -362,6 +375,106 @@ export interface PostRecord {
   file_url?: string;
   tag_string_copyright?: string;
   tag_string_character?: string;
+
+  // Fields version 2 (T-402), under short names: IndexedDB stores the key
+  // names in every row. Absent on rows from before; `sync_meta.fieldsVersion`
+  // says whether all of a user's rows hold them.
+  /** `updated_at`, ms since epoch (server clock). */
+  upd?: number;
+  /** `is_pending`. */
+  pend?: boolean;
+  /** `is_flagged`. */
+  flag?: boolean;
+  /** `tag_count` (tags of every category). */
+  tc?: number;
+  /** `tag_string_character` (space-separated). */
+  chr?: string;
+  /** `tag_string_copyright` (space-separated). */
+  cpy?: string;
+
+  // Fields version 3 (T-703).
+  /**
+   * Which of the secondary pies' tags the post has: sorted indices into
+   * `TAG_FLAG_NAMES` (`core/post-tag-flags`), `[]` for none. Absent on rows
+   * from before.
+   */
+  tf?: number[];
+}
+
+/**
+ * Per-user sync state in the `sync_meta` table (schema v13). One row per
+ * synced uploader, filled in by the sync (T-402), the tag-field backfill
+ * (T-403), the row-count check (T-404) and the change catch-up (T-407).
+ * Every field but the key is optional: a row is written a piece at a time.
+ */
+export interface SyncMetaRecord {
+  /**
+   * Uploader id, as in `posts.uploader_id` — a number: IndexedDB keys `1`
+   * and `"1"` are different, so a string id would miss the row.
+   */
+  userId: number;
+  /**
+   * Which post fields the user's rows hold. 2: the tag fields T-402 adds
+   * (`updated_at`, pending / flagged, `tag_count`, character and copyright
+   * tag strings). Absent: rows from before, so the pies keep counting.
+   */
+  fieldsVersion?: number;
+  /**
+   * Latest `updated_at` (ms since epoch, server clock) the user's rows are
+   * known to reflect: the first response's `Date` of the full sync or
+   * backfill that filled them, then the newest change the catch-up saw.
+   */
+  changeWatermark?: number;
+  /**
+   * A fields backfill under way (T-403): every row the user had when it
+   * started is fetched again, in id ranges walked in parallel. Cleared when
+   * it completes.
+   */
+  backfill?: {
+    /** Server time (ms) of its first response: the watermark once done. */
+    from: number;
+    /** Each id range: done up to `after`, ends at `to` (inclusive). */
+    ranges: Array<{after: number; to: number}>;
+    /**
+     * The fields version it writes and the viewer's time zone it started
+     * in. A plan is resumed only when both are the current ones; one
+     * without them (saved before they were recorded) starts over.
+     */
+    version?: number;
+    timeZone?: string;
+  };
+  /**
+   * Where an interrupted change catch-up resumes (T-407,
+   * `core/change-catch-up.ts`).
+   */
+  catchUp?: {
+    /** The next `order:change` page it would have read. */
+    page: number;
+    /** Newest `updated_at` (ms) on its first page. */
+    headAt: number;
+  };
+  /** When the last change catch-up completed (ms): one per count TTL. */
+  caughtUpAt?: number;
+  /**
+   * The catch-up ran past the page limit: the rows cannot be brought up to
+   * date by it. The pies count remotely and the next sync starts over.
+   */
+  needsFullSync?: boolean;
+  /**
+   * The viewer's Danbooru time zone during the sync
+   * (`<body data-current-user-time-zone>`): Grass may reuse the rows'
+   * dates only under the same one. A Rails zone name such as "Seoul"
+   * (seen 2026-11-15), not an IANA id: compare it, do not hand it to
+   * `Intl` (which throws on "Seoul").
+   */
+  timeZone?: string;
+  /**
+   * Set when a sync starts and cleared when it ends (ms since epoch).
+   * Cleanup keeps the rows of a user with one set (T-404).
+   */
+  syncStartedAt?: number;
+  /** Last time this user's dashboard was opened (ms since epoch). */
+  lastVisitedAt?: number;
 }
 
 /** User-level aggregate statistics stored in the `user_stats` table. */
@@ -417,6 +530,7 @@ export interface MilestoneEntry {
     approver_name?: string;
     rating: string;
     score?: number;
+    media_asset?: {variants?: PostVariant[]};
     variants?: PostVariant[];
     preview_file_url?: string;
     file_url?: string;
@@ -481,6 +595,8 @@ export interface CreatedTagItem {
 export interface DanbooruPost {
   id: number;
   created_at: string;
+  /** Last change to the post (tags, rating, status…), ISO with offset. */
+  updated_at?: string;
   uploader_id: number;
   rating: string;
 
@@ -490,6 +606,8 @@ export interface DanbooruPost {
   down_score?: number;
   fav_count?: number;
   tag_count_general?: number;
+  /** Tags of every category. */
+  tag_count?: number;
 
   // Status flags (modern post schema)
   is_deleted?: boolean;
@@ -504,8 +622,14 @@ export interface DanbooruPost {
   tag_string_artist?: string;
   tag_string_copyright?: string;
   tag_string_character?: string;
+  tag_string_general?: string;
+  tag_string_meta?: string;
 
-  // Media (variants is the modern field; *_file_url are legacy fallbacks)
+  // Media. Danbooru sends the sizes under `media_asset` when asked with
+  // `only=…,media_asset[variants]` (V-9, 2026-11-16) — never a top-level
+  // `variants`, which only holds a stored row's copy (the milestone lookup,
+  // T-506). *_file_url are the fallbacks (preview: the 180×180 jpg).
+  media_asset?: {variants?: PostVariant[]};
   variants?: PostVariant[];
   preview_file_url?: string;
   file_url?: string;
@@ -661,10 +785,10 @@ export interface ProfileSummaryInput {
   window: WindowPoint[];
 }
 
-/** Tone of a pane part: `good` praise, `info` neutral note, `warn`/`bad` concerns. */
 /** `recent`: newest-window view (popover). `lifetime`: all synced uploads (dashboard). */
 export type SummaryScope = 'recent' | 'lifetime';
 
+/** Tone of a pane part: `good` praise, `info` neutral note, `warn`/`bad` concerns. */
 export type SummarySeverity = 'good' | 'info' | 'warn' | 'bad';
 
 /** Danbooru tag category of a tag-name link (drives its colour). */
@@ -814,6 +938,12 @@ export interface MonthlyCountRecord {
   count: number;
   /** Fetch timestamp in ms since epoch. */
   fetchedAt: number;
+  /**
+   * `'utc'` for counts of a UTC calendar month (written since T-303).
+   * Older rows counted the month in the viewer's time zone and are not
+   * read back. Not indexed, so adding it needed no schema version.
+   */
+  basis?: 'utc';
 }
 
 /**
@@ -868,6 +998,21 @@ export interface SyncOutcome {
   started: boolean;
 }
 
+/** One of the four report rankings of a tag page. */
+export type RankingSlot =
+  | 'uploaderAll'
+  | 'approverAll'
+  | 'uploaderYear'
+  | 'approverYear';
+
+/**
+ * Posts per slice of a tag-page count pie (status, rating, commentary,
+ * translation). `null` is a count that could not be had — lost after its
+ * retry, a `null` from Danbooru, or over the viewer's search tag limit and
+ * never asked. It shows as unknown and is never read as 0 (T-308).
+ */
+export type TagCountMap = Record<string, number | null>;
+
 /** Complete tag analytics metadata. */
 export interface TagAnalyticsMeta {
   name: string;
@@ -888,6 +1033,12 @@ export interface TagAnalyticsMeta {
   hundredthPost?: DanbooruPost;
   timeToHundred?: number;
   historyData: HistoryEntry[];
+  /**
+   * `'utc'` when `historyData` counts UTC calendar months (reports and
+   * UTC-bounded counts, T-302). Records without it predate that and count
+   * months in the viewer's time zone; see `hasUtcHistory`.
+   */
+  historyBasis?: 'utc';
   precalculatedMilestones: MilestoneEntry[];
   rankings: {
     uploader: {
@@ -901,12 +1052,24 @@ export interface TagAnalyticsMeta {
       first100: UserRanking[];
     };
   };
-  statusCounts: Record<string, number>;
-  ratingCounts: Record<string, number>;
-  commentaryCounts?: Record<string, number>;
-  translationCounts?: Record<string, number>;
+  /**
+   * Report rankings Danbooru did not return, with nothing cached in their
+   * place: their list is empty and shows as unavailable, not as "No Data"
+   * (a logged-out search of a large tag times out after 3 seconds).
+   */
+  rankingsFailed?: RankingSlot[];
+  statusCounts: TagCountMap;
+  ratingCounts: TagCountMap;
+  commentaryCounts?: TagCountMap;
+  translationCounts?: TagCountMap;
   copyrightCounts?: Record<string, number>;
   characterCounts?: Record<string, number>;
+  /**
+   * Which related-tag pies hold exact counts. A large tag's are related-tag
+   * approximations until the user opens that tab, which counts them
+   * (T-307); a small tag's are counted from its posts. Absent = approximate.
+   */
+  relatedCountsExact?: {copyright?: boolean; character?: boolean};
   latestPost?: DanbooruPost;
   trendingPost?: DanbooruPost;
   trendingPostNSFW?: DanbooruPost;

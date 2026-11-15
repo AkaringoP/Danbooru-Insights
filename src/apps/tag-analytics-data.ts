@@ -3,11 +3,29 @@ import {
   buildUntaggedTranslationQueries,
   computeUntaggedTranslation,
 } from '../core/analytics-data-manager';
-import {fetchRemoteCount} from '../core/data-manager';
+import {
+  CountUnavailableError,
+  claimDailySweep,
+  fetchRemoteCount,
+} from '../core/data-manager';
+import {classifySyncFetchError} from '../core/fetch-retry';
 import {createLogger} from '../core/logger';
+import {
+  MONTHLY_REPORT_FROM,
+  buildMonthlyReportUrl,
+  defaultReportTo,
+  mergeMonthlyCounts,
+  monthKeysBetween,
+  parseMonthlyReport,
+  splitReportRange,
+  trimMonthlyCounts,
+  utcDateString,
+  type MonthlyCounts,
+} from '../core/monthly-report';
 import {bulkPutSafe, evictOldestNonCurrentUser} from '../core/quota-manager';
 import {RateLimitedFetch} from '../core/rate-limiter';
-import {getTopLevelFlags} from '../core/top-level-tags';
+import {fitsViewerTagLimit} from '../core/search-terms';
+import {getTopLevelFlags, pruneImplicationCache} from '../core/top-level-tags';
 import type {Database} from '../core/database';
 import type {
   DanbooruPost,
@@ -17,12 +35,160 @@ import type {
   DanbooruRelatedTagResponse,
   HistoryEntry,
   MilestoneEntry,
+  RankingSlot,
   UserRanking,
   TagAnalyticsMeta,
+  TagCountMap,
   MonthlyCountRecord,
 } from '../types';
 
-type MonthlyCountsData = HistoryEntry[] & {historyCutoff?: string};
+/**
+ * `fetchMonthlyCounts`'s history. `partial`: some month's count was lost
+ * and reads as 0 in it, so the history must not be cached (G-4).
+ */
+type MonthlyCountsData = HistoryEntry[] & {partial?: boolean};
+
+/** A tag's monthly history from {@link TagAnalyticsDataService.fetchMonthlyHistory}. */
+export type MonthlyHistory = {
+  /** Consecutive UTC months from the first one with posts, running total. */
+  history: HistoryEntry[];
+  /**
+   * How it was fetched: 1 one report for the whole range, 2 the range in
+   * pieces (or a remainder after cached months), 3 one count per month.
+   */
+  layer: 1 | 2 | 3;
+  /** Some month was lost (layer 3 only): show it, but do not cache it. */
+  partial: boolean;
+};
+
+/**
+ * Reports a monthly history may cost before it falls back to one count per
+ * month (layer 3). The first, whole-range request counts.
+ */
+export const REPORT_HISTORY_MAX_REQUESTS = 24;
+
+/** The smallest piece a timed-out report range is split into, in months. */
+const REPORT_HISTORY_MIN_SPLIT_MONTHS = 12;
+
+/**
+ * Whether a cached tag report's history is in UTC months (`historyBasis`).
+ * Records saved before T-302 counted months in the viewer's time zone (and
+ * could hold a lost month as 0); their history and the tag's monthly count
+ * cache are dropped once rather than mixed with UTC months (PLAN.md 4.2).
+ */
+export function hasUtcHistory(
+  meta: Pick<TagAnalyticsMeta, 'historyBasis'> | null | undefined,
+): boolean {
+  return meta?.historyBasis === 'utc';
+}
+
+/** Milestone posts fetched at a time (the shared limiter paces them). */
+const MILESTONE_CONCURRENCY = 3;
+
+/**
+ * Numbered pages every viewer may ask for: Danbooru answers 410 past
+ * `User.page_limit` (1000 below Gold, 5000 from Gold).
+ */
+const MILESTONE_MAX_PAGE = 1000;
+
+/** Where to find one milestone post: the search, the page, the row. */
+export type MilestoneLookup = {
+  milestone: number;
+  /** `<tag> status:any date:>=<UTC month start> order:id`. */
+  query: string;
+  limit: number;
+  page: number;
+  /** Zero-based row of the post on that page. */
+  index: number;
+};
+
+/**
+ * Where the `target`-th post of the tag is (T-304): the month the running
+ * total reaches it, then its place among that month's posts in id order.
+ *
+ * - The month starts at its UTC instant, like the history's months. The
+ *   old `date:>` the previous month's last day was a bare date (read in the
+ *   viewer's time zone) and let that day's posts in, so the post found was
+ *   ahead of the milestone by them.
+ * - The page size grows with the offset, `limit = ceil(offset / 1000)` up
+ *   to 200, so the page number stays within 1000 — the page limit of every
+ *   account level — up to 200,000 posts into the month.
+ *
+ * Null when the history never reaches `target`, or the post would lie past
+ * that page limit.
+ */
+export function milestoneLookup(
+  tagName: string,
+  history: HistoryEntry[],
+  target: number,
+): MilestoneLookup | null {
+  let prevCumulative = 0;
+  const month = history.find(m => {
+    if (m.cumulative >= target) return true;
+    prevCumulative = m.cumulative;
+    return false;
+  });
+  if (!month) return null;
+
+  const offset = target - prevCumulative;
+  const limit = Math.min(200, Math.max(1, Math.ceil(offset / 1000)));
+  const page = Math.ceil(offset / limit);
+  if (page > MILESTONE_MAX_PAGE) return null;
+  return {
+    milestone: target,
+    query: `${tagName} status:any date:>=${month.date.slice(0, 7)}-01T00:00:00Z order:id`,
+    limit,
+    page,
+    index: (offset - 1) % limit,
+  };
+}
+
+/**
+ * Reads a grouped report (`search[group]` without `search[period]`): rows
+ * like `{rating: "g", posts: 12}` or `{is_deleted: true, posts: 3}`, one
+ * per value that has posts. Keys are the values as strings. Throws on
+ * anything but such a list, so a broken reply is never read as zeros.
+ */
+export function parseGroupReport(
+  body: unknown,
+  column: string,
+): Map<string, number> {
+  if (!Array.isArray(body)) throw new Error('Group report is not a list');
+  const counts = new Map<string, number>();
+  for (const row of body as unknown[]) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    const value = r[column];
+    const posts = r['posts'];
+    if (
+      (typeof value !== 'string' && typeof value !== 'boolean') ||
+      typeof posts !== 'number' ||
+      !Number.isInteger(posts) ||
+      posts < 0
+    ) {
+      throw new Error(`Group report row unreadable: ${JSON.stringify(row)}`);
+    }
+    const key = String(value);
+    counts.set(key, (counts.get(key) ?? 0) + posts);
+  }
+  return counts;
+}
+
+/** A report request that came back with an HTTP error. */
+class ReportStatusError extends Error {
+  constructor(readonly status: number) {
+    super(`HTTP ${status}`);
+    this.name = 'ReportStatusError';
+  }
+}
+
+/**
+ * Whether a failed report is worth asking for again in smaller pieces: the
+ * server ran out of time (Danbooru answers a statement timeout with 500)
+ * or a gateway in front of it did.
+ */
+function isReportTimeout(e: unknown): boolean {
+  return e instanceof ReportStatusError && e.status >= 500;
+}
 
 export type InitialStats = {
   firstPost?: DanbooruPost;
@@ -59,7 +225,208 @@ export type RankingResult = {
   approverAll: UserRanking[];
   uploaderYear: UserRanking[];
   approverYear: UserRanking[];
+  /**
+   * Slots whose report could not be fetched (a 429, 5xx, network error or
+   * an error body). Their list is empty, which here means "unknown", not
+   * "nobody": see {@link keepCachedOnFailure}.
+   */
+  failed?: RankingSlot[];
 };
+
+const RANKING_SLOTS: readonly RankingSlot[] = [
+  'uploaderAll',
+  'approverAll',
+  'uploaderYear',
+  'approverYear',
+];
+
+/**
+ * `fresh` with each failed slot filled from `cached`, so a report that
+ * failed never replaces a ranking that was there (the empty list would be
+ * shown and then saved for a day). A failed slot with nothing cached stays
+ * empty and stays listed in `failed` — and so does one whose cached list
+ * is itself a failure (listed in the cache's `failed`).
+ */
+export function keepCachedOnFailure(
+  fresh: RankingResult,
+  cached: RankingResult | null,
+): RankingResult {
+  if (!fresh.failed?.length) return fresh;
+  const out: RankingResult = {...fresh};
+  const stillFailed: RankingSlot[] = [];
+  for (const slot of fresh.failed) {
+    const previous = cached?.[slot];
+    if (previous && !cached?.failed?.includes(slot)) out[slot] = previous;
+    else stillFailed.push(slot);
+  }
+  if (stillFailed.length > 0) out.failed = stillFailed;
+  else delete out.failed;
+  return out;
+}
+
+/**
+ * The report rankings saved with a cached tag report, or null. Slots the
+ * report saved as failed (`rankingsFailed`) come back in `failed`.
+ */
+export function cachedRankingResult(
+  meta:
+    | Pick<TagAnalyticsMeta, 'rankings' | 'rankingsFailed'>
+    | null
+    | undefined,
+): RankingResult | null {
+  const r = meta?.rankings;
+  if (!r) return null;
+  const result: RankingResult = {
+    uploaderAll: r.uploader?.allTime,
+    approverAll: r.approver?.allTime,
+    uploaderYear: r.uploader?.year,
+    approverYear: r.approver?.year,
+  };
+  const failed = RANKING_SLOTS.filter(s => meta?.rankingsFailed?.includes(s));
+  if (failed.length > 0) result.failed = failed;
+  return result;
+}
+
+/**
+ * The count searches behind each key of a tag's `commentaryCounts`. The two
+ * breakdowns search three tags (`has:` counts as one).
+ */
+export function commentaryCountQueries(
+  tagName: string,
+): Record<string, string[]> {
+  return {
+    total: [`${tagName} has:commentary`],
+    translated: [`${tagName} has:commentary commentary`],
+    requested: [`${tagName} has:commentary commentary_request`],
+  };
+}
+
+/**
+ * The count searches behind each key of a tag's `translationCounts`.
+ * Untagged is the inclusion–exclusion of six (`computeUntaggedTranslation`),
+ * four of which search three tags.
+ */
+export function translationCountQueries(
+  tagName: string,
+): Record<string, string[]> {
+  const {t, a, b, c, ab, ac} = buildUntaggedTranslationQueries(tagName);
+  return {
+    translated: [`${tagName} translated`],
+    requested: [`${tagName} translation_request`],
+    untagged: [t, a, b, c, ab, ac],
+  };
+}
+
+/**
+ * Keys of `queries` the viewer cannot count: a search behind them uses more
+ * tags than the viewer's limit (anonymous 2), so Danbooru would answer 422.
+ * They are never asked and show locked (T-308).
+ */
+export function lockedCountKeys(
+  queries: Record<string, string[]>,
+): Set<string> {
+  return new Set(
+    Object.keys(queries).filter(k => !queries[k].every(fitsViewerTagLimit)),
+  );
+}
+
+/** Whether any slice of a count pie could not be had (`null`). */
+export function hasUnknownCount(counts: TagCountMap | undefined): boolean {
+  return !!counts && Object.values(counts).some(v => typeof v !== 'number');
+}
+
+/**
+ * One count pie to keep: `fresh`, unless it lost a count and `previous` has
+ * them all — then `previous`, so a count Danbooru did not return never
+ * replaces one it did (T-308). The pie is kept whole rather than mixed,
+ * since some slices derive from others (active = not deleted − pending −
+ * flagged).
+ */
+export function knownCounts(
+  fresh: TagCountMap,
+  previous: TagCountMap | undefined,
+): TagCountMap {
+  return hasUnknownCount(fresh) && previous && !hasUnknownCount(previous)
+    ? previous
+    : fresh;
+}
+
+/** The count pies of a tag report (T-308). */
+const COUNT_PIES = [
+  'statusCounts',
+  'ratingCounts',
+  'commentaryCounts',
+  'translationCounts',
+] as const;
+
+/**
+ * The report to save: each count pie that lost a count is replaced by the
+ * previous report's when that one is whole ({@link knownCounts}). Without a
+ * whole previous pie the new one is saved with its `null`s, which read as
+ * unknown, never 0. `data` itself is not changed: the open dashboard keeps
+ * showing what this run got.
+ */
+export function keepKnownCounts(
+  data: TagAnalyticsMeta,
+  previous: TagAnalyticsMeta | undefined,
+): TagAnalyticsMeta {
+  if (!previous) return data;
+  let kept: TagAnalyticsMeta | null = null;
+  for (const pie of COUNT_PIES) {
+    const fresh = data[pie];
+    if (!fresh) continue;
+    const counts = knownCounts(fresh, previous[pie]);
+    if (counts !== fresh) {
+      kept ??= {...data};
+      kept[pie] = counts;
+    }
+  }
+  return kept ?? data;
+}
+
+/**
+ * The report to save: a ranking Danbooru did not return this run is
+ * replaced by the previous report's when that one has it. The run itself
+ * only knows the previous rankings on a delta ({@link keepCachedOnFailure});
+ * on a revisit after the cache expired this is what keeps a failed report
+ * (a logged-out viewer's 3-second timeout, say) from replacing a ranking
+ * that was saved. `data` itself is not changed.
+ */
+export function keepKnownRankings(
+  data: TagAnalyticsMeta,
+  previous: TagAnalyticsMeta | undefined,
+): TagAnalyticsMeta {
+  const fresh = cachedRankingResult(data);
+  if (!fresh?.failed?.length || !previous) return data;
+  const kept = keepCachedOnFailure(fresh, cachedRankingResult(previous));
+  if (kept.failed?.length === fresh.failed.length) return data;
+  const out: TagAnalyticsMeta = {
+    ...data,
+    rankings: {
+      uploader: {
+        ...data.rankings.uploader,
+        allTime: kept.uploaderAll,
+        year: kept.uploaderYear,
+      },
+      approver: {
+        ...data.rankings.approver,
+        allTime: kept.approverAll,
+        year: kept.approverYear,
+      },
+    },
+  };
+  if (kept.failed) out.rankingsFailed = kept.failed;
+  else delete out.rankingsFailed;
+  return out;
+}
+
+/** Whether `data` has a count pie that lost a count. */
+function hasUnknownPie(data: TagAnalyticsMeta): boolean {
+  return COUNT_PIES.some(pie => hasUnknownCount(data[pie]));
+}
+
+/** localStorage: when the tag pages' daily cache sweep last ran (T-309). */
+const TAG_CACHE_SWEEP_KEY = 'di.tagCache.sweptAt';
 
 type UserEntry = {name: string; level: string};
 type UserEntryWithId = {id: number; name: string; level: string};
@@ -275,12 +642,24 @@ export class TagAnalyticsDataService {
   /**
    * Loads the tag analytics report from the cache if not expired.
    * Cache is considered stale after 24 hours.
+   *
+   * A report saved before histories were UTC months (no `historyBasis`) is
+   * not used: the analysis runs again, and this tag's monthly count rows go
+   * with it, so viewer-time-zone months never mix with UTC ones (T-303).
+   *
    * @return {Promise<?Object>} The cached data object or null if not found/expired.
    */
   async loadFromCache(): Promise<TagAnalyticsMeta | null> {
     if (!this.db || !this.db.tag_analytics) return null;
     try {
       const cached = await this.db.tag_analytics.get(this.tagName);
+      if (cached && !hasUtcHistory(cached.data)) {
+        log.debug('Cached report predates UTC history, refetching', {
+          tag: this.tagName,
+        });
+        await this.invalidateMonthlyCountsCache();
+        return null;
+      }
       if (cached) {
         // Check expiry (e.g. 24 hours)
         const age = Date.now() - cached.updatedAt;
@@ -303,6 +682,9 @@ export class TagAnalyticsDataService {
 
   /**
    * Saves the current tag analytics data to the cache with a timestamp.
+   * A count pie that lost a count keeps the saved report's pie when that
+   * one is whole ({@link keepKnownCounts}, T-308), and a ranking that
+   * failed keeps the saved one ({@link keepKnownRankings}).
    * @param {!Object} data The analytics data to cache.
    * @return {Promise<void>}
    */
@@ -315,7 +697,9 @@ export class TagAnalyticsDataService {
       // volatile-data-only saves don't wipe these metadata fields.
       const needExisting =
         this._pendingLastFullScanAt === null ||
-        this._pendingCountsUpdatedAt === null;
+        this._pendingCountsUpdatedAt === null ||
+        hasUnknownPie(data) ||
+        Boolean(data.rankingsFailed?.length);
       const existing = needExisting
         ? await this.db.tag_analytics.get(this.tagName)
         : null;
@@ -332,7 +716,10 @@ export class TagAnalyticsDataService {
       await this.db.tag_analytics.put({
         tagName: this.tagName,
         updatedAt: Date.now(),
-        data: data,
+        data: keepKnownRankings(
+          keepKnownCounts(data, existing?.data),
+          existing?.data,
+        ),
         lastFullScanAt,
         countsUpdatedAt,
       });
@@ -346,6 +733,7 @@ export class TagAnalyticsDataService {
   /**
    * Bulk-reads monthly count cache entries for this tag.
    * Returns a Map keyed by `yearMonth` (missing entries are simply absent).
+   * Rows from before UTC months (no `basis`) count as missing.
    */
   private async readMonthlyCountsCache(
     yearMonths: string[],
@@ -356,7 +744,7 @@ export class TagAnalyticsDataService {
       const keys = yearMonths.map(ym => [this.tagName, ym] as [string, string]);
       const records = await this.db.tag_monthly_counts.bulkGet(keys);
       records.forEach((r, i) => {
-        if (r) result.set(yearMonths[i], r);
+        if (r?.basis === 'utc') result.set(yearMonths[i], r);
       });
     } catch (e) {
       log.warn('Failed to read monthly counts cache', {error: e});
@@ -379,6 +767,7 @@ export class TagAnalyticsDataService {
         yearMonth: e.yearMonth,
         count: e.count,
         fetchedAt: now,
+        basis: 'utc',
       }));
       // Tag pages have no current-user context; pass `0` so the evictor
       // can pick any user's posts as the LRU victim if quota is hit.
@@ -504,20 +893,77 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Deletes tag analytics cache entries older than the retention threshold.
-   * @return {Promise<void>}
+   * Deletes tag reports older than the retention period together with
+   * their monthly count rows, and once a day sweeps what no report owns
+   * (T-309). Through v9.11 only the reports went: their month rows and the
+   * expired implication rows were never removed.
    */
-  async cleanupOldCache(): Promise<void> {
-    if (!this.db || !this.db.tag_analytics) return;
-
-    const retentionDays = this.getRetentionDays();
-    const cutoff = Date.now() - retentionDays * DAY_MS;
+  async cleanupOldCache(now = Date.now()): Promise<void> {
+    if (!this.db?.tag_analytics || !this.db.tag_monthly_counts) return;
+    const cutoff = now - this.getRetentionDays() * DAY_MS;
 
     try {
-      await this.db.tag_analytics.where('updatedAt').below(cutoff).delete();
+      await this.deleteExpiredReports(cutoff);
     } catch (e) {
       log.warn('Cleanup failed', {error: e});
     }
+
+    if (!claimDailySweep(TAG_CACHE_SWEEP_KEY, now)) return;
+    try {
+      const monthRows = await this.sweepMonthlyCounts(cutoff);
+      log.debug('Daily tag cache sweep', {monthRows});
+    } catch (e) {
+      log.warn('Monthly count sweep failed', {error: e});
+    }
+    await pruneImplicationCache(this.db, now);
+  }
+
+  /**
+   * Expired reports and their tags' monthly count rows, in one transaction
+   * so a failure cannot leave rows that no expired report points to any more.
+   */
+  private async deleteExpiredReports(cutoff: number): Promise<void> {
+    const db = this.db!;
+    await db.transaction(
+      'rw',
+      db.tag_analytics,
+      db.tag_monthly_counts,
+      async () => {
+        const tags = await db.tag_analytics
+          .where('updatedAt')
+          .below(cutoff)
+          .primaryKeys();
+        if (tags.length === 0) return;
+        await db.tag_analytics.bulkDelete(tags);
+        const monthRows = await db.tag_monthly_counts
+          .where('tag')
+          .anyOf(tags)
+          .delete();
+        log.debug('Expired tag reports deleted', {
+          reports: tags.length,
+          monthRows,
+        });
+      },
+    );
+  }
+
+  /**
+   * Daily: drops monthly count rows of viewer-time-zone months (no
+   * `basis: 'utc'`, never read since T-303) and rows no report owns. A row
+   * without a report but fetched inside the retention period is kept: a
+   * first visit writes its months before it saves its report (maybe in
+   * another tab), and a partial history caches its months without one.
+   * Rows of reports deleted before T-309 are swept here. Scans the table,
+   * which since T-303 holds only the split ranges of the largest tags.
+   */
+  private async sweepMonthlyCounts(cutoff: number): Promise<number> {
+    const db = this.db!;
+    const owned = new Set(await db.tag_analytics.toCollection().primaryKeys());
+    return db.tag_monthly_counts
+      .filter(
+        r => r.basis !== 'utc' || (r.fetchedAt < cutoff && !owned.has(r.tag)),
+      )
+      .delete();
   }
 
   /**
@@ -527,8 +973,9 @@ export class TagAnalyticsDataService {
    * @param {string} tagName - The tag to analyze.
    * @param {?Object} cachedData - Existing cached data to serve as a base for delta updates.
    * @param {boolean} absoluteOldest - If true, forces a scan from 2005-01-01 (ignoring cache/hints).
-   * @param {?string} foundEarliestDate - An optimized starting date (YYYY-MM-DD) found via reverse scan.
-   *                                      Used to narrow the search range for recent tags.
+   * @param {?string} dateTerm - A `date:` term searched instead of the
+   *     tag's creation date: the history's range of the posts older than
+   *     the tag (`firstPostsDateTerm`).
    * @return {Promise<Object|null>} - Initial stats object or null on failure.
    */
   // T-26 baseline: complexity 31. Cache/hint/cold-start branches × full vs
@@ -538,7 +985,7 @@ export class TagAnalyticsDataService {
     tagName: string,
     cachedData?: TagAnalyticsMeta | null,
     absoluteOldest?: boolean,
-    foundEarliestDate?: string | null,
+    dateTerm?: string | null,
   ): Promise<InitialStats | null> {
     // Get Tag Metadata first to know count and category
     const tagData = await this.fetchTagData(tagName); // Existing helper
@@ -557,15 +1004,13 @@ export class TagAnalyticsDataService {
       };
     }
 
-    // Extract created_at from tagData
-    // If absoluteOldest is true, we ignore created_at to find history hidden by renames
-    // If foundEarliestDate is provided (from Reverse Scan), use it as a strong hint!
-
-    let tagCreatedAt = tagData.created_at;
-    if (foundEarliestDate) {
-      tagCreatedAt = foundEarliestDate;
+    // From the tag's creation date, unless the history says older posts
+    // carry it (renamed tag): then its range (`dateTerm`), or all of it.
+    let dateFilter = `date:>=${tagData.created_at}`;
+    if (dateTerm) {
+      dateFilter = dateTerm;
     } else if (absoluteOldest) {
-      tagCreatedAt = '2005-01-01';
+      dateFilter = 'date:>=2005-01-01';
     }
 
     let posts: DanbooruPost[] = [];
@@ -581,10 +1026,10 @@ export class TagAnalyticsDataService {
       while (hasMore && posts.length < targetFetchCount) {
         const fetchLimit = Math.min(limit, targetFetchCount - posts.length);
         const params = new URLSearchParams({
-          tags: `${tagName} date:>=${tagCreatedAt}`,
+          tags: `${tagName} ${dateFilter}`,
           limit: String(fetchLimit),
           page: currentPage,
-          only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
+          only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,rating,score,tag_string_copyright,tag_string_character',
         });
         const url = `/posts.json?${params.toString()}`;
 
@@ -630,7 +1075,7 @@ export class TagAnalyticsDataService {
             tags: `${tagName}`,
             limit: String(fetchLimit),
             page: currentPage,
-            only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,variants,rating,score,tag_string_copyright,tag_string_character',
+            only: 'id,created_at,uploader_id,approver_id,file_url,preview_file_url,rating,score,tag_string_copyright,tag_string_character',
           });
           const fbBatch = await this.rateLimiter
             .fetch(`/posts.json?${fbParams.toString()}`)
@@ -691,136 +1136,167 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Fetches `/counts/posts.json` for the given tag query with one bounded
-   * retry on transient failure. Returns 0 if both attempts fail.
+   * One `/counts/posts.json`, or `null` when the count cannot be had
+   * (T-308). Never 0 for "unknown": through v9.11 a failed count came back
+   * as 0 and was drawn and cached as a real one.
+   *
+   * - A search over the viewer's tag limit is not sent (it would be a 422).
+   * - A `null` from the server and any other 4xx are not retried: Danbooru
+   *   caches the `null` for 5 minutes, and a 4xx would come again.
+   * - A 429, 5xx, timeout or network failure is retried once. The retry
+   *   waits in the rate limiter's queue, behind its pause after a 429.
    *
    * @param tagQuery Unencoded tag query string (e.g. `"foo has:commentary"`).
-   * @param retries Number of retries after the first attempt (default 1).
    */
-  async fetchCountWithRetry(
-    tagQuery: string,
-    retries: number = 1,
-  ): Promise<number> {
-    for (let i = 0; i <= retries; i++) {
-      try {
-        return await fetchRemoteCount(this.rateLimiter, tagQuery);
-      } catch (e) {
-        if (i === retries) {
-          log.warn(`Failed to fetch count after ${retries + 1} attempts`, {
-            tagQuery,
-            error: e,
-          });
-          return 0;
-        }
-        await new Promise(r => setTimeout(r, 500));
+  async fetchCountWithRetry(tagQuery: string): Promise<number | null> {
+    if (!fitsViewerTagLimit(tagQuery)) {
+      log.debug('Count over the viewer tag limit, not asked', {tagQuery});
+      return null;
+    }
+    try {
+      return await fetchRemoteCount(this.rateLimiter, tagQuery);
+    } catch (first) {
+      if (
+        first instanceof CountUnavailableError ||
+        classifySyncFetchError(first) === 'fatal'
+      ) {
+        log.warn('Count lost', {tagQuery, error: first});
+        return null;
       }
     }
-    return 0;
+    try {
+      return await fetchRemoteCount(this.rateLimiter, tagQuery);
+    } catch (second) {
+      log.warn('Count lost after a retry', {tagQuery, error: second});
+      return null;
+    }
   }
 
   /**
-   * Fetches commentary-related counts for a tag (Total, Translated, Requested).
-   * @param {string} tagName - The tag to analyze.
-   * @return {Promise<Object>} - Object containing counts for 'total', 'translated', and 'requested'.
-   */
-  async fetchCommentaryCounts(
-    tagName: string,
-  ): Promise<Record<string, number>> {
-    const queries: Record<string, string> = {
-      total: `${tagName} has:commentary`,
-      translated: `${tagName} has:commentary commentary`,
-      requested: `${tagName} has:commentary commentary_request`,
-    };
-
-    const results: Record<string, number> = {};
-
-    const keys = Object.keys(queries);
-    await Promise.all(
-      keys.map(async key => {
-        results[key] = await this.fetchCountWithRetry(queries[key]);
-      }),
-    );
-
-    // [Integrity Check] Ensure all keys exist and are valid numbers
-    keys.forEach(key => {
-      if (results[key] === undefined) {
-        log.warn(`Missing commentary key: ${key}. Defaulting to 0.`);
-        results[key] = 0;
-      }
-    });
-
-    return results;
-  }
-
-  /**
-   * Fetches translation-related counts for a tag: Translated, Requested,
-   * and Untagged. Untagged is computed via the same inclusion-exclusion
-   * formula used on the user side (max(0, t − a − b − c + ab + ac)); the
-   * 6 subqueries each use ≤2 real tags so Member(Blue) accounts work.
+   * Commentary counts of a tag: `total` (has commentary), `translated` and
+   * `requested`; the chart's Untagged is total − translated − requested. A
+   * count that could not be had is `null` (T-308).
    *
-   * @return Object containing counts for 'translated', 'requested', 'untagged'.
+   * The two breakdowns search three tags, over an anonymous viewer's two.
+   * Without them `total` alone shows nothing, so for such a viewer none of
+   * the three is asked and the pie shows locked.
    */
-  async fetchTranslationCounts(
-    tagName: string,
-  ): Promise<Record<string, number>> {
-    const direct: Record<string, string> = {
-      translated: `${tagName} translated`,
-      requested: `${tagName} translation_request`,
-    };
-    const incl = buildUntaggedTranslationQueries(tagName);
+  async fetchCommentaryCounts(tagName: string): Promise<TagCountMap> {
+    const queries = commentaryCountQueries(tagName);
+    const keys = Object.keys(queries);
+    if (lockedCountKeys(queries).size > 0) {
+      return Object.fromEntries(keys.map(k => [k, null]));
+    }
+    const counts = await Promise.all(
+      keys.map(k => this.fetchCountWithRetry(queries[k][0])),
+    );
+    return Object.fromEntries(keys.map((k, i) => [k, counts[i]]));
+  }
 
-    const [translated, requested, t, a, b, c, ab, ac] = await Promise.all([
-      this.fetchCountWithRetry(direct.translated),
-      this.fetchCountWithRetry(direct.requested),
-      this.fetchCountWithRetry(incl.t),
-      this.fetchCountWithRetry(incl.a),
-      this.fetchCountWithRetry(incl.b),
-      this.fetchCountWithRetry(incl.c),
-      this.fetchCountWithRetry(incl.ab),
-      this.fetchCountWithRetry(incl.ac),
+  /**
+   * Translation counts of a tag: `translated`, `requested` and `untagged`,
+   * the last by the same inclusion–exclusion as the user side
+   * (max(0, t − a − b − c + ab + ac)). A count that could not be had is
+   * `null`, and so is `untagged` when any of its six terms is (T-308).
+   *
+   * Four of the six terms search three tags, over an anonymous viewer's
+   * two; for such a viewer none of the six is asked and Untagged shows
+   * locked, while Translated and Requested (two tags each) are counted.
+   */
+  async fetchTranslationCounts(tagName: string): Promise<TagCountMap> {
+    const queries = translationCountQueries(tagName);
+    const untaggedLocked = lockedCountKeys(queries).has('untagged');
+    const [translated, requested, terms] = await Promise.all([
+      this.fetchCountWithRetry(queries.translated[0]),
+      this.fetchCountWithRetry(queries.requested[0]),
+      untaggedLocked
+        ? null
+        : Promise.all(queries.untagged.map(q => this.fetchCountWithRetry(q))),
     ]);
-
-    const untagged = computeUntaggedTranslation({t, a, b, c, ab, ac});
+    let untagged: number | null = null;
+    if (terms && terms.every((n): n is number => n !== null)) {
+      const [t, a, b, c, ab, ac] = terms;
+      untagged = computeUntaggedTranslation({t, a, b, c, ab, ac});
+    }
     return {translated, requested, untagged};
   }
 
   /**
-   * Fetches post counts for each status (active, deleted, etc.).
-   * @param {string} tagName - The tag to analyze.
-   * @return {Promise<Object>} - Map of status strings to counts.
+   * Posts per value of one report group (`search[group]`) over the tag's
+   * whole life (`from` to today). One request through the reports lane
+   * instead of one count per value (T-306). Throws on any failure, so the
+   * caller can fall back to the counts.
    */
-  async fetchStatusCounts(tagName: string): Promise<Record<string, number>> {
-    const statuses = [
-      'active',
-      'appealed',
-      'banned',
-      'deleted',
-      'flagged',
-      'pending',
-    ];
-    const results: Record<string, number> = {};
-
-    const tasks = statuses.map(async status => {
-      results[status] = await this.fetchCountWithRetry(
-        `${tagName} status:${status}`,
-      );
+  private async fetchReportGroups(
+    tagName: string,
+    group: 'rating' | 'is_deleted',
+    from: string,
+  ): Promise<Map<string, number>> {
+    const params = new URLSearchParams({
+      'search[tags]': tagName,
+      'search[group]': group,
+      'search[from]': from,
+      'search[to]': defaultReportTo(),
     });
-
-    await Promise.all(tasks);
-
-    // [Integrity Check] Ensure all keys exist and are valid numbers
-    statuses.forEach(status => {
-      if (results[status] === undefined) {
-        log.warn(`Missing status key: ${status}. Defaulting to 0.`);
-        results[status] = 0;
-      }
-    });
-
-    return results;
+    const resp = await this.rateLimiter.fetch(
+      `/reports/posts.json?${params.toString()}`,
+      {headers: {Accept: 'application/json'}},
+    );
+    if (!resp.ok) throw new ReportStatusError(resp.status);
+    return parseGroupReport(await resp.json(), group);
   }
 
   /**
-   * Fetches post counts for all ratings (g, s, q, e) for a tag.
+   * Fetches post counts for each status (active, deleted, etc.).
+   *
+   * Deleted and active come from one `is_deleted` report (T-306): active is
+   * Danbooru's own definition, not deleted, pending or flagged
+   * (`Post.active`), and a post that is pending or flagged is never deleted
+   * (deleting clears both) — so active = not deleted − pending − flagged.
+   * Pending, flagged, appealed and banned stay counts. When the report
+   * fails, deleted and active are counted as before. A count that could
+   * not be had is `null`, and so is active when pending or flagged is
+   * (T-308).
+   *
+   * @param {string} tagName - The tag to analyze.
+   * @return {Promise<Object>} - Map of status strings to counts.
+   */
+  async fetchStatusCounts(tagName: string): Promise<TagCountMap> {
+    const deletedGroups = this.fetchReportGroups(
+      tagName,
+      'is_deleted',
+      MONTHLY_REPORT_FROM,
+    ).catch((e: unknown) => {
+      log.warn('Deleted report failed, counting statuses', {error: e});
+      return null;
+    });
+    const counted = ['appealed', 'banned', 'flagged', 'pending'] as const;
+    const [groups, ...counts] = await Promise.all([
+      deletedGroups,
+      ...counted.map(s => this.fetchCountWithRetry(`${tagName} status:${s}`)),
+    ]);
+    const [appealed, banned, flagged, pending] = counts;
+    let deleted: number | null;
+    let active: number | null;
+    if (groups) {
+      deleted = groups.get('true') ?? 0;
+      active =
+        pending === null || flagged === null
+          ? null
+          : Math.max(0, (groups.get('false') ?? 0) - pending - flagged);
+    } else {
+      // Only the two the report was for; the other four are in hand.
+      [deleted, active] = await Promise.all([
+        this.fetchCountWithRetry(`${tagName} status:deleted`),
+        this.fetchCountWithRetry(`${tagName} status:active`),
+      ]);
+    }
+    return {active, appealed, banned, deleted, flagged, pending};
+  }
+
+  /**
+   * Fetches post counts for all ratings (g, s, q, e) for a tag, from one
+   * `rating` report (T-306); counted one rating at a time if it fails.
    * @param {string} tagName The tag name.
    * @param {?string} startDate Optional start date (YYYY-MM-DD) to optimize query.
    * @return {Promise<!Object<string, number>>} Map of rating characters to counts.
@@ -828,44 +1304,54 @@ export class TagAnalyticsDataService {
   async fetchRatingCounts(
     tagName: string,
     startDate: string | null = null,
-  ): Promise<Record<string, number>> {
-    const ratings = ['g', 's', 'q', 'e'];
-    const results: Record<string, number> = {};
-
-    const tasks = ratings.map(async rating => {
-      let tagQuery = `${tagName} rating:${rating}`;
-      if (startDate) {
-        tagQuery += ` date:>=${startDate}`;
-      }
-      results[rating] = await this.fetchCountWithRetry(tagQuery);
-    });
-
-    await Promise.all(tasks);
-
-    // [Integrity Check] Ensure all keys exist and are valid numbers
-    ratings.forEach(rating => {
-      if (results[rating] === undefined) {
-        log.warn(`Missing rating key: ${rating}. Defaulting to 0.`);
-        results[rating] = 0;
-      }
-    });
-
-    return results;
+  ): Promise<TagCountMap> {
+    try {
+      const groups = await this.fetchReportGroups(
+        tagName,
+        'rating',
+        startDate ?? MONTHLY_REPORT_FROM,
+      );
+      // A rating without posts has no row in the report.
+      return Object.fromEntries(
+        ['g', 's', 'q', 'e'].map(r => [r, groups.get(r) ?? 0]),
+      );
+    } catch (e) {
+      log.warn('Rating report failed, counting each rating', {error: e});
+    }
+    return this.countRatings(tagName, startDate);
   }
 
+  /**
+   * {@link fetchRatingCounts} with one count per rating (the fallback). A
+   * rating that could not be counted is `null` (T-308).
+   */
+  private async countRatings(
+    tagName: string,
+    startDate: string | null,
+  ): Promise<TagCountMap> {
+    const ratings = ['g', 's', 'q', 'e'];
+    const counts = await Promise.all(
+      ratings.map(rating => {
+        let tagQuery = `${tagName} rating:${rating}`;
+        if (startDate) {
+          tagQuery += ` date:>=${startDate}`;
+        }
+        return this.fetchCountWithRetry(tagQuery);
+      }),
+    );
+    return Object.fromEntries(ratings.map((r, i) => [r, counts[i]]));
+  }
+
+  /**
+   * The copyright or character distribution of a tag, approximated from
+   * `/related_tag.json` frequencies (× the tag's post count). No counts are
+   * sent here: the exact values are fetched by {@link fetchExactRelatedCounts}
+   * only when the user opens that pie's tab (T-307).
+   */
   async fetchRelatedTagDistribution(
     tagName: string,
     categoryId: number,
     totalTagCount: number,
-    opts: {
-      /**
-       * Optional SWR hook. When provided, initial approximate counts are
-       * returned immediately and exact `/counts/posts.json` lookups run
-       * in the background, invoking `onExactCounts` once complete. Omit
-       * to disable SWR (returns approximations only, no background fetch).
-       */
-      onExactCounts?: (counts: Record<string, number>) => void;
-    } = {},
   ): Promise<Record<string, number> | null> {
     const catName = categoryId === 3 ? 'Copyright' : 'Character';
 
@@ -895,24 +1381,10 @@ export class TagAnalyticsDataService {
       );
 
       // 3. Build approximate distribution from frequency × totalCount.
-      //    No per-combination /counts/posts.json queries here — the SWR
-      //    background fetch below supplies exact values without blocking
-      //    the initial render.
-      const slices = buildDistributionApprox(filtered, totalTagCount);
-      const approxResult = distributionToCountMap(slices);
-
-      // 4. SWR: kick off exact per-combination count fetches in the
-      //    background. Fire-and-forget; callers that opted in via
-      //    `opts.onExactCounts` receive the refined map when ready.
-      if (opts.onExactCounts && slices.length > 0) {
-        void this.revalidateRelatedTagCounts(
-          tagName,
-          slices,
-          opts.onExactCounts,
-        );
-      }
-
-      return approxResult;
+      //    No per-combination /counts/posts.json queries here.
+      return distributionToCountMap(
+        buildDistributionApprox(filtered, totalTagCount),
+      );
     } catch (e) {
       log.warn(`Failed to fetch ${catName} distribution`, {error: e});
       return null;
@@ -920,190 +1392,51 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Background refetch of exact per-combination counts (SWR swap-in).
-   *
-   * Runs 10 parallel `/counts/posts.json` queries through the rate-limited
-   * queue; per-slice failures keep the approximate count instead. Errors
-   * are logged at debug level so a noisy network doesn't spam the console.
+   * Exact counts for a related-tag pie, one `/counts/posts.json` per slice
+   * (`<tag> <related tag>`, up to 10). Run when the pie's tab is opened,
+   * not with every analysis (T-307). A slice whose count fails keeps its
+   * approximation and makes the result incomplete, so the caller can try
+   * again later. The "others" slice is an estimate by nature and passes
+   * through.
    */
-  private async revalidateRelatedTagCounts(
+  async fetchExactRelatedCounts(
     tagName: string,
-    slices: DistributionSlice[],
-    onExactCounts: (counts: Record<string, number>) => void,
-  ): Promise<void> {
-    try {
-      const fetchable = slices.filter(s => !s.isOther);
-      const resolved: Record<string, number> = {};
-
-      await Promise.all(
-        fetchable.map(async slice => {
-          try {
-            resolved[slice.key] = await fetchRemoteCount(
-              this.rateLimiter,
-              `${tagName} ${slice.key}`,
-            );
-          } catch (e) {
-            log.debug('SWR exact count fetch failed, keeping approx', {
-              tag: slice.key,
-              error: e,
-            });
-            resolved[slice.key] = slice.count;
-          }
+    approx: Record<string, number>,
+  ): Promise<{counts: Record<string, number>; complete: boolean}> {
+    const counts: Record<string, number> = {...approx};
+    let complete = true;
+    await Promise.all(
+      Object.keys(approx)
+        .filter(key => key !== 'others')
+        .map(async key => {
+          // Retried once like the other counts; a lost one keeps its
+          // approximation and leaves the pie unmarked, to be asked again.
+          const exact = await this.fetchCountWithRetry(`${tagName} ${key}`);
+          if (exact === null) complete = false;
+          else counts[key] = exact;
         }),
-      );
+    );
+    return {counts, complete};
+  }
 
-      // Pass-through the "Others" slice — it's already an aggregate
-      // estimate from (1 - cumulative frequency) × totalCount.
-      const others = slices.find(s => s.isOther);
-      if (others) resolved[others.key] = others.count;
-
-      onExactCounts(resolved);
+  /**
+   * Merges `patch` into this tag's cached report without touching its age,
+   * so a later refinement (exact related counts, T-307) outlives the page.
+   * Nothing is written when there is no current (UTC-history) report: a
+   * run that was not saved, e.g. a partial history, stays unsaved.
+   */
+  async patchCachedReport(patch: Partial<TagAnalyticsMeta>): Promise<void> {
+    if (!this.db?.tag_analytics) return;
+    try {
+      const record = await this.db.tag_analytics.get(this.tagName);
+      if (!record || !hasUtcHistory(record.data)) return;
+      await this.db.tag_analytics.put({
+        ...record,
+        data: {...record.data, ...patch},
+      });
     } catch (e) {
-      log.debug('SWR revalidation aborted', {error: e});
+      log.warn('Cache patch failed', {error: e});
     }
-  }
-
-  async fetchHistoryBackwards(
-    tagName: string,
-    forwardStartDate: string,
-    targetTotal: number,
-    currentForwardTotal: number,
-  ): Promise<HistoryEntry[]> {
-    log.debug('Starting Reverse Scan', {
-      tag: tagName,
-      start: forwardStartDate,
-      target: targetTotal,
-      current: currentForwardTotal,
-    });
-    const history: HistoryEntry[] = [];
-    let totalSum = currentForwardTotal;
-    const currentMonth = new Date(forwardStartDate);
-
-    // We strictly start scanning from 1 month before the forward start date
-    // to avoid overlapping with fetchMonthlyCounts which already covers the starting month.
-    currentMonth.setMonth(currentMonth.getMonth() - 1); // Start from month BEFORE forward scan
-
-    // Danbooru founded in late 2005. Don't go past that.
-    const hardLimit = new Date('2005-01-01');
-
-    while (totalSum < targetTotal && currentMonth > hardLimit) {
-      const year = currentMonth.getFullYear();
-      const month = currentMonth.getMonth() + 1;
-
-      // Use next month's 1st day as end of range to include the last day of current month fully
-      const nextDate = new Date(currentMonth);
-      nextDate.setMonth(nextDate.getMonth() + 1);
-      const nYear = nextDate.getFullYear();
-      const nMonth = nextDate.getMonth() + 1;
-
-      const dateRange = `${year}-${String(month).padStart(2, '0')}-01...${nYear}-${String(nMonth).padStart(2, '0')}-01`;
-
-      try {
-        const count = await fetchRemoteCount(
-          this.rateLimiter,
-          `${tagName} date:${dateRange}`,
-        );
-
-        if (count > 0) {
-          history.unshift({
-            date: `${year}-${String(month).padStart(2, '0')}-01`,
-            count: count,
-            cumulative: 0, // Will fix in post-process
-          });
-          totalSum += count;
-          log.debug(`Reverse Scan Hit: ${year}-${month}`, {
-            count,
-            total: totalSum,
-            target: targetTotal,
-          });
-        }
-      } catch (e) {
-        log.warn(`Backward fetch failed for ${year}-${month}`, {error: e});
-      }
-
-      currentMonth.setMonth(currentMonth.getMonth() - 1);
-    }
-    log.debug('Reverse Scan Completed', {
-      total: totalSum,
-      target: targetTotal,
-      hitsCount: history.length,
-    });
-
-    // Calculate cumulative counts for backward data
-    let runningSum = 0;
-    for (let i = 0; i < history.length; i++) {
-      runningSum += history[i].count;
-      history[i].cumulative = runningSum;
-    }
-
-    return history;
-  }
-
-  async fetchHistoryDelta(
-    tagName: string,
-    lastDate: Date | string,
-    startDate: Date | string,
-  ): Promise<HistoryEntry[]> {
-    if (!lastDate) {
-      // Falling through to full scan — let the caching layer treat it as such.
-      return this.fetchMonthlyCounts(tagName, startDate, {isFullScan: true});
-    }
-
-    // Delta Sync: Check last 2 months only
-    const now = new Date();
-    const twoMonthsAgo = new Date(now);
-    twoMonthsAgo.setMonth(now.getMonth() - 2);
-    twoMonthsAgo.setDate(1); // Start from 1st of month
-
-    const effectiveStart =
-      lastDate && lastDate > twoMonthsAgo
-        ? twoMonthsAgo
-        : lastDate || startDate;
-
-    // Delta path: isFullScan=false (default) so forced-rescan/drift guard
-    // stay idle; the two months in range are always TTL-stale and get fetched.
-    return this.fetchMonthlyCounts(tagName, effectiveStart);
-  }
-
-  mergeHistory(
-    oldHistory: HistoryEntry[] | null,
-    newHistory: HistoryEntry[] | null,
-  ): HistoryEntry[] {
-    if (!oldHistory || oldHistory.length === 0) return newHistory ?? [];
-    if (!newHistory || newHistory.length === 0) return oldHistory;
-
-    // Map old history by date string (YYYY-MM-DD or time) for easy lookup?
-    // Actually, standard is array of objects { date: Date, count: number, cumulative: number }
-    // newHistory starts from lastDate.
-
-    // Remove overlapping months from oldHistory
-    // We keep old history UP TO the month before newStart.
-    // newStart is likely YYYY-MM-DD. We want to avoid duplication.
-    // fetchMonthlyCounts returns dates as YYYY-MM-01.
-
-    const newStart = newHistory[0].date;
-    const filteredOld = oldHistory.filter(h => h.date < newStart);
-
-    // Concatenate
-    let merged = filteredOld.concat(newHistory);
-
-    // Recalculate Cumulative strictly from start
-    // Note: This assumes the first item in merged has correct 'count' but 'cumulative' might need offset if we cropped pure start.
-    // But we are appending to a base.
-
-    // If we cut the tail of oldHistory, the last item of filteredOld has a cumulative count.
-    // We can just iterate and update.
-
-    let runningSum = 0;
-    merged = merged.map(h => {
-      // We can't just sum 'count' unless we are sure we have the WHOLE history from 2005.
-      // partial sync means we have (Old - Tail) + New.
-      // So valid history.
-      runningSum += h.count;
-      return {...h, cumulative: runningSum};
-    });
-
-    return merged;
   }
 
   async fetchMilestonesDelta(
@@ -1134,7 +1467,7 @@ export class TagAnalyticsDataService {
 
   async fetchLatestPost(tagName: string): Promise<DanbooruPost | null> {
     // Query for the single latest post
-    const url = `/posts.json?tags=${encodeURIComponent(tagName)}&limit=1&only=id,created_at,variants,uploader_id,rating,preview_file_url`;
+    const url = `/posts.json?tags=${encodeURIComponent(tagName)}&limit=1&only=id,created_at,media_asset[variants],uploader_id,rating,preview_file_url`;
     try {
       const posts = await this.rateLimiter
         .fetch(url)
@@ -1162,7 +1495,7 @@ export class TagAnalyticsDataService {
     // Query for the most popular SFW (or NSFW) post in the last 3 days
     // age:..3d, order:score, rating:g (or is:nsfw)
     const ratingQuery = isNSFW ? 'is:nsfw' : 'is:sfw';
-    const url = `/posts.json?tags=${encodeURIComponent(tagName)}+age:..3d+order:score+${ratingQuery}&limit=1&only=id,created_at,variants,uploader_id,rating,score,preview_file_url`;
+    const url = `/posts.json?tags=${encodeURIComponent(tagName)}+age:..3d+order:score+${ratingQuery}&limit=1&only=id,created_at,media_asset[variants],uploader_id,rating,score,preview_file_url`;
     try {
       const posts = await this.rateLimiter
         .fetch(url)
@@ -1212,19 +1545,27 @@ export class TagAnalyticsDataService {
     };
   }
 
+  /**
+   * Top 10 uploaders or approvers of `tagName` between two dates, from
+   * `/reports/posts.json` (`search[group]`, `search[group_limit]=10`;
+   * `from` / `to` are `YYYY-MM-DD`, both included). The reply is a JSON
+   * array of rows, one per user.
+   *
+   * Throws on a failed request, an HTTP error or a reply that is not an
+   * array. It used to read the error body as the ranking and come back
+   * empty, which then replaced the cached ranking (N-04).
+   */
   async fetchReportRanking(
     tagName: string,
-    group: string,
+    group: 'uploader' | 'approver',
     from: string,
     to: string,
   ): Promise<ReportEntry[]> {
-    // group: 'uploader' or 'approver'
-    // from/to: YYYY-MM-DD
     const params = new URLSearchParams({
       'search[tags]': tagName,
       'search[group]': group,
       'search[mode]': 'table',
-      'search[group_limit]': '10', // Top 100
+      'search[group_limit]': '10',
       commit: 'Search',
     });
 
@@ -1232,30 +1573,175 @@ export class TagAnalyticsDataService {
     if (to) params.append('search[to]', to);
 
     const url = `/reports/posts.json?${params.toString()}`;
-    try {
-      const resp = await this.rateLimiter.fetch(url, {
-        headers: {Accept: 'application/json'},
-      });
-      const data = await resp.json();
-
-      return data;
-      // Let's verify format. The user provided link returns a standard JSON structure?
-      // Actually reports/posts.json returns HTML table row data usually?
-      // Wait, user provided: reports/posts.json?...
-      // Let's assume it returns JSON with [ { id, count, ... } ] or similar.
-      // If it returns HTML, I might need to parse, but usually .json returns JSON.
-      // Based on Danbooru API, reports usually return a string or specific structure.
-      // For 'uploader', it returns list of objects.
-    } catch (e) {
-      log.warn(`Ranking fetch failed (${group})`, {error: e});
-      return [];
-    }
+    const resp = await this.rateLimiter.fetch(url, {
+      headers: {Accept: 'application/json'},
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data: unknown = await resp.json();
+    if (!Array.isArray(data)) throw new Error('Report reply is not a list');
+    return data as ReportEntry[];
   }
 
   // -----------------------------------
 
   /**
-   * Fetches monthly post counts for the tag since the start date.
+   * The tag's monthly history (UTC months) from Danbooru's reports, in up
+   * to three layers (PLAN.md 4.2, T-302):
+   *
+   * 1. One report for the whole range, 2005 to today. Most tags end here,
+   *    with no monthly count cache involved.
+   * 2. A report the server could not finish in time (5xx) is asked for
+   *    again in halves, down to {@link REPORT_HISTORY_MIN_SPLIT_MONTHS}
+   *    months and {@link REPORT_HISTORY_MAX_REQUESTS} requests in all. The
+   *    finished months are then cached (`tag_monthly_counts`), and the
+   *    next run starts after the cached months it can still trust
+   *    (`isMonthlyCountValid`), so a heavy tag only asks for its recent
+   *    part.
+   * 3. When the reports cannot give the history (still timing out, an
+   *    error reply, an unreadable body), one count per month from
+   *    `startDate`, through {@link fetchMonthlyCounts}. A lost month there
+   *    makes the result `partial`.
+   *
+   * @param opts `startDate` (the tag's first post) bounds layer 3;
+   *     `totalCount` feeds its drift guard.
+   */
+  async fetchMonthlyHistory(
+    tagName: string,
+    opts: {startDate?: Date | string; totalCount?: number} = {},
+  ): Promise<MonthlyHistory> {
+    const now = new Date();
+    const cached = await this.readCachedMonthPrefix(now);
+    const state = {requests: 0, split: false, failed: false};
+    try {
+      const fetched = await this.fetchReportRange(
+        tagName,
+        cached.nextFrom,
+        defaultReportTo(now),
+        state,
+      );
+      if (state.split) await this.cacheClosedMonths(fetched, now);
+      return {
+        history: trimMonthlyCounts(
+          mergeMonthlyCounts([cached.counts, fetched]),
+          now,
+        ),
+        layer: state.split || cached.counts.size > 0 ? 2 : 1,
+        partial: false,
+      };
+    } catch (e) {
+      log.warn('Monthly report failed, counting month by month', {
+        tag: tagName,
+        requests: state.requests,
+        error: e,
+      });
+    }
+
+    const counted = await this.fetchMonthlyCounts(
+      tagName,
+      opts.startDate ?? MONTHLY_REPORT_FROM,
+      {isFullScan: true, totalCount: opts.totalCount},
+    );
+    return {history: [...counted], layer: 3, partial: !!counted.partial};
+  }
+
+  /**
+   * The monthly report for `[from, to]`, halved and asked again while the
+   * server times out (layer 2). Throws when a piece cannot be split any
+   * further, the request budget is spent, or the reply is not a timeout;
+   * the other pieces then send nothing more (`failed`).
+   */
+  private async fetchReportRange(
+    tagName: string,
+    from: string,
+    to: string,
+    state: {requests: number; split: boolean; failed: boolean},
+  ): Promise<MonthlyCounts> {
+    if (state.failed) throw new Error('Monthly report already failed');
+    state.requests++;
+    try {
+      return await this.fetchMonthlyReport(tagName, from, to);
+    } catch (e) {
+      const mid = isReportTimeout(e)
+        ? splitReportRange(from, to, REPORT_HISTORY_MIN_SPLIT_MONTHS)
+        : null;
+      if (
+        state.failed ||
+        !mid ||
+        state.requests + 2 > REPORT_HISTORY_MAX_REQUESTS
+      ) {
+        state.failed = true;
+        throw e;
+      }
+      state.split = true;
+      log.debug('Monthly report timed out, splitting', {from, mid, to});
+      const halves = await Promise.all([
+        this.fetchReportRange(tagName, from, mid, state),
+        this.fetchReportRange(tagName, mid, to, state),
+      ]);
+      return mergeMonthlyCounts(halves);
+    }
+  }
+
+  /**
+   * One monthly report. A 429 is asked again once: the reports lane of the
+   * shared limiter holds the retry until Danbooru's bucket allows it.
+   */
+  private async fetchMonthlyReport(
+    tagName: string,
+    from: string,
+    to: string,
+  ): Promise<MonthlyCounts> {
+    const url = buildMonthlyReportUrl(tagName, {from, to});
+    const init = {headers: {Accept: 'application/json'}};
+    let resp = await this.rateLimiter.fetch(url, init);
+    if (resp.status === 429) resp = await this.rateLimiter.fetch(url, init);
+    if (!resp.ok) throw new ReportStatusError(resp.status);
+    return parseMonthlyReport(await resp.json());
+  }
+
+  /**
+   * The cached months this tag's history can start from: the longest run
+   * from {@link MONTHLY_REPORT_FROM} with every month still valid, and the
+   * date to ask the report from after it. Only a layer-2 run writes such a
+   * run (it caches from 2005 on); otherwise the cache gives nothing here
+   * and the report starts in 2005.
+   */
+  private async readCachedMonthPrefix(
+    now: Date,
+  ): Promise<{counts: MonthlyCounts; nextFrom: string}> {
+    const months = monthKeysBetween(MONTHLY_REPORT_FROM, utcDateString(now));
+    const records = await this.readMonthlyCountsCache(months);
+    const counts: MonthlyCounts = new Map();
+    for (const month of months) {
+      const r = records.get(month);
+      if (!r || !isMonthlyCountValid(month, r.fetchedAt, now.getTime())) {
+        return {counts, nextFrom: `${month}-01`};
+      }
+      counts.set(month, r.count);
+    }
+    // Unreachable in practice: the current month is never valid.
+    return {counts, nextFrom: utcDateString(now)};
+  }
+
+  /**
+   * Caches the months of a split report that will not change any more
+   * (two or more months back), leading empty months included, so the next
+   * run can start after them.
+   */
+  private async cacheClosedMonths(
+    counts: MonthlyCounts,
+    now: Date,
+  ): Promise<void> {
+    const closed = [...counts]
+      .filter(([month]) => computeMonthsDistance(month, now) >= 2)
+      .map(([yearMonth, count]) => ({yearMonth, count}));
+    await this.writeMonthlyCountsCache(closed);
+  }
+
+  /**
+   * Fetches monthly post counts for the tag since the start date, one
+   * count per UTC month. Layer 3 of {@link fetchMonthlyHistory}; months
+   * whose count is lost read as 0 and mark the result `partial`.
    *
    * Cache-aware path: when the `tag_monthly_counts` table has entries for
    * months outside the Delta sync window (current + previous month), those
@@ -1286,8 +1772,10 @@ export class TagAnalyticsDataService {
     const startDateObj =
       startDate instanceof Date ? startDate : new Date(startDate);
 
-    const startYear = startDateObj.getFullYear();
-    const startMonth = startDateObj.getMonth(); // 0-based
+    // UTC months, like the reports (layers 1-2) and the small-tag path.
+    // Local getters started a month early west of UTC.
+    const startYear = startDateObj.getUTCFullYear();
+    const startMonth = startDateObj.getUTCMonth(); // 0-based
 
     const now = new Date();
     const nowMs = now.getTime();
@@ -1312,8 +1800,11 @@ export class TagAnalyticsDataService {
       const nextY = nextMonth.getUTCFullYear();
       const nextM = nextMonth.getUTCMonth() + 1;
 
-      // Danbooru counts API needs the date filter INSIDE the tags parameter
-      let rangeEnd = `${nextY}-${String(nextM).padStart(2, '0')}-01`;
+      // Danbooru counts API needs the date filter INSIDE the tags parameter.
+      // Explicit UTC instants: a bare date is read in the viewer's time zone
+      // (`Time.zone.parse`), which shifted every month by its offset.
+      // `a...b` excludes `b`.
+      let rangeEnd = `${nextY}-${String(nextM).padStart(2, '0')}-01T00:00:00Z`;
 
       // [OPTIMIZATION] Cap range at NOW when the month is the current one to
       // avoid race conditions with posts added during the fetch.
@@ -1321,7 +1812,7 @@ export class TagAnalyticsDataService {
         rangeEnd = now.toISOString();
       }
 
-      const queryDate = `${y}-${String(m).padStart(2, '0')}-01...${rangeEnd}`;
+      const queryDate = `${y}-${String(m).padStart(2, '0')}-01T00:00:00Z...${rangeEnd}`;
 
       tasks.push({dateStr, yearMonth, queryDate});
 
@@ -1478,7 +1969,8 @@ export class TagAnalyticsDataService {
     }
 
     const monthlyData: MonthlyCountsData = combined;
-    monthlyData.historyCutoff = now.toISOString();
+    // A lost month reads as 0 above; the caller must not cache this history.
+    if (fetchedResults.some(r => !r.ok)) monthlyData.partial = true;
     return monthlyData;
   }
 
@@ -1498,107 +1990,83 @@ export class TagAnalyticsDataService {
   }
 
   /**
-   * Identifies milestone posts (e.g., 100th, 1000th) from the monthly data.
-   * Precision depends on the granularity of the monthly data.
-   * @param {string} tagName The tag name.
-   * @param {!Array<{date: !Date, count: number, cumulative: number}>} monthlyData The history data.
-   * @param {!Array<number>} targets The milestone targets (e.g., [1, 100, 1000]).
-   * @return {Promise<!Array<{milestone: number, post: ?Object}>>} Array of milestones.
+   * Finds the milestone posts (the 1st, 100th, 1000th, … post of the tag)
+   * from the monthly history: each target's month from the running total,
+   * then the post at its place in that month ({@link milestoneLookup}).
+   * Three lookups at a time; the shared rate limiter paces them.
+   *
+   * @param tagName The tag name.
+   * @param monthlyData The history, oldest month first (UTC months).
+   * @param targets The milestone targets (e.g., [1, 100, 1000]).
+   * @return The milestones found; a target whose post could not be fetched
+   *     is left out.
    */
   async fetchMilestones(
     tagName: string,
     monthlyData: HistoryEntry[],
     targets: number[],
   ): Promise<MilestoneEntry[]> {
-    const milestones: MilestoneEntry[] = [];
-
-    // Sort targets
-    targets.sort((a, b) => a - b);
-
     if (!monthlyData || monthlyData.length === 0) return [];
 
-    for (const target of targets) {
-      // Find month where accum >= target
-      // monthlyData is sorted by date asc
-      let targetData = null;
-      let prevCumulative = 0;
+    const lookups = [...targets]
+      .sort((a, b) => a - b)
+      .map(target => milestoneLookup(tagName, monthlyData, target))
+      .filter((l): l is MilestoneLookup => l !== null);
 
-      for (const mData of monthlyData) {
-        if (mData.cumulative >= target) {
-          targetData = mData;
-          break;
-        }
-        prevCumulative = mData.cumulative;
+    const found: Array<MilestoneEntry | null> = new Array(lookups.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < lookups.length) {
+        const i = next++;
+        found[i] = await this.fetchMilestonePost(lookups[i]);
       }
-
-      if (targetData) {
-        const offset = target - prevCumulative;
-
-        // targetData.date is a "YYYY-MM-01" string (HistoryEntry.date: string)
-        let y, m;
-        {
-          const dParts = targetData.date.split('-');
-          y = parseInt(dParts[0], 10);
-          m = parseInt(dParts[1], 10); // 1-12
-        }
-
-        // Date(y, m-1, 0) gives last day of prev month
-        // Month is 0-indexed in Date constructor.
-        // m is 1-based (Feb=2). Date(2020, 1, 1) is Feb 1.
-        // We want last day of Jan. Date(2020, 0, 0)? No.
-        // Date(year, monthIndex, 0) is the last day of the *previous* month.
-        // So Date(2020, 1, 0) is Jan 31? Yes.
-        // targetData.date is 2020-02-01. m=2.
-        // new Date(y, m - 1, 0) -> new Date(2020, 1, 0) -> 2020-01-31.
-
-        const prevMonthEnd = new Date(y, m - 1, 0);
-        // Format to YYYY-MM-DD
-        const prevDateStr = `${prevMonthEnd.getFullYear()}-${String(prevMonthEnd.getMonth() + 1).padStart(2, '0')}-${String(prevMonthEnd.getDate()).padStart(2, '0')}`;
-
-        const limit = 200;
-        const page = Math.ceil(offset / limit);
-        const indexInPage = (offset - 1) % limit;
-
-        // Query
-        // Note: order:id assumes IDs increase with time. Usually true but imported posts might break this.
-        // User asked for "date:>..." and "offset".
-        // We must use order:id to ensure deterministic sort matching the "count" order roughly.
-        // Actually "count" is just total.
-        const params = new URLSearchParams({
-          tags: `${tagName} status:any date:>${prevDateStr} order:id`,
-          limit: String(limit),
-          page: String(page),
-          only: 'id,created_at,uploader_id,uploader_name,variants,rating,preview_file_url',
-        });
-
-        const url = `/posts.json?${params.toString()}`;
-
-        try {
-          const posts: DanbooruPost[] = await this.rateLimiter
-            .fetch(url)
-            .then((r: Response) => r.json());
-          if (posts && posts[indexInPage]) {
-            milestones.push({
-              milestone: target,
-              post: posts[indexInPage],
-            } as MilestoneEntry);
-          } else {
-            log.warn(`Milestone ${target} post not found`, {
-              index: indexInPage,
-              page,
-              postsLen: posts ? posts.length : 0,
-            });
-          }
-        } catch (e) {
-          log.warn(`Failed milestone ${target}`, {error: e});
-        }
-      }
-    }
+    };
+    await Promise.all(
+      Array.from(
+        {length: Math.min(MILESTONE_CONCURRENCY, lookups.length)},
+        worker,
+      ),
+    );
+    const milestones = found.filter((m): m is MilestoneEntry => m !== null);
 
     // Batch Fetch Uploaders for Milestones
     await this.backfillUploaderNames(milestones);
 
     return milestones;
+  }
+
+  /** One milestone post, or null when it could not be fetched. */
+  private async fetchMilestonePost(
+    lookup: MilestoneLookup,
+  ): Promise<MilestoneEntry | null> {
+    const params = new URLSearchParams({
+      tags: lookup.query,
+      limit: String(lookup.limit),
+      page: String(lookup.page),
+      only: 'id,created_at,uploader_id,uploader_name,media_asset[variants],rating,preview_file_url',
+    });
+    try {
+      const resp = await this.rateLimiter.fetch(
+        `/posts.json?${params.toString()}`,
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const posts: unknown = await resp.json();
+      const post = Array.isArray(posts)
+        ? (posts[lookup.index] as DanbooruPost | undefined)
+        : undefined;
+      if (!post) {
+        log.warn(`Milestone ${lookup.milestone} post not found`, {
+          index: lookup.index,
+          page: lookup.page,
+          postsLen: Array.isArray(posts) ? posts.length : 0,
+        });
+        return null;
+      }
+      return {milestone: lookup.milestone, post} as MilestoneEntry;
+    } catch (e) {
+      log.warn(`Failed milestone ${lookup.milestone}`, {error: e});
+      return null;
+    }
   }
 
   /**
@@ -1916,44 +2384,28 @@ export class TagAnalyticsDataService {
     dateStrTomorrow: string,
     measure: <T>(label: string, promise: Promise<T>) => Promise<T>,
   ): Promise<RankingResult> {
-    // 1. Fetch all rankings in parallel (RateLimiter queues them)
+    // 1. Fetch all rankings in parallel (the reports lane paces them). A
+    // failed report is listed in `failed`, never passed off as empty.
+    const failed: RankingSlot[] = [];
+    const report = (
+      slot: RankingSlot,
+      label: string,
+      group: 'uploader' | 'approver',
+      from: string,
+    ): Promise<ReportEntry[]> =>
+      measure(
+        label,
+        this.fetchReportRanking(tagName, group, from, dateStrTomorrow),
+      ).catch((e: unknown) => {
+        log.warn(`Ranking fetch failed (${slot})`, {error: e});
+        failed.push(slot);
+        return [];
+      });
     const [uAll, aAll, uYear, aYear] = await Promise.all([
-      measure(
-        'Ranking (Uploader All)',
-        this.fetchReportRanking(
-          tagName,
-          'uploader',
-          '2005-01-01',
-          dateStrTomorrow,
-        ),
-      ),
-      measure(
-        'Ranking (Approver All)',
-        this.fetchReportRanking(
-          tagName,
-          'approver',
-          '2005-01-01',
-          dateStrTomorrow,
-        ),
-      ),
-      measure(
-        'Ranking (Uploader Year)',
-        this.fetchReportRanking(
-          tagName,
-          'uploader',
-          dateStr1Y,
-          dateStrTomorrow,
-        ),
-      ),
-      measure(
-        'Ranking (Approver Year)',
-        this.fetchReportRanking(
-          tagName,
-          'approver',
-          dateStr1Y,
-          dateStrTomorrow,
-        ),
-      ),
+      report('uploaderAll', 'Ranking (Uploader All)', 'uploader', '2005-01-01'),
+      report('approverAll', 'Ranking (Approver All)', 'approver', '2005-01-01'),
+      report('uploaderYear', 'Ranking (Uploader Year)', 'uploader', dateStr1Y),
+      report('approverYear', 'Ranking (Approver Year)', 'approver', dateStr1Y),
     ]);
 
     // 2. Resolve Users Immediately
@@ -2012,12 +2464,15 @@ export class TagAnalyticsDataService {
       return [];
     };
 
-    const result = {
+    const result: RankingResult = {
       uploaderAll: processReport(uAll),
       approverAll: processReport(aAll),
       uploaderYear: processReport(uYear),
       approverYear: processReport(aYear),
     };
+    if (failed.length > 0) {
+      result.failed = RANKING_SLOTS.filter(s => failed.includes(s));
+    }
     return result;
   }
 

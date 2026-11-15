@@ -152,6 +152,14 @@ const LEGEND_TITLES: Record<string, string> = {
   commentary: 'COMMENTARY',
   translation: 'TRANSLATION',
 };
+/** Legend tooltip of a slice whose count could not be had (`unknown`). */
+const UNKNOWN_COUNT_TITLE =
+  'Unknown: Danbooru did not return this count. The search may be over ' +
+  "your account's tag limit.";
+/** Legend tooltip of a slice not counted for the viewer's tag limit (T-408). */
+const LOCKED_COUNT_TITLE =
+  'Locked: this count needs more search tags than your account allows ' +
+  '(2 when logged out). Log in to see it.';
 /** Custom categorical order for the hair_length tab (count-based sort would
  *  reorder buckets in non-intuitive ways). */
 const HAIR_LENGTH_ORDER = [
@@ -191,7 +199,10 @@ function preprocessFrequencyTab(data: PieTabItem[]): PieTabItem[] {
  * upstream-supplied color, everything else falls back to PIE_PALETTE.
  * Pure.
  */
-function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
+export function processSlices(
+  data: PieTabItem[],
+  currentPieTab: string,
+): PieSlice[] {
   // T-26 baseline: arrow complexity 22. Tab-specific normalization (status
   // colors, rating labels, hair_color passthrough, tag fallbacks). Pure
   // mapping; refactor would be splitting per tab — over-abstraction risk.
@@ -211,6 +222,8 @@ function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
       frequency?: number;
       thumb?: string | null;
       count: number;
+      unknown?: boolean;
+      locked?: boolean;
     };
 
     const tagDetails = (): PieDetails => ({
@@ -219,6 +232,8 @@ function processSlices(data: PieTabItem[], currentPieTab: string): PieSlice[] {
       originalTag: item.originalTag,
       isOther: item.isOther,
       count: item.count,
+      unknown: item.unknown,
+      locked: item.locked,
       thumb: item.thumb,
       color: item.color,
       frequency: item.frequency,
@@ -995,7 +1010,7 @@ function bindTouchPieInteractions(args: {
  * injected) and replaces the rest of the inner HTML with a fresh title +
  * one row per slice. Pure on processedData / pctFor.
  */
-function renderPieLegend(args: {
+export function renderPieLegend(args: {
   legendDiv: Element;
   processedData: PieSlice[];
   currentPieTab: string;
@@ -1028,7 +1043,10 @@ function renderPieLegend(args: {
 
   const listHtml = processedData
     .map((d, idx) => {
-      const pct = pctFor(d.label);
+      const isUnknown = d.details.kind === 'tag' && !!d.details.unknown;
+      const isLocked =
+        isUnknown && d.details.kind === 'tag' && !!d.details.locked;
+      const pct = isLocked ? '🔒' : isUnknown ? '—' : pctFor(d.label);
       const isOtherSlice = d.details.kind === 'tag' && !!d.details.isOther;
       let targetUrl = '#';
 
@@ -1047,9 +1065,13 @@ function renderPieLegend(args: {
       const swatchColor = safeColor(d.color);
       const safeLabel = escapeHtml(d.label);
       const safeUrl = escapeHtml(targetUrl);
-      const countTitle = d.details.count
-        ? escapeHtml(d.details.count.toLocaleString())
-        : '';
+      const countTitle = isLocked
+        ? LOCKED_COUNT_TITLE
+        : isUnknown
+          ? UNKNOWN_COUNT_TITLE
+          : d.details.count
+            ? escapeHtml(d.details.count.toLocaleString())
+            : '';
       // Mark every Copy/Fav_Copy/Char legend row for the post-render
       // wire-up — including Others, which needs its own mouseenter
       // handler to revert the sub-chart back to the main pie (v9.6.2+).
@@ -2943,7 +2965,7 @@ export async function renderHistoryChart(
     const searchUrl = `/posts?tags=user:${encodeURIComponent(context.targetUser.normalizedName)}+${dateFilter}`;
 
     svg += `
-      <g class="month-column" style="cursor: pointer;" onclick="window.open('${searchUrl}', '_blank')">
+      <g class="month-column" style="cursor: pointer;" data-search-url="${escapeHtml(searchUrl)}">
         <rect class="column-overlay" x="${colX}" y="0" width="${colWidth}" height="${vHeight - padBottom}" fill="transparent" />
         <rect class="monthly-bar" x="${x}" y="${y}" width="${barWidth}" height="${barH}" fill="#40c463" rx="2" style="pointer-events: none;" />
         <title>${m.label}: ${m.count} posts</title>
@@ -2990,11 +3012,11 @@ export async function renderHistoryChart(
 
   monthly.forEach((mo: MonthlyStatEntry, idx: number) => {
     const mKey = mo.date;
-    const stars = milestones1k.filter((m: MilestoneEntry) => {
-      const pDate = new Date(m.post.created_at);
-      const k = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}`;
-      return k === mKey;
-    });
+    // The month as written in `created_at` (the viewer's account time zone),
+    // as the bars count it — not the browser's calendar (T-702).
+    const stars = milestones1k.filter(
+      (m: MilestoneEntry) => String(m.post.created_at).slice(0, 7) === mKey,
+    );
 
     if (stars.length > 0) {
       const x = padLeftScroll + step * idx + step / 2;
@@ -3015,19 +3037,20 @@ export async function renderHistoryChart(
           animClass = 'star-shiny';
         }
 
+        const day = escapeHtml(String(m.post.created_at).slice(0, 10));
         if (isTouch2) {
           svg += `
                <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}; pointer-events: none;">
                    ★
-                   <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
+                   <title>Milestone #${m.milestone} (${day})</title>
                </text>
              `;
         } else {
           svg += `
-               <a href="/posts/${m.post.id}" target="_blank" style="cursor: pointer; pointer-events: all;" onclick="event.stopPropagation()">
+               <a href="/posts/${m.post.id}" target="_blank" style="cursor: pointer; pointer-events: all;">
                   <text class="${animClass}" x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="${fill}" stroke="${stroke}" stroke-width="0.5" style="${style}">
                      ★
-                     <title>Milestone #${m.milestone} (${new Date(m.post.created_at).toLocaleDateString()})</title>
+                     <title>Milestone #${m.milestone} (${day})</title>
                   </text>
                </a>
              `;
@@ -3040,6 +3063,15 @@ export async function renderHistoryChart(
 
   chartDiv.innerHTML = chartHtml;
   chartWrapper.innerHTML = svg;
+  // Month click → that month's post search. One delegated listener rather
+  // than an inline `onclick`: Danbooru's CSP blocks inline handlers (see
+  // ui/thumb-fallback.ts). Milestone stars are siblings of the columns, not
+  // children, so a star click never matches `.month-column`.
+  chartWrapper.addEventListener('click', e => {
+    const column = (e.target as Element | null)?.closest?.('.month-column');
+    const url = column?.getAttribute('data-search-url');
+    if (url) window.open(url, '_blank');
+  });
   chartDiv.appendChild(mainWrapper);
 
   container.appendChild(chartDiv);

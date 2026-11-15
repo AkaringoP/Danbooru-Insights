@@ -604,3 +604,35 @@ describe('lifetime focus (dashboard line 1)', () => {
     expect(t).toMatch(/^Uploading since 2021-03\. /);
   });
 });
+
+describe('very large accounts (DA-05)', () => {
+  // Spreading a per-post array into Math.min/max throws RangeError past
+  // ~124k elements (Chrome, Node), which made the card vanish for big
+  // uploaders. 150k is past that limit in every engine.
+  const BIG = 150_000;
+
+  it('derives activity from 150k uploads without a RangeError', () => {
+    const lifetimePoints = Array.from({length: BIG}, (_, i) =>
+      pt(i + 1, (i + 1) * H),
+    );
+    const a = deriveActivity(
+      input({firstUploadDate: null, lifetimePoints, window: []}),
+      NOW,
+    );
+    expect(a.lastUpload).toBe(NOW - H);
+    expect(a.count30).toBe(30 * 24);
+  });
+
+  it('builds the whole summary for 150k uploads', () => {
+    const lifetimePoints = Array.from({length: BIG}, (_, i) =>
+      pt(i + 1, (i + 1) * H),
+    );
+    expect(() =>
+      buildProfileSummary(
+        input({firstUploadDate: null, lifetimePoints}),
+        NOW,
+        'lifetime',
+      ),
+    ).not.toThrow();
+  });
+});

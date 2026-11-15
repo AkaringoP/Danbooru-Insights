@@ -25,6 +25,7 @@ import {
   MINTAG_MAX,
   SUSPICIOUS_SCORE_MAX,
 } from './dashboard-preview';
+import {numericExtent} from '../utils';
 
 const DAY = 86_400_000;
 
@@ -393,7 +394,9 @@ export function deriveActivity(
       peak: null,
     };
   }
-  const first = input.firstUploadDate?.getTime() ?? Math.min(...times);
+  // One entry per upload — no spread into Math.min/max (see numericExtent).
+  const span = numericExtent(times);
+  const first = input.firstUploadDate?.getTime() ?? span.min;
   const age = now - first;
   const count30 = times.filter(t => now - t <= 30 * DAY).length;
   const count365 = times.filter(t => now - t <= 365 * DAY).length;
@@ -403,7 +406,7 @@ export function deriveActivity(
       ? count30 / 30 / (count365 / span365)
       : null;
   return {
-    lastUpload: Math.max(...times),
+    lastUpload: span.max,
     pace30,
     count30,
     count365,

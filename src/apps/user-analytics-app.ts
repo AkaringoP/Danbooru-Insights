@@ -4,7 +4,8 @@ import {
   resolveEffectiveDashboardTheme,
 } from '../ui/theme-palette';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
-import {RateLimitedFetch} from '../core/rate-limiter';
+import {GrassLoadGate} from '../core/grass-load-gate';
+import type {RateLimitedFetch} from '../core/rate-limiter';
 import {
   SettingsManager,
   getNsfwEnabled,
@@ -59,9 +60,28 @@ import {isTouchDevice} from '../ui/two-step-tap';
 import {showToast} from '../ui/toast';
 import type {Database} from '../core/database';
 import type {ProfileContext} from '../core/profile-context';
-import type {ProfileSummaryInput, SyncOutcome} from '../types';
+import type {ProfileSummaryInput, SyncOutcome, TargetUser} from '../types';
 
 const log = createLogger('UserAnalytics');
+
+/**
+ * How long Grass must have been loading before the report button shows as
+ * waiting (G-7). A cached graph paints well within it, so opening a profile
+ * does not flash the lock; a click is refused during it all the same.
+ */
+const GRASS_LOCK_DELAY_MS = 400;
+/** Class on the report button while it waits for Grass. */
+const GRASS_LOCK_CLASS = 'di-grass-locked';
+const GRASS_LOCK_MESSAGE =
+  'The contribution graph is still loading; the report opens after it';
+
+/**
+ * How long the pointer must rest on 📊 before the preview popover opens
+ * (desktop). Every move over the icon restarts the wait, so a pointer
+ * crossing it on the way elsewhere opens nothing and fetches nothing. Was a
+ * fixed 200 ms from entering, which opened it on a mere graze.
+ */
+const PREVIEW_HOVER_REST_MS = 400;
 
 /** ProfileContext with a guaranteed non-null targetUser (post-validation). */
 type ValidatedProfileContext = ProfileContext & {
@@ -200,6 +220,74 @@ function scheduleRevalidateAll(
       });
     }, 0);
   }
+}
+
+/**
+ * After paint: brings the local rows up to date with the posts changed on
+ * Danbooru (T-407), then recounts the pies counted from them and live-patches
+ * the open dashboard (`DanbooruInsights:DataUpdated`, as the SWR revalidates
+ * do). Within the count TTL, or before the rows hold fields version 2, it
+ * sends nothing. The recount only runs while the pies are counted locally —
+ * otherwise a forced refresh would mean dozens of counts.
+ */
+function scheduleChangeCatchUp(
+  dataManager: AnalyticsDataManager,
+  user: TargetUser,
+): void {
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const {changed} = await dataManager.catchUpChanges(user);
+        if (changed === 0) return;
+        const uploaderId = parseInt(user.id || '0');
+        if (!(await dataManager.getLocalDistributions(uploaderId))) return;
+        const recount: Array<[string, () => Promise<unknown>]> = [
+          [
+            'status_dist',
+            () => dataManager.getStatusDistribution(user, null, true),
+          ],
+          [
+            'rating_dist',
+            () => dataManager.getRatingDistribution(user, null, true),
+          ],
+          [
+            'character_dist',
+            () => dataManager.getCharacterDistribution(user, true),
+          ],
+          [
+            'copyright_dist',
+            () => dataManager.getCopyrightDistribution(user, true),
+          ],
+        ];
+        for (const [contentType, run] of recount) {
+          const data = await run();
+          window.dispatchEvent(
+            new CustomEvent('DanbooruInsights:DataUpdated', {
+              detail: {contentType, data},
+            }),
+          );
+        }
+      } catch (e: unknown) {
+        log.warn('Change catch-up failed', {error: e});
+      }
+    })();
+  }, 0);
+}
+
+/**
+ * Other users' stale rows (`cleanupStaleData`) after a sync, once its
+ * dashboard is painted (T-503). Inside the sync it held the dashboard back
+ * while it deleted, seconds for a large user.
+ */
+function scheduleStaleCleanup(
+  dataManager: AnalyticsDataManager,
+  user: TargetUser,
+): void {
+  if (!user.id) return;
+  const currentId = user.id;
+  setTimeout(() => {
+    void dataManager.cleanupStaleData(currentId);
+  }, 0);
 }
 
 /** Same single-slot pattern as {@link lazyPieRevalidateListener}. */
@@ -873,6 +961,17 @@ async function renderDashboardWidgets(
     gated: totalUploads < SCATTER_MIN_UPLOADS,
   });
 
+  // The scatter runs the fields backfill and shows its progress. Without a
+  // scatter (under SCATTER_MIN_UPLOADS, a page or two of posts, or with no
+  // points) it still has to run for the local pies (T-403), unseen.
+  const scatterRanBackfill =
+    totalUploads >= SCATTER_MIN_UPLOADS && scatterData.length > 0;
+  if (needsBackfill && !scatterRanBackfill) {
+    void dataManager
+      .backfillPostMetadata(app.context.targetUser)
+      .catch((e: unknown) => log.warn('Fields backfill failed', {error: e}));
+  }
+
   // 8. Footer credit (always last)
   parent.insertAdjacentHTML('beforeend', dashboardFooterHtml());
 }
@@ -1300,24 +1399,30 @@ export class UserAnalyticsApp {
     typeof createDashboardPreviewPopover
   > | null = null;
 
+  /** Grass's loading state; the report waits for it (G-7). */
+  private readonly grassGate: GrassLoadGate;
+
   /**
    * Initializes the UserAnalyticsApp.
    * @param {Database} db The Dexie database instance.
    * @param {Object} settings The settings manager.
    * @param {ProfileContext} context The profile context.
+   * @param {RateLimitedFetch} rateLimiter The tab's shared rate limiter.
+   * @param {GrassLoadGate=} grassGate GrassApp's gate; without one (no
+   *     graph on the page) the button never locks.
    */
   constructor(
     db: Database,
     settings: SettingsManager,
     context: ProfileContext,
-    rateLimiter?: RateLimitedFetch,
+    rateLimiter: RateLimitedFetch,
+    grassGate: GrassLoadGate = new GrassLoadGate(),
   ) {
     this.db = db;
     this.settings = settings;
     this.context = context as ValidatedProfileContext;
-    const rl = CONFIG.RATE_LIMITER;
-    this.rateLimiter =
-      rateLimiter ?? new RateLimitedFetch(rl.concurrency, rl.jitter, rl.rps);
+    this.rateLimiter = rateLimiter;
+    this.grassGate = grassGate;
 
     this.dataManager = new AnalyticsDataManager(db, this.rateLimiter);
     // Share the rate limiter so the dashboard fetch + post-paint SWR
@@ -1372,6 +1477,61 @@ export class UserAnalyticsApp {
     if (closeBtn) {
       closeBtn.onclick = () => this.toggleModal(false);
     }
+  }
+
+  /**
+   * Shows the report button as waiting while Grass loads (G-7): a dimmed
+   * `di-grass-locked` button with `aria-disabled`, only once the load has
+   * run past {@link GRASS_LOCK_DELAY_MS} so a cached graph does not make it
+   * flicker on every profile open. The hover preview stays available.
+   */
+  private wireGrassLock(btn: HTMLElement): void {
+    const label = btn.getAttribute('aria-label') ?? '';
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const show = (locked: boolean) => {
+      btn.classList.toggle(GRASS_LOCK_CLASS, locked);
+      if (locked) {
+        btn.setAttribute('aria-disabled', 'true');
+        btn.setAttribute('aria-label', `${label} (${GRASS_LOCK_MESSAGE})`);
+      } else {
+        btn.removeAttribute('aria-disabled');
+        btn.setAttribute('aria-label', label);
+      }
+    };
+    const onChange = (loading: boolean) => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      if (!loading) {
+        show(false);
+        return;
+      }
+      const wait = GRASS_LOCK_DELAY_MS - this.grassGate.loadingForMs();
+      if (wait <= 0) {
+        show(true);
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        if (this.grassGate.isLoading()) show(true);
+      }, wait);
+    };
+    this.grassGate.subscribe(onChange);
+    if (this.grassGate.isLoading()) onChange(true);
+  }
+
+  /**
+   * While Grass loads, a report click explains instead of starting a sync.
+   * @return true when the click was refused.
+   */
+  private refuseWhileGrassLoads(): boolean {
+    if (!this.grassGate.isLoading()) return false;
+    // Keyed: clicking again while it shows keeps the one toast up.
+    showToast({
+      type: 'info',
+      message: `${GRASS_LOCK_MESSAGE}.`,
+      key: 'grass-lock',
+    });
+    return true;
   }
 
   /**
@@ -1453,18 +1613,29 @@ export class UserAnalyticsApp {
       this.previewPopover = previewPopover;
 
       // Hover opens a transient popover (skipped on touch — unreachable
-      // there; the click path still works). A short dwell debounce avoids
-      // firing on an accidental graze. Gate unified to isTouchDevice() so the
-      // hover wiring and the touch-only paths (📋 button, legend two-step)
-      // agree on what counts as "touch" (R-08).
+      // there; the click path still works) once the pointer rests on the
+      // icon (PREVIEW_HOVER_REST_MS, debounced on movement). Gate unified to
+      // isTouchDevice() so the hover wiring and the touch-only paths (📋
+      // button, legend two-step) agree on what counts as "touch" (R-08).
       let hoverTimer: ReturnType<typeof setTimeout> | null = null;
       if (!isTouchDevice()) {
+        const waitForRest = () => {
+          if (hoverTimer !== null) clearTimeout(hoverTimer);
+          hoverTimer = setTimeout(() => {
+            hoverTimer = null;
+            previewPopover.show();
+          }, PREVIEW_HOVER_REST_MS);
+        };
         btn.addEventListener('mouseenter', () => {
           // Cursor back on the icon during the grace/fade window: keep the
           // open popover alive instead of letting it close and re-load (R-04).
           previewPopover.keepOpen();
-          if (hoverTimer !== null) clearTimeout(hoverTimer);
-          hoverTimer = setTimeout(() => previewPopover.show(), 200);
+          waitForRest();
+        });
+        // Moving restarts the wait, until it opens: moves after that leave
+        // the open popover alone.
+        btn.addEventListener('mousemove', () => {
+          if (hoverTimer !== null) waitForRest();
         });
         btn.addEventListener('mouseleave', () => {
           if (hoverTimer !== null) {
@@ -1507,6 +1678,9 @@ export class UserAnalyticsApp {
           return;
         }
 
+        // Grass first (G-7): no sync or dashboard while the graph loads.
+        if (this.refuseWhileGrassLoads()) return;
+
         // Normal path: dismiss any hover popover, sync if needed, open modal.
         previewPopover.hide();
         if (this.isFullySynced === false) {
@@ -1518,6 +1692,7 @@ export class UserAnalyticsApp {
         }
         this.toggleModal(true);
       };
+      this.wireGrassLock(btn);
       container.appendChild(btn);
 
       // The touch-only 📋 mini-report button now lives in updateHeaderStatus(),
@@ -1822,13 +1997,6 @@ export class UserAnalyticsApp {
     el.appendChild(row2);
   }
 
-  /**
-   * The touch-only 📋 mini-report button, sized to the ⚙️ sync-settings gear
-   * and placed right after it in the header status row. On touch the 📊 tap
-   * opens the full modal, leaving the hover-only preview unreachable — this
-   * opens the pinned preview directly. Returns null on desktop or before the
-   * preview popover has been created.
-   */
   /** The popover's newest-200 summary (see {@link buildRecentSummaryInput}). */
   private async buildRecentSummary() {
     const user = this.context.targetUser;
@@ -1838,6 +2006,13 @@ export class UserAnalyticsApp {
     return buildProfileSummary(input, Date.now(), 'recent');
   }
 
+  /**
+   * The touch-only 📋 mini-report button, sized to the ⚙️ sync-settings gear
+   * and placed right after it in the header status row. On touch the 📊 tap
+   * opens the full modal, leaving the hover-only preview unreachable — this
+   * opens the pinned preview directly. Returns null on desktop or before the
+   * preview popover has been created.
+   */
   private buildMiniReportButton(): HTMLSpanElement | null {
     if (!isTouchDevice() || !this.previewPopover) return null;
     const reportBtn = document.createElement('span');
@@ -2361,6 +2536,17 @@ export class UserAnalyticsApp {
         ['levelChanges', levelChangesStartRevalidate],
         ['tagCloudGeneral', tagCloudGeneralStartRevalidate],
       ]);
+      // Changed posts since the last catch-up, then the local pies (T-407).
+      // On this open's manager: the rows it changes must drop that
+      // manager's scan of them (T-501), which the pies here read.
+      scheduleChangeCatchUp(dashboardData.dataManager, this.context.targetUser);
+      // After a sync: other users' stale rows, now that this is painted.
+      if (forceDistRevalidate) {
+        scheduleStaleCleanup(
+          dashboardData.dataManager,
+          this.context.targetUser,
+        );
+      }
     } finally {
       perfLogger.end('dbi:render:total', perfMeta);
       this.isRendering = false;

@@ -12,6 +12,7 @@ import {
   wasDismissed,
   wouldTuningImprove,
 } from '../core/threshold-tuner';
+import {GrassLoadGate} from '../core/grass-load-gate';
 import type {RateLimitedFetch} from '../core/rate-limiter';
 import type {Database} from '../core/database';
 import type {SettingsManager} from '../core/settings';
@@ -19,6 +20,9 @@ import type {ProfileContext} from '../core/profile-context';
 import type {Metric, Threshold4} from '../types';
 
 const log = createLogger('GrassApp');
+
+/** How long after opening a profile the daily Grass cache sweep waits. */
+const GRASS_SWEEP_DELAY_MS = 10_000;
 
 /**
  * GrassApp: Encapsulates the contribution graph visualization logic.
@@ -28,25 +32,31 @@ export class GrassApp {
   db: Database;
   settings: SettingsManager;
   context: ProfileContext;
-  rateLimiter: RateLimitedFetch | null;
+  rateLimiter: RateLimitedFetch;
+  /** On while the current view loads; holds the report button (G-7). */
+  readonly loadGate: GrassLoadGate;
 
   /**
    * Initializes the GrassApp default instance.
    * @param {Database} db - The shared Dexie database instance.
    * @param {SettingsManager} settings - The settings manager instance.
    * @param {ProfileContext} context - The current profile context containing target user info.
-   * @param {RateLimitedFetch=} rateLimiter - Optional shared rate limiter instance.
+   * @param {RateLimitedFetch} rateLimiter - The tab's shared rate limiter.
+   * @param {GrassLoadGate=} loadGate - Shared with UserAnalyticsApp so its
+   *     report button waits for the graph.
    */
   constructor(
     db: Database,
     settings: SettingsManager,
     context: ProfileContext,
-    rateLimiter?: RateLimitedFetch,
+    rateLimiter: RateLimitedFetch,
+    loadGate: GrassLoadGate = new GrassLoadGate(),
   ) {
     this.db = db;
     this.settings = settings;
     this.context = context;
-    this.rateLimiter = rateLimiter ?? null;
+    this.rateLimiter = rateLimiter;
+    this.loadGate = loadGate;
   }
 
   /**
@@ -68,6 +78,13 @@ export class GrassApp {
     if (!injected) {
       return;
     }
+
+    // This visit, then — once a day, after the first paint has had its
+    // turn — other users' Grass caches unopened for 90 days (T-606, G-6).
+    void dataManager.noteGrassVisit(targetUser);
+    setTimeout(() => {
+      void dataManager.sweepGrassCache(userId);
+    }, GRASS_SWEEP_DELAY_MS);
 
     let currentYear = new Date().getFullYear();
     let currentMetric: Metric = (this.settings.getLastMode(userId) ||
@@ -120,6 +137,10 @@ export class GrassApp {
       };
 
       renderer.setLoading(true);
+      // The gate follows this spinner: on now, off in `finally` only if this
+      // run is still the current one (a superseded run keeps fetching into
+      // the cache, but the report button must not wait for it).
+      this.loadGate.set(true);
       try {
         // Initial render for layout (skeleton — scroll deferred to final render)
         await renderer.renderGraph(
@@ -212,7 +233,10 @@ export class GrassApp {
         renderer.renderError(message, () => updateView());
       } finally {
         // A superseded run must not clear the spinner the newer run owns.
-        if (isCurrent()) renderer.setLoading(false);
+        if (isCurrent()) {
+          renderer.setLoading(false);
+          this.loadGate.set(false);
+        }
       }
     };
 

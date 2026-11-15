@@ -9,6 +9,7 @@ import {
   newestPoints,
   scatterPointToWindowPoint,
 } from '../core/profile-summary';
+import {numericExtent} from '../utils';
 import type {
   DistributionItem,
   ProfileSummaryInput,
@@ -161,16 +162,18 @@ type HeavyDistKey =
 
 /**
  * Heavy distributions fetched up front even on a cold cache: the pie opens on
- * copyright, and these three related-tag tabs are the ones users read most
- * and the ones that cost the most to fetch on a tab click. The other six
- * (gender, breasts, hair ×2, commentary, translation) are left out of the
- * blocking cold-cache load; the pie widget fetches a missing tab when it is
- * first opened (its "Loading..." path), and a tab never opened costs nothing.
+ * copyright, and the at-a-glance card reads copyright and character — both
+ * counted from the local rows when they qualify (T-406). The other seven
+ * (fav copyright, gender, breasts, hair ×2, commentary, translation) are left
+ * out of the blocking cold-cache load; the pie widget fetches a missing tab
+ * when it is first opened (its "Loading..." path), and a tab never opened
+ * costs nothing. Fav copyright was eager until T-704: its ~37 counts at
+ * 1 req/s (a large account) held a cold first open about 30 s for a tab
+ * that is not shown.
  */
 const EAGER_HEAVY_DISTS: ReadonlySet<HeavyDistKey> = new Set([
   'copyright',
   'character',
-  'fav_copyright',
 ]);
 
 /**
@@ -371,6 +374,10 @@ export type PieDetails =
       color?: string;
       frequency?: number;
       name?: string;
+      /** The count could not be had: legend "—" (`DistributionItem.unknown`). */
+      unknown?: boolean;
+      /** Not asked, over the viewer's tag limit: legend "🔒" (T-408). */
+      locked?: boolean;
       /**
        * Sub-tag breakdown for legend hover/tap (Copy / Fav_Copy / Char,
        * v9.6.0+). Source: `DistributionItem.subTags` from the resolver.
@@ -392,7 +399,7 @@ export interface PieSlice {
  */
 export class UserAnalyticsDataService {
   private readonly db: Database;
-  private readonly rateLimiter: RateLimitedFetch | null;
+  private readonly rateLimiter: RateLimitedFetch;
 
   /**
    * @param db The Dexie database instance.
@@ -400,9 +407,8 @@ export class UserAnalyticsDataService {
    *   dashboard fetch (and the now-heavier post-paint SWR revalidate flood)
    *   on the TabCoordinator-managed, 429-backoff-aware limiter instead of a
    *   private bucket that would blow past Danbooru's server cap (audit H-1).
-   *   Optional so existing callers/tests that only need cache reads still work.
    */
-  constructor(db: Database, rateLimiter: RateLimitedFetch | null = null) {
+  constructor(db: Database, rateLimiter: RateLimitedFetch) {
     this.db = db;
     this.rateLimiter = rateLimiter;
   }
@@ -763,8 +769,9 @@ export async function buildRecentSummaryInput(
       cached<DistributionItem[]>('copyright_dist', []),
       cached<DistributionItem[]>('character_dist', []),
     ]);
+  // One entry per synced upload — no spread into Math.min (see numericExtent).
   const firstTs = scatterData.length
-    ? Math.min(...scatterData.map(p => p.d))
+    ? numericExtent(scatterData.map(p => p.d)).min
     : null;
   return assembleProfileSummaryInput({
     dataManager,

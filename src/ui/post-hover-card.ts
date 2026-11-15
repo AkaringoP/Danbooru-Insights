@@ -26,6 +26,8 @@ interface PostDetails {
   tag_string_character?: string;
   preview_file_url?: string;
   file_url?: string;
+  /** The sizes, as `fetchPostDetails` asks for them (T-506). */
+  media_asset?: {variants?: PostVariant[]};
   variants?: PostVariant[];
 }
 

@@ -797,8 +797,7 @@ function buildCacheInfoSection(
   let statsInterval: ReturnType<typeof setInterval> | null = null;
 
   const updateMyStats = async (): Promise<void> => {
-    const dataManager = new DataManager(db);
-    const stats = await dataManager.getCacheStats();
+    const stats = await DataManager.getCacheStats(db);
     (contentDiv as HTMLElement).innerHTML = `
             <table style="width:100%; border-collapse:collapse; font-size:11px;">
               <tr style="border-bottom:1px solid var(--di-border-light, #eee);">
