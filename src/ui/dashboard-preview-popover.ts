@@ -929,19 +929,6 @@ interface CachedFetcher<T> {
 }
 
 /**
- * Wraps `fetchFn` with a single-slot {@link ttlMs} cache and in-flight dedup —
- * the shared engine behind sections A and B so the popover's load paths don't
- * each re-implement the bookkeeping.
- *
- * `isCacheable` gates what gets stored (default: everything). Both fetch
- * methods swallow network errors into an *empty* result (`[]` / an empty
- * distribution) rather than rejecting, so without this an offline blip would
- * pin a false-empty for the full TTL — re-hover after the API recovers would
- * still show nothing (R-05). Passing `v => v.length > 0` (or the distribution
- * equivalent) means an empty result is never cached: the next open re-fetches
- * and recovers. A genuinely-empty user just re-fetches each open — cheap.
- */
-/**
  * Top "At a glance" section — independent of the A/B load strategy (it is
  * just text). A fresh cache renders synchronously; otherwise a placeholder
  * until the summary resolves, dropped if this open is no longer current.
@@ -995,6 +982,19 @@ function createPopoverFetchers(options: DashboardPreviewPopoverOptions) {
   };
 }
 
+/**
+ * Wraps `fetchFn` with a single-slot {@link ttlMs} cache and in-flight dedup —
+ * the shared engine behind sections A and B so the popover's load paths don't
+ * each re-implement the bookkeeping.
+ *
+ * `isCacheable` gates what gets stored (default: everything). Both fetch
+ * methods swallow network errors into an *empty* result (`[]` / an empty
+ * distribution) rather than rejecting, so without this an offline blip would
+ * pin a false-empty for the full TTL — re-hover after the API recovers would
+ * still show nothing (R-05). Passing `v => v.length > 0` (or the distribution
+ * equivalent) means an empty result is never cached: the next open re-fetches
+ * and recovers. A genuinely-empty user just re-fetches each open — cheap.
+ */
 function createCachedFetcher<T>(
   fetchFn: () => Promise<T>,
   ttlMs: number,

@@ -199,9 +199,11 @@ export class Database extends Dexie {
     });
 
     // [v12] Tag analytics caching layer for sync-time optimization.
-    // - tag_monthly_counts: persist per-tag, per-month post counts so
-    //   revisits only refetch the current + previous month (matches the
-    //   existing Delta sync rescan window). Compound PK `[tag+yearMonth]`,
+    // - tag_monthly_counts: per-tag, per-month post counts. Since T-301–T-303
+    //   only the monthly history's fallback layers write them (summed
+    //   report halves, or one count per month), in UTC months (`basis:
+    //   'utc'`), so a later run asks only for what follows the closed months
+    //   (`fetchMonthlyHistory`). Compound PK `[tag+yearMonth]`,
     //   `tag` index for bulk per-tag reads and deletes, `fetchedAt` for the
     //   distance-based TTL (checked on read). Rows go with their tag's report
     //   and in the tag page's daily sweep (T-309). See `MonthlyCountRecord`.
@@ -224,8 +226,10 @@ export class Database extends Dexie {
     // left, and every one was rewritten on each bulkPut (audit measure, 50k
     // rows: 7.0 → 4.7 s to write, 112 → 65 MB). The fields stay in the rows.
     // - sync_meta: per-user sync state (`SyncMetaRecord`), keyed by the
-    //   numeric uploader id. Replaces nothing yet; the localStorage stamps
-    //   (`danbooru_grass_last_sync_*`, `di_post_metadata_v2_*`) stay.
+    //   numeric uploader id. The completion stamp
+    //   (`danbooru_grass_last_sync_*`) stays in localStorage; the
+    //   `di_post_metadata_v2_*` flag is no longer read or written, only
+    //   removed with a user's data (T-403: `fieldsVersion` 2 covers it).
     // Other open tabs on v12 get `versionchange` and reload once.
     this.version(13).stores({
       posts: 'id, uploader_id, [uploader_id+no], [uploader_id+created_at]',

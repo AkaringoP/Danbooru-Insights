@@ -777,12 +777,6 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Centrally selects the most appropriate thumbnail URL for a post.
-   * Prioritizes high-quality WebP variants (720x720 or 360x360) for performance.
-   * @param {Object} post The post data object from Danbooru API.
-   * @return {string} The selected thumbnail URL.
-   */
-  /**
    * Fetches a thumbnail URL with built-in retry logic for handling rate limits.
    * Implements exponential backoff on 429 status codes.
    * @param {string} tags The tag string to search for.
@@ -902,14 +896,6 @@ export class AnalyticsDataManager extends DataManager {
     };
   }
 
-  /**
-   * Retrieves milestone posts (e.g., 1st, 100th, 1000th) based on local sequence.
-   * Automatically adjusts step size based on total post count if 'auto' is selected.
-   * @param {!Object} userInfo The user's information object.
-   * @param {boolean=} isNsfwEnabled Whether to fetch thumbnails for all posts regardless of rating.
-   * @param {(string|number)=} customStep Step interval ('auto' or a number).
-   * @return {Promise<!Array<{type: string, post: !Object, index: number}>>} List of milestone posts.
-   */
   /**
    * Builds the milestone target sequence (numeric values only) for a given
    * total post count and step mode. Used by both `getMilestones` (to look up
@@ -1070,6 +1056,15 @@ export class AnalyticsDataManager extends DataManager {
     }
   }
 
+  /**
+   * Retrieves milestone posts (e.g., 1st, 100th, 1000th) based on local sequence.
+   * Automatically adjusts step size based on total post count if 'auto' is selected.
+   * @param {!Object} userInfo The user's information object.
+   * @param {boolean=} isNsfwEnabled Whether to fetch thumbnails for all posts regardless of rating.
+   * @param {(string|number)=} customStep Step interval ('auto', 'repdigit' or a number).
+   * @param {boolean=} forceRefresh Whether to bypass the milestone cache.
+   * @return {Promise<!Array<MilestoneEntry>>} List of milestone posts.
+   */
   async getMilestones(
     userInfo: TargetUser,
     isNsfwEnabled: boolean = false,
@@ -1242,11 +1237,6 @@ export class AnalyticsDataManager extends DataManager {
     return results;
   }
 
-  /**
-   * Fetches rating distribution report from Danbooru's /reports/posts.json endpoint.
-   * @param {!Object} userInfo The user's information object.
-   * @return {Promise<!Array<{rating: string, count: number, label: string}>>} Rating distribution array.
-   */
   /**
    * Fetches post counts for each status (active, deleted, etc.).
    * @param {!Object} userInfo The user's information object.
