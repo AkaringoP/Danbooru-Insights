@@ -374,12 +374,13 @@ export function classifyCommentType(score: number | undefined): ActivityType {
 
 /**
  * `only=` field list for the recent-posts preview fetch: the status flags
- * {@link derivePostStatus} needs, score, general tag count, and thumbnail
- * sources.
+ * {@link derivePostStatus} needs, score, general tag count, and the
+ * thumbnail. The grid shows 180px cells, which `preview_file_url` (the
+ * 180×180 jpg) is; `variants` is not a post field (T-506).
  */
 export const PREVIEW_POST_FIELDS =
   'id,rating,score,up_score,down_score,tag_count_general,is_pending,' +
-  'is_flagged,is_deleted,is_banned,variants,preview_file_url';
+  'is_flagged,is_deleted,is_banned,preview_file_url';
 
 /**
  * Builds the two `/posts.json` URLs the preview grid needs: the recent

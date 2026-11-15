@@ -86,6 +86,29 @@ describe('getBestThumbnailUrl', () => {
   it('모든 fallback 없으면 빈 문자열', () => {
     expect(getBestThumbnailUrl({})).toBe('');
   });
+
+  it('reads the sizes Danbooru sends under media_asset first (T-506)', () => {
+    // The shape `only=…,media_asset[variants]` returns (V-9, 2026-11-16).
+    const post = {
+      preview_file_url: 'http://x/180.jpg',
+      variants: [{type: '360x360', file_ext: 'jpg', url: 'http://x/old.jpg'}],
+      media_asset: {
+        variants: [
+          {type: '180x180', file_ext: 'jpg', url: 'http://x/180.jpg'},
+          {type: '360x360', file_ext: 'jpg', url: 'http://x/360.jpg'},
+          {type: '720x720', file_ext: 'webp', url: 'http://x/720.webp'},
+        ],
+      },
+    };
+    expect(getBestThumbnailUrl(post)).toBe('http://x/720.webp');
+    // Without them: a stored row's copy, then the preview.
+    expect(getBestThumbnailUrl({...post, media_asset: {}})).toBe(
+      'http://x/old.jpg',
+    );
+    expect(
+      getBestThumbnailUrl({preview_file_url: 'http://x/180.jpg', variants: []}),
+    ).toBe('http://x/180.jpg');
+  });
 });
 
 // ============================================================
@@ -2919,7 +2942,7 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
   });
 
   describe('thumbnail lookup (T-506)', () => {
-    /** A milestone row as the sync stores it: a preview URL, no variants. */
+    /** A milestone row as the sync stores it: no thumbnail at all. */
     const syncedRow = (no: number, extra: Record<string, unknown> = {}) => ({
       id: 1000 + no,
       uploader_id: 42,
@@ -2927,9 +2950,22 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
       rating: 'g',
       score: 5,
       created_at: '2025-01-01T00:00:00Z',
-      preview_file_url: `http://x/${no}.jpg`,
       ...extra,
     });
+    /** Danbooru's answer for a post: its sizes under `media_asset`. */
+    const answer = (id: number) => ({
+      id,
+      rating: 'g',
+      preview_file_url: `http://x/${id}.jpg`,
+      media_asset: {
+        variants: [
+          {type: '180x180', url: `http://x/${id}.jpg`, file_ext: 'jpg'},
+          {type: '720x720', url: `http://x/${id}.webp`, file_ext: 'webp'},
+        ],
+      },
+    });
+    const idsAsked = (url: string) =>
+      /tags=id:([\d,]+)&/.exec(url)?.[1].split(',').map(Number);
 
     /** Milestone rows for total=200 (targets 1, 100, 200) and a posts.update spy. */
     function makeDbWith(rows: Record<string, unknown>[]) {
@@ -2942,31 +2978,16 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
       return {db, update};
     }
 
-    it('sends nothing for rows that have a preview URL but no variants', async () => {
-      // The sync never gets `variants`; the old "no variants" test sent a
-      // lookup on every recompute (each sync, each dashboard open).
-      const {db} = makeDbWith([syncedRow(1), syncedRow(100), syncedRow(200)]);
-      const rl = makeSyncRateLimiter();
-      const adm = new AnalyticsDataManager(db as never, rl as never);
-
-      await adm.getMilestones(makeSyncUser(), false, 'auto');
-      await adm.getMilestones(makeSyncUser(), true, 'auto');
-
-      expect(rl.fetch).not.toHaveBeenCalled();
-    });
-
-    it('looks up only a row without any thumbnail URL and stores the answer', async () => {
+    it('looks rows up once for the large sizes and keeps them on the row', async () => {
       const {db, update} = makeDbWith([
         syncedRow(1),
-        syncedRow(100, {preview_file_url: undefined}),
+        syncedRow(100),
         syncedRow(200),
       ]);
       const rl = makeSyncRateLimiter(async () => ({
         ok: true,
         status: 200,
-        json: async () => [
-          {id: 1100, rating: 'g', preview_file_url: 'http://x/100-new.jpg'},
-        ],
+        json: async () => [answer(1001), answer(1100), answer(1200)],
       }));
       const adm = new AnalyticsDataManager(db as never, rl as never);
 
@@ -2974,37 +2995,90 @@ describe('AnalyticsDataManager.getMilestones (count-stamped cache)', () => {
 
       expect(rl.fetch).toHaveBeenCalledTimes(1);
       const url = rl.fetch.mock.calls[0][0];
-      expect(url).toContain('tags=id:1100&');
+      expect(idsAsked(url)).toEqual([1001, 1100, 1200]);
+      expect(url).toContain('media_asset[variants]');
       expect(update).toHaveBeenCalledWith(
         1100,
-        expect.objectContaining({preview_file_url: 'http://x/100-new.jpg'}),
+        expect.objectContaining({variants: answer(1100).media_asset.variants}),
       );
+      // The card picks the 720 webp (G-3).
       const m100 = result.find(m => m.milestone === 100);
-      expect(m100?.post.preview_file_url).toBe('http://x/100-new.jpg');
+      expect(getBestThumbnailUrl(m100?.post)).toBe('http://x/1100.webp');
+
+      // A recompute (as each dashboard open forces) asks nothing more.
+      await adm.getMilestones(makeSyncUser(), false, 'auto', true);
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves an explicit row without a URL alone unless NSFW is on', async () => {
+    it('does not ask again for a post Danbooru answered without sizes', async () => {
+      const {db, update} = makeDbWith([
+        syncedRow(1),
+        syncedRow(100),
+        syncedRow(200),
+      ]);
+      // 1100 comes back without sizes (banned, viewer below Approver);
+      // 1200 does not come back at all.
+      const rl = makeSyncRateLimiter(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [answer(1001), {id: 1100, rating: 'g'}],
+      }));
+      const adm = new AnalyticsDataManager(db as never, rl as never);
+
+      await adm.getMilestones(makeSyncUser(), false, 'auto');
+      await adm.getMilestones(makeSyncUser(), false, 'auto', true);
+
+      expect(rl.fetch).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith(
+        1100,
+        expect.objectContaining({variants: []}),
+      );
+      expect(update).toHaveBeenCalledWith(
+        1200,
+        expect.objectContaining({variants: []}),
+      );
+    });
+
+    it('stores nothing when the lookup fails, so it asks again', async () => {
+      const {db, update} = makeDbWith([syncedRow(1)]);
+      const rl = makeSyncRateLimiter(async () => ({
+        ok: false,
+        status: 429,
+        json: async () => ({}),
+      }));
+      const adm = new AnalyticsDataManager(db as never, rl as never);
+
+      await adm.getMilestones(makeSyncUser(), false, 'auto');
+      await adm.getMilestones(makeSyncUser(), false, 'auto', true);
+
+      expect(update).not.toHaveBeenCalled();
+      expect(rl.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks for an explicit post only when NSFW is on', async () => {
       const rows = [
         syncedRow(1),
-        syncedRow(100, {rating: 'e', preview_file_url: undefined}),
+        syncedRow(100, {rating: 'e'}),
         syncedRow(200),
       ];
-      const rl = makeSyncRateLimiter();
+      const rl = makeSyncRateLimiter(async (url: string) => ({
+        ok: true,
+        status: 200,
+        json: async () => (idsAsked(url) ?? []).map(answer),
+      }));
 
-      const sfw = makeDbWith(rows);
       await new AnalyticsDataManager(
-        sfw.db as never,
+        makeDbWith(rows).db as never,
         rl as never,
       ).getMilestones(makeSyncUser(), false, 'auto');
-      expect(rl.fetch).not.toHaveBeenCalled();
+      expect(idsAsked(rl.fetch.mock.calls[0][0])).toEqual([1001, 1200]);
 
-      const nsfw = makeDbWith(rows);
+      // The same rows, now holding the SFW answers: only 1100 is left.
       await new AnalyticsDataManager(
-        nsfw.db as never,
+        makeDbWith(rows).db as never,
         rl as never,
       ).getMilestones(makeSyncUser(), true, 'auto');
-      expect(rl.fetch).toHaveBeenCalledTimes(1);
-      expect(rl.fetch.mock.calls[0][0]).toContain('tags=id:1100&');
+      expect(idsAsked(rl.fetch.mock.calls[1][0])).toEqual([1100]);
     });
   });
 });

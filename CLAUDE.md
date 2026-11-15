@@ -232,7 +232,7 @@ preview popover 의 동작 카탈로그 (mintag/abandoned 판정 기준, 활동 
 
 ## 메모
 - `CONFIG.THEMES` 에 테마 추가 시 light/dark 섹션 코멘트 유지 (현재 12 개 테마 — Light 6: Light/Solarized Light/Sakura/Lavender/Ice/Aurora, Dark 6: Midnight/Solarized Dark/Dracula/Ocean/Monokai/Ember)
-- `getBestThumbnailUrl()` 우선순위: 720x720 webp > 360x360 webp > 기타 변형 > preview > file
+- `getBestThumbnailUrl()` 우선순위: 720x720 webp > 360x360 webp > 기타 변형 > preview > file. 변형은 `media_asset.variants` (Danbooru 는 top-level `variants` 를 안 줌) 또는 저장된 행의 `variants`. 고화질은 한 건씩 받는 카드 요청만 `only=…,media_asset[variants]` 로 받음 (단건, 마일스톤, top posts, recent popular, random, 태그 페이지 latest · trending · 마일스톤 — 결정 G-3, T-506). 목록 · sync · 파이 썸네일 (80px) · 미리보기 격자 (180px) 는 변형을 안 받고 `preview_file_url` (180×180 jpg). sync 행은 썸네일을 저장하지 않고, 마일스톤 조회가 해당 행에 한 번 채움 (없으면 `variants: []`)
 - `mapConcurrent()` 유틸은 병렬 API 호출 제어용 (count fetch, tag filtering 에서 사용)
 - `MAX_OPTIMIZED_POSTS = 1200` — Quick Sync / Small Tag 경로의 분기 임계값 ([src/config.ts](src/config.ts))
 - Count cache TTL (v9.6): `getCountCacheTtlMs()` 기본 10 분, 사용자가 settings popover 에서 조절 가능. `tryGetCachedStats<T>` 가 일관 사용

@@ -16,8 +16,10 @@ import type {DanbooruPost, PostRecord} from '../types';
 export const POST_FIELDS_VERSION = 2;
 
 /**
- * `only=` of the sync's `/posts.json` pages. `variants` is not asked for: a
- * post search does not return it, so it was always empty in the rows.
+ * `only=` of the sync's `/posts.json` pages. No thumbnail (T-506, audit
+ * DA-01): `variants` is not a post field, and `preview_file_url` cost about
+ * 100 bytes in every row for the few the milestone cards show — their
+ * lookup (`getMilestones`) fetches those, with the larger sizes.
  */
 export const SYNC_POST_FIELDS = [
   'id',
@@ -35,7 +37,6 @@ export const SYNC_POST_FIELDS = [
   'tag_count_general',
   'tag_string_character',
   'tag_string_copyright',
-  'preview_file_url',
 ].join(',');
 
 /**
@@ -59,7 +60,6 @@ export function toPostRecord(p: DanbooruPost, no: number): PostRecord {
     is_banned: p.is_banned ?? false,
     rating: p.rating,
     tag_count_general: p.tag_count_general ?? 0,
-    preview_file_url: p.preview_file_url,
     upd: Number.isNaN(updated) ? undefined : updated,
     pend: p.is_pending ?? false,
     flag: p.is_flagged ?? false,

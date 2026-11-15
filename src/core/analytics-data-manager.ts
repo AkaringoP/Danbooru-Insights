@@ -848,7 +848,9 @@ export class AnalyticsDataManager extends DataManager {
     retries: number = 3,
     delay: number = 2000,
   ): Promise<string> {
-    const url = `/posts.json?tags=${encodeURIComponent(tags)}&limit=1&only=preview_file_url,variants,rating`;
+    // The pie tooltip shows it at 80×80: the 180×180 preview is enough, so
+    // no `media_asset[variants]` here (T-506).
+    const url = `/posts.json?tags=${encodeURIComponent(tags)}&limit=1&only=preview_file_url,rating`;
     for (let i = 0; i < retries; i++) {
       try {
         const resp = await this.rateLimiter.fetch(url);
@@ -1084,6 +1086,43 @@ export class AnalyticsDataManager extends DataManager {
     return Math.floor(total / step) * step + step;
   }
 
+  /**
+   * Fetches milestone rows' thumbnails (`media_asset[variants]` and the
+   * preview), 100 ids a request, and stores them on the rows — `variants`
+   * an empty list for an id Danbooru answered without them or not at all,
+   * so the row is not asked again (T-506). A failed request stores nothing.
+   */
+  private async lookUpMilestoneThumbnails(
+    ids: number[],
+    rows: PostRecord[],
+  ): Promise<void> {
+    const chunkSize = 100;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const url = `${this.baseUrl}/posts.json?tags=id:${chunk.join(',')}&limit=${chunkSize}&only=id,media_asset[variants],rating,preview_file_url`;
+      const res = await this.rateLimiter.fetch(url);
+      if (!res.ok) continue;
+      const fetched: DanbooruPost[] = await res.json();
+      const byId = new Map(fetched.map(p => [p.id, p]));
+      for (const id of chunk) {
+        const local = rows.find(r => r.id === id);
+        if (!local) continue;
+        const item = byId.get(id);
+        const patch: Partial<PostRecord> = {
+          variants: item?.media_asset?.variants ?? [],
+          preview_file_url: item?.preview_file_url,
+          rating: item?.rating ?? local.rating,
+        };
+        Object.assign(local, patch);
+        this.db.posts
+          .update(id, patch)
+          .catch((e: unknown) =>
+            log.error('Failed to update post in DB', {postId: id, error: e}),
+          );
+      }
+    }
+  }
+
   async getMilestones(
     userInfo: TargetUser,
     isNsfwEnabled: boolean = false,
@@ -1137,57 +1176,20 @@ export class AnalyticsDataManager extends DataManager {
       .toArray();
 
     // Thumbnails are shown for Safe(s) / General(g) posts, or all when NSFW is
-    // on. A row normally has one already (the sync stores
-    // `preview_file_url`); only a row without any thumbnail URL is looked up.
-    // The test used to be "no `variants`", which a post search never returns,
-    // so every recompute — each sync and each dashboard open — sent a lookup
-    // that changed nothing (T-506; one of them drew an edge 429 right after
-    // a full sync, 2026-11-15).
-    const missingIds: number[] = [];
-    matches.forEach(p => {
-      const isSafe = p.rating === 's' || p.rating === 'g';
-      const shouldFetch = isNsfwEnabled || isSafe;
-      if (shouldFetch && !getBestThumbnailUrl(p)) missingIds.push(p.id);
-    });
-
+    // on, in the larger sizes (G-3) only a lookup brings: the sync stores no
+    // thumbnail (T-506). A row is looked up once — its `variants` keeps the
+    // answer, an empty list when Danbooru gave none (a banned post for a
+    // viewer below Approver) — until a sync or a catch-up rewrites it.
+    // Before, the test was "no thumbnail URL", and earlier still "no
+    // `variants`" read from a field Danbooru never sends, which sent a
+    // lookup on every recompute (one drew an edge 429 after a full sync).
+    const missingIds = matches
+      .filter(p => isNsfwEnabled || p.rating === 's' || p.rating === 'g')
+      .filter(p => p.variants === undefined)
+      .map(p => p.id);
     if (missingIds.length > 0) {
       try {
-        // Chunk requests if too many
-        const chunkSize = 100;
-        for (let i = 0; i < missingIds.length; i += chunkSize) {
-          const chunk = missingIds.slice(i, i + chunkSize);
-          const idsStr = chunk.join(',');
-          const url = `${this.baseUrl}/posts.json?tags=id:${idsStr}&limit=100&only=id,variants,rating,preview_file_url`;
-
-          const res = await this.rateLimiter.fetch(url);
-          if (res.ok) {
-            const fetchedItems = await res.json();
-            // Update local matches objects
-            fetchedItems.forEach((item: DanbooruPost) => {
-              const local = matches.find((m: PostRecord) => m.id === item.id);
-              if (local) {
-                local.variants = item.variants;
-                local.preview_file_url = item.preview_file_url;
-                // Ensure rating matches just in case
-                local.rating = item.rating;
-
-                // Update DB for persistence (no need for bulkPut if we do it here)
-                this.db.posts
-                  .update(local.id, {
-                    variants: item.variants,
-                    preview_file_url: item.preview_file_url,
-                    rating: item.rating,
-                  })
-                  .catch((e: unknown) =>
-                    log.error('Failed to update post in DB', {
-                      postId: local['id'],
-                      error: e,
-                    }),
-                  );
-              }
-            });
-          }
-        }
+        await this.lookUpMilestoneThumbnails(missingIds, matches);
       } catch (e: unknown) {
         log.warn('Failed to fetch missing milestone thumbnails', {error: e});
       }
@@ -2596,7 +2598,7 @@ export class AnalyticsDataManager extends DataManager {
         // blank thumbnail cell.
         const normalizedName = userInfo.name.replace(/ /g, '_');
         const query = `user:${normalizedName} order:score rating:${ratingTag} status:active ${extraQuery}`;
-        const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
+        const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,media_asset[variants],rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const r = await this.rateLimiter.fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const resp = await r.json();
@@ -2652,7 +2654,7 @@ export class AnalyticsDataManager extends DataManager {
         // status:active excludes banned/deleted posts that would render as a
         // blank thumbnail cell.
         const query = `user:${normalizedName} order:score ${ratingTag} age:<1w status:active`;
-        const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
+        const url = `/posts.json?tags=${encodeURIComponent(query)}&limit=1&only=id,preview_file_url,file_url,media_asset[variants],rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const r = await this.rateLimiter.fetch(url);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const resp = await r.json();
@@ -3127,7 +3129,7 @@ export class AnalyticsDataManager extends DataManager {
         // status:active excludes banned/deleted posts — without it, random
         // could land on a banned post and render an empty card (user report).
         const query = `user:${normalizedName} ${ratingTag} status:active`;
-        const url = `/posts/random.json?tags=${encodeURIComponent(query)}&only=id,preview_file_url,file_url,variants,rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
+        const url = `/posts/random.json?tags=${encodeURIComponent(query)}&only=id,preview_file_url,file_url,media_asset[variants],rating,score,fav_count,created_at,tag_string_artist,tag_string_copyright,tag_string_character`;
         const resp = await this.rateLimiter.fetch(url).then(r => r.json());
         if (resp && resp.id) {
           return resp;
@@ -5838,13 +5840,18 @@ export class AnalyticsDataManager extends DataManager {
           this.getLevelChangeHistory(userInfo, true),
         ),
         // Warm the milestones cache for the step=1000 view that renderDashboard
-        // always requests. Both NSFW values so toggling is a cache hit too.
-        perfLogger.wrap('dbi:db:refresh:milestonesSfw', () =>
-          this.getMilestones(userInfo, false, 1000, true),
-        ),
-        perfLogger.wrap('dbi:db:refresh:milestonesNsfw', () =>
-          this.getMilestones(userInfo, true, 1000, true),
-        ),
+        // always requests. Both NSFW values so toggling is a cache hit too —
+        // NSFW first: its thumbnail lookup covers every milestone row, so the
+        // SFW pass finds them filled instead of asking for the same posts
+        // (T-506).
+        (async () => {
+          await perfLogger.wrap('dbi:db:refresh:milestonesNsfw', () =>
+            this.getMilestones(userInfo, true, 1000, true),
+          );
+          await perfLogger.wrap('dbi:db:refresh:milestonesSfw', () =>
+            this.getMilestones(userInfo, false, 1000, true),
+          );
+        })(),
         // Popular posts are API-driven (order:score, age:<1w) and cached in
         // piestats. Refresh on EVERY sync — a partial (incremental) sync must
         // freshen them too, otherwise the post-sync dashboard render serves

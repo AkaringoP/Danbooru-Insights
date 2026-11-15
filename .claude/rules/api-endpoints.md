@@ -13,7 +13,9 @@ All API calls must go through `RateLimitedFetch`.
 | `/tag_implications.json` | Top-level tag detection. Single-tag: `search[antecedent_name_matches]=<name>`. Batched (v10+): `search[antecedent_name_comma]=t1,t2,...&limit=1000` — used by `getTopLevelFlags` in `core/top-level-tags.ts` (50 names per request, cached 180d in `tag_implications_cache`) — shared by tag pages and the user dashboard's character / copyright / fav-copyright pies, which used to fire one single-tag request per candidate |
 | `/user_feedbacks.json` | Promotion/level change history |
 | `/posts/random.json` | Random post fetch |
-| `/posts/{id}.json` | Single post details (milestone thumbnails) |
+| `/posts/{id}.json` | Single post details (hover cards) |
+
+**Thumbnails (T-506, decision G-3).** A post's image sizes come under `media_asset` when asked as `only=…,media_asset[variants]` (verified 2026-11-16: `180x180` jpg, `360x360` jpg, `720x720` webp, `sample`, `original`, each with `type, url, width, height, file_ext`); Danbooru has no top-level `variants` field, though the code asked for one in 14 places until T-506. Only the single-post cards ask for the sizes (single post, user milestones, top posts, recent popular, random, the tag page's latest, trending and milestones) and show the 720 webp (`getBestThumbnailUrl`). Lists, the syncs, pie slice thumbnails (an 80px tooltip) and the preview grid (180px cells) ask for `preview_file_url` only, or nothing.
 
 ## Search tag limit
 
@@ -72,7 +74,7 @@ A banned post is hidden from viewers below Approver, and a post with a restricte
 
 Verified live 2026-11-15: `user:X status:banned` with `only=id,is_banned,rating,tag_count_general,tag_string_character,tag_string_copyright,preview_file_url` returned the banned posts with their tags and rating, and without `preview_file_url`.
 
-So the sync stores these posts with full tags, and the local pies (T-406) count them the same way `/counts/posts.json` does. Only their thumbnail is missing: `getBestThumbnailUrl` returns `''`, and the milestone lookup (`getMilestones`) asks again for such a row each time it recomputes; the rest of T-506 is to stop that.
+So the sync stores these posts with full tags, and the local pies (T-406) count them the same way `/counts/posts.json` does. Only their thumbnail is missing: `getBestThumbnailUrl` returns `''`. The milestone lookup (`getMilestones`) stores `variants: []` on such a row, so it does not ask again until a sync rewrites the row (T-506).
 
 ## Mintag / abandoned detection (v9.7.1 — preview popover section A)
 

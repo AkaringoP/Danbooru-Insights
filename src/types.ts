@@ -515,6 +515,7 @@ export interface MilestoneEntry {
     approver_name?: string;
     rating: string;
     score?: number;
+    media_asset?: {variants?: PostVariant[]};
     variants?: PostVariant[];
     preview_file_url?: string;
     file_url?: string;
@@ -607,7 +608,11 @@ export interface DanbooruPost {
   tag_string_copyright?: string;
   tag_string_character?: string;
 
-  // Media (variants is the modern field; *_file_url are legacy fallbacks)
+  // Media. Danbooru sends the sizes under `media_asset` when asked with
+  // `only=…,media_asset[variants]` (V-9, 2026-11-16) — never a top-level
+  // `variants`, which only holds a stored row's copy (the milestone lookup,
+  // T-506). *_file_url are the fallbacks (preview: the 180×180 jpg).
+  media_asset?: {variants?: PostVariant[]};
   variants?: PostVariant[];
   preview_file_url?: string;
   file_url?: string;
