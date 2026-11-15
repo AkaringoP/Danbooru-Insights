@@ -435,6 +435,13 @@ export interface SyncMetaRecord {
     from: number;
     /** Each id range: done up to `after`, ends at `to` (inclusive). */
     ranges: Array<{after: number; to: number}>;
+    /**
+     * The fields version it writes and the viewer's time zone it started
+     * in. A plan is resumed only when both are the current ones; one
+     * without them (saved before they were recorded) starts over.
+     */
+    version?: number;
+    timeZone?: string;
   };
   /**
    * Where an interrupted change catch-up resumes (T-407,

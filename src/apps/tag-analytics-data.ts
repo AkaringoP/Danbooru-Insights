@@ -384,6 +384,42 @@ export function keepKnownCounts(
   return kept ?? data;
 }
 
+/**
+ * The report to save: a ranking Danbooru did not return this run is
+ * replaced by the previous report's when that one has it. The run itself
+ * only knows the previous rankings on a delta ({@link keepCachedOnFailure});
+ * on a revisit after the cache expired this is what keeps a failed report
+ * (a logged-out viewer's 3-second timeout, say) from replacing a ranking
+ * that was saved. `data` itself is not changed.
+ */
+export function keepKnownRankings(
+  data: TagAnalyticsMeta,
+  previous: TagAnalyticsMeta | undefined,
+): TagAnalyticsMeta {
+  const fresh = cachedRankingResult(data);
+  if (!fresh?.failed?.length || !previous) return data;
+  const kept = keepCachedOnFailure(fresh, cachedRankingResult(previous));
+  if (kept.failed?.length === fresh.failed.length) return data;
+  const out: TagAnalyticsMeta = {
+    ...data,
+    rankings: {
+      uploader: {
+        ...data.rankings.uploader,
+        allTime: kept.uploaderAll,
+        year: kept.uploaderYear,
+      },
+      approver: {
+        ...data.rankings.approver,
+        allTime: kept.approverAll,
+        year: kept.approverYear,
+      },
+    },
+  };
+  if (kept.failed) out.rankingsFailed = kept.failed;
+  else delete out.rankingsFailed;
+  return out;
+}
+
 /** Whether `data` has a count pie that lost a count. */
 function hasUnknownPie(data: TagAnalyticsMeta): boolean {
   return COUNT_PIES.some(pie => hasUnknownCount(data[pie]));
@@ -647,7 +683,8 @@ export class TagAnalyticsDataService {
   /**
    * Saves the current tag analytics data to the cache with a timestamp.
    * A count pie that lost a count keeps the saved report's pie when that
-   * one is whole ({@link keepKnownCounts}, T-308).
+   * one is whole ({@link keepKnownCounts}, T-308), and a ranking that
+   * failed keeps the saved one ({@link keepKnownRankings}).
    * @param {!Object} data The analytics data to cache.
    * @return {Promise<void>}
    */
@@ -661,7 +698,8 @@ export class TagAnalyticsDataService {
       const needExisting =
         this._pendingLastFullScanAt === null ||
         this._pendingCountsUpdatedAt === null ||
-        hasUnknownPie(data);
+        hasUnknownPie(data) ||
+        Boolean(data.rankingsFailed?.length);
       const existing = needExisting
         ? await this.db.tag_analytics.get(this.tagName)
         : null;
@@ -678,7 +716,10 @@ export class TagAnalyticsDataService {
       await this.db.tag_analytics.put({
         tagName: this.tagName,
         updatedAt: Date.now(),
-        data: keepKnownCounts(data, existing?.data),
+        data: keepKnownRankings(
+          keepKnownCounts(data, existing?.data),
+          existing?.data,
+        ),
         lastFullScanAt,
         countsUpdatedAt,
       });
@@ -1368,18 +1409,11 @@ export class TagAnalyticsDataService {
       Object.keys(approx)
         .filter(key => key !== 'others')
         .map(async key => {
-          try {
-            counts[key] = await fetchRemoteCount(
-              this.rateLimiter,
-              `${tagName} ${key}`,
-            );
-          } catch (e) {
-            complete = false;
-            log.debug('Exact related count failed, keeping approx', {
-              tag: key,
-              error: e,
-            });
-          }
+          // Retried once like the other counts; a lost one keeps its
+          // approximation and leaves the pie unmarked, to be asked again.
+          const exact = await this.fetchCountWithRetry(`${tagName} ${key}`);
+          if (exact === null) complete = false;
+          else counts[key] = exact;
         }),
     );
     return {counts, complete};

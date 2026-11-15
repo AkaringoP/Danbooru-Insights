@@ -553,6 +553,8 @@ export function splitIdRanges(
 interface BackfillRun {
   /** Server time of the first response (the watermark), once known. */
   from: number | undefined;
+  /** The viewer's time zone at the start: the zone of what it writes. */
+  zone: string | undefined;
   /** The plan, with each range's progress; saved after every page. */
   ranges: Array<{after: number; to: number}>;
   failed: boolean;
@@ -3312,6 +3314,28 @@ export class AnalyticsDataManager extends DataManager {
     const uploaderId = parseInt(userInfo.id ?? '0');
     if (!uploaderId) return;
 
+    // One run per user in this tab: a dashboard closed and opened again
+    // during a long backfill joins the run under way instead of starting a
+    // second one over the same ranges (twice the requests, and two runs
+    // saving their progress over each other).
+    const running = AnalyticsDataManager.backfillRuns.get(uploaderId);
+    if (running) return running;
+    const started = this.runPostMetadataBackfill(
+      userInfo,
+      uploaderId,
+      onProgress,
+    ).finally(() => AnalyticsDataManager.backfillRuns.delete(uploaderId));
+    AnalyticsDataManager.backfillRuns.set(uploaderId, started);
+    return started;
+  }
+
+  private static backfillRuns = new Map<number, Promise<void>>();
+
+  private async runPostMetadataBackfill(
+    userInfo: TargetUser,
+    uploaderId: number,
+    onProgress?: (current: number, total: number) => void,
+  ): Promise<void> {
     const meta = await readSyncMeta(this.db, uploaderId);
     if ((meta?.fieldsVersion ?? 0) >= POST_FIELDS_VERSION) return;
 
@@ -3322,11 +3346,21 @@ export class AnalyticsDataManager extends DataManager {
     if (rows.length === 0) return;
 
     const ids = rows.map(r => r.id).sort((a, b) => a - b);
+    // A saved plan is resumed only when it was for this fields version and
+    // made in this time zone: the pages it has done wrote those fields, and
+    // `created_at` in that zone. Any other plan starts over.
+    const zone = viewerTimeZone();
+    const plan =
+      meta?.backfill?.version === POST_FIELDS_VERSION &&
+      meta.backfill.timeZone === zone
+        ? meta.backfill
+        : undefined;
     const run: BackfillRun = {
-      from: meta?.backfill?.from,
-      ranges: (
-        meta?.backfill?.ranges ?? splitIdRanges(ids, BACKFILL_RANGES)
-      ).map(r => ({...r})),
+      from: plan?.from,
+      zone,
+      ranges: (plan?.ranges ?? splitIdRanges(ids, BACKFILL_RANGES)).map(r => ({
+        ...r,
+      })),
       failed: false,
       failureRecorded: false,
       done: 0,
@@ -3348,7 +3382,7 @@ export class AnalyticsDataManager extends DataManager {
     await patchSyncMeta(this.db, uploaderId, {
       fieldsVersion: POST_FIELDS_VERSION,
       changeWatermark: run.from ?? Date.now(),
-      timeZone: viewerTimeZone(),
+      timeZone: run.zone,
       backfill: undefined,
       catchUp: undefined,
       needsFullSync: undefined,
@@ -3405,7 +3439,12 @@ export class AnalyticsDataManager extends DataManager {
       range.after =
         batch.length < limit ? range.to : batch[batch.length - 1].id;
       await patchSyncMeta(this.db, uploaderId, {
-        backfill: {from: run.from ?? Date.now(), ranges: run.ranges},
+        backfill: {
+          from: run.from ?? Date.now(),
+          ranges: run.ranges,
+          version: POST_FIELDS_VERSION,
+          timeZone: run.zone,
+        },
       });
     }
   }
@@ -3503,8 +3542,25 @@ export class AnalyticsDataManager extends DataManager {
       );
       cursor = await this.recordCatchUpStep(uploaderId, step, watermark);
     }
-    if (changed > 0) this.forgetLocalRows(uploaderId);
+    if (changed > 0) {
+      this.forgetLocalRows(uploaderId);
+      await this.dropTimeZoneIfMixed(uploaderId);
+    }
     return {changed};
+  }
+
+  /**
+   * After rows were written without rewriting them all (a catch-up, a
+   * resume sync): `created_at` carries the viewer's time zone, so when that
+   * is not the zone on record the rows now mix two and the record goes.
+   * Grass then stops reading its days from them (`syncedPostsUsable`) until
+   * a sync or a backfill rewrites every row.
+   */
+  private async dropTimeZoneIfMixed(uploaderId: number): Promise<void> {
+    const meta = await readSyncMeta(this.db, uploaderId);
+    if (meta?.timeZone === undefined) return;
+    if (meta.timeZone === viewerTimeZone()) return;
+    await patchSyncMeta(this.db, uploaderId, {timeZone: undefined});
   }
 
   /**
@@ -3571,8 +3627,9 @@ export class AnalyticsDataManager extends DataManager {
   }
 
   /**
-   * Overwrites the rows this page's posts already have, each under its own
-   * `no`; returns how many. A post the rows lack is the sync's to add.
+   * Overwrites the rows of this page's posts that changed (a different
+   * `updated_at`), each under its own `no`; returns how many. A post the
+   * rows lack is the sync's to add.
    */
   private async applyChangedPosts(
     uploaderId: number,
@@ -3583,9 +3640,13 @@ export class AnalyticsDataManager extends DataManager {
     const rows: PostRecord[] = [];
     batch.forEach((p, i) => {
       const row = existing[i];
-      if (row && row.uploader_id === uploaderId) {
-        rows.push(toPostRecord(p, row.no));
-      }
+      if (!row || row.uploader_id !== uploaderId) return;
+      // The first page is read on every run, changed or not: a row already
+      // as new as its post is left alone (and keeps what the milestone
+      // lookup stored on it).
+      const updatedAt = Date.parse(p.updated_at ?? '');
+      if (!isNaN(updatedAt) && row.upd === updatedAt) return;
+      rows.push(toPostRecord(p, row.no));
     });
     if (rows.length > 0) {
       await bulkPutSafe(this.db.posts, rows, () =>
@@ -5554,6 +5615,7 @@ export class AnalyticsDataManager extends DataManager {
         await this.recordFullSyncMeta(uploaderId, firstResponseAt);
       } else {
         await patchSyncMeta(this.db, uploaderId, {syncStartedAt: undefined});
+        await this.dropTimeZoneIfMixed(uploaderId);
       }
     }
 
@@ -5599,8 +5661,10 @@ export class AnalyticsDataManager extends DataManager {
       changeWatermark: firstResponseAt,
       timeZone: viewerTimeZone(),
       syncStartedAt: undefined,
-      // A new watermark: catch-up progress against the old one is void.
+      // A new watermark: catch-up progress against the old one is void,
+      // and so is a backfill's plan (every row is at this version now).
       catchUp: undefined,
+      backfill: undefined,
       needsFullSync: undefined,
     });
   }
@@ -5680,10 +5744,17 @@ export class AnalyticsDataManager extends DataManager {
         reportProgress(no, total, `Fetching posts (${no}/${total})...`);
 
         const resp = await this.rateLimiter.fetch(url);
+        // The rows were cleared above: an error answer (a 500's JSON body
+        // parses fine) must fail the run, not read as the last page and
+        // leave a cut-off set stamped as complete.
+        if (!resp.ok) throw new Error(`Quick sync page: HTTP ${resp.status}`);
         firstResponseAt ??= responseServerTime(resp, Date.now());
         const batch: DanbooruPost[] = await resp.json();
+        if (!Array.isArray(batch)) {
+          throw new Error('Quick sync page is not a list');
+        }
 
-        if (!Array.isArray(batch) || batch.length === 0) {
+        if (batch.length === 0) {
           perfLogger.end('dbi:db:sync:quick:page', {
             page: pageIndex,
             cursor: page,
