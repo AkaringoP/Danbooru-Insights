@@ -460,8 +460,9 @@ describe('UserAnalyticsApp report button — Grass first (G-7)', () => {
 
     expect(sync).not.toHaveBeenCalled();
     expect(app.toggleModal).not.toHaveBeenCalled();
+    // Keyed, so clicking again keeps one toast up instead of stacking more.
     expect(showToast).toHaveBeenCalledWith(
-      expect.objectContaining({type: 'info'}),
+      expect.objectContaining({type: 'info', key: 'grass-lock'}),
     );
   });
 

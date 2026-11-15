@@ -35,6 +35,12 @@ export interface ToastOptions {
    * action," e.g. session-level dismissal of recurring suggestions.
    */
   onClose?: () => void;
+  /**
+   * At most one toast per key on screen: while one is shown, another call
+   * with the same key restarts its auto-dismiss timer instead of stacking a
+   * copy (a button clicked again and again while it is locked).
+   */
+  key?: string;
 }
 
 const DEFAULT_DURATIONS: Record<ToastType, number> = {
@@ -49,6 +55,9 @@ const MAX_TOASTS = 5;
 /** Active toast elements, oldest first. */
 const activeToasts: HTMLElement[] = [];
 
+/** Keyed toasts on screen, with the function that restarts their timer. */
+const keyedToasts = new Map<string, {el: HTMLElement; rearm: () => void}>();
+
 let container: HTMLElement | null = null;
 
 function getContainer(): HTMLElement {
@@ -60,6 +69,10 @@ function getContainer(): HTMLElement {
 }
 
 function removeToast(el: HTMLElement): void {
+  // A toast on its way out no longer stands for its key: the next call
+  // with that key shows a new one.
+  const key = el.dataset.toastKey;
+  if (key && keyedToasts.get(key)?.el === el) keyedToasts.delete(key);
   el.classList.remove('di-toast-visible');
   el.classList.add('di-toast-exit');
   const onEnd = () => {
@@ -77,8 +90,14 @@ function removeToast(el: HTMLElement): void {
  * Show a toast notification.
  */
 export function showToast(options: ToastOptions): void {
-  const {type, message} = options;
+  const {type, message, key} = options;
   const duration = options.duration ?? DEFAULT_DURATIONS[type];
+
+  const shown = key === undefined ? undefined : keyedToasts.get(key);
+  if (shown && document.body.contains(shown.el)) {
+    shown.rearm();
+    return;
+  }
 
   const parent = getContainer();
 
@@ -136,12 +155,20 @@ export function showToast(options: ToastOptions): void {
   });
 
   // Auto-dismiss.
-  if (duration > 0) {
-    setTimeout(() => {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const arm = (): void => {
+    if (duration <= 0) return;
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => {
       if (document.body.contains(el)) {
         fireOnCloseOnce();
         removeToast(el);
       }
     }, duration);
+  };
+  arm();
+  if (key !== undefined) {
+    el.dataset.toastKey = key;
+    keyedToasts.set(key, {el, rearm: arm});
   }
 }

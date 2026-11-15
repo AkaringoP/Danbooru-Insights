@@ -1517,7 +1517,12 @@ export class UserAnalyticsApp {
    */
   private refuseWhileGrassLoads(): boolean {
     if (!this.grassGate.isLoading()) return false;
-    showToast({type: 'info', message: `${GRASS_LOCK_MESSAGE}.`});
+    // Keyed: clicking again while it shows keeps the one toast up.
+    showToast({
+      type: 'info',
+      message: `${GRASS_LOCK_MESSAGE}.`,
+      key: 'grass-lock',
+    });
     return true;
   }
 
