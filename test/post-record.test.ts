@@ -5,6 +5,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {Database} from '../src/core/database';
 import type {DanbooruPost} from '../src/types';
 import {SYNC_POST_FIELDS, toPostRecord} from '../src/core/post-record';
+import {tagFlagNames, tagFlagsOf} from '../src/core/post-tag-flags';
 import {
   patchSyncMeta,
   responseServerTime,
@@ -67,6 +68,27 @@ describe('toPostRecord', () => {
     expect('variants' in row).toBe(false);
   });
 
+  it('keeps the tag flags of version 3, not the general and meta strings', () => {
+    const row = toPostRecord(
+      {
+        ...post,
+        tag_string_general: '1girl long_hair english_text solo',
+        tag_string_meta: 'translated highres',
+      },
+      9,
+    );
+    expect(row.tf).toEqual(
+      tagFlagsOf('1girl long_hair english_text', 'translated'),
+    );
+    expect(tagFlagNames(row.tf!).sort()).toEqual(
+      ['*_text', '1girl', 'english_text', 'long_hair', 'translated'].sort(),
+    );
+    expect('tag_string_general' in row).toBe(false);
+    expect('tag_string_meta' in row).toBe(false);
+    // An item without the strings leaves the flags unset, not empty.
+    expect(toPostRecord(post, 9).tf).toBeUndefined();
+  });
+
   it('asks for every field the row reads, and no thumbnail', () => {
     const fields = SYNC_POST_FIELDS.split(',');
     for (const f of [
@@ -77,6 +99,8 @@ describe('toPostRecord', () => {
       'tag_count_general',
       'tag_string_character',
       'tag_string_copyright',
+      'tag_string_general',
+      'tag_string_meta',
     ]) {
       expect(fields).toContain(f);
     }

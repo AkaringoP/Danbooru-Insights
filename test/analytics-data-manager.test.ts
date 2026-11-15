@@ -16,6 +16,8 @@ import {
   catchUpWatermark,
 } from '../src/core/analytics-data-manager';
 import {resetTopLevelSessionCache} from '../src/core/top-level-tags';
+import {POST_FIELDS_VERSION} from '../src/core/post-record';
+import {tagFlagsOf} from '../src/core/post-tag-flags';
 import {
   classifySyncFetchError,
   syncRetryDelayMs,
@@ -1477,7 +1479,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       });
     });
 
-    it('records fields version 2, the server time of the first page and the time zone after a sync from the start', async () => {
+    it('records the fields version, the server time of the first page and the time zone after a sync from the start', async () => {
       const {rl} = serve();
       const {adm, syncMeta} = setUp([], rl);
 
@@ -1485,7 +1487,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
 
       expect(syncMeta.rows.get(42)).toEqual({
         userId: 42,
-        fieldsVersion: 2,
+        fieldsVersion: POST_FIELDS_VERSION,
         changeWatermark: Date.parse(DATE),
         timeZone: 'Seoul',
       });
@@ -1553,7 +1555,7 @@ describe('AnalyticsDataManager.syncAllPosts', () => {
       await adm.quickSyncAllPosts(makeSyncUser({id: '42'}));
 
       expect(syncMeta.rows.get(42)).toMatchObject({
-        fieldsVersion: 2,
+        fieldsVersion: POST_FIELDS_VERSION,
         changeWatermark: Date.parse(DATE),
       });
       // Other users' cleanup is the app's, after paint (T-503).
@@ -3806,14 +3808,20 @@ describe('fields backfill (T-403)', () => {
 
   const user = makeSyncUser({id: '42'});
 
-  it('is needed for a user with rows and no fields version 2', async () => {
+  it('is needed for a user with rows below the current fields version', async () => {
     const {rl} = serveRemote([]);
     expect(
       await setUp(oldRows([1]), rl).adm.needsPostMetadataBackfill(user),
     ).toBe(true);
+    // Version 2 rows lack the tag flags of version 3 (T-703).
     expect(
       await setUp(oldRows([1]), rl, {
         fieldsVersion: 2,
+      }).adm.needsPostMetadataBackfill(user),
+    ).toBe(true);
+    expect(
+      await setUp(oldRows([1]), rl, {
+        fieldsVersion: POST_FIELDS_VERSION,
       }).adm.needsPostMetadataBackfill(user),
     ).toBe(false);
     expect(await setUp([], rl).adm.needsPostMetadataBackfill(user)).toBe(false);
@@ -3833,7 +3841,7 @@ describe('fields backfill (T-403)', () => {
     ).toBe(false);
   });
 
-  it('rebuilds every row under its own number and records version 2 with the first response time', async () => {
+  it('rebuilds every row under its own number and records the fields version with the first response time', async () => {
     const {rl, asked} = serveRemote([10, 20, 25, 30]);
     const {adm, metaRows, written} = setUp(oldRows([10, 20, 30]), rl);
     const progress = vi.fn();
@@ -3854,7 +3862,7 @@ describe('fields backfill (T-403)', () => {
       [30, 3, 'char_30'],
     ]);
     expect(metaRows.get(42)).toMatchObject({
-      fieldsVersion: 2,
+      fieldsVersion: POST_FIELDS_VERSION,
       changeWatermark: Date.parse(DATE),
       timeZone: 'Seoul',
       backfill: undefined,
@@ -3879,7 +3887,7 @@ describe('fields backfill (T-403)', () => {
 
     expect(asked).toEqual(['user:test_user status:any id:21..30 order:id']);
     expect(metaRows.get(42)).toMatchObject({
-      fieldsVersion: 2,
+      fieldsVersion: POST_FIELDS_VERSION,
       changeWatermark: 1234,
     });
   });
@@ -4277,6 +4285,101 @@ describe('pies from the local rows (T-406)', () => {
     await adm.getRatingDistribution(user, null, true);
 
     expect(counted()).toHaveLength(4);
+  });
+
+  // T-703: at fields version 3 the rows carry the secondary pies' tag flags.
+  describe('secondary pies from the tag flags (T-703)', () => {
+    const flagged = () => [
+      v2({
+        tf: tagFlagsOf(
+          '1girl long_hair black_hair large_breasts english_text',
+          'translated commentary',
+        ),
+      }),
+      v2({
+        tf: tagFlagsOf(
+          '2girls 1boy short_hair blonde_hair chinese_text',
+          'translation_request',
+        ),
+      }),
+      v2({
+        tf: tagFlagsOf('no_humans bald japanese_text', 'commentary_request'),
+      }),
+      v2({tf: tagFlagsOf('', '')}),
+    ];
+    const v3 = {fieldsVersion: 3};
+    const byName = (items: Array<{name: string; count: number}>) =>
+      Object.fromEntries(items.map(i => [i.name, i.count]));
+
+    it('counts gender, breasts and hair from the rows, with no count', async () => {
+      const {adm, user, counted} = setUp(v3, flagged());
+
+      expect(byName(await adm.getGenderDistribution(user, true))).toEqual({
+        Girl: 2,
+        Boy: 1,
+        'No Humans': 1,
+      });
+      expect(byName(await adm.getBreastsDistribution(user, true))).toEqual({
+        'Large Breasts': 1,
+      });
+      expect(byName(await adm.getHairLengthDistribution(user, true))).toEqual({
+        Bald: 1,
+        'Long Hair': 1,
+        'Short Hair': 1,
+      });
+      expect(byName(await adm.getHairColorDistribution(user, true))).toEqual({
+        'Black Hair': 1,
+        'Blonde Hair': 1,
+      });
+      expect(counted()).toEqual([]);
+    });
+
+    it('counts translation from the rows, Untagged exactly', async () => {
+      const {adm, user, counted} = setUp(v3, flagged());
+
+      const translation = await adm.getTranslationDistribution(user, true);
+
+      // Untagged: japanese_text alone (chinese_text has a request).
+      expect(byName(translation)).toEqual({
+        Translated: 1,
+        Requested: 1,
+        Untagged: 1,
+      });
+      expect(counted()).toEqual([]);
+    });
+
+    it('still counts commentary Untagged, which is not a tag', async () => {
+      const {adm, user, counted} = setUp(v3, flagged());
+
+      const commentary = await adm.getCommentaryDistribution(user, true);
+
+      expect(counted().sort()).toEqual([
+        '/counts/posts.json?tags=user:test_user has:commentary',
+        '/counts/posts.json?tags=user:test_user has:commentary commentary',
+        '/counts/posts.json?tags=user:test_user has:commentary commentary_request',
+      ]);
+      // 3 − 3 − 3 from the fake counts: no Untagged slice.
+      expect(byName(commentary)).toEqual({Commentary: 1, Requested: 1});
+    });
+
+    it('counts remotely at fields version 2, keeping the first pies local', async () => {
+      const {adm, user, counted} = setUp({fieldsVersion: 2}, flagged());
+
+      await adm.getRatingDistribution(user, null, true);
+      expect(counted()).toEqual([]);
+
+      await adm.getBreastsDistribution(user, true);
+      expect(counted()).toHaveLength(6);
+    });
+
+    it('counts remotely when a row lacks the flags', async () => {
+      const rows = [...flagged(), v2({})];
+      const {adm, user, counted} = setUp(v3, rows);
+
+      await adm.getBreastsDistribution(user, true);
+
+      expect(counted()).toHaveLength(6);
+    });
   });
 });
 

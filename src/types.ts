@@ -391,6 +391,14 @@ export interface PostRecord {
   chr?: string;
   /** `tag_string_copyright` (space-separated). */
   cpy?: string;
+
+  // Fields version 3 (T-703).
+  /**
+   * Which of the secondary pies' tags the post has: sorted indices into
+   * `TAG_FLAG_NAMES` (`core/post-tag-flags`), `[]` for none. Absent on rows
+   * from before.
+   */
+  tf?: number[];
 }
 
 /**
@@ -607,6 +615,8 @@ export interface DanbooruPost {
   tag_string_artist?: string;
   tag_string_copyright?: string;
   tag_string_character?: string;
+  tag_string_general?: string;
+  tag_string_meta?: string;
 
   // Media. Danbooru sends the sizes under `media_asset` when asked with
   // `only=…,media_asset[variants]` (V-9, 2026-11-16) — never a top-level
