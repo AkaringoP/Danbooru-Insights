@@ -40,6 +40,14 @@ import {
   schedulePieRevalidate,
   wireSummaryCard,
 } from '../src/apps/user-analytics-app';
+import {
+  renderHistoryChart,
+  renderMilestonesWidget,
+  renderPieWidget,
+  renderTopPostsWidget,
+} from '../src/apps/user-analytics-charts';
+import {renderCreatedTagsWidget} from '../src/apps/created-tags-widget';
+import {renderTagCloudWidget} from '../src/ui/tag-cloud-widget';
 import {isTouchDevice} from '../src/ui/two-step-tap';
 import {showToast} from '../src/ui/toast';
 import {AnalyticsDataManager} from '../src/core/analytics-data-manager';
@@ -900,5 +908,90 @@ describe('wireSummaryCard — dashboard At a glance (lifetime)', () => {
     dataUpdated('status_dist', [{name: 'deleted', count: 150}]);
     expect(cardText(first)).toContain('2 deleted (0.2%)');
     expect(cardText(second)).toContain('150 deleted (15%)');
+  });
+});
+
+describe('renderDashboard — one data manager per open', () => {
+  /**
+   * The manager `fetchDashboardData` read the rows with keeps their one
+   * scan and drops it when the catch-up or a backfill changes them. A
+   * widget handed the app's long-lived manager instead reads the rows a
+   * second time and can count from a scan made before those changes.
+   */
+  function openData(openManager: AnalyticsDataManager) {
+    return {
+      stats: {count: 500, lastDate: '2026-11-01'},
+      total: 500,
+      summaryStats: {
+        maxUploads: 3,
+        maxDate: '2024-01-02',
+        firstUploadDate: new Date('2021-03-01T00:00:00Z'),
+        lastUploadDate: new Date('2026-11-01T00:00:00Z'),
+        count1Year: 10,
+        maxUploads1Year: 2,
+        maxDate1Year: '2026-05-05',
+        maxStreak: 2,
+        maxStreakStart: '2024-01-01',
+        maxStreakEnd: '2024-01-02',
+        activeDays: 100,
+      },
+      distributions: {status: [], rating: [], copyright: [], character: []},
+      distributionRevalidators: [],
+      topPosts: {g: null, s: null, q: null, e: null},
+      recentPopularPosts: {sfw: null, nsfw: null},
+      randomPostsPromise: Promise.resolve({sfw: null, nsfw: null}),
+      milestones1k: [],
+      scatterData: [{id: 1, d: 0, s: 1, t: 10, r: 'g'}],
+      levelChanges: [],
+      timelineMilestones: [],
+      tagCloudGeneral: [],
+      userStats: null,
+      needsBackfill: false,
+      profileSummaryInput: {
+        userName: 'fixture_user',
+        firstUploadDate: new Date('2021-03-01T00:00:00Z'),
+        total: 500,
+        lifetimeDeleted: 0,
+        lifetimeStatus: {pending: 0, flagged: 0, banned: 0},
+        copyrightTop: [],
+        characterTop: [],
+        lifetimePoints: [],
+        window: [],
+      },
+      dataManager: openManager,
+    };
+  }
+
+  it('hands every widget the manager the open read its rows with', async () => {
+    const {app} = makeApp();
+    stubDataManager(app.dataManager, {
+      syncStats: {count: 500, lastDate: '2026-11-01'},
+      totalCount: 500,
+    });
+    const getTagCloudData = vi.fn(async () => []);
+    const openManager = {
+      catchUpChanges: vi.fn(async () => ({changed: 0})),
+      getTagCloudData,
+    } as unknown as AnalyticsDataManager;
+    vi.spyOn(app.dataService, 'fetchDashboardData').mockResolvedValue(
+      openData(openManager) as never,
+    );
+    vi.spyOn(app, 'updateHeaderStatus').mockResolvedValue(undefined);
+
+    await app.renderDashboard();
+
+    expect(openManager).not.toBe(app.dataManager);
+    const managerArg = (fn: unknown, index: number) =>
+      vi.mocked(fn as Mock).mock.calls[0][index];
+    expect(managerArg(renderPieWidget, 3)).toBe(openManager);
+    expect(managerArg(renderTopPostsWidget, 5)).toBe(openManager);
+    expect(managerArg(renderMilestonesWidget, 2)).toBe(openManager);
+    expect(managerArg(renderHistoryChart, 1)).toBe(openManager);
+    expect(managerArg(renderCreatedTagsWidget, 1)).toBe(openManager);
+    const cloud = managerArg(renderTagCloudWidget, 1) as {
+      fetchData: (categoryId: number) => Promise<unknown>;
+    };
+    await cloud.fetchData(4);
+    expect(getTagCloudData).toHaveBeenCalledWith(TARGET_USER, 4);
   });
 });

@@ -101,10 +101,70 @@ interface ScatterState {
 }
 
 /**
+ * What one plot holds outside its own subtree: its listeners on `window`
+ * and `document`, and whatever is released with them (the popover and the
+ * Y=10 tooltip on `<body>`, the two-step tap controller).
+ *
+ * The dashboard has no teardown hook; a re-render just empties the modal.
+ * So the plot lets go by itself, on the first of its global events that
+ * finds its wrapper out of the document. Before this, every dashboard open
+ * left five listeners behind, each keeping that open's points and canvas
+ * alive, and one more popover and tooltip on `<body>`.
+ */
+interface ScatterLifetime {
+  /** `addEventListener` on `window` / `document`, removed with the plot. */
+  listen<K extends keyof GlobalEventHandlersEventMap>(
+    target: Window | Document,
+    type: K,
+    handler: (e: GlobalEventHandlersEventMap[K]) => void,
+  ): void;
+  /** Runs once, when the plot is released. */
+  onRelease(fn: () => void): void;
+  /**
+   * Releases the plot if it has left the document; true when it is gone.
+   * A plot that was never in the document is not gone yet.
+   */
+  releaseIfGone(): boolean;
+}
+
+function createScatterLifetime(wrapper: HTMLElement): ScatterLifetime {
+  const controller = new AbortController();
+  let wasInDocument = false;
+  const releaseIfGone = (): boolean => {
+    if (wrapper.isConnected) {
+      wasInDocument = true;
+      return false;
+    }
+    if (wasInDocument) controller.abort();
+    return wasInDocument;
+  };
+  return {
+    listen(target, type, handler) {
+      target.addEventListener(
+        type,
+        e => {
+          if (!releaseIfGone()) {
+            handler(e as GlobalEventHandlersEventMap[typeof type]);
+          }
+        },
+        {signal: controller.signal},
+      );
+    },
+    onRelease(fn) {
+      controller.signal.addEventListener('abort', fn, {once: true});
+    },
+    releaseIfGone,
+  };
+}
+
+/**
  * Bundle of all DOM elements created by `buildScatterDom`. Helpers receive
  * this struct so signatures stay stable as the decomposition evolves.
  */
 interface ScatterDom {
+  /** The plot's global listeners and `<body>` nodes ({@link ScatterLifetime}). */
+  lifetime: ScatterLifetime;
+
   // Top-level containers
   wrapper: HTMLElement;
   scatterDiv: HTMLElement;
@@ -487,7 +547,14 @@ function buildScatterDom(): ScatterDom {
     'position: fixed; z-index: 10000; background: var(--di-bg, #fff); border: 1px solid var(--di-border, #e1e4e8); border-radius: 4px; box-shadow: 0 4px 12px var(--di-shadow, rgba(0,0,0,0.2)); display: none; max-height: 300px; width: 320px; flex-direction: column; font-family: sans-serif; color: var(--di-text, #333);';
   document.body.appendChild(popover);
 
+  const lifetime = createScatterLifetime(wrapper);
+  lifetime.onRelease(() => {
+    y10Tooltip.remove();
+    popover.remove();
+  });
+
   return {
+    lifetime,
     wrapper,
     scatterDiv,
     canvasContainer,
@@ -1313,7 +1380,7 @@ function wireY10Tooltip(
     rerender();
   };
 
-  document.addEventListener('click', e => {
+  dom.lifetime.listen(document, 'click', e => {
     if (dom.y10Tooltip.style.display === 'none') return;
     if (e.target === dom.y10Hit || dom.y10Tooltip.contains(e.target as Node))
       return;
@@ -1556,7 +1623,7 @@ function wireDragSelection(
     }, 50);
   };
 
-  window.addEventListener('mousemove', e => {
+  dom.lifetime.listen(window, 'mousemove', e => {
     if (!state.dragStart) return;
     const rect = dom.canvasContainer.getBoundingClientRect();
     const mx = e.clientX - rect.left;
@@ -1582,7 +1649,7 @@ function wireDragSelection(
     updateRangeLabel(state.dragStart.x, currentX, state.dragStart.y, currentY);
   });
 
-  window.addEventListener('mouseup', e => {
+  dom.lifetime.listen(window, 'mouseup', e => {
     if (!state.dragStart) return;
     const ds = state.dragStart;
     state.dragStart = null;
@@ -1688,7 +1755,7 @@ function createScatterPopover(
   options: ScatterPlotOptions,
 ): ShowPopoverFn {
   // Document-level mousedown handler to dismiss popover when clicking outside
-  document.addEventListener('mousedown', e => {
+  dom.lifetime.listen(document, 'mousedown', e => {
     if (
       dom.popover.style.display !== 'none' &&
       !dom.popover.contains(e.target as Node)
@@ -1915,6 +1982,7 @@ export function renderScatterPlot(
       rerender();
     },
   });
+  dom.lifetime.onRelease(() => twoStepTap.destroy());
 
   // Centralized Y-threshold reset — invoked by handlers that change scale
   // (mode toggle, year zoom in/out, drag select) so the highlight doesn't
@@ -1967,5 +2035,8 @@ export function renderScatterPlot(
   wireBackfillUi(state, dom, options, scatterData, rerender);
 
   requestAnimationFrame(rerender);
-  window.addEventListener('resize', rerender);
+  dom.lifetime.listen(window, 'resize', rerender);
+  // In the document from here on (when the container is): leaving it
+  // releases the plot.
+  dom.lifetime.releaseIfGone();
 }

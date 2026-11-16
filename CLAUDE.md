@@ -77,7 +77,7 @@ If the choice is not obvious, note the reason briefly. This keeps the pipeline r
 - `npm run build` — `vitest run && tsc && vite build` → outputs `dist/danbooruinsights.user.js`
 - `npm run compile` — `tsc` alone (type check only, no bundle)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest unit tests (currently 1437 cases)
+- `npm run test` — Vitest unit tests (currently 1442 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e tests (`test/e2e/`, 7 visual-regression baselines)
 - `npm run test:e2e:update` — update the e2e snapshot baselines (only for an intended visual change)
@@ -215,9 +215,10 @@ The baseline images are **per platform** (`…-chromium-win32.png`, `…-chromiu
 - [CHANGELOG.md](CHANGELOG.md) — release history & version context
 
 ## Current release state
-Current version **v9.12.0** (`APP_VERSION` in [src/version.ts](src/version.ts) is the single source of truth — bump only there on release). No active issue. "v9.12" in the docs means this release.
+Current version **v9.12.1** (`APP_VERSION` in [src/version.ts](src/version.ts) is the single source of truth — bump only there on release). No active issue. "v9.12" in the docs means v9.12.0 and its hotfixes.
 
 Recent releases (details in [CHANGELOG.md](CHANGELOG.md)):
+- **v9.12.1** (hotfix) — every dashboard widget reads the open's data manager, so the rows are scanned once and a pie tab opened after a catch-up counts the updated rows (the monthly chart and the widgets used the app's own manager and its older scan); the scatter plot releases its `window` / `document` listeners, two-step tap controller and `<body>` popover / tooltip when it leaves the document (each open left a set behind)
 - **v9.12.0** — the 2026-11-12 audit follow-up (Phases 1–7). A lane per server limit and one shared 4.5 req/s budget; the user dashboard's pies counted from the synced rows (fields versions 2 and 3, a one-time backfill, a change catch-up); tag page history from reports in UTC months; lost counts shown as unknown, never saved as 0; searches over the viewer's tag limit not sent (🔒); sync fixes (page-limit segments, first-post anchor, numbering gaps); Grass reusing synced posts, retrying pages, hours in the account zone, 90-day cache sweep; large thumbnails through `media_asset[variants]`; inline handlers replaced for Danbooru's CSP; a pre-release review's seven fixes. Schema v13 (`sync_meta`). Tests 1040 → 1437. Two known limits are listed in the CHANGELOG's Internal section
 - **v9.11.3** (hotfix) — on mobile, a "?" tooltip opened by a tap (Suspicious, the Recent uploads colour legend) did not close on a tap elsewhere. A shared `attachTapTooltip` (detects an outside tap with a document capture-phase click, only while open), `closeTapTooltips` in the popover's `hide()`, and the CSS hover/focus reveal limited to `@media (hover: hover)` (a phone's sticky hover and tap focus held the tooltip)
 - **v9.11.2** (hotfix) — the preview popover was cut off on the right on phones (width clamped to the screen − 16 px, `documentElement.clientWidth` instead of `innerWidth` — the overflowing popover inflated mobile Chrome's `innerWidth`), repositioned on rotation while open (a `resize` listener, only while open). A "?" explanation beside Suspicious in the Activity legend (hover on PC / tap on mobile, full width above the legend). Suspicious-upload conditions reworked: banned excluded (an artist-requested takedown), flagged and four Meta tags (`SUSPICIOUS_UPLOAD_TAGS`) added — only `is_flagged,tag_string_meta` added to the existing lookup, matched client-side (Meta-category tags count toward a Member's 2-tag limit — rechecked 2026-10-30, api-endpoints.md "Search tag limit")
