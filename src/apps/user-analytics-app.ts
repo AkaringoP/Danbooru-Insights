@@ -760,6 +760,12 @@ function renderSummaryCards(
  * onto the shared `nsfw` bus once all three NSFW-aware widgets have
  * built their `onNsfwChange` handlers.
  *
+ * Every widget gets the open's manager (`data.dataManager`), the one
+ * `fetchDashboardData` read the rows with: it holds their one scan (T-501)
+ * and drops it when the catch-up or a backfill changes them. The app's own
+ * manager would read the rows again for the monthly chart, and count a pie
+ * tab opened after a catch-up from a scan made before it.
+ *
  * Footer is appended last (caller used to do it; now lives here for
  * locality with the widget chain).
  */
@@ -817,7 +823,7 @@ async function renderDashboardWidgets(
     pieContainer,
     distributions,
     nsfw.enabled,
-    app.dataManager,
+    dataManager,
     app.context,
     firstUploadDate,
   );
@@ -834,7 +840,7 @@ async function renderDashboardWidgets(
     recentPopularPosts,
     randomPostsPromise,
     nsfw.enabled,
-    app.dataManager,
+    dataManager,
     app.context,
   );
   perfLogger.end('dbi:render:widget:topPosts');
@@ -855,7 +861,7 @@ async function renderDashboardWidgets(
       renderMilestonesWidget(
         milestonesDiv,
         app.db,
-        app.dataManager,
+        dataManager,
         app.context,
         nsfw.enabled,
       ),
@@ -875,7 +881,7 @@ async function renderDashboardWidgets(
   await perfLogger.wrap('dbi:render:widget:history', () =>
     renderHistoryChart(
       parent,
-      app.dataManager,
+      dataManager,
       app.context,
       milestones1k,
       levelChanges,
@@ -889,7 +895,7 @@ async function renderDashboardWidgets(
   perfLogger.start('dbi:render:widget:createdTags');
   renderCreatedTagsWidget(
     createdTagsContainer,
-    app.dataManager,
+    dataManager,
     app.context.targetUser,
   );
   perfLogger.end('dbi:render:widget:createdTags');
@@ -912,7 +918,7 @@ async function renderDashboardWidgets(
     renderTagCloudWidget(tagCloudContainer, {
       initialData: tagCloudGeneral,
       fetchData: (catId: number) =>
-        app.dataManager.getTagCloudData(app.context.targetUser, catId),
+        dataManager.getTagCloudData(app.context.targetUser, catId),
       userName: app.context.targetUser.normalizedName,
       categories: [
         {id: 0, label: 'General', color: '#0075f8'},
@@ -925,9 +931,6 @@ async function renderDashboardWidgets(
   perfLogger.end('dbi:render:widget:tagCloud');
 
   // 7. Scatter Plot Widget — gated by upload count (v9.6.0).
-  // Scatter wiring goes through the dataManager instance that
-  // fetchDashboardData created — keep the original references to preserve
-  // identity-sensitive call paths.
   perfLogger.start('dbi:render:widget:scatter');
   if (totalUploads < SCATTER_MIN_UPLOADS) {
     const scatterContainer = document.createElement('div');
