@@ -4,6 +4,34 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.12.1 — Dashboard reads its data once; the score plot cleans up after itself
+
+### Fixed
+- **A pie tab could show counts from before the latest changes.** After the
+  dashboard caught up with posts edited on Danbooru, a pie tab opened for
+  the first time within the next minute was counted from the posts as they
+  were before the catch-up, and saved that way until its next refresh. Every
+  widget now reads the same, up-to-date copy.
+- **The dashboard read the account's saved posts twice on every open.** The
+  monthly upload chart made its own pass; it now uses the one the rest of
+  the dashboard makes.
+- **Each dashboard open left the score plot's listeners and its post list
+  pop-up behind.** Reopening the dashboard kept adding to them for as long
+  as the page stayed open. The plot now removes them when it is closed.
+
+### Internal
+- `renderDashboardWidgets` hands every widget the open's manager
+  (`fetchDashboardData`'s), which holds the row scan (T-501) and drops it on
+  a catch-up or backfill. The app's long-lived manager kept a scan of its
+  own.
+- The scatter plot owns its `window` / `document` listeners, its two-step
+  tap controller and its popover and Y=10 tooltip on `<body>` through one
+  lifetime object (`AbortController`), released on the first global event
+  that finds the plot out of the document (the dashboard has no teardown
+  hook). Tests 1437 → 1442.
+
+---
+
 ## v9.12.0 — Far fewer requests: pies from the synced posts, tag history from reports, pacing per Danbooru limit
 
 ### Fixed
