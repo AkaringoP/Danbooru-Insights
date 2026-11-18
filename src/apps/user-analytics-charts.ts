@@ -3,7 +3,6 @@ import {createLogger} from '../core/logger';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {createBodyTooltip} from '../ui/popover-utils';
 import {attachTapTooltip} from '../ui/tap-tooltip';
-import {formatPct} from '../core/profile-summary';
 import {
   cancelSubtagTooltipHide,
   hideSubtagTooltip,
@@ -170,7 +169,6 @@ const UPLOAD_SHARE_TABS: Record<string, string> = {
 function uploadShareHelpHtml(
   processedData: PieSlice[],
   currentPieTab: string,
-  pctFor: (label: string) => string,
   uploadTotal: number,
 ): string {
   const noun = UPLOAD_SHARE_TABS[currentPieTab];
@@ -179,19 +177,14 @@ function uploadShareHelpHtml(
   );
   const tagTotal = tags.reduce((acc, d) => acc + d.value, 0);
   if (!noun || uploadTotal <= 0 || tagTotal <= uploadTotal) return '';
-  const top = tags[0];
-  const fmt = (n: number) => n.toLocaleString('en-US');
   const note =
-    `A post can have several ${noun}, so these ${tags.length} are tagged ` +
-    `${fmt(tagTotal)} times across ${fmt(uploadTotal)} uploads. The ` +
-    `percentages here are shares of those ${fmt(tagTotal)} tags; At a glance ` +
-    `gives shares of all uploads (${top.label}: ${pctFor(top.label)} here, ` +
-    `${formatPct(top.value / uploadTotal)} of uploads).`;
+    `A post can have several ${noun}, so these percentages are shares of ` +
+    'the tags here, not of uploads. At a glance gives shares of all uploads.';
   return (
     '<span class="di-pie-share-help">' +
     '<span class="di-preview-legend-icon" role="button" tabindex="0" ' +
     'aria-label="Why these percentages differ from At a glance">?</span>' +
-    `<span class="di-pie-share-help-pop" role="tooltip">${escapeHtml(note)}</span>` +
+    `<span class="di-pie-share-help-pop" role="tooltip">${note}</span>` +
     '</span>'
   );
 }
@@ -1145,7 +1138,6 @@ export function renderPieLegend(args: {
   const shareHelp = uploadShareHelpHtml(
     processedData,
     currentPieTab,
-    pctFor,
     uploadTotal,
   );
   legendDiv.innerHTML =

@@ -618,18 +618,13 @@ describe('renderPieLegend - "?" note when shares overlap', () => {
     return legendDiv;
   }
 
-  it('explains the two denominators beside the title', () => {
+  it('explains why the shares differ, beside the title', () => {
     const note = render('character', CHARS, 200).querySelector(
       '.di-pie-share-help',
     );
     expect(note).not.toBeNull();
-    const text = note!.textContent ?? '';
-    expect(text).toContain('260');
-    expect(text).toContain('200 uploads');
-    // The top tag's two readings: the pie's and At a glance's (120/200).
-    expect(text).toContain('ootsu mari');
-    expect(text).toContain('46.2%');
-    expect(text).toContain('60%');
+    expect(note!.textContent).toContain('several characters');
+    expect(note!.textContent).toContain('At a glance');
   });
 
   it('also appears on the copyright tab', () => {
@@ -655,14 +650,5 @@ describe('renderPieLegend - "?" note when shares overlap', () => {
     expect(
       render('fav_copyright', CHARS, 200).querySelector('.di-pie-share-help'),
     ).toBeNull();
-  });
-
-  it('escapes the tag name', () => {
-    const data = [{...CHARS[0], name: '<b>x</b>'}, ...CHARS.slice(1)];
-    const note = render('character', data, 200).querySelector(
-      '.di-pie-share-help',
-    );
-    expect(note!.querySelector('b')).toBeNull();
-    expect(note!.textContent).toContain('<b>x</b>');
   });
 });
