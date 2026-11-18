@@ -4,6 +4,53 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.12.3 — Why the Copy / Char pie and At a glance disagree
+
+### Added
+- **A "?" beside the Copy / Char legend title when its percentages differ
+  from At a glance.** Hovering it (or tapping it on a phone) says why: a
+  post can have several characters (or copyrights), so the pie's
+  percentages are shares of the tags shown, while At a glance gives shares
+  of all uploads. It shows only when the two really differ.
+
+### Why the numbers differ — a worked example
+Reported on an account with 843 uploads: At a glance said "above all
+ootsu mari (21%)" while the Char pie's legend showed ootsu mari at 15.7%.
+Both are right; they divide by different things.
+
+- **At a glance** divides by the uploads: ootsu mari is on about 177
+  uploads, and 177 / 843 ≈ 21% (`lifetimeFocusParts` in
+  `core/profile-summary.ts`, `count / total`).
+- **The pie** divides by the sum of its slices: the top 10 plus Others,
+  where Others = uploads − Σ top 10, floored at 0. The account's top
+  characters often appear together (miorine rembran with suletta mercury,
+  lara with agott arklaum, coco with richeh and tetia), so the top 10 are
+  tagged about 1,130 times across the 843 uploads. Others is then 0, and
+  177 / ~1,130 ≈ 15.7%.
+- **Copy agreed** (28% in both): a post rarely has two copyrights, so the
+  top 10 summed to less than 843, Others filled the rest, and the pie's
+  denominator was exactly the 843 uploads. An account that uploads many
+  crossovers would see the Copy tab disagree the same way.
+
+177 and ~1,130 were worked back from the two shown percentages
+(843 × 21% ≈ 173–181; 177 / 15.7% ≈ 1,130); Danbooru's edge challenge kept
+them from being counted live.
+
+In short: the pie and At a glance agree exactly when Σ top 10 ≤ uploads,
+and the "?" appears exactly when Σ top 10 > uploads.
+
+### Internal
+- `renderPieWidget` takes the upload total (`DashboardData.total`, the
+  number At a glance divides by) and hands it to the legend
+  (`uploadShareHelpHtml` in `apps/user-analytics-charts.ts`). Fav_Copy is
+  left out: its base is the favourite count and At a glance never quotes
+  it.
+- The tap toggle of the "?" notes (`attachTapTooltip`, `closeTapTooltips`)
+  moved from `ui/dashboard-preview-popover.ts` to `ui/tap-tooltip.ts` so
+  the pie legend can use it too. Tests 1447 → 1452.
+
+---
+
 ## v9.12.2 — The profile's Statistics table keeps its own layout
 
 ### Fixed
