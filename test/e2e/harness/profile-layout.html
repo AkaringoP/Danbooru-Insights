@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Profile Layout Harness — DanbooruInsights e2e</title>
+    <!--
+      A profile page with Danbooru's own statistics markup and the rule
+      that sizes its label column, so the spec can compare the table's
+      geometry before and after the graph is injected.
+
+      Markup: app/components/user_profile_component/
+      user_profile_component.html.erb. Rule: app/javascript/src/styles/
+      specific/users.scss (danbooru/danbooru, production, read 2026-11-19).
+
+      `?box=border` adds a global `box-sizing: border-box`, as a CSS reset
+      would; without it the cells are content-box.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.7/dist/dexie.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cal-heatmap@4.2.4/dist/cal-heatmap.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica,
+          Arial, sans-serif;
+        background: #ffffff;
+      }
+      body.box-border *,
+      body.box-border *::before,
+      body.box-border *::after {
+        box-sizing: border-box;
+      }
+      #page {
+        padding: 20px;
+      }
+      table.table-sm th,
+      table.table-sm td {
+        padding: 2px 8px;
+      }
+      /* users.scss */
+      div#c-users div#a-show table.user-statistics th {
+        width: 15%;
+        text-align: right;
+        padding-right: 1em;
+      }
+    </style>
+  </head>
+  <body class="c-users a-show" data-current-user-id="42">
+    <div id="page">
+      <div id="c-users">
+        <div id="a-show">
+          <div>
+            <h1><a href="#">fixture_user</a></h1>
+            <div>
+              <h2>Statistics</h2>
+              <table width="100%" class="user-statistics table-sm">
+                <tbody>
+                  <tr><th>User ID</th><td>42</td></tr>
+                  <tr><th>Join Date</th><td>2020-01-01</td></tr>
+                  <tr><th>Level</th><td>Member (<a href="#">Gift upgrade</a>)</td></tr>
+                  <tr><th>Post Limit</th><td><a href="#">1</a> / 36 (<a href="#">help</a>)</td></tr>
+                  <tr><th>Posts</th><td><a href="#">843</a> (<a href="#">tag changes report</a>)</td></tr>
+                  <tr><th>Deleted Posts</th><td><a href="#">15</a></td></tr>
+                  <tr><th>Favorites</th><td><a href="#">75</a></td></tr>
+                  <tr><th>Favorite Groups</th><td><a href="#">4</a></td></tr>
+                  <tr><th>Post Changes</th><td><a href="#">1135</a></td></tr>
+                  <tr><th>Note Changes</th><td><a href="#">30</a> in <a href="#">3</a> posts (<a href="#">note changes report</a>)</td></tr>
+                  <tr><th>Wiki Page Changes</th><td><a href="#">59</a></td></tr>
+                  <tr><th>Artist Changes</th><td><a href="#">176</a></td></tr>
+                  <tr><th>Commentary Changes</th><td><a href="#">707</a></td></tr>
+                  <tr><th>Pool Changes</th><td><a href="#">1</a></td></tr>
+                  <tr><th>Forum Posts</th><td><a href="#">2</a></td></tr>
+                  <tr><th>Comments</th><td><a href="#">3</a> in <a href="#">2</a> posts</td></tr>
+                  <tr><th>Appeals</th><td><a href="#">10</a></td></tr>
+                  <tr><th>Feedback</th><td><a href="#">positive:0 neutral:0 negative:0</a></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module">
+      if (new URLSearchParams(location.search).get('box') === 'border') {
+        document.body.classList.add('box-border');
+      }
+
+      // Geometry of the statistics table: one entry per row, plus the
+      // width of the row the section sits in.
+      window.__diMeasureStats = () => {
+        const table = document.querySelector('table.user-statistics');
+        const section = table.parentElement;
+        const row = section.parentElement;
+        return {
+          rowWidth: row.getBoundingClientRect().width,
+          sectionWidth: section.getBoundingClientRect().width,
+          rows: Array.from(table.rows).map(tr => {
+            const th = tr.cells[0].getBoundingClientRect();
+            const td = tr.cells[1].getBoundingClientRect();
+            return {
+              label: tr.cells[0].textContent,
+              labelLeft: th.left,
+              labelWidth: th.width,
+              valueLeft: td.left,
+              height: tr.getBoundingClientRect().height,
+            };
+          }),
+        };
+      };
+
+      try {
+        window.__diStatsBefore = window.__diMeasureStats();
+
+        const {GraphRenderer} = await import('/src/ui/graph-renderer.ts');
+        const {SettingsManager} = await import('/src/core/settings.ts');
+        const {injectGlobalStyles} = await import('/src/styles.ts');
+
+        injectGlobalStyles();
+
+        const FIXED_YEAR = 2024;
+        const settings = new SettingsManager();
+        settings.applyTheme('light');
+
+        const dataManager = {
+          getGrassSettings: async () => null,
+          saveGrassSettings: async () => {},
+        };
+
+        const gr = new GraphRenderer(settings, /* db */ {});
+        const ok = await gr.injectSkeleton(dataManager, '42');
+        if (!ok) {
+          throw new Error('injectSkeleton returned false');
+        }
+
+        await gr.renderGraph(
+          {daily: {[`${FIXED_YEAR}-03-01`]: 3}, hourly: new Array(24).fill(0)},
+          FIXED_YEAR,
+          'uploads',
+          'fixture_user',
+          [FIXED_YEAR],
+          () => {},
+          () => {},
+          /* skipScroll */ true,
+        );
+        gr.setLoading(false);
+
+        await new Promise(r =>
+          requestAnimationFrame(() => requestAnimationFrame(r)),
+        );
+      } catch (err) {
+        console.error('[harness] failed to mount profile-layout', err);
+        document.body.setAttribute('data-harness-error', String(err));
+      }
+      document.body.setAttribute('data-harness-ready', 'profile-layout');
+    </script>
+  </body>
+</html>

@@ -594,20 +594,97 @@ function findStatisticsAnchor(): Element | null {
   return stats;
 }
 
+/** The statistics table's label column, as measured on the untouched page. */
+interface StatsLabelColumn {
+  /** The first-column `<th>` of every row. */
+  cells: HTMLElement[];
+  /** Column width as a share of the statistics section's width. */
+  ratio: number;
+  /** Padding + border to take off a cell's width (0 for border-box cells). */
+  inset: number;
+}
+
+/**
+ * Measure the statistics table's label column while the section still has
+ * Danbooru's own layout. Returns `null` when there is no such column or it
+ * has no size yet (the section is then left as the wrapper lays it out).
+ */
+function measureStatsLabelColumn(stats: Element): StatsLabelColumn | null {
+  const table = stats.querySelector('table');
+  if (!table) return null;
+  const cells = Array.from(table.rows)
+    .map(row => row.cells[0])
+    .filter(cell => cell?.tagName === 'TH');
+  if (cells.length === 0) return null;
+  const statsWidth = stats.getBoundingClientRect().width;
+  const labelWidth = cells[0].getBoundingClientRect().width;
+  if (!(statsWidth > 0 && labelWidth > 0)) return null;
+  const cs = getComputedStyle(cells[0]);
+  const px = (value: string): number => parseFloat(value) || 0;
+  const inset =
+    cs.boxSizing === 'border-box'
+      ? 0
+      : px(cs.paddingLeft) +
+        px(cs.paddingRight) +
+        px(cs.borderLeftWidth) +
+        px(cs.borderRightWidth);
+  return {cells, ratio: labelWidth / statsWidth, inset};
+}
+
+/**
+ * Keep the statistics table looking as it does without the script.
+ *
+ * Danbooru sizes the label column as a share of the table
+ * (`table.user-statistics th { width: 15% }`, table `width="100%"`). Inside
+ * the wrapper the section is a flex item of at most 60% of the row, so the
+ * column shrank with it: the labels moved left and the longer ones broke
+ * into two lines. Here every label cell gets the width the column had on
+ * the untouched page, as a share of the wrapper (which is as wide as the
+ * section was), and follows the wrapper when the window is resized.
+ *
+ * With no percentage left in the table, the section is as wide as that
+ * column plus the widest value (up to the 60% cap), in every browser. In
+ * Chromium it was the widest label plus the widest value before (measured
+ * 2026-11-19), so the graph beside it starts a little further right on a
+ * wide window and a little further left on a narrow one.
+ */
+function keepStatsLabelColumn(
+  wrapper: HTMLElement,
+  labels: StatsLabelColumn,
+): void {
+  const apply = (): void => {
+    const wrapperWidth = wrapper.getBoundingClientRect().width;
+    if (!(wrapperWidth > 0)) return;
+    const width = Math.max(0, labels.ratio * wrapperWidth - labels.inset);
+    const value = `${Math.round(width * 100) / 100}px`;
+    for (const cell of labels.cells) {
+      if (cell.style.width !== value) cell.style.width = value;
+    }
+  };
+  apply();
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(apply).observe(wrapper);
+  }
+}
+
 /**
  * Find or create the `#danbooru-grass-wrapper` flex row that holds the
  * stats table side-by-side with the grass container. Idempotent — if
  * the stats element is already wrapped, returns the existing wrapper
  * without re-parenting. Also applies the maxWidth:60% constraint to
  * the stats section so long content (e.g. Previous Names) doesn't push
- * the grass into a wrap.
+ * the grass into a wrap, and keeps the table's label column at the width
+ * it has without the script (`keepStatsLabelColumn`).
  */
 function ensureGrassWrapper(stats: Element): HTMLElement {
   let wrapper = document.getElementById('danbooru-grass-wrapper');
+  let labels: StatsLabelColumn | null = null;
   if (!wrapper) {
     if ((stats.parentNode as HTMLElement).id === 'danbooru-grass-wrapper') {
       wrapper = stats.parentNode as HTMLElement;
     } else {
+      // Before the move: afterwards the column no longer has its own width.
+      labels = measureStatsLabelColumn(stats);
       wrapper = document.createElement('div');
       wrapper.id = 'danbooru-grass-wrapper';
       wrapper.style.display = 'flex';
@@ -630,6 +707,7 @@ function ensureGrassWrapper(stats: Element): HTMLElement {
   statsEl.style.maxWidth = '60%';
   statsEl.style.overflowWrap = 'break-word';
   statsEl.style.overflow = 'hidden';
+  if (labels) keepStatsLabelColumn(wrapper, labels);
   return wrapper;
 }
 

@@ -77,7 +77,7 @@ If the choice is not obvious, note the reason briefly. This keeps the pipeline r
 - `npm run build` — `vitest run && tsc && vite build` → outputs `dist/danbooruinsights.user.js`
 - `npm run compile` — `tsc` alone (type check only, no bundle)
 - `npm run lint` / `npm run fix` — GTS lint / auto-fix
-- `npm run test` — Vitest unit tests (currently 1442 cases)
+- `npm run test` — Vitest unit tests (currently 1447 cases)
 - `npm run check:dead` — knip dead-code detection (Phase 6 gate)
 - `npm run test:e2e` — Playwright e2e tests (`test/e2e/`, 7 visual-regression baselines)
 - `npm run test:e2e:update` — update the e2e snapshot baselines (only for an intended visual change)
@@ -215,9 +215,10 @@ The baseline images are **per platform** (`…-chromium-win32.png`, `…-chromiu
 - [CHANGELOG.md](CHANGELOG.md) — release history & version context
 
 ## Current release state
-Current version **v9.12.1** (`APP_VERSION` in [src/version.ts](src/version.ts) is the single source of truth — bump only there on release). No active issue. "v9.12" in the docs means v9.12.0 and its hotfixes.
+Current version **v9.12.2** (`APP_VERSION` in [src/version.ts](src/version.ts) is the single source of truth — bump only there on release). No active issue. "v9.12" in the docs means v9.12.0 and its hotfixes.
 
 Recent releases (details in [CHANGELOG.md](CHANGELOG.md)):
+- **v9.12.2** (hotfix) — the profile page's Statistics table keeps Danbooru's own layout beside the graph. Danbooru sizes the label column as 15% of the table (`table.user-statistics th`), and the table shrank inside the flex wrapper, so the labels moved left and the long ones broke into two lines. `ensureGrassWrapper` measures the column before wrapping and gives every label cell that share of the wrapper's width (`keepStatsLabelColumn`, followed on resize by a `ResizeObserver`). The section is then as wide as the label column plus the widest value (still at most 60%), so the graph starts a few px further right on a wide window. Geometry checked in `test/e2e/profile-layout.spec.ts` (no screenshot baseline)
 - **v9.12.1** (hotfix) — every dashboard widget reads the open's data manager, so the rows are scanned once and a pie tab opened after a catch-up counts the updated rows (the monthly chart and the widgets used the app's own manager and its older scan); the scatter plot releases its `window` / `document` listeners, two-step tap controller and `<body>` popover / tooltip when it leaves the document (each open left a set behind)
 - **v9.12.0** — the 2026-11-12 audit follow-up (Phases 1–7). A lane per server limit and one shared 4.5 req/s budget; the user dashboard's pies counted from the synced rows (fields versions 2 and 3, a one-time backfill, a change catch-up); tag page history from reports in UTC months; lost counts shown as unknown, never saved as 0; searches over the viewer's tag limit not sent (🔒); sync fixes (page-limit segments, first-post anchor, numbering gaps); Grass reusing synced posts, retrying pages, hours in the account zone, 90-day cache sweep; large thumbnails through `media_asset[variants]`; inline handlers replaced for Danbooru's CSP; a pre-release review's seven fixes. Schema v13 (`sync_meta`). Tests 1040 → 1437. Two known limits are listed in the CHANGELOG's Internal section
 - **v9.11.3** (hotfix) — on mobile, a "?" tooltip opened by a tap (Suspicious, the Recent uploads colour legend) did not close on a tap elsewhere. A shared `attachTapTooltip` (detects an outside tap with a document capture-phase click, only while open), `closeTapTooltips` in the popover's `hide()`, and the CSS hover/focus reveal limited to `@media (hover: hover)` (a phone's sticky hover and tap focus held the tooltip)

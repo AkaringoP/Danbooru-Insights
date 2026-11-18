@@ -4,6 +4,30 @@ All notable changes to Danbooru Insights are documented here.
 
 ---
 
+## v9.12.2 — The profile's Statistics table keeps its own layout
+
+### Fixed
+- **The Statistics table on a profile page changed shape once the graph sat
+  beside it.** The bold label column (User ID, Join Date, … Feedback) moved
+  toward the left edge, and the longer labels (Deleted Posts, Favorite
+  Groups, Post Changes, …) broke into two lines, which made those rows
+  taller. The column now keeps the width and position it has without the
+  script, and follows the window when it is resized. On a wide window the
+  graph beside it starts a little further right and has that much less
+  room, by the width the label column got back.
+
+### Internal
+- Danbooru sizes the label column as 15% of the table, and the table
+  shrank inside the script's flex row. The column is measured before the
+  section is wrapped and each label cell gets that share of the row's
+  width (`keepStatsLabelColumn` in `ui/graph-renderer.ts`).
+- A new e2e spec (`test/e2e/profile-layout.spec.ts`) compares the table's
+  geometry before and after the graph is injected, on a page with
+  Danbooru's own markup and rule. It takes no screenshot, so it needs no
+  per-platform baseline.
+
+---
+
 ## v9.12.1 — Dashboard reads its data once; the score plot cleans up after itself
 
 ### Fixed

@@ -151,6 +151,117 @@ describe('GraphRenderer.injectSkeleton', () => {
   });
 });
 
+// Danbooru sizes the statistics table's label column as a share of the
+// table; inside the flex wrapper the table is narrower, so the column must
+// be given the width it had. JSDOM lays nothing out — the widths are fed in
+// here, and test/e2e/profile-layout.spec.ts checks the real geometry.
+describe('GraphRenderer.injectSkeleton — statistics label column', () => {
+  const widths = {stats: 1000, label: 150, wrapper: 1000};
+  let resizeCallbacks: Array<() => void> = [];
+
+  function buildStatsDom(labelStyle: string): void {
+    document.body.innerHTML = `
+      <div id="page">
+        <div class="user-statistics">
+          <table>
+            <tbody>
+              <tr><th style="${labelStyle}">Join Date</th><td>2020-01-01</td></tr>
+              <tr><th style="${labelStyle}">Commentary Changes</th><td>7</td></tr>
+              <tr><td colspan="2">no label here</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function labelWidths(): string[] {
+    return Array.from(document.querySelectorAll('th')).map(
+      th => (th as HTMLElement).style.width,
+    );
+  }
+
+  async function inject(): Promise<void> {
+    const gr = new GraphRenderer(new SettingsManager(), {} as Database);
+    await gr.injectSkeleton(makeDataManager(), '42');
+  }
+
+  beforeEach(() => {
+    widths.stats = 1000;
+    widths.label = 150;
+    widths.wrapper = 1000;
+    resizeCallbacks = [];
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(
+      function (this: Element) {
+        let width = 0;
+        if (this.id === 'danbooru-grass-wrapper') width = widths.wrapper;
+        else if (this.classList.contains('user-statistics')) {
+          width = widths.stats;
+        } else if (this.tagName === 'TH') width = widths.label;
+        return {width, right: width} as DOMRect;
+      },
+    );
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private readonly callback: () => void) {}
+        observe(): void {
+          resizeCallbacks.push(this.callback);
+        }
+        disconnect(): void {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('gives every label cell the width the column had on the untouched page', async () => {
+    buildStatsDom('box-sizing: border-box');
+    await inject();
+    expect(labelWidths()).toEqual(['150px', '150px']);
+    // The row without a label cell is left alone.
+    const plain = document.querySelector('td[colspan]') as HTMLElement;
+    expect(plain.style.width).toBe('');
+  });
+
+  it('takes padding and border off for content-box cells', async () => {
+    buildStatsDom(
+      'padding: 2px 16px 2px 8px; border: 0 solid; border-left-width: 1px',
+    );
+    await inject();
+    expect(labelWidths()).toEqual(['125px', '125px']);
+  });
+
+  it('keeps the same share of the row when the window is resized', async () => {
+    buildStatsDom('box-sizing: border-box');
+    await inject();
+    widths.wrapper = 800;
+    resizeCallbacks.forEach(cb => cb());
+    expect(labelWidths()).toEqual(['120px', '120px']);
+  });
+
+  it('leaves the cells alone when the column has no size to measure', async () => {
+    widths.label = 0;
+    buildStatsDom('box-sizing: border-box');
+    await inject();
+    expect(labelWidths()).toEqual(['', '']);
+  });
+
+  it('does not measure again when the section is already wrapped', async () => {
+    buildStatsDom('box-sizing: border-box');
+    await inject();
+    // The graph is gone but the wrapper stayed (a re-injection): by now the
+    // column's width is the pinned one over a narrower section.
+    document.getElementById('danbooru-grass-container')?.remove();
+    widths.stats = 500;
+    await inject();
+    expect(labelWidths()).toEqual(['150px', '150px']);
+  });
+});
+
 describe('GraphRenderer.renderGraph with mocked CalHeatmap', () => {
   function makeSampleData(): MetricData {
     return {
