@@ -826,6 +826,7 @@ async function renderDashboardWidgets(
     dataManager,
     app.context,
     firstUploadDate,
+    data.total,
   );
   perfLogger.end('dbi:render:widget:pie');
 

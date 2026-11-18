@@ -2,6 +2,8 @@ import * as d3 from 'd3';
 import {createLogger} from '../core/logger';
 import {AnalyticsDataManager} from '../core/analytics-data-manager';
 import {createBodyTooltip} from '../ui/popover-utils';
+import {attachTapTooltip} from '../ui/tap-tooltip';
+import {formatPct} from '../core/profile-summary';
 import {
   cancelSubtagTooltipHide,
   hideSubtagTooltip,
@@ -152,6 +154,48 @@ const LEGEND_TITLES: Record<string, string> = {
   commentary: 'COMMENTARY',
   translation: 'TRANSLATION',
 };
+/** Tabs whose top tags At a glance quotes as shares of all uploads. */
+const UPLOAD_SHARE_TABS: Record<string, string> = {
+  copyright: 'copyrights',
+  character: 'characters',
+};
+
+/**
+ * The "?" beside the legend title when the pie's shares are not shares of
+ * uploads. A post can carry several characters (or copyrights), so the top
+ * tags can be tagged more times than there are uploads; Others is then 0 and
+ * the pie divides by the tag total, while At a glance divides by the uploads.
+ * Empty when the shares already are of uploads.
+ */
+function uploadShareHelpHtml(
+  processedData: PieSlice[],
+  currentPieTab: string,
+  pctFor: (label: string) => string,
+  uploadTotal: number,
+): string {
+  const noun = UPLOAD_SHARE_TABS[currentPieTab];
+  const tags = processedData.filter(
+    d => d.details.kind === 'tag' && !d.details.isOther && !d.details.unknown,
+  );
+  const tagTotal = tags.reduce((acc, d) => acc + d.value, 0);
+  if (!noun || uploadTotal <= 0 || tagTotal <= uploadTotal) return '';
+  const top = tags[0];
+  const fmt = (n: number) => n.toLocaleString('en-US');
+  const note =
+    `A post can have several ${noun}, so these ${tags.length} are tagged ` +
+    `${fmt(tagTotal)} times across ${fmt(uploadTotal)} uploads. The ` +
+    `percentages here are shares of those ${fmt(tagTotal)} tags; At a glance ` +
+    `gives shares of all uploads (${top.label}: ${pctFor(top.label)} here, ` +
+    `${formatPct(top.value / uploadTotal)} of uploads).`;
+  return (
+    '<span class="di-pie-share-help">' +
+    '<span class="di-preview-legend-icon" role="button" tabindex="0" ' +
+    'aria-label="Why these percentages differ from At a glance">?</span>' +
+    `<span class="di-pie-share-help-pop" role="tooltip">${escapeHtml(note)}</span>` +
+    '</span>'
+  );
+}
+
 /** Legend tooltip of a slice whose count could not be had (`unknown`). */
 const UNKNOWN_COUNT_TITLE =
   'Unknown: Danbooru did not return this count. The search may be over ' +
@@ -1018,6 +1062,8 @@ export function renderPieLegend(args: {
   normalizedName: string;
   /** Optional hooks for sub-chart mode (Copy/Fav_Copy/Char). v9.6+. */
   chartModeControl?: ChartModeControl;
+  /** The user's uploads, At a glance's denominator (0 = unknown). */
+  uploadTotal?: number;
 }): void {
   const {
     legendDiv,
@@ -1026,6 +1072,7 @@ export function renderPieLegend(args: {
     pctFor,
     normalizedName,
     chartModeControl,
+    uploadTotal = 0,
   } = args;
   const legendTitle = LEGEND_TITLES[currentPieTab] ?? 'DIST.';
   const styleTag = legendDiv.querySelector('style')?.outerHTML ?? '';
@@ -1095,12 +1142,27 @@ export function renderPieLegend(args: {
     })
     .join('');
 
+  const shareHelp = uploadShareHelpHtml(
+    processedData,
+    currentPieTab,
+    pctFor,
+    uploadTotal,
+  );
   legendDiv.innerHTML =
     styleTag +
     `
-           <div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:var(--di-chart-bg, #fff); padding-bottom:4px; border-bottom:1px solid var(--di-border-light, #eee);">${legendTitle}</div>
+           <div style="font-size:0.8em; color:var(--di-text-muted, #888); margin-bottom:8px; text-transform:uppercase; position:sticky; top:0; background:var(--di-chart-bg, #fff); padding-bottom:4px; border-bottom:1px solid var(--di-border-light, #eee);">${legendTitle}${shareHelp}</div>
            ${listHtml}
       `;
+
+  const help = legendDiv.querySelector<HTMLElement>('.di-pie-share-help');
+  if (help && isTouchDevice()) {
+    attachTapTooltip(
+      help,
+      help.querySelector<HTMLElement>('.di-preview-legend-icon')!,
+      'di-pie-share-help--open',
+    );
+  }
 
   if (subtagTooltipEnabled) {
     wireSubtagTooltipHandlers(
@@ -1597,6 +1659,8 @@ function renderPieFrame(args: {
    * single-slice view snaps back to the full pie mid-interaction.
    */
   setSubChartActive?: (active: boolean) => void;
+  /** The user's uploads, for the legend's "?" note. */
+  uploadTotal: number;
 }): void {
   const {
     container,
@@ -1605,6 +1669,7 @@ function renderPieFrame(args: {
     context,
     handlePieClick,
     setSubChartActive,
+    uploadTotal,
   } = args;
   const isTouch = isTouchDevice();
   const contextUser = context.targetUser;
@@ -1886,6 +1951,7 @@ function renderPieFrame(args: {
       currentPieTab,
       pctFor,
       normalizedName: contextUser.normalizedName ?? '',
+      uploadTotal,
       chartModeControl: {
         enter: enterSubChartMode,
         exit: exitSubChartMode,
@@ -1946,6 +2012,7 @@ export function renderPieWidget(
   dataManager: AnalyticsDataManager,
   context: ChartContext,
   firstUploadDate: Date | null,
+  uploadTotal = 0,
 ): {onNsfwChange: (enabled: boolean) => void} {
   // Local state (closure variables)
   const pieData: Record<string, PieTabItem[]> = {...distributions};
@@ -2150,6 +2217,7 @@ export function renderPieWidget(
       currentPieTab,
       context,
       handlePieClick,
+      uploadTotal,
       setSubChartActive: active => {
         subChartIsActive = active;
         // Sub-chart just closed and a live-patch arrived while it was open →

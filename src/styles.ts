@@ -2082,6 +2082,43 @@ const GLOBAL_CSS = `
     .di-activity-help--open .di-activity-help-pop {
       display: block;
     }
+    /* Pie legend title "?": why the Copy / Char shares differ from At a
+       glance. The note anchors to the sticky title (no position on the wrap)
+       and spans the legend's width just below it. */
+    .di-pie-share-help {
+      display: inline-flex;
+      vertical-align: middle;
+      margin-left: 6px;
+    }
+    .di-pie-share-help-pop {
+      display: none;
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 100%;
+      z-index: 2;
+      margin-top: 4px;
+      padding: 6px 8px;
+      background: var(--di-bg, #fff);
+      border: 1px solid var(--di-border, #ddd);
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--di-text, #333);
+      text-transform: none;
+      white-space: normal;
+    }
+    /* Same (hover: hover) gating as the preview popover's "?" notes. */
+    @media (hover: hover) {
+      .di-pie-share-help:hover .di-pie-share-help-pop,
+      .di-pie-share-help:focus-within .di-pie-share-help-pop {
+        display: block;
+      }
+    }
+    .di-pie-share-help--open .di-pie-share-help-pop {
+      display: block;
+    }
     .di-activity-legend-item {
       display: inline-flex;
       align-items: center;

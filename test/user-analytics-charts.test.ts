@@ -590,3 +590,79 @@ describe('renderHistoryChart - month column click (CSP-safe)', () => {
     expect(open).not.toHaveBeenCalled();
   });
 });
+
+describe('renderPieLegend - "?" note when shares overlap', () => {
+  // ootsu_mari and the rest co-occur: the top three are tagged 260 times
+  // across 200 uploads, so the pie's shares (of 260) differ from
+  // At a glance's (of 200).
+  const CHARS = [
+    {name: 'ootsu mari', tagName: 'ootsu_mari', count: 120},
+    {name: 'coco', tagName: 'coco', count: 80},
+    {name: 'tetia', tagName: 'tetia', count: 60},
+  ].map(d => ({...d, frequency: 0, thumb: null, isOther: false}));
+
+  function render(
+    tab: string,
+    data: typeof CHARS,
+    uploadTotal?: number,
+  ): HTMLElement {
+    const legendDiv = document.createElement('div');
+    renderPieLegend({
+      legendDiv,
+      processedData: processSlices(data, tab),
+      currentPieTab: tab,
+      pctFor: () => '46.2%',
+      normalizedName: 'fixture_user',
+      uploadTotal,
+    });
+    return legendDiv;
+  }
+
+  it('explains the two denominators beside the title', () => {
+    const note = render('character', CHARS, 200).querySelector(
+      '.di-pie-share-help',
+    );
+    expect(note).not.toBeNull();
+    const text = note!.textContent ?? '';
+    expect(text).toContain('260');
+    expect(text).toContain('200 uploads');
+    // The top tag's two readings: the pie's and At a glance's (120/200).
+    expect(text).toContain('ootsu mari');
+    expect(text).toContain('46.2%');
+    expect(text).toContain('60%');
+  });
+
+  it('also appears on the copyright tab', () => {
+    expect(
+      render('copyright', CHARS, 200).querySelector('.di-pie-share-help'),
+    ).not.toBeNull();
+  });
+
+  it('is absent when the top tags fit within the uploads', () => {
+    // 260 tags ≤ 300 uploads: Others fills the rest, shares are of uploads.
+    expect(
+      render('character', CHARS, 300).querySelector('.di-pie-share-help'),
+    ).toBeNull();
+  });
+
+  it('is absent without an upload total', () => {
+    expect(
+      render('character', CHARS).querySelector('.di-pie-share-help'),
+    ).toBeNull();
+  });
+
+  it('is absent on tabs At a glance does not quote', () => {
+    expect(
+      render('fav_copyright', CHARS, 200).querySelector('.di-pie-share-help'),
+    ).toBeNull();
+  });
+
+  it('escapes the tag name', () => {
+    const data = [{...CHARS[0], name: '<b>x</b>'}, ...CHARS.slice(1)];
+    const note = render('character', data, 200).querySelector(
+      '.di-pie-share-help',
+    );
+    expect(note!.querySelector('b')).toBeNull();
+    expect(note!.textContent).toContain('<b>x</b>');
+  });
+});
